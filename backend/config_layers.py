@@ -163,6 +163,7 @@ APP_KEYS = frozenset({
     "YTDLP_PO_PROVIDER_URL",
     "SPOTIFLAC_SERVICES",
     "SPOTIFLAC_AUTO_INSTALL",
+    "RECOVER_OWNED_ACCOUNTS",  # read live via os.environ on each recover call
 })
 
 SECRET_KEYS = frozenset({

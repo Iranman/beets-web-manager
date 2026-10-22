@@ -7,6 +7,7 @@ import type {
   RecoverFetchResponse,
   RecoverRetryResponse,
   RecoverImportResponse,
+  RecoverAuthorizationInput,
 } from './types';
 import type {
   AcquisitionDownloadAllActiveResponse,
@@ -401,17 +402,21 @@ export function getRecoverRuns(limit = 50): Promise<RecoverRunsResponse> {
   return apiJson<RecoverRunsResponse>(`/api/recover/runs?limit=${encodeURIComponent(limit)}`);
 }
 
-/** Start a fetch+stage job for one or more owner-authorized URLs. */
-export function startRecoverFetch(urls: string[]): Promise<RecoverFetchResponse> {
-  return apiJson<RecoverFetchResponse>('/api/recover/fetch', jsonRequest('POST', { urls }));
+/** Start a fetch+stage job for one or more URLs. The backend REQUIRES an
+ * authorization basis; without one it returns {ok:false, error:"authorization
+ * basis required (...)"}. */
+export function startRecoverFetch(urls: string[], authorization: RecoverAuthorizationInput): Promise<RecoverFetchResponse> {
+  return apiJson<RecoverFetchResponse>('/api/recover/fetch', jsonRequest('POST', { urls, authorization }));
 }
 
 export function retryRecoverRun(runId: string): Promise<RecoverRetryResponse> {
   return apiJson<RecoverRetryResponse>('/api/recover/retry', jsonRequest('POST', { run_id: runId }));
 }
 
-export function importRecoverRun(runId: string): Promise<RecoverImportResponse> {
-  return apiJson<RecoverImportResponse>('/api/recover/import', jsonRequest('POST', { run_id: runId }));
+/** Import a staged run. The backend REQUIRES the same authorization basis as
+ * fetch; an asserted (unverified) basis routes items to review, not auto-import. */
+export function importRecoverRun(runId: string, authorization: RecoverAuthorizationInput): Promise<RecoverImportResponse> {
+  return apiJson<RecoverImportResponse>('/api/recover/import', jsonRequest('POST', { run_id: runId, authorization }));
 }
 
 export function transactionExportUrl(transactionId: string, format: 'json' | 'csv' | 'markdown'): string {

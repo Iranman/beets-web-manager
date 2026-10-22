@@ -92,6 +92,30 @@ _LOSSLESS_EXTS = frozenset({
     ".dsf", ".dff",
 })
 
+# Containers Beets/MediaFile adds NO item from, even when the audio codec is
+# itself importable. yt-dlp bestaudio commonly stages opus/vorbis inside a
+# .webm (matroska) container; MediaFile skips it so the Beets import "completes
+# without adding an item". Detected by the ACTUAL ffprobe container, not the
+# extension, so a mislabeled .webm is still caught. The identical audio remuxed
+# to its native container (.opus/.ogg/.m4a) imports fine.
+_BEETS_UNIMPORTABLE_CONTAINERS = frozenset({"webm", "matroska"})
+# Lossless-remux target container per audio codec (ffmpeg -c:a copy, no
+# re-encode). Opus/Vorbis -> Ogg, AAC/ALAC -> MP4/M4A, etc.
+_REMUX_TARGET_EXT = {
+    "opus": ".opus",
+    "vorbis": ".ogg",
+    "aac": ".m4a",
+    "alac": ".m4a",
+    "mp3": ".mp3",
+    "flac": ".flac",
+}
+# Marker in a converted copy's stem so it is distinguishable from the preserved
+# original that shares its staged dir.
+_RECOVER_CONVERTED_MARKER = ".beetsfix"
+# A remux copies packets verbatim, so the converted duration must match the
+# original almost exactly — a tighter band than the fetch integrity gate.
+_RECOVER_CONVERT_DURATION_TOLERANCE = 0.05
+
 # Provenance status vocabulary shared across probe, fetch, import, and Phase 3
 # diagnostic report sanitization.
 RECOVER_PROVENANCE_STATES = frozenset({
@@ -1159,6 +1183,18 @@ def recover_probe(url: str, *, ydl_module: Any = None,
         "uploader": _s(info.get("uploader") or info.get("channel") or info.get("uploader_id"))[:200],
         "duration": info.get("duration"),
         "webpage_url": _s(info.get("webpage_url") or url),
+        # Immutable channel/uploader identifiers (independent evidence for an
+        # own_account claim). Captured from yt-dlp whichever it provides; these,
+        # NOT the mutable display uploader/channel name, verify ownership.
+        "channel_id": _s(info.get("channel_id"))[:200],
+        "uploader_id": _s(info.get("uploader_id"))[:200],
+        "channel_url": _s(info.get("channel_url"))[:300],
+        "uploader_url": _s(info.get("uploader_url"))[:300],
+        # Platform license metadata (independent evidence for an open_license
+        # claim). yt-dlp populates ``license`` for CC-flagged items, e.g.
+        # "Creative Commons Attribution license (reuse allowed)".
+        "license": _s(info.get("license"))[:300],
+        "license_url": _s(info.get("license_url"))[:300] if info.get("license_url") else "",
         "formats": formats,
         "selected_format": plan["format"],
         "recommended_format": plan.get("recommended_format"),
@@ -1263,10 +1299,259 @@ def _sanitize_persisted_url(url: Any) -> str:
         return _redact_security_text(raw)[:500]
 
 
+# ── authorization: the user's ASSERTED basis kept DISTINCT from independently
+#    VERIFIED evidence (an asserted claim is NEVER copied into a verified_* field) ──
+RECOVER_AUTH_BASES = frozenset({
+    "original_creation", "own_account", "licensed_permission", "open_license",
+})
+_RECOVER_AUTH_ERROR = (
+    "authorization basis required "
+    "(original_creation, own_account, licensed_permission, or open_license)"
+)
+# Platform license strings that denote public-domain / openly-licensed media.
+# Matched case-insensitively against the source's own yt-dlp ``license`` field
+# (independent evidence) — never against the user's asserted claim.
+_OPEN_LICENSE_PATTERNS = (
+    "creative commons", "cc-by", "cc0", "public domain", "reuse allowed",
+)
+
+
+def _recover_owned_accounts() -> List[str]:
+    """Operator-configured owned-account identifiers, lower-cased, read at call
+    time so a settings/env change takes effect without a reimport. Each entry is
+    an immutable channel/uploader ID (e.g. ``UCxxxx``) or a canonical channel/
+    profile URL (e.g. ``youtube.com/@handle``) — never a mutable display name.
+    This is the ONLY independent evidence source for an ``own_account`` claim.
+    Entries shorter than 3 chars are dropped: too short to be a real identifier
+    and too easy to collide with an attacker-chosen value."""
+    raw = _s(os.environ.get("RECOVER_OWNED_ACCOUNTS", "")).strip()
+    return [
+        seg.strip().lower()
+        for seg in raw.split(",")
+        if len(seg.strip()) >= 3
+    ]
+
+
+def _canon_host(host: Any) -> str:
+    h = _s(host).strip().lower().rstrip(".")
+    return h[4:] if h.startswith("www.") else h
+
+
+def _identity_tokens(value: Any) -> set:
+    """Normalise an immutable channel/uploader identifier (a bare ID/handle or a
+    canonical URL) into a set of comparison tokens for own_account verification.
+
+    Matching is by EXACT token equality — never a substring of a free-text
+    display name. A URL yields its canonical ``host/path`` plus the specific
+    identity segment (``@handle``, or the id/name after ``/channel/`` or
+    ``/user/``); a bare value yields itself. The same function normalises both an
+    allowlist entry and a source identifier, so a match is a set intersection."""
+    v = _s(value).strip().lower().rstrip("/")
+    if not v:
+        return set()
+    toks: set = set()
+    if "://" in v:
+        try:
+            parts = urllib.parse.urlsplit(v)
+        except ValueError:
+            return {v}
+        host = _canon_host(parts.hostname or "")
+        path = (parts.path or "").rstrip("/")
+        if host and path:
+            toks.add(f"{host}{path}")
+        elif host:
+            toks.add(host)
+        segs = [s for s in path.split("/") if s]
+        if segs:
+            if segs[-1].startswith("@"):
+                toks.add(segs[-1])
+            if len(segs) >= 2 and segs[-2] == "channel":
+                # A /channel/<id> segment is a platform-global immutable id
+                # (e.g. a YouTube UCxxxx): kept as a bare token so a configured
+                # bare channel_id still matches its channel URL (channel_id
+                # behaviour preserved).
+                toks.add(segs[-1])
+            elif host and len(segs) >= 2 and segs[-2] == "user":
+                # F3: a /user/<name> segment is a WEAK, reusable username. Emit
+                # it ONLY host-namespaced, so an allowlisted youtube.com/user/alice
+                # can never verify a different platform's source whose bare
+                # uploader_id happens to be "alice".
+                toks.add(f"{host}/user/{segs[-1]}")
+        return toks
+    toks.add(v)
+    return toks
+
+
+def parse_recover_authorization(payload: Optional[Dict[str, Any]]) -> Tuple[str, str, str]:
+    """Extract and validate the asserted ``authorization`` from a fetch/import
+    request body. Returns ``(basis, note, error)``; ``error`` is non-empty when
+    the basis is missing or not one of the three allowed values. Probe does not
+    call this (diagnostics stay open)."""
+    auth = (payload or {}).get("authorization")
+    if not isinstance(auth, dict):
+        return "", "", _RECOVER_AUTH_ERROR
+    basis = _s(auth.get("basis")).strip().lower()
+    note = _s(auth.get("note")).strip()[:1000]
+    if basis not in RECOVER_AUTH_BASES:
+        return "", note, _RECOVER_AUTH_ERROR
+    return basis, note, ""
+
+
+def evaluate_recover_authorization(
+    basis: str,
+    note: str,
+    *,
+    platform: str = "",
+    uploader: str = "",
+    channel: str = "",
+    webpage_url: str = "",
+    channel_id: str = "",
+    uploader_id: str = "",
+    channel_url: str = "",
+    uploader_url: str = "",
+    source_license: str = "",
+) -> Dict[str, Any]:
+    """Build the authorization record. Verification exists for two bases only:
+    ``own_account`` and ``open_license``.
+
+    ``own_account`` is verified ONLY when an ``RECOVER_OWNED_ACCOUNTS`` entry
+    matches one of the source's IMMUTABLE identifiers — an exact (case-insensitive)
+    match of ``channel_id``/``uploader_id``, or a canonical-URL / path-boundary
+    match of ``channel_url``/``uploader_url`` (the entry equals the channel URL,
+    or exactly equals the ``@handle`` / ``/channel/<id>`` / ``/user/<name>`` path
+    segment). The mutable display ``uploader``/``channel`` name is NEVER evidence:
+    an impersonator whose display name contains the allowlist token but whose
+    stable id differs is not verified. ``open_license`` is verified when the
+    source's own platform ``license`` metadata matches an open-license pattern.
+    ``original_creation`` and ``licensed_permission`` are asserted-only
+    (``verified=False``). verified_* fields are populated from independent
+    evidence ONLY — never from the user's asserted claim (or a display name).
+
+    ``uploader``/``channel``/``webpage_url`` are retained for the record's
+    platform context only and are intentionally NOT used for own_account
+    verification."""
+    asserted_basis = _s(basis).strip().lower()
+    verified = False
+    verified_basis: Optional[str] = None
+    verified_evidence: Optional[str] = None
+    if asserted_basis == "own_account":
+        # Independent evidence = immutable identifiers only, in priority order.
+        source_ids = [
+            raw for raw in (
+                _s(channel_id).strip(),
+                _s(uploader_id).strip(),
+                _s(channel_url).strip(),
+                _s(uploader_url).strip(),
+            ) if raw
+        ]
+        source_token_map = [(raw, _identity_tokens(raw)) for raw in source_ids]
+        for entry in _recover_owned_accounts():
+            entry_tokens = _identity_tokens(entry)
+            if not entry_tokens:
+                continue
+            matched_raw = next(
+                (raw for raw, stoks in source_token_map if entry_tokens & stoks),
+                None,
+            )
+            if matched_raw is not None:
+                verified = True
+                verified_basis = "own_account"
+                # Evidence is the matched STABLE id/url, scrubbed + bounded.
+                verified_evidence = _scrub_authz_text(matched_raw, 300)
+                break
+    elif asserted_basis == "open_license":
+        lic = _s(source_license).strip()
+        if lic and any(pat in lic.lower() for pat in _OPEN_LICENSE_PATTERNS):
+            verified = True
+            verified_basis = "open_license"
+            verified_evidence = _redact_security_text(lic)[:300]
+    return {
+        "asserted_basis": asserted_basis,
+        "asserted_note": _s(note).strip()[:1000],
+        "verified": verified,
+        "verified_basis": verified_basis,
+        "verified_evidence": verified_evidence,
+        "platform": _s(platform).strip().lower()[:40],
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+#: Any http(s) URL embedded in free text, so its signed query params can be
+#: stripped before the note/evidence is persisted (F5).
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>\"'()]+", re.IGNORECASE)
+
+#: Signed/secret query parameters as they appear in ANY text form -- a full
+#: http(s) URL, a scheme-relative ``//host/…`` URL, or a parenthesised URL that
+#: ``_URL_IN_TEXT_RE`` stops short of (it ends at ``(`` and ignores URLs with no
+#: scheme). Matching the ``name=value`` token directly, independent of URL
+#: structure, closes the F5 gap where a signature survived because the URL regex
+#: ended early or the URL had no scheme. Longer names precede their prefixes so
+#: the value is fully consumed. Linear-time: a fixed name alternation plus a
+#: single greedy character class with no nested quantifier (no ReDoS).
+_SIGNED_QUERY_PARAM_RE = re.compile(
+    r"(?i)\b("
+    r"x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|"
+    r"signature|access_token|refresh_token|id_token|oauth_token|api_key|apikey|"
+    r"credentials|credential|password|session_id|cookies|cookie|policy|secret|"
+    r"token|session|hdnea|hdnts|expires|auth|pass|sig|key"
+    r")=[^\s&#]+",
+    re.IGNORECASE,
+)
+
+
+def _scrub_authz_text(value: Any, limit: int) -> str:
+    """Redact an authorization free-text field before persistence. Applies the
+    generic ``key=value``/URL-credential redactor, strips signed query params
+    (``?X-Amz-Signature=…`` etc.) from any embedded URL via
+    ``_sanitize_persisted_url`` AND, regardless of URL form (parenthesised or
+    scheme-relative), from any surviving ``name=value`` signed/secret token
+    (F5), AND the inline-secret regex (Bearer/Basic tokens, PEM blocks) that the
+    whitelisted re-admit would otherwise bypass (F3), then bounds the length."""
+    text = _redact_security_text(_s(value))
+    text = _URL_IN_TEXT_RE.sub(lambda m: _sanitize_persisted_url(m.group(0)), text)
+    # Full-redact inline secrets (Bearer/Basic tokens, PEM blocks) BEFORE the
+    # signed-param sub. The signed-param sub's value class would otherwise
+    # consume the `Bearer`/`-----BEGIN` marker as a param "value" and defang
+    # this check, letting a `<signedname>=Bearer <token>` secret persist (F-1).
+    if _PEM_OR_SECRET_VALUE_RE.search(text[:4096]):
+        text = "[REDACTED]"
+    text = _SIGNED_QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
+    return text[:limit]
+
+
+def _sanitize_authorization_record(auth: Any) -> Optional[Dict[str, Any]]:
+    """Whitelist an authorization record for persistence. The generic secret
+    stripper removes any key named ``authorization`` (normally a Bearer
+    credential); this re-admits ONLY our structured, type-checked record with a
+    valid asserted basis and keeps verified_* independent of the asserted claim."""
+    if not isinstance(auth, dict):
+        return None
+    basis = _s(auth.get("asserted_basis")).strip().lower()
+    if basis not in RECOVER_AUTH_BASES:
+        return None
+    verified = bool(auth.get("verified"))
+    vbasis = _s(auth.get("verified_basis")).strip().lower()
+    vev = auth.get("verified_evidence")
+    return {
+        "asserted_basis": basis,
+        "asserted_note": _scrub_authz_text(auth.get("asserted_note"), 1000),
+        "verified": verified,
+        "verified_basis": (vbasis or None) if verified else None,
+        "verified_evidence": (_scrub_authz_text(vev, 500) if vev else None) if verified else None,
+        "platform": _s(auth.get("platform")).strip().lower()[:40],
+        "recorded_at": _s(auth.get("recorded_at"))[:40],
+    }
+
+
 def _write_provenance(staged_file: str, record: Dict[str, Any]) -> str:
     """Persist provenance next to the staged file for a later import to consume.
     Never contains cookie contents, secret keys, or URL query tokens."""
     clean_rec = _strip_secret_fields_recursive(dict(record or {}), set())
+    # Re-admit the whitelisted authorization record (the generic stripper drops
+    # the 'authorization' key as if it were a Bearer credential).
+    auth_rec = _sanitize_authorization_record((record or {}).get("authorization"))
+    if auth_rec is not None and isinstance(clean_rec, dict):
+        clean_rec["authorization"] = auth_rec
     if isinstance(clean_rec, dict) and clean_rec.get("source_url"):
         clean_rec["source_url"] = _sanitize_persisted_url(clean_rec.get("source_url"))
     sidecar = str(Path(staged_file).with_suffix(Path(staged_file).suffix + ".recover.json"))
@@ -1307,6 +1592,7 @@ _ALLOWED_PERSISTED_RUN_KEYS = frozenset({
     "skipped_existing",
     "import_failed",
     "playlist_coverage",
+    "authorization",
     "retry_of",
     "retry_count",
     "created_at",
@@ -1323,6 +1609,11 @@ def _sanitize_persisted_run(run_record: Dict[str, Any]) -> Dict[str, Any]:
     rec: Dict[str, Any] = {
         k: v for k, v in raw.items() if k in _ALLOWED_PERSISTED_RUN_KEYS
     }
+    # Re-admit the run-level authorization record (stripped by the generic
+    # secret stripper above, which removes any key named 'authorization').
+    top_auth = _sanitize_authorization_record((run_record or {}).get("authorization"))
+    if top_auth is not None:
+        rec["authorization"] = top_auth
     if isinstance(rec.get("urls"), list):
         rec["urls"] = [
             _sanitize_persisted_url(u)
@@ -1333,8 +1624,12 @@ def _sanitize_persisted_run(run_record: Dict[str, Any]) -> Dict[str, Any]:
         items = rec.get(list_key)
         if not isinstance(items, list):
             continue
+        # Originals (index-aligned with the stripped list) so per-item
+        # authorization can be re-admitted after the generic strip removed it.
+        orig_items = (run_record or {}).get(list_key)
+        orig_items = orig_items if isinstance(orig_items, list) else []
         cleaned_items: List[Dict[str, Any]] = []
-        for item in items:
+        for i, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
             c_item = dict(item)
@@ -1344,6 +1639,10 @@ def _sanitize_persisted_run(run_record: Dict[str, Any]) -> Dict[str, Any]:
             for text_field in ("message", "error", "action"):
                 if text_field in c_item and c_item[text_field]:
                     c_item[text_field] = _redact_security_text(_s(c_item[text_field]))[:400]
+            orig = orig_items[i] if i < len(orig_items) and isinstance(orig_items[i], dict) else {}
+            item_auth = _sanitize_authorization_record(orig.get("authorization"))
+            if item_auth is not None:
+                c_item["authorization"] = item_auth
             cleaned_items.append(c_item)
         rec[list_key] = cleaned_items
     return rec
@@ -1475,25 +1774,30 @@ def _has_partial_file(dest_dir: str) -> bool:
 
 
 def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
-                       ydl_module: Any = None) -> Dict[str, Any]:
+                       ydl_module: Any = None,
+                       auth_basis: str = "", auth_note: str = "") -> Dict[str, Any]:
     url = _s(url).strip()
     run_id = _s(run_id).strip() or uuid.uuid4().hex
+    host = _host_of(url)
+    platform = _platform_for_host(host)
+    # Asserted-only authorization so EVERY outcome carries the record, even ones
+    # that fail before the probe can supply the immutable identifiers that
+    # own_account verification needs (claim never dropped, F4).
+    asserted_auth = evaluate_recover_authorization(auth_basis, auth_note, platform=platform)
     try:
         check_ytdlp_target(url)
     except YtdlpTargetRejected as exc:
         log.append(f"  [recover] Rejected target: {exc}")
         return {"url": url, "recovered": False, "category": "misconfig",
-                "provenance_status": "unavailable",
+                "provenance_status": "unavailable", "authorization": asserted_auth,
                 "action": "Use an allowlisted public YouTube/SoundCloud URL.", "message": _s(exc)}
 
-    host = _host_of(url)
-    platform = _platform_for_host(host)
     if _is_youtube_host(host):
         try:
             _require_ytdlp_js_runtime()
         except RuntimeError as exc:
             fail_info = _fail_from(exc)
-            return {"url": url, "recovered": False,
+            return {"url": url, "recovered": False, "authorization": asserted_auth,
                     "provenance_status": classify_media_provenance(error_category=fail_info["category"]),
                     **fail_info}
 
@@ -1501,7 +1805,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     if not probe.get("ok"):
         cat = _s(probe.get("category") or "unknown")
         return {"url": url, "recovered": False,
-                "category": cat,
+                "category": cat, "authorization": asserted_auth,
                 "provenance_status": _s(probe.get("provenance_status")) or classify_media_provenance(error_category=cat),
                 "action": classify_recover_error(probe.get("error") or probe.get("message") or "").get("action", ""),
                 "message": _s(probe.get("error") or probe.get("message"))}
@@ -1511,7 +1815,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     if probe.get("is_collection"):
         log.append(f"  [recover] Refusing collection URL in fetch: {_sanitize_persisted_url(url) or url}")
         return {"url": url, "recovered": False, "category": "collection",
-                "provenance_status": "accessible",
+                "provenance_status": "accessible", "authorization": asserted_auth,
                 "action": "Enumerate this channel/playlist first, then fetch the individual item URLs.",
                 "message": f"URL is a collection of {probe.get('entry_count', 0)} item(s), not a single upload"}
 
@@ -1524,9 +1828,26 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "category": "genuinely-DRM",
             "provenance_status": "genuinely-DRM",
             "stream_diagnostics": stream_diag,
+            "authorization": asserted_auth,
             "action": "This item is DRM/EME protected; recover it from the account owner's own source, not here.",
             "message": "all available streams are DRM/EME protected",
         }
+
+    # Authorization: the user's asserted basis, with independent verification for
+    # own_account against the owned-accounts allowlist (the probe's uploader /
+    # webpage_url is the independent evidence). Recorded distinctly on the
+    # provenance sidecar; never gates the fetch itself (DRM refusal stays above).
+    authorization = evaluate_recover_authorization(
+        auth_basis, auth_note,
+        platform=platform,
+        uploader=_s(probe.get("uploader")),
+        webpage_url=_s(probe.get("webpage_url") or url),
+        channel_id=_s(probe.get("channel_id")),
+        uploader_id=_s(probe.get("uploader_id")),
+        channel_url=_s(probe.get("channel_url")),
+        uploader_url=_s(probe.get("uploader_url")),
+        source_license=_s(probe.get("license")),
+    )
 
     plan = _recover_format_plan(host, probe)
     expected_duration = probe.get("duration")
@@ -1565,14 +1886,14 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             ydl.download([url])
     except YtdlpTargetRejected as exc:
         return {"url": url, "recovered": False, "category": "misconfig",
-                "provenance_status": "unavailable",
+                "provenance_status": "unavailable", "authorization": authorization,
                 "action": "Use an allowlisted public URL.", "message": _s(exc)}
     except Exception as exc:  # noqa: BLE001
         # A crash after a complete download but before provenance is retried
         # safely below: the isolated dir is re-scanned for a finished file.
         if not _audio_files_in(stage_dir):
             fail_info = _fail_from(exc)
-            return {"url": url, "recovered": False,
+            return {"url": url, "recovered": False, "authorization": authorization,
                     "provenance_status": classify_media_provenance(error_category=fail_info["category"]),
                     **fail_info}
         log.append(f"  [recover] Download reported an error but a staged file exists; validating it: {exc}")
@@ -1585,11 +1906,11 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     if not produced:
         if _has_partial_file(stage_dir):
             return {"url": url, "recovered": False, "category": "integrity",
-                    "provenance_status": "unavailable",
+                    "provenance_status": "unavailable", "authorization": authorization,
                     "action": "Re-fetch; only a partial (.part) download remains.",
                     "message": "only a leftover partial download (.part) is present"}
         return {"url": url, "recovered": False, "category": "format",
-                "provenance_status": "unsupported-format",
+                "provenance_status": "unsupported-format", "authorization": authorization,
                 "action": "No audio file was produced; check the requested format.",
                 "message": "no audio file produced"}
 
@@ -1613,8 +1934,17 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "source_platform": platform,
             "source_url": probe.get("webpage_url") or url,
             "uploader": probe.get("uploader", ""),
+            # Immutable identifiers persisted as the independent evidence an
+            # import re-derives own_account verification from (never a client
+            # value, never the mutable display name).
+            "channel_id": _s(probe.get("channel_id")),
+            "uploader_id": _s(probe.get("uploader_id")),
+            "channel_url": _sanitize_persisted_url(_s(probe.get("channel_url"))),
+            "uploader_url": _sanitize_persisted_url(_s(probe.get("uploader_url"))),
             "title": probe.get("title", ""),
             "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z") or time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "source_license": _s(probe.get("license")),
+            "source_license_url": _sanitize_persisted_url(_s(probe.get("license_url"))),
             "authorized_access": bool(auth),
             "quality": quality,
             "lossless": lossless,
@@ -1622,6 +1952,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
             "duration": integrity.get("duration"),
             "run_id": run_id,
             "provenance_status": "recovered",
+            "authorization": authorization,
             "stream_diagnostics": {
                 "protocols": stream_diag.get("protocols") or [],
                 "manifest_types": stream_diag.get("manifest_types") or [],
@@ -1652,7 +1983,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
 
     if not staged_ok:
         return {"url": url, "recovered": False, "category": "integrity",
-                "provenance_status": "unavailable",
+                "provenance_status": "unavailable", "authorization": authorization,
                 "action": "Re-fetch; the staged file was truncated, corrupt, or could not be recorded.",
                 "message": last_fail or "no valid audio file could be staged"}
 
@@ -1670,6 +2001,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
         "title": first.get("title", ""),
         "uploader": first.get("uploader", ""),
         "authorized_access": bool(auth),
+        "authorization": authorization,
     }
 
 
@@ -1749,6 +2081,8 @@ def verify_and_match_staged_upload(
     artist_hint: str = "",
     title_hint: str = "",
     album_hint: str = "",
+    auth_basis: str = "",
+    auth_note: str = "",
 ) -> Dict[str, Any]:
     """Verify a staged upload's provenance sidecar and audio integrity, then
     resolve identity via AcoustID fingerprinting + MusicBrainz search with a
@@ -1760,7 +2094,29 @@ def verify_and_match_staged_upload(
 
     resolved, sidecar, err = _validate_staged_recover_file(staged_path)
     if resolved is None or sidecar is None:
-        return {"ok": False, "error": err, "staged_file": _s(staged_path)}
+        # No trustworthy sidecar to verify against: still carry the asserted
+        # claim so the outcome is never claim-less (F4).
+        return {"ok": False, "error": err, "staged_file": _s(staged_path),
+                "authorization": evaluate_recover_authorization(auth_basis, auth_note)}
+
+    # Authorization: independent verification (own_account vs the owned-accounts
+    # allowlist, matched against the sidecar's recorded IMMUTABLE identifiers —
+    # channel_id/uploader_id/channel_url/uploader_url, never the mutable display
+    # name). An asserted-only authorization (verified==False) is NEVER
+    # auto-imported — it is forced to review_required. A verified==True claim
+    # proceeds through the existing AcoustID/MusicBrainz identity gate below.
+    # Computed up front so EVERY outcome below carries the record (F4).
+    authorization = evaluate_recover_authorization(
+        auth_basis, auth_note,
+        platform=_s(sidecar.get("source_platform")),
+        uploader=_s(sidecar.get("uploader")),
+        webpage_url=_s(sidecar.get("source_url")),
+        channel_id=_s(sidecar.get("channel_id")),
+        uploader_id=_s(sidecar.get("uploader_id")),
+        channel_url=_s(sidecar.get("channel_url")),
+        uploader_url=_s(sidecar.get("uploader_url")),
+        source_license=_s(sidecar.get("source_license")),
+    )
 
     expected_duration = sidecar.get("duration")
     integrity = recover_integrity_check(str(resolved), expected_duration)
@@ -1768,6 +2124,7 @@ def verify_and_match_staged_upload(
         return {
             "ok": False,
             "error": f"integrity check failed: {integrity.get('reason')}",
+            "authorization": authorization,
             "staged_file": str(resolved),
         }
 
@@ -1776,6 +2133,30 @@ def verify_and_match_staged_upload(
         return {
             "ok": False,
             "error": _s(media_info.get("error") or "audio inspection failed"),
+            "authorization": authorization,
+            "staged_file": str(resolved),
+        }
+
+    if not authorization["verified"]:
+        try:
+            merged = dict(sidecar)
+            merged["authorization"] = authorization
+            merged["provenance_status"] = "recovered"
+            _write_provenance(str(resolved), merged)
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "status": "review_required",
+            "final_action": "review",
+            "identity_status": "unverified",
+            "acoustid_status": "not_attempted",
+            "authorization": authorization,
+            "error": (
+                "authorization not independently verified "
+                f"(asserted basis '{authorization['asserted_basis'] or 'none'}'); "
+                "operator confirmation required before import"
+            ),
             "staged_file": str(resolved),
         }
 
@@ -1851,6 +2232,7 @@ def verify_and_match_staged_upload(
             "identity_status": identity_status or "conflict",
             "acoustid_status": acoustid_status,
             "conflicts": blocking_conflicts,
+            "authorization": authorization,
             "error": f"audio fingerprint conflicts with expected upload identity ({reason})",
             "staged_file": str(resolved),
         }
@@ -1871,6 +2253,7 @@ def verify_and_match_staged_upload(
             "identity_status": identity_status or "unverified",
             "acoustid_status": acoustid_status,
             "conflicts": conflicts,
+            "authorization": authorization,
             "error": f"audio identity requires manual review (acoustid_status={acoustid_status})",
             "staged_file": str(resolved),
         }
@@ -1907,6 +2290,7 @@ def verify_and_match_staged_upload(
                 "final_action": "review",
                 "identity_status": "unverified",
                 "acoustid_status": acoustid_status,
+                "authorization": authorization,
                 "error": f"MusicBrainz provider unavailable during verification: {_s(exc)}",
                 "staged_file": str(resolved),
             }
@@ -1935,6 +2319,7 @@ def verify_and_match_staged_upload(
         "source_url": _s(sidecar.get("source_url")),
         "source_platform": _s(sidecar.get("source_platform")),
         "authorized_access": bool(sidecar.get("authorized_access")),
+        "authorization": authorization,
         "duration": integrity.get("duration"),
         "codec": _s(media_info.get("codec") or sidecar.get("codec")),
         "lossless": lossless,
@@ -1987,6 +2372,41 @@ def _find_existing_library_conflict(
     return None
 
 
+def _find_recovered_item_by_token(
+    token: str,
+    *,
+    adapter: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the single library item this import created, identified by the
+    unique ``webmanager_recover_token`` flexattr stamped into its set_fields
+    (F1). Authoritative provenance for rollback: a uuid4 token cannot collide
+    with another import, so two concurrent imports of the same track each find
+    exactly their own item. Returns None unless EXACTLY one item carries the
+    exact token (a substring query match whose field differs is rejected)."""
+    tok = _s(token).strip()
+    if not tok:
+        return None
+    ad = adapter or beets_adapter
+    try:
+        rows = ad.find_items_by_query(f"webmanager_recover_token:{tok}") or []
+    except Exception:
+        return None
+    rows = [row for row in rows if isinstance(row, dict) and row.get("id") is not None]
+    # Prefer an EXACT token match: real Beets serialises the flexattr, so the
+    # row this import created always carries it -- that is the authoritative
+    # provenance and it cannot be confused with a concurrent import's item.
+    exact = [row for row in rows if _s(row.get("webmanager_recover_token")).strip() == tok]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    # Fail closed: only trust the server-side token query's single row when that
+    # row carries NO token field at all (an adapter that doesn't echo the
+    # flexattr back). A lone row with a DIFFERENT non-empty token is NOT this
+    # import's item -- returning it would bind rollback to the wrong file.
+    if len(rows) == 1 and not _s(rows[0].get("webmanager_recover_token")).strip():
+        return rows[0]
+    return None
+
+
 def _stamp_staged_identity_tags(
     resolved_file: str,
     *,
@@ -2013,6 +2433,181 @@ def _stamp_staged_identity_tags(
         pass
 
 
+def _probe_container_format(path: str) -> str:
+    """Lower-cased ffprobe container ``format_name`` of a local file ("" on
+    error). Detection is by actual container, not extension, so a .webm carrying
+    an audio extension is still recognised. Local-file-only input (SEC-13)."""
+    import shutil
+    import subprocess
+    ffprobe = shutil.which("ffprobe") or "/usr/bin/ffprobe"
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=format_name",
+             "-of", "json", ffmpeg_file_input(path)],
+            timeout=int(os.environ.get("AUDIO_FFPROBE_TIMEOUT", "20") or "20"),
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return ""
+    return _s((data.get("format") or {}).get("format_name")).strip().lower()
+
+
+def _container_tokens(format_name: str) -> set:
+    return {t.strip() for t in _s(format_name).split(",") if t.strip()}
+
+
+def _unique_convert_target(src: Path, target_ext: str) -> Optional[Path]:
+    """A never-overwriting, NUL/slash-free sibling path (under ``src``'s already
+    validated staged dir) for the converted copy, or None if none is free."""
+    parent = src.parent
+    base = src.stem + _RECOVER_CONVERTED_MARKER
+    for n in range(0, 1000):
+        name = f"{base}{target_ext}" if n == 0 else f"{base}.{n}{target_ext}"
+        if "\x00" in name or "/" in name or "\\" in name:
+            return None
+        cand = parent / name
+        # exists() follows symlinks; is_symlink() catches a dangling one. ffmpeg
+        # -n is the final never-overwrite guard against a TOCTOU swap.
+        if not cand.exists() and not cand.is_symlink():
+            return cand
+    return None
+
+
+def _verify_converted_audio(path: str, reference_duration: Optional[float]) -> Dict[str, Any]:
+    """Converted-file gate BEFORE import: nonzero size, ffprobe-decodable, has an
+    audio stream, and a decoded duration within a small tolerance of the
+    original. Any failure means the file is NOT imported."""
+    p = Path(path)
+    try:
+        if p.stat().st_size <= 0:
+            return {"ok": False, "error": "converted file is zero bytes"}
+    except OSError:
+        return {"ok": False, "error": "converted file is missing"}
+    media = inspect_audio_file(path)
+    codec = _s(media.get("codec")).strip().lower()
+    if not media.get("ok") or not codec or codec == "unknown":
+        return {"ok": False, "error": "converted file has no decodable audio stream"}
+    actual = _probe_file_duration(path)
+    if actual is None:
+        return {"ok": False, "error": "converted file could not be decoded by ffprobe"}
+    try:
+        ref = float(reference_duration) if reference_duration is not None else 0.0
+    except (TypeError, ValueError):
+        ref = 0.0
+    if ref > 0 and not _duration_within_tolerance(actual, ref, _RECOVER_CONVERT_DURATION_TOLERANCE):
+        return {"ok": False,
+                "error": f"converted duration {actual:.1f}s differs from original {ref:.1f}s"}
+    return {"ok": True, "duration": actual}
+
+
+def _convert_staged_for_beets(
+    resolved_file: str,
+    *,
+    codec: str,
+    reference_duration: Optional[float],
+    log: list,
+) -> Dict[str, Any]:
+    """If ``resolved_file`` sits in a container Beets adds no item from (e.g. a
+    .webm/opus yt-dlp bestaudio), produce a VERIFIED importable copy under the
+    same staged dir, preferring a LOSSLESS remux (``ffmpeg -c:a copy``). A
+    transcode is used only when a remux cannot yield an importable file. The
+    ORIGINAL staged file is never modified.
+
+    Returns one of:
+      ``{"converted": False}``                       -> import the original as-is
+      ``{"converted": True, "path", "original_container",
+         "converted_container", "lossless", "method"}``
+      ``{"ok": False, "error"}``                      -> conversion/verification failed
+    """
+    import shutil
+    import subprocess
+
+    src = Path(resolved_file)
+    original_container = _probe_container_format(resolved_file)
+    if not (_container_tokens(original_container) & _BEETS_UNIMPORTABLE_CONTAINERS):
+        return {"converted": False}
+
+    # Confinement: the converted copy must stay under DOWNLOADS_ROOT/recovered
+    # (the staged file was already validated there; re-check its parent).
+    try:
+        dl_root = Path(validated_downloads_root()).resolve()
+        recovered_root = (dl_root / "recovered").resolve()
+        parent = src.parent.resolve()
+        if parent != recovered_root and recovered_root not in parent.parents:
+            return {"ok": False, "error": "staged file is not under DOWNLOADS_ROOT/recovered"}
+    except Exception as exc:
+        return {"ok": False, "error": f"staging-root validation failed: {_redact_security_text(_s(exc))[:200]}"}
+
+    ffmpeg = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    timeout = int(os.environ.get("AUDIO_FFMPEG_TIMEOUT", "180") or "180")
+    codec_l = _s(codec).strip().lower()
+
+    # (method, target_ext, codec_args). Remux first (lossless, preserves the
+    # original audio); a high-quality transcode is the last resort only.
+    attempts: List[Tuple[str, str, List[str]]] = []
+    remux_ext = _REMUX_TARGET_EXT.get(codec_l)
+    if remux_ext:
+        attempts.append(("remux", remux_ext, ["-vn", "-map", "0:a:0", "-c:a", "copy"]))
+    attempts.append(("transcode", ".mp3",
+                     ["-vn", "-map", "0:a:0", "-c:a", "libmp3lame", "-q:a", "0"]))
+
+    last_err = "staged audio could not be converted to an importable container"
+    for method, target_ext, codec_args in attempts:
+        target = _unique_convert_target(src, target_ext)
+        if target is None:
+            last_err = "could not allocate a safe converted-file name"
+            continue
+        # -n: never overwrite (defence-in-depth with the unique-name search).
+        cmd = [ffmpeg, "-nostdin", "-n", "-i", ffmpeg_file_input(resolved_file),
+               *codec_args, ffmpeg_file_input(str(target))]
+        try:
+            proc = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True)
+        except Exception as exc:
+            last_err = f"ffmpeg {method} could not run"
+            log.append(f"  [recover-import] ffmpeg {method} error: {_redact_security_text(_s(exc))[:200]}")
+            continue
+        if proc.returncode != 0 or not target.exists():
+            last_err = f"ffmpeg {method} exited non-zero"
+            log.append(f"  [recover-import] ffmpeg {method} rc={proc.returncode}: "
+                       f"{_redact_security_text(_s(proc.stderr))[:200]}")
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError:
+                pass
+            continue
+
+        verify = _verify_converted_audio(str(target), reference_duration)
+        if not verify.get("ok"):
+            last_err = _s(verify.get("error") or f"{method} output failed verification")
+            log.append(f"  [recover-import] Converted file rejected: {last_err}")
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            continue
+
+        log.append(f"  [recover-import] Converted {src.name} "
+                   f"({original_container or '?'}) -> {target.name} ({method})")
+        return {
+            "converted": True,
+            "path": str(target),
+            "original_container": original_container or "unknown",
+            "converted_container": target_ext.lstrip("."),
+            "lossless": method == "remux",
+            "method": method,
+        }
+
+    return {"ok": False, "error": last_err}
+
+
 def _recover_import_one(
     staged_path: str,
     log: list,
@@ -2022,6 +2617,8 @@ def _recover_import_one(
     album_hint: str = "",
     skip_existing: bool = True,
     adapter: Any = None,
+    auth_basis: str = "",
+    auth_note: str = "",
 ) -> Dict[str, Any]:
     """Verify one staged recovery file and import it into Beets as a singleton
     via ``beets_adapter.run_import`` with ``autotag=False``,
@@ -2034,6 +2631,8 @@ def _recover_import_one(
         artist_hint=artist_hint,
         title_hint=title_hint,
         album_hint=album_hint,
+        auth_basis=auth_basis,
+        auth_note=auth_note,
     )
     if not verified.get("ok"):
         err = _s(verified.get("error") or "verification failed")
@@ -2045,6 +2644,7 @@ def _recover_import_one(
             "status": ver_status,
             "final_action": _s(verified.get("final_action") or "reject"),
             "provenance_status": "recovered" if ver_status in ("identity_conflict", "review_required") else "unavailable",
+            "authorization": verified.get("authorization"),
             "error": err,
         }
 
@@ -2054,6 +2654,8 @@ def _recover_import_one(
     album = verified["album"]
     mb_trackid = verified["mb_trackid"]
     match_source = verified["match_source"]
+    # The verified authorization record travels onto EVERY outcome below (F4).
+    authorization = verified.get("authorization")
 
     # Always enforce existing-library conflict protection before importing.
     existing = _find_existing_library_conflict(artist, title, mb_trackid, adapter=adapter)
@@ -2075,22 +2677,67 @@ def _recover_import_one(
             "album": album,
             "mb_trackid": mb_trackid,
             "match_source": match_source,
+            "authorization": authorization,
+        }
+
+    # yt-dlp bestaudio frequently stages opus/vorbis inside a .webm container
+    # Beets adds NO item from (the identical audio imports fine as .opus/.ogg).
+    # Remux (lossless, no re-encode) into an importable container BEFORE import;
+    # the ORIGINAL staged file is preserved untouched and the CONVERTED copy is
+    # what Beets imports. A non-webm container returns {"converted": False} and
+    # the original is imported unchanged.
+    import_file = resolved_file
+    conversion: Dict[str, Any] = {}
+    conv = _convert_staged_for_beets(
+        resolved_file,
+        codec=_s(verified.get("codec")),
+        reference_duration=verified.get("duration"),
+        log=log,
+    )
+    if conv.get("ok") is False:
+        err_msg = _s(conv.get("error") or "staged audio could not be converted for import")
+        log.append(f"  [recover-import] Conversion refused {Path(resolved_file).name}: {err_msg}")
+        return {
+            "staged_file": resolved_file,
+            "imported": False,
+            "status": "import_failed",
+            "provenance_status": "recovered",
+            "error": err_msg,
+            "artist": artist,
+            "title": title,
+            "authorization": authorization,
+        }
+    if conv.get("converted"):
+        import_file = conv["path"]
+        conversion = {
+            "converted": True,
+            "import_file": import_file,
+            "original_container": conv.get("original_container"),
+            "converted_container": conv.get("converted_container"),
+            "lossless_remux": bool(conv.get("lossless")),
+            "method": conv.get("method"),
         }
 
     _stamp_staged_identity_tags(
-        resolved_file,
+        import_file,
         artist=artist,
         title=title,
         album=album,
         mb_trackid=mb_trackid,
     )
 
+    # F1: a unique per-import token stamped as a flexattr so the CREATED item is
+    # identified authoritatively after import -- never by a fuzzy (artist,title)
+    # re-query, which could cross-record a concurrent import of the same track
+    # and let rollback delete the wrong item's file.
+    recover_token = uuid.uuid4().hex
     set_fields: Dict[str, Any] = {
         "artist": artist,
         "albumartist": artist,
         "title": title,
         "album": album,
         "source_platform": verified.get("source_platform") or "",
+        "webmanager_recover_token": recover_token,
     }
     if mb_trackid:
         set_fields["mb_trackid"] = mb_trackid
@@ -2105,8 +2752,11 @@ def _recover_import_one(
             metadata={
                 "workflow": "recover_upload_singleton",
                 "staged_file": resolved_file,
+                "import_file": import_file,
+                "conversion": conversion,
                 "source_url": _sanitize_persisted_url(verified.get("source_url") or ""),
                 "match_source": match_source,
+                "authorization": _sanitize_authorization_record(verified.get("authorization")) or {},
             },
         )
         if isinstance(tx, dict):
@@ -2117,7 +2767,7 @@ def _recover_import_one(
     try:
         if adapter is None:
             import_res = beets_adapter.run_import(
-                paths=[resolved_file],
+                paths=[import_file],
                 autotag=False,
                 duplicate_action="skip",
                 copy=True,
@@ -2130,7 +2780,7 @@ def _recover_import_one(
             )
         else:
             import_res = adapter.run_import(
-                paths=[resolved_file],
+                paths=[import_file],
                 autotag=False,
                 duplicate_action="skip",
                 copy=True,
@@ -2157,6 +2807,7 @@ def _recover_import_one(
             "error": err_msg,
             "artist": artist,
             "title": title,
+            "authorization": authorization,
             "transaction_id": tx_id,
         }
 
@@ -2178,6 +2829,7 @@ def _recover_import_one(
             "error": err_msg,
             "artist": artist,
             "title": title,
+            "authorization": authorization,
             "transaction_id": tx_id,
         }
 
@@ -2210,6 +2862,7 @@ def _recover_import_one(
                     "album": album,
                     "mb_trackid": mb_trackid,
                     "match_source": match_source,
+                    "authorization": authorization,
                     "transaction_id": tx_id,
                 }
             err_msg = f"beets skipped file during import ({skip_reason})"
@@ -2227,11 +2880,14 @@ def _recover_import_one(
                 "error": err_msg,
                 "artist": artist,
                 "title": title,
+                "authorization": authorization,
                 "transaction_id": tx_id,
             }
 
-    # Post-import library read-back: verify the imported item actually exists in Beets.
-    imported_item = _find_existing_library_conflict(artist, title, mb_trackid, adapter=adapter)
+    # Post-import library read-back: find THIS import's item by its unique token
+    # (F1), never by a fuzzy (artist,title) re-query. This both confirms the
+    # import added the item and yields the authoritative id+path for rollback.
+    imported_item = _find_recovered_item_by_token(recover_token, adapter=adapter)
     if imported_item is None:
         err_msg = "beets import completed without adding item to library"
         if tx_id:
@@ -2248,6 +2904,7 @@ def _recover_import_one(
             "error": err_msg,
             "artist": artist,
             "title": title,
+            "authorization": authorization,
             "transaction_id": tx_id,
         }
 
@@ -2264,6 +2921,22 @@ def _recover_import_one(
             )
         except Exception:
             pass
+        # Capture the minimal, verifiable undo (added item id + the single file
+        # copied under MUSIC_ROOT + its content hash/size) on this audited
+        # Import transaction so the import can be rolled back safely later.
+        # Best-effort: a failure here never fails the import -- it only leaves
+        # rollback unavailable for this record.
+        if imported_item_id is not None:
+            try:
+                from backend import transaction_engine as _txe
+                _txe.record_recover_import_rollback(
+                    transactions,
+                    tx_id,
+                    item_id=imported_item_id,
+                    file_path=_s(imported_item.get("path") or ""),
+                )
+            except Exception:
+                pass
 
     # Update the .recover.json sidecar with import provenance
     try:
@@ -2281,7 +2954,11 @@ def _recover_import_one(
             "album": album,
             "mb_trackid": mb_trackid,
             "match_source": match_source,
+            "authorization": verified.get("authorization"),
         })
+        if conversion:
+            sidecar_data["conversion"] = conversion
+        # The sidecar belongs to the ORIGINAL staged file, which is preserved.
         _write_provenance(resolved_file, sidecar_data)
 
     log.append(
@@ -2302,7 +2979,9 @@ def _recover_import_one(
         "match_source": match_source,
         "source_url": _sanitize_persisted_url(verified.get("source_url") or ""),
         "source_platform": verified.get("source_platform") or "",
+        "authorization": verified.get("authorization"),
         "transaction_id": tx_id,
+        "conversion": conversion,
         "beets": import_res if isinstance(import_res, dict) else {},
     }
 
@@ -2406,6 +3085,8 @@ def recover_import_job(
     metadata_by_file: Optional[Dict[str, Dict[str, Any]]] = None,
     skip_existing: bool = True,
     adapter: Any = None,
+    auth_basis: str = "",
+    auth_note: str = "",
 ) -> Dict[str, Any]:
     """Verify and import staged recovery files into Beets, update persisted run
     records, and refresh playlist coverage."""
@@ -2427,6 +3108,8 @@ def recover_import_job(
             album_hint=_s(hints.get("album") or ""),
             skip_existing=True,
             adapter=adapter,
+            auth_basis=auth_basis,
+            auth_note=auth_note,
         )
         if res.get("imported"):
             imported.append(res)
@@ -2471,7 +3154,8 @@ def recover_import_job(
 def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
                       *, run_id: str = "", ydl_module: Any = None,
                       auto_import: bool = False, retry_of: str = "",
-                      retry_count: int = 0, adapter: Any = None) -> Dict[str, Any]:
+                      retry_count: int = 0, adapter: Any = None,
+                      auth_basis: str = "", auth_note: str = "") -> Dict[str, Any]:
     """Fetch + stage each URL under DOWNLOADS_ROOT. Optionally imports verified
     staged files when ``auto_import=True``. Persists run state in
     ``recover_runs.json`` for retry support."""
@@ -2482,6 +3166,10 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
     if cookie_state.get("state") != "ok":
         log.append(f"  [recover] Cookie state: {cookie_state.get('state')} — {cookie_state.get('message')}")
 
+    # Run-level authorization: the asserted claim for this request (per-item
+    # independent verification lives on each recovered item and sidecar).
+    run_authorization = evaluate_recover_authorization(auth_basis, auth_note)
+
     _upsert_recover_run({
         "run_id": run_id,
         "status": "running",
@@ -2489,6 +3177,7 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
         "urls": list(urls),
         "recovered": [],
         "failed": [],
+        "authorization": run_authorization,
         "retry_of": _s(retry_of),
         "retry_count": int(retry_count or 0),
     })
@@ -2498,7 +3187,8 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
             raise RuntimeError("cancelled")
         log.append(f"[recover] [{idx}/{len(urls)}] {_sanitize_persisted_url(url) or url}")
         # Per-item sub-run id keeps multiple items in one job isolated too.
-        result = _recover_fetch_one(url, log, run_id=f"{run_id}-{idx}", ydl_module=ydl_module)
+        result = _recover_fetch_one(url, log, run_id=f"{run_id}-{idx}", ydl_module=ydl_module,
+                                    auth_basis=auth_basis, auth_note=auth_note)
         if result.get("recovered"):
             recovered.append(result)
         else:
@@ -2543,6 +3233,8 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
                 cancel_event,
                 run_id=run_id,
                 adapter=adapter,
+                auth_basis=auth_basis,
+                auth_note=auth_note,
             )
             summary["import_summary"] = import_summary
             import_failed_items = list(import_summary.get("failed") or [])
@@ -2581,6 +3273,7 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
         "skipped_existing": skipped_existing_items,
         "import_failed": import_failed_items,
         "playlist_coverage": (summary.get("import_summary") or {}).get("playlist_coverage") or {},
+        "authorization": run_authorization,
         "retry_of": _s(retry_of),
         "retry_count": int(retry_count or 0),
     })
@@ -2606,6 +3299,11 @@ def start_recover_fetch(payload_in: Dict[str, Any]) -> Any:
     urls = [u for u in urls if not (u in seen or seen.add(u))]
     if not urls:
         return {"ok": False, "error": "one or more URLs are required"}, 200
+
+    # Authorization basis is required for fetch (diagnostics/probe stay open).
+    auth_basis, auth_note, auth_err = parse_recover_authorization(data)
+    if auth_err:
+        return {"ok": False, "error": auth_err}, 200
 
     # Validate the allowlist/SSRF guard up front, before any job exists.
     for url in urls:
@@ -2640,6 +3338,8 @@ def start_recover_fetch(payload_in: Dict[str, Any]) -> Any:
             auto_import=auto_import,
             retry_of=retry_of,
             retry_count=retry_count,
+            auth_basis=auth_basis,
+            auth_note=auth_note,
         )
 
     label = f"Recover uploads: {len(urls)} item(s)" + (" (retry)" if retry_of else "")
@@ -2674,6 +3374,18 @@ def start_recover_retry(payload_in: Dict[str, Any]) -> Any:
     parent = recover_get_run(parent_run_id)
     if not isinstance(parent, dict):
         return {"ok": False, "error": f"recovery run '{parent_run_id}' not found"}, 200
+
+    # Carry authorization forward: the retry payload's own basis, else the parent
+    # run's recorded asserted basis. The downstream fetch/import services enforce
+    # that a valid basis is present (they reject otherwise with the clear error).
+    retry_auth = data.get("authorization")
+    if not isinstance(retry_auth, dict):
+        parent_auth = parent.get("authorization") if isinstance(parent.get("authorization"), dict) else {}
+        if _s(parent_auth.get("asserted_basis")).strip():
+            retry_auth = {
+                "basis": parent_auth.get("asserted_basis"),
+                "note": parent_auth.get("asserted_note") or "",
+            }
 
     include_drm = bool(data.get("include_drm", False))
     recovered_urls = {
@@ -2717,6 +3429,7 @@ def start_recover_retry(payload_in: Dict[str, Any]) -> Any:
             imp_body, imp_status = start_recover_import({
                 "run_id": parent_run_id,
                 "staged_files": import_failed_files,
+                "authorization": retry_auth,
             })
             if isinstance(imp_body, dict) and imp_body.get("ok"):
                 imp_body["retried_staged_files"] = list(import_failed_files)
@@ -2730,6 +3443,7 @@ def start_recover_retry(payload_in: Dict[str, Any]) -> Any:
         "auto_import": bool(data.get("auto_import", False)),
         "retry_of": parent_run_id,
         "retry_count": next_retry_count,
+        "authorization": retry_auth,
     })
     if isinstance(body, dict) and body.get("ok"):
         body["retried_urls"] = list(retry_urls)
@@ -2744,6 +3458,12 @@ def start_recover_import(payload_in: Dict[str, Any]) -> Any:
     from backend.app_runtime import jobs
 
     data = payload_in or {}
+
+    # Authorization basis is required for import, exactly as for fetch.
+    auth_basis, auth_note, auth_err = parse_recover_authorization(data)
+    if auth_err:
+        return {"ok": False, "error": auth_err}, 200
+
     run_id = _s(data.get("run_id") or "").strip()
     staged_files: List[str] = []
     metadata_by_file: Dict[str, Dict[str, Any]] = {}
@@ -2805,6 +3525,8 @@ def start_recover_import(payload_in: Dict[str, Any]) -> Any:
             run_id=run_id,
             metadata_by_file=metadata_by_file,
             skip_existing=skip_existing,
+            auth_basis=auth_basis,
+            auth_note=auth_note,
         )
 
     label = f"Import recovered uploads: {len(validated_paths)} item(s)"

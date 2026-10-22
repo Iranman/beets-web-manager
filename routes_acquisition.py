@@ -661,7 +661,11 @@ def api_recover_enumerate():
 @app.post("/api/recover/fetch")
 def api_recover_fetch():
     """Start a background job to fetch + stage authorized uploads under
-    DOWNLOADS_ROOT (with optional auto_import)."""
+    DOWNLOADS_ROOT (with optional auto_import). Requires an ``authorization``
+    object ``{basis, note}`` with a valid basis (original_creation / own_account
+    / licensed_permission / open_license); own_account is independently verified
+    against RECOVER_OWNED_ACCOUNTS and open_license against the source's own
+    platform license metadata, the others are asserted-only."""
     body, status = start_recover_fetch(request.get_json(silent=True) or {})
     return json_route_result(body, status)
 
@@ -694,7 +698,9 @@ def api_recover_retry():
 def api_recover_import():
     """Verify staged recovery files, run AcoustID/MusicBrainz matching, safely
     import into Beets without overwriting existing library items, and refresh
-    playlist coverage."""
+    playlist coverage. Requires an ``authorization`` object ``{basis, note}``;
+    an asserted-only (unverified) basis is forced to review_required and never
+    auto-imported."""
     body, status = start_recover_import(request.get_json(silent=True) or {})
     return json_route_result(body, status)
 
