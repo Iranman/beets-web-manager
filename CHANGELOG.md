@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Lidarr release-group-MBID resolver never guesses across distinct release groups (QA finding-7).** Writing an `{release-group-mbid}` into an album folder establishes canonical identity, so it must not be a guess. The resolver's tie-breakers (exact year, albumType rank, monitored, trackFileCount) previously picked **one** candidate even when the same-title candidates belonged to **different** release groups, baking a wrong MBID into the folder. The resolver now collapses matched candidates by distinct `foreignAlbumId` (release-group MBID) **before** tie-breaking: tie-breakers only choose *which edition's album id to report* among candidates that all share **one** release-group MBID (editions/releases of a single release group — the emitted MBID is identical whichever wins). If an artist+title(+year) match spans more than one distinct release-group MBID, the folder is **held for review** (`ambiguous_multiple_albums`) rather than resolved. This applies to every tier: Tier B (title+year) and Tier C (title-only) resolve only to a single distinct RGID and otherwise hold; Tier A (path-exact) with distinct RGIDs falls through to the title tiers rather than guessing. A match whose candidates carry a mix of one valid RGID and a missing one is also held. Provider failures still abort the run, the MBID is still taken verbatim from `foreignAlbumId` and `_is_valid_mb_uuid`-validated, and the four unresolved reasons and one-snapshot-per-run behaviour are unchanged. This only moves borderline multi-release-group matches from "resolved (guessed)" to "unresolved: ambiguous_multiple_albums"; it never loosens anything.
+
+### Added
+
+- **Folder MBID names — name every album folder `Album (Year) {release-group-mbid}` from the Lidarr resolver, through the controlled mutation engine.** New `POST /api/library/folder-mbid-names/apply` (dry-run by default; `confirmed:true` required to mutate; optional `batch_limit`, `resume_from_job`) and `POST /api/library/folder-mbid-names/rollback` (by `job_id` or explicit `operations`). This is the correct replacement for the earlier strip-based placeholder apply, which wrongly *removed* the `{...}` token instead of *filling* the release-group MBID. One bulk Lidarr snapshot is taken per run (`LidarrRgidResolver.from_lidarr`); a provider failure **aborts the run touching nothing** and surfaces the provider error (never downgraded to "unresolved"). Per album folder: an already-correctly-named folder is an idempotent **skip** (`already_correct`); a disk-only folder is renamed through `folder_cleanup_v1`; a DB-tracked album is **relocated** through Beets (so its DB item paths follow) **only when the DB `mb_releasegroupid` already equals the resolver's**, so a non-resolver MBID is never written; an unresolved folder, a target-path collision, a DB-rgid mismatch, or a multi-album folder is **held for review** with its reason. The MBID written to disk or to the DB template always comes verbatim from the resolver. Reuses the hardened placeholder-apply machinery (write-ahead checkpoint, `batch_limit` counts only mutations, resume dedup, descendant-aware tracked detection, `ok:false` on any error, running-job 409 guard, single-call rollback-by-job from the transaction audit records). The `review` list (unresolved folders, collisions, mismatches) is produced for a later manual-resolution UI; choosing/writing `LIDARR_URL` config is a deploy-time step.
+
+
+
 ## v0.12.0 - 2026-10-21
 
 ### Fixed

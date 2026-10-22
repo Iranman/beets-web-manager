@@ -280,6 +280,42 @@ class AlbumFolderCleanupPlannerTests(unittest.TestCase):
         self.assertTrue(parsed["has_bad_mbid_suffix"])
         self.assertEqual(parsed["uuid_stamp"], "")
 
+    def test_canonical_parse_round_trip_is_fixed_point(self):
+        # Regression: a yearless name must not grow a bare "()" suffix on re-run.
+        # canonical(parse(canonical(...))) must equal canonical(...) for the
+        # placeholder-apply already_correct check to stabilize over repeated runs.
+        parse = self.helpers["_album_cleanup_parse_folder_name"]
+        canonical = self.helpers["_album_cleanup_canonical_name"]
+        rgid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        cases = [
+            ("Some Album", "2003"),   # yearful
+            ("Some Album", ""),       # yearless
+            ("Some Album", "0"),      # junk year (not 4-digit)
+            ("B.O.A.T.S. II #METIME", ""),
+        ]
+        for album, year in cases:
+            for stamp in ("", rgid):
+                target = canonical(album, year, stamp)
+                self.assertNotIn("()", target, f"bare () leaked for {album!r}/{year!r}")
+                # One round-trip reproduces the same name...
+                p = parse(target)
+                again = canonical(p["title"], p["year"], stamp)
+                self.assertEqual(again, target, f"round-trip drifted for {target!r}")
+                # ...and a second round-trip does not grow it further.
+                p2 = parse(again)
+                self.assertEqual(canonical(p2["title"], p2["year"], stamp), target)
+
+    def test_parse_strips_empty_bracket_groups(self):
+        # Heals names already corrupted by the earlier bare-"()" bug.
+        parse = self.helpers["_album_cleanup_parse_folder_name"]
+        self.assertEqual(parse("Some Album ()")["title"], "Some Album")
+        self.assertEqual(parse("Some Album () ()")["title"], "Some Album")
+        self.assertEqual(parse("Some Album []")["title"], "Some Album")
+        # A real year is still extracted, not stripped.
+        keep = parse("Some Album (2003)")
+        self.assertEqual(keep["title"], "Some Album")
+        self.assertEqual(keep["year"], "2003")
+
     def test_embedded_musicbrainz_tags_infer_release_group_for_bad_folder(self):
         folder_record = self.helpers["_album_cleanup_folder_record"]
         build = self.helpers["_album_cleanup_build_issue"]

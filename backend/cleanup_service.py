@@ -1493,6 +1493,9 @@ def _album_cleanup_parse_folder_name(name: str) -> Dict[str, Any]:
     cleaned = _UNRESOLVED_TEMPLATE_TOKEN_RE.sub("", cleaned)
     cleaned = _ALBUM_FOLDER_BAD_MBID_SUFFIX_RE.sub("", cleaned)
     cleaned = _ALBUM_FOLDER_UUID_IN_BRACES_RE.sub("", cleaned)
+    # Drop empty bracket groups (e.g. a bare "()" left by a missing year) so the
+    # parse->canonical round-trip is a fixed point and corrupted names stop growing.
+    cleaned = re.sub(r"\(\s*\)|\[\s*\]", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip().strip(" -_")
 
     year = ""
@@ -1518,7 +1521,10 @@ def _album_cleanup_canonical_name(album: str, year: Any, rgid: str) -> str:
     if year_text and year_text.isdigit():
         base = f"{title} ({year_text})"
     else:
-        base = f"{title} ()"
+        # No parseable year: omit the "()" group entirely. Emitting a bare "()"
+        # makes the parse->canonical round-trip grow ("Album () {rgid}" ->
+        # "Album () () {rgid}" -> ...), breaking idempotent re-runs.
+        base = title
     rgid_text = _s(rgid).strip().lower()
     if _MB_UUID_RE.match(rgid_text):
         base += f" {{{rgid_text}}}"

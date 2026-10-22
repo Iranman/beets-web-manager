@@ -103,3 +103,6 @@ TEST_INFRA.md
 
 # Maintainer-local agent context (host details); never commit
 CLAUDE.local.md
+
+# beets in-memory test fixture backups leaked into cwd
+*-before-*.bak

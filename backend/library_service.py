@@ -4249,6 +4249,358 @@ def _rollback_folder_placeholder_apply(
     }
 
 
+# -- folder MBID-name apply (Lidarr-resolved) ---------------------------------
+# Name every album folder `Album (Year) {release-group-mbid}` using the Lidarr
+# release-group resolver, through the SAME hardened machinery as the folder
+# placeholder apply above (write-ahead checkpoint, batch_limit counts only
+# mutations, resume dedup, descendant-aware tracked detection, rollback-by-job
+# via _rollback_folder_placeholder_apply). The ONLY real change vs the
+# placeholder apply is the target name: the MBID comes verbatim from the
+# resolver (MBID substitution) instead of stripping the token.
+
+_ARTIST_FOLDER_MBID_RE = re.compile(r"\(([0-9a-fA-F-]{36})\)")
+
+
+def _artist_mbid_from_folder(name: Any) -> str:
+    """The artist MBID from a `<Artist> (<artist-mbid>)` folder name, or "".
+    Only a syntactically valid MBID is returned (never guessed)."""
+    for m in _ARTIST_FOLDER_MBID_RE.finditer(_s(name)):
+        if _MB_UUID_RE.match(m.group(1)):
+            return m.group(1).strip().lower()
+    return ""
+
+
+def _iter_album_folders(cancel_event: Optional[Any] = None) -> List[Path]:
+    """Every `<artist>/<album>` directory under MUSIC_ROOT (two levels down),
+    the same walk the placeholder scan uses, dotfiles skipped."""
+    root = Path(MUSIC_ROOT)
+    out: List[Path] = []
+    if not root.exists():
+        return out
+    try:
+        artist_dirs = sorted(d for d in root.iterdir() if d.is_dir() and not d.name.startswith("."))
+    except PermissionError:
+        return out
+    for artist_dir in artist_dirs:
+        if cancel_event and cancel_event.is_set():
+            break
+        try:
+            out.extend(sorted(d for d in artist_dir.iterdir()
+                              if d.is_dir() and not d.name.startswith(".")))
+        except PermissionError:
+            continue
+    return out
+
+
+def _album_rgid_via_adapter(adapter: Any, album_ids: List[int]) -> str:
+    """The DB mb_releasegroupid for these album id(s), via the passed adapter
+    (not the global), so the tracked-relocation gate can prove the DB already
+    carries the resolver's MBID before relocating. "" if none is valid."""
+    ad = adapter or beets_adapter
+    for aid in album_ids:
+        try:
+            alb = ad.get_album(int(aid))
+        except Exception:
+            alb = None
+        if alb:
+            rg = _s(alb.get("mb_releasegroupid")).strip().lower()
+            if _MB_UUID_RE.match(rg):
+                return rg
+    return ""
+
+
+def _apply_folder_mbid_names(
+    folders: Optional[List[str]] = None,
+    *,
+    dry_run: bool = True,
+    approved_by: str = "operator (folder MBID-name apply)",
+    cancel_event: Optional[Any] = None,
+    update_state: Optional[Any] = None,
+    resume_done: Optional[set] = None,
+    prior_operations: Optional[List[Dict[str, Any]]] = None,
+    batch_limit: int = 0,
+    adapter: Any = None,
+    store: Any = None,
+    resolver: Any = None,
+    resolver_timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """Rename every album folder to `Album (Year) {release-group-mbid}` using
+    the Lidarr resolver, through the canonical mutation engine. Preview
+    (``dry_run``) never mutates.
+
+    ONE bulk Lidarr snapshot is taken per run (``LidarrRgidResolver.from_lidarr``);
+    a ``provider_boundary.ProviderError`` from it ABORTS the run, touching
+    nothing -- a provider failure is never downgraded to an "unresolved" row.
+    ``resolver`` may be injected (tests); otherwise it is built here.
+
+    Per album folder, with the resolver's verdict and a live tracked-status
+    re-check (descendant-aware, matching the engine's DB-reference refusal):
+      * unresolved                     -> SKIP, carry the resolver's reason.
+      * resolved, basename == target   -> already_correct (idempotent skip).
+      * resolved, DB-tracked           -> relocate_album ONLY when the DB's
+            mb_releasegroupid already equals the resolver's (so the
+            template-driven rename writes the resolver's MBID, never another);
+            otherwise HELD (``tracked_rgid_mismatch`` / ``tracked_multiple_albums``).
+      * resolved, disk-only, target absent -> rename via folder_cleanup_v1.
+      * resolved, target path exists   -> HELD (``target_exists``), never clobbered.
+
+    The MBID written to disk (a folder rename) or to the DB template (a
+    relocation) is ALWAYS the resolver's, taken verbatim -- nothing is invented.
+    Resumable and rollback-by-job identical to the placeholder apply:
+    ``operations`` (folder/album op ids, with a write-ahead marker before each
+    mutation) feeds ``_rollback_folder_placeholder_apply``. ``ok`` is False when
+    any row errored (F4).
+    """
+    from backend.cleanup_service import _album_cleanup_canonical_name, _album_cleanup_parse_folder_name
+    from backend.lidarr_rgid_resolver import LidarrRgidResolver
+
+    st = store if store is not None else composite_workflows.get_default_store()
+    # One bulk snapshot per run; a provider failure propagates and aborts.
+    if resolver is None:
+        resolver = LidarrRgidResolver.from_lidarr(timeout=resolver_timeout)
+
+    resume_done_originals = list(resume_done or [])
+    resume_done = {_placeholder_norm_path(f) for f in resume_done_originals}
+
+    if folders is None:
+        folders = [str(d) for d in _iter_album_folders(cancel_event=cancel_event)]
+
+    folder_db = _placeholder_folder_db(adapter)
+
+    operations: List[Dict[str, Any]] = list(prior_operations or [])
+    applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    already_correct: List[Dict[str, Any]] = []
+    done_folders: List[str] = list(resume_done_originals)
+    processed = 0
+    attempted = 0  # F3: only an actionable row (a mutation, or a dry-run would-change)
+    total = len(folders)
+
+    def _emit(current: Optional[str] = None, result: Optional[str] = None) -> None:
+        if not update_state:
+            return
+        update_state({
+            "category": "Cleanup",
+            "current_task": "Previewing MBID folder renames" if dry_run
+                            else "Renaming folders to Album (Year) {release-group-mbid}",
+            "current_path": current,
+            "total_count": total,
+            "scanned_count": processed,
+            "remaining_count": max(0, total - processed),
+            "changed_count": len(applied),
+            "already_correct_count": len(already_correct),
+            "skipped_count": len(skipped),
+            "error_count": len(errors),
+            "current_result": result,
+            "checkpoint": {"done_folders": list(done_folders), "operations": list(operations)},
+        })
+
+    def _relocate_tracked(aid: int, record: Dict[str, Any]) -> None:
+        """Write-ahead album relocation: the real op id is recorded BEFORE the
+        move, so a crash is always reachable by rollback-by-job (kind album)."""
+        plan = composite_workflows.plan_album_relocation(album_id=int(aid), mode="rename",
+                                                         adapter=adapter, store=st)
+        if not plan.get("ok"):
+            errors.append({**record, "code": plan.get("code"), "error": plan.get("error")})
+            _emit(record["folder"], f"error: {plan.get('code')}")
+            return
+        op_id = plan["operation_id"]
+        operations.append({"operation_id": op_id, "kind": "album"})
+        _emit(record["folder"], "relocating")
+        from backend.resource_locks import approve_preview, cancel_unclaimed_on_error
+        if approve_preview(st, op_id, approved_by) is None:
+            errors.append({**record, "code": "not_preview", "operation_ids": [op_id]})
+            _emit(record["folder"], "error: not_preview")
+            return
+        try:
+            with cancel_unclaimed_on_error(st, op_id):
+                res = composite_workflows.apply_album_relocation(op_id, adapter=adapter, store=st)
+        except Exception as exc:
+            errors.append({**record, "code": "apply_raised", "error": type(exc).__name__,
+                           "operation_ids": [op_id]})
+            _emit(record["folder"], f"error: {type(exc).__name__}")
+            return
+        if res.get("ok"):
+            done_folders.append(record["folder"])
+            applied.append({**record, "operation_ids": [op_id], "dest_dir": res.get("dest_dir")})
+            _emit(record["folder"], "relocated")
+        else:
+            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
+                           "operation_ids": [op_id]})
+            _emit(record["folder"], f"error: {res.get('code')}")
+
+    for folder in folders:
+        if cancel_event and cancel_event.is_set():
+            break
+        key = _placeholder_norm_path(folder)
+        if key in resume_done:
+            continue
+        processed += 1
+        source = Path(folder)
+        parsed = _album_cleanup_parse_folder_name(source.name)
+        artist_mbid = _artist_mbid_from_folder(source.parent.name)
+        album_ids, item_count = _placeholder_folder_tracked(folder_db, key)
+        tracked = item_count > 0
+        record: Dict[str, Any] = {
+            "folder": str(source),
+            "artist_mbid": artist_mbid,
+            "album_title": parsed["title"],
+            "album_year": parsed["year"],
+            "db_item_count": item_count,
+            "db_album_ids": album_ids,
+        }
+
+        verdict = resolver.resolve(artist_mbid=artist_mbid, album_title=parsed["title"],
+                                   album_year=parsed["year"], album_basename=source.name)
+        if verdict.get("status") != "resolved":
+            skipped.append({**record, "reason": verdict.get("reason") or "unresolved",
+                            "resolver_status": "unresolved"})
+            _emit(str(source), f"skipped (unresolved: {verdict.get('reason')})")
+            continue
+
+        rgid = verdict["release_group_mbid"]
+        target_name = _album_cleanup_canonical_name(parsed["title"], parsed["year"], rgid)
+        target_path = source.parent / target_name
+        record.update({"release_group_mbid": rgid, "matched_tier": verdict.get("matched_tier"),
+                       "target_name": target_name, "proposed_folder": str(target_path)})
+
+        # Idempotent: the folder is already named exactly as the resolver says.
+        if source.name == target_name:
+            already_correct.append({**record, "reason": "already_correct"})
+            _emit(str(source), "already correct")
+            continue
+
+        if tracked:
+            # A DB-tracked album is renamed only by moving its files through
+            # Beets (relocate), so its DB paths follow. relocate writes the
+            # folder name from the DB's template (the DB mb_releasegroupid) --
+            # so we relocate ONLY when the DB already carries the resolver's
+            # MBID, never writing a non-resolver MBID.
+            record["mechanism"] = "album_relocation"
+            if len(album_ids) != 1:
+                skipped.append({**record, "reason": "tracked_multiple_albums",
+                                "error": f"Folder maps to {len(album_ids)} albums; relocate each directly."})
+                _emit(str(source), "skipped (multiple tracked albums)")
+                continue
+            db_rgid = _album_rgid_via_adapter(adapter, album_ids)
+            if db_rgid != rgid:
+                skipped.append({**record, "reason": "tracked_rgid_mismatch",
+                                "db_release_group_mbid": db_rgid,
+                                "error": "DB release-group MBID differs from Lidarr's; held for review."})
+                _emit(str(source), "skipped (DB rgid != resolver rgid)")
+                continue
+            # Never clobber an existing same-parent target (the common case).
+            if target_path.exists() and _placeholder_norm_path(target_path) != key:
+                skipped.append({**record, "reason": "target_exists"})
+                _emit(str(source), "skipped (target exists -- needs review)")
+                continue
+            if batch_limit and attempted >= batch_limit:
+                processed -= 1
+                break
+            attempted += 1
+            if dry_run:
+                applied.append({**record, "would": "relocate"})
+                _emit(str(source), "would relocate")
+                continue
+            _relocate_tracked(album_ids[0], record)
+            continue
+
+        # Disk-only: rename the folder through folder_cleanup_v1.
+        record["mechanism"] = "folder_rename"
+        if not source.exists():
+            # Resumed/crashed: recover the applied op (F2) so rollback-by-job
+            # still reaches it; preview never emits ops.
+            if not dry_run and not _ops_cover_source(operations, source):
+                recovered = _find_applied_folder_op(source, st)
+                if recovered and not any(
+                        o.get("operation_id") == recovered["operation_id"] for o in operations):
+                    operations.append(recovered)
+            skipped.append({**record, "reason": "source_missing"})
+            done_folders.append(str(source))
+            _emit(str(source), "skipped (source already gone)")
+            continue
+        if target_path.exists():
+            skipped.append({**record, "reason": "target_exists"})
+            _emit(str(source), "skipped (target exists -- needs review)")
+            continue
+
+        if batch_limit and attempted >= batch_limit:
+            processed -= 1
+            break
+        attempted += 1
+
+        if dry_run:
+            applied.append({**record, "would": "rename"})
+            _emit(str(source), "would rename")
+            continue
+
+        marker = {"pending": True, "kind": "folder", "source": str(source)}
+        operations.append(marker)
+        _emit(str(source), "renaming")
+        try:
+            res = composite_workflows.safe_rename_library_folder(
+                str(source), str(target_path), approved_by, store=st)
+        except Exception as exc:
+            errors.append({**record, "code": "apply_raised", "error": type(exc).__name__})
+            _emit(str(source), f"error: {type(exc).__name__}")
+            continue
+
+        operations[:] = [o for o in operations if o is not marker]
+        if res.get("ok"):
+            new_ops = res.get("operations") or (
+                [{"operation_id": res["operation_id"], "kind": "folder"}]
+                if res.get("operation_id") else [])
+            operations.extend(new_ops)
+            done_folders.append(str(source))
+            applied.append({**record, "operation_ids": [o["operation_id"] for o in new_ops]})
+            _emit(str(source), "renamed")
+        elif res.get("code") == "folder_cleanup_db_references":
+            # A disk-only row that gained Beets items since the folder_db
+            # snapshot (a genuine race). Nothing mutated -> refund the budget.
+            attempted -= 1
+            skipped.append({**record, "reason": "became_tracked_needs_relocation",
+                            "error": res.get("error")})
+            _emit(str(source), "skipped (now DB-tracked -- needs relocation)")
+        else:
+            new_ops = list(res.get("operations") or [])
+            if not new_ops and res.get("operation_id"):
+                new_ops = [{"operation_id": res["operation_id"], "kind": "folder"}]
+            operations.extend(new_ops)
+            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
+                           "operation_ids": [o["operation_id"] for o in new_ops]})
+            _emit(str(source), f"error: {res.get('code')}")
+
+    cancelled = bool(cancel_event and cancel_event.is_set())
+    skipped_by_reason: Dict[str, int] = {}
+    for s in skipped:
+        skipped_by_reason[s["reason"]] = skipped_by_reason.get(s["reason"], 0) + 1
+    summary = {
+        "dry_run": dry_run,
+        "total_selected": total,
+        "processed": processed,
+        "changed_count": len(applied) if not dry_run else 0,
+        "would_change_count": len(applied) if dry_run else 0,
+        "already_correct_count": len(already_correct),
+        "skipped_count": len(skipped),
+        "skipped_by_reason": skipped_by_reason,
+        "error_count": len(errors),
+        "remaining_count": max(0, total - processed),
+        "cancelled": cancelled,
+    }
+    return {
+        "ok": len(errors) == 0,
+        "dry_run": dry_run,
+        "operations": operations,
+        "applied": applied,
+        "skipped": skipped,
+        "errors": errors,
+        "already_correct": already_correct,
+        "done_folders": done_folders,
+        "final_summary": summary,
+    }
+
+
 def _root_folder_repair_scan(root: Optional[Path] = None) -> Dict[str, Any]:
     """Find MUSIC_ROOT top-level entries that are actually album/singleton
     folders sitting one level too shallow, e.g. "/data/media/music/Aaliyah
