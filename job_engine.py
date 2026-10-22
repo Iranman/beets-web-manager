@@ -844,13 +844,17 @@ class JobStore:
         jid = str(jid)
         if not _SAFE_JOB_ID.fullmatch(jid):
             return None
-        path = self.root / f"{jid}.json"
+        # Build the candidate, then confine it to the jobs directory by
+        # realpath containment (CodeQL-recognised py/path-injection barrier):
+        # the resolved record path must live directly inside the resolved root.
         try:
-            if path.parent != self.root:
+            root_real = os.path.realpath(str(self.root))
+            path_real = os.path.realpath(os.path.join(root_real, f"{jid}.json"))
+            if os.path.dirname(path_real) != root_real:
                 return None
         except OSError:
             return None
-        return path
+        return Path(path_real)
 
     def get(self, jid) -> Optional["PythonJob"]:
         job = self._jobs.get(jid)
