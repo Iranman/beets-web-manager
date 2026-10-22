@@ -1085,6 +1085,39 @@ class ConcurrencyLockTests(RealRestoreBase):
 # ---------------------------------------------------------------------------
 
 class ExactPathRestoreTests(RealRestoreBase):
+    def test_uses_the_containment_resolvers_canonical_destination(self):
+        album, paths = self._add_wav_album(count=1, folder="Artist/CanonicalSource")
+        item = next(iter(album.items()))
+        original_hash = _sha(paths[0])
+        raw = os.path.join(self.music, "Unused", "..", "Restored", "track.wav")
+        canonical = os.path.realpath(raw)
+        with mock.patch.object(ops_mod, "resolve_safe_descendant",
+                               wraps=ops_mod.resolve_safe_descendant) as resolve:
+            response = self._post("/webmanager/item-path/restore", {
+                "items": [{"id": item.id, "path": raw, "sha256": original_hash}]})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["success"])
+        resolve.assert_called_once_with(raw, [self.music])
+        self.assertEqual(response.get_json()["restored"][0]["path"], canonical)
+        self.assertEqual(os.fsdecode(self.lib.get_item(item.id).path), canonical)
+        self.assertEqual(_sha(canonical), original_hash)
+        self.assertFalse(os.path.exists(paths[0]))
+
+    def test_refuses_root_sibling_and_dotdot_escape_before_any_move(self):
+        album, paths = self._add_wav_album(count=1, folder="Artist/Containment")
+        item = next(iter(album.items()))
+        original_hash = _sha(paths[0])
+        for target in (self.music, os.path.join(self.music + "-other", "track.wav"),
+                       os.path.join(self.music, "..", "outside.wav")):
+            with self.subTest(target=target):
+                response = self._post("/webmanager/item-path/restore", {
+                    "items": [{"id": item.id, "path": target, "sha256": original_hash}]})
+                self.assertEqual(response.status_code, 403, response.get_json())
+                self.assertEqual(response.get_json()["error_code"], "PATH_NOT_ALLOWED")
+                self.assertEqual(_sha(paths[0]), original_hash)
+                self.assertEqual(os.path.normcase(os.fsdecode(self.lib.get_item(item.id).path)),
+                                 os.path.normcase(paths[0]))
+
     def test_restores_an_exact_path_and_row_without_clobber(self):
         album, paths = self._add_wav_album(count=1, folder="Old Artist/Album")
         item = album.items().__iter__().__next__()

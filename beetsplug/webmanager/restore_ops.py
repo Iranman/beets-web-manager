@@ -684,8 +684,11 @@ def _run_item_path_restore():
         want = raw.get("path")
         if not isinstance(want, str) or not want.strip() or "\x00" in want:
             return fail("path must be a non-empty string", "INVALID_PATH")
-        target = os.path.abspath(want)
-        if not _inside_allowed(target):
+        # Use the canonical value admitted by the containment resolver, not
+        # the request spelling after a boolean check. This is the same
+        # source-to-filesystem boundary used by the other plugin operations.
+        target = ops.resolve_safe_descendant(want, ops.get_allowed_roots())
+        if target is None:
             return fail("path outside allowed roots", "PATH_NOT_ALLOWED", 403)
         expected = str(raw.get("sha256") or "").lower()
         if expected and not (len(expected) == 64 and all(c in "0123456789abcdef" for c in expected)):
