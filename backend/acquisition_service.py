@@ -1409,6 +1409,9 @@ def _build_acquisition_queue_payload(force: bool = False, *, include_unmonitored
     timings: Dict[str, float] = {}
     started = time.monotonic()
     phase(phase="library")
+    # Acquisition needs the full disk-reconciled tree (disk-only folders
+    # included) and already runs inside its own background job, so the default
+    # block=True synchronous build here is off the page-load path.
     library_payload = get_library_payload(force=force, include_disk_only=True)
     library_error = "" if library_payload.get("ok") else _s(library_payload.get("error") or "")
     timings["library"] = round(time.monotonic() - started, 2)

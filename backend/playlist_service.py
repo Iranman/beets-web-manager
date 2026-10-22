@@ -9235,16 +9235,16 @@ def _playlist_auto_sync_scheduler(stop: threading.Event) -> None:
     """Wake every PLAYLIST_AUTO_SYNC_INTERVAL seconds and start a tracked
     sync job. This loop does no sync work itself (ADR 0005: the work is a
     job_engine job, visible, cancellable and logged)."""
-    wait = min(30, PLAYLIST_AUTO_SYNC_INTERVAL)
+    # Honor the configured interval from the first tick onward. (Earlier a
+    # min(30, ...) first-tick made auto-sync appear to run every ~30s.)
     while True:
-        _PLAYLIST_SYNC_STATE["next_run_at"] = time.time() + wait
-        if stop.wait(wait):
+        _PLAYLIST_SYNC_STATE["next_run_at"] = time.time() + PLAYLIST_AUTO_SYNC_INTERVAL
+        if stop.wait(PLAYLIST_AUTO_SYNC_INTERVAL):
             return
         try:
             _playlist_auto_sync_tick()
         except Exception as exc:  # never let the scheduler die silently
             _app_logger.warning("Playlist auto-sync scheduler tick failed: %s", type(exc).__name__)
-        wait = PLAYLIST_AUTO_SYNC_INTERVAL
 
 
 _PLAYLIST_AUTO_SYNC_STOP = threading.Event()

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from flask import jsonify, request, send_file, redirect
 from backend.matching_contract import AiState
 from backend.transaction_engine import metadata_diff
+from job_engine import TERMINAL_STATUSES
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_mb_release_id
 from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsAdapterNotFoundError, BeetsAdapterConnectionError, BeetsAdapterTimeoutError
 import backend.composite_workflows as composite_workflows
@@ -33,7 +34,7 @@ from backend.import_reconciliation_service import _run_artist_folder_reconcile_f
 from backend.import_review_service import _metadata_transaction_pending_fields, _redact_unmatched_draft_tracks
 from backend.import_service import _coerce_library_import_all_album, _library_import_all_read_last, _library_import_all_record, _library_import_all_write_last, _start_reimport_disk_job_internal, start_reimport_disk
 from backend.job_service import _wait_for_child_job
-from backend.library_service import AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _lastgenre_cmd, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _require_beet_ok, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
+from backend.library_service import AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _lastgenre_cmd, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _require_beet_ok, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _apply_folder_name_placeholders, _rollback_folder_placeholder_apply, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _SCAN_STATE, _do_scan_job
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_mb_completeness, _album_mb_match_plan, _disc_cache, _disc_cache_discogs, _disc_cache_discogs_lock, _disc_cache_lock, _invalidate_lib_cache, _load_album_mb_suggestions, _match_tracks_from_mb, _remove_album_track_items
 from backend.musicbrainz_service import _discogs_artist_discography, _discogs_track_search, _ensure_release_group_art, _mb_release_group_for_release
@@ -2720,9 +2721,15 @@ def library_missing_mb_ids_batch_apply():
 
 @app.get("/api/library")
 def library_full():
-    """Walk /data/media/music on disk + inject library items whose files are missing (shown in red).
-    Results are cached for _LIB_CACHE_TTL seconds; pass ?refresh=1 to force a rebuild.
-    Supports ?limit=N&offset=M for fast paginated queries directly from the engine.
+    """Library listing, served without a synchronous NFS disk walk on the request.
+
+    With ?limit=N(&offset=M): fast paginated flat item rows straight from the engine.
+    Without a limit: the artists/albums tree from the shared cache if warm, else an
+    engine-only fast tree built with no disk access; either way the disk reconciliation
+    (files missing on disk -> red, disk-only/not-imported files) runs as a background
+    job_engine job and warms the cache for subsequent loads. The response's
+    ``reconciled`` flag is True once the served payload includes that disk state.
+    ?refresh=1 schedules a background rebuild (it no longer blocks the request).
     """
     limit_arg = request.args.get("limit")
     if limit_arg is not None:
@@ -2758,14 +2765,23 @@ def library_full():
                 }), 503
             raise
 
-    return jsonify(get_library_payload(
-        force=request.args.get("refresh", "0") == "1",
-        include_tracks=request.args.get("include_tracks", "0") == "1",
-        include_disk_only=(
-            request.args.get("include_disk_only", "0") == "1"
-            or request.path.startswith("/api/acquisition")
-        ),
-    ))
+    try:
+        return jsonify(get_library_payload(
+            force=request.args.get("refresh", "0") == "1",
+            include_tracks=request.args.get("include_tracks", "0") == "1",
+            include_disk_only=(
+                request.args.get("include_disk_only", "0") == "1"
+                or request.path.startswith("/api/acquisition")
+            ),
+            block=False,  # page load: serve cache/fast tree, reconcile disk in the background
+        ))
+    except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError, TimeoutError) as ex:
+        _app_logger.warning("library payload unavailable: %s: %s", type(ex).__name__, ex)
+        return jsonify({
+            "error": "Beets library is unavailable.",
+            "error_code": "ENGINE_OFFLINE",
+            "status": "unavailable",
+        }), 503
 
 
 @app.post("/api/albums/<int:aid>/ai-suggest")
@@ -4936,6 +4952,135 @@ def scan_folder_placeholders_job():
         _do,
         label="Scan folder placeholder names",
         metadata={"type": "folder-placeholder-scan"},
+    )
+    return jsonify({"ok": True, "job_id": job.job_id})
+
+
+@app.post("/api/library/folder-placeholders/apply")
+def apply_folder_placeholders_job():
+    """Rename album folders whose template placeholder was never substituted
+    (e.g. ``Hot & Wet (2003){Album MbId}`` -> ``Hot & Wet (2003)``) through the
+    controlled mutation engine. Preview/apply/audit/rollback, resumable.
+
+    Body:
+      { "dry_run": bool (default true -> preview only),
+        "confirmed": bool (required to actually rename),
+        "folders": [str] (optional absolute folder paths; omit = all safe
+                    disk-only rows of a fresh scan; the 52 target_exists
+                    review cases are never auto-fixed),
+        "batch_limit": int (optional; cap renames this run, rest resumable),
+        "resume_from_job": str (optional; skip folders a prior apply finished) }
+    """
+    payload = request.get_json(silent=True) or {}
+    dry_run = payload.get("dry_run", True) is not False
+    if not dry_run and payload.get("confirmed") is not True:
+        return jsonify({"ok": False, "error": "Confirmation is required before renaming folders"}), 400
+
+    folders = payload.get("folders")
+    if folders is not None:
+        folders = [str(f) for f in folders]
+    try:
+        batch_limit = max(0, int(payload.get("batch_limit") or 0))
+    except (TypeError, ValueError):
+        batch_limit = 0
+
+    resume_done: set = set()
+    prior_operations: list = []
+    resume_from_job = str(payload.get("resume_from_job") or "").strip()
+    if resume_from_job:
+        prior = jobs.get(resume_from_job)
+        if prior is not None:
+            # F6: a still-running source job's checkpoint misses its later ops;
+            # resuming it would skip or double-apply folders. Require it done.
+            if getattr(prior, "status", None) not in TERMINAL_STATUSES:
+                return jsonify({"ok": False, "error": (
+                    f"Source job {resume_from_job} is still {prior.status}; "
+                    "wait for it to finish before resuming it.")}), 409
+            ckpt = (getattr(prior, "state", None) or {}).get("checkpoint") or {}
+            result = getattr(prior, "result", None) or {}
+            resume_done = set(ckpt.get("done_folders") or result.get("done_folders") or [])
+            prior_operations = list(ckpt.get("operations") or result.get("operations") or [])
+
+    def _do(log, cancel_event=None, update_state=None):
+        log.append(
+            f"{'Previewing' if dry_run else 'Applying'} placeholder folder renames"
+            + (f" ({len(folders)} selected)" if folders is not None else " (all safe disk-only rows)")
+            + (f"; resuming past {len(resume_done)} completed folder(s)" if resume_done else "")
+        )
+        res = _apply_folder_name_placeholders(
+            folders,
+            dry_run=dry_run,
+            cancel_event=cancel_event,
+            update_state=update_state,
+            resume_done=resume_done,
+            prior_operations=prior_operations,
+            batch_limit=batch_limit,
+        )
+        s = res["final_summary"]
+        log.append(
+            f"Done — {'would change' if dry_run else 'changed'} "
+            f"{s['would_change_count'] if dry_run else s['changed_count']}; "
+            f"skipped {s['skipped_count']}; errors {s['error_count']}; "
+            f"remaining {s['remaining_count']}."
+        )
+        for sk in res["skipped"][:40]:
+            log.append(f"  [skip:{sk.get('reason')}] {sk.get('folder')}")
+        if not dry_run and (res["applied"] or res["operations"]):
+            _invalidate_lib_cache()
+        if update_state:
+            update_state({"checkpoint": {"done_folders": res["done_folders"],
+                                         "operations": res["operations"]}})
+        return res
+
+    job = jobs.start_python(
+        _do,
+        label=f"Folder placeholder apply ({'dry-run' if dry_run else 'apply'})",
+        metadata={"type": "folder-placeholder-apply", "dry_run": dry_run},
+    )
+    return jsonify({"ok": True, "job_id": job.job_id})
+
+
+@app.post("/api/library/folder-placeholders/rollback")
+def rollback_folder_placeholders_job():
+    """Undo a placeholder-folder apply from its transaction audit records.
+
+    Body (one of):
+      { "job_id": str }                      # the apply job to undo
+      { "operations": [{operation_id, kind}] }  # explicit ops from an apply
+    """
+    payload = request.get_json(silent=True) or {}
+    operations = payload.get("operations")
+    job_id = str(payload.get("job_id") or "").strip()
+    if not operations and job_id:
+        prior = jobs.get(job_id)
+        if prior is None:
+            return jsonify({"ok": False, "error": f"Job {job_id} not found"}), 404
+        # F6: a still-running apply keeps extending its checkpoint; rolling it
+        # back now would miss the ops it has not recorded yet. Require it done.
+        if getattr(prior, "status", None) not in TERMINAL_STATUSES:
+            return jsonify({"ok": False, "error": (
+                f"Job {job_id} is still {prior.status}; "
+                "wait for it to finish (or cancel it) before rolling it back.")}), 409
+        ckpt = (getattr(prior, "state", None) or {}).get("checkpoint") or {}
+        result = getattr(prior, "result", None) or {}
+        operations = ckpt.get("operations") or result.get("operations") or []
+    if not operations:
+        return jsonify({"ok": False, "error": "No operations to roll back (pass job_id or operations)"}), 400
+
+    def _do(log, cancel_event=None, update_state=None):
+        log.append(f"Rolling back {len(operations)} placeholder folder operation(s)...")
+        res = _rollback_folder_placeholder_apply(
+            operations, cancel_event=cancel_event, update_state=update_state)
+        s = res["final_summary"]
+        log.append(f"Done — rolled back {s['rolled_back_count']}; errors {s['error_count']}.")
+        if res["rolled_back"]:
+            _invalidate_lib_cache()
+        return res
+
+    job = jobs.start_python(
+        _do,
+        label="Folder placeholder rollback",
+        metadata={"type": "folder-placeholder-rollback"},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 

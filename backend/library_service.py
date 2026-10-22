@@ -28,6 +28,7 @@ from backend.artwork_service import _ART_EXTS, _artist_name_key, _attach_artist_
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _load_album_mb_suggestions, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
+from job_engine import DuplicateJobError
 from backend.musicbrainz_service import _artist_album_index, _artist_folder_key, _mb_artist_lookup_by_id, _mb_artist_search_one, _mb_canonical_for_artist_entries, _mb_release_has_tracks, _mb_release_search_by_folder_tracks
 from backend.serializers import _DOWNLOADS_ROOTS, _format_duration, _import_review_path_text_error, _leaked_db_paths_summary, _resolve_import_review_source_path, _review_origin_payload
 from backend.plex_service import _trigger_plex_refresh
@@ -1846,20 +1847,252 @@ def _library_track_dict(item) -> Dict[str, Any]:
     }
 
 
-def get_library_payload(*, force: bool = False, include_tracks: bool = False,
-                        include_disk_only: bool = False) -> Dict[str, Any]:
-    """Library page payload from the shared cache, rebuilt when stale or forced.
-
-    Request-free service behind GET /api/library (ARCH-001)."""
-    now   = time.time()
-    cached_payload, cached_ts = library_cache.snapshot()
-    if not force and cached_payload and (now - cached_ts) < _LIB_CACHE_TTL:
-        return _library_payload_for_response(
-            cached_payload, include_tracks, include_disk_only)
-
+def _library_reconcile_job(log, cancel_event=None) -> dict:
+    """Background job body: rebuild the full disk-reconciled library payload
+    (the NFS tree walk in _build_library_payload) and store it in the shared
+    cache. Kept off the page-load request path -- a page load serves the cache
+    or the engine-only fast tree and schedules this instead of walking the
+    disk synchronously (the confirmed cause of the 120s /api/library load)."""
+    log.append("Reconciling the library tree with files on disk...")
     payload = _refresh_library_cache()
-    return _library_payload_for_response(
-        payload, include_tracks, include_disk_only)
+    stats = payload.get("stats") or {}
+    log.append(
+        f"Reconciled {stats.get('artists', 0)} artists / {stats.get('albums', 0)} albums / "
+        f"{stats.get('tracks', 0)} tracks on disk."
+    )
+    return payload
+
+
+def _schedule_library_reconcile() -> None:
+    """Start the disk-reconciliation job via job_engine, deduped so N
+    concurrent page loads on a cold/stale cache start at most one NFS walk.
+    A DuplicateJobError just means one is already running -- its result warms
+    the cache for the next load, so nothing more to do here."""
+    try:
+        jobs.start_python(
+            _library_reconcile_job,
+            label="Library disk reconciliation",
+            metadata={"type": "library-reconcile", "mutating": False,
+                      "dedupe_key": "library-reconcile"},
+        )
+    except DuplicateJobError:
+        pass
+    except Exception as ex:  # scheduling must never break a page load
+        _app_logger.warning("Library reconcile could not be scheduled: %s", ex)
+
+
+def _build_library_payload_fast() -> dict:
+    """Engine-only Library tree built with no music-tree/NFS disk walk.
+
+    (It never scans or walks the music tree directories. It still reads the
+    small local artist-image cache via _attach_artist_image_cache_urls; that
+    touches only the cache dir, never the NFS music tree.)
+
+    Served on a cold cache so the page loads immediately instead of blocking on
+    the NFS tree walk in _build_library_payload(). Disk-derived facts -- files
+    missing on disk (shown red) and disk-only/not-imported files -- are not
+    known here; the background reconciliation job (_library_reconcile_job) fills
+    them in and stores the full payload in library_cache, which later loads
+    serve. Until then every imported item is reported optimistically as present
+    (ok/imported) and every album as fully imported (missing=0, not_imported=0).
+    Request-free: safe to call with no Flask request context.
+    """
+    _MROOT = str(MUSIC_ROOT)
+    _TYPE_ORDER = {"album": 0, "ep": 1, "mixtape": 2, "single": 3,
+                   "broadcast": 4, "other": 5, "": 6}
+
+    # Album metadata by Beets DB id (the same fields the full builder reads).
+    # Note: "year" is NOT in the album field allowlist (beetsplug/webmanager
+    # read_ops READ_FIELDS["album"]); requesting it returns HTTP 400 and the
+    # adapter only falls back on 404, so album year is derived from the item
+    # rows below (which do carry "year"), as the full builder also works.
+    album_meta: Dict[int, dict] = {}
+    try:
+        for ba in lib.albums([], fields=_LIBRARY_ALBUM_FIELDS):
+            try:
+                album_meta[int(ba.id)] = {
+                    "id":                 int(ba.id),
+                    "album":              _s(getattr(ba, "album", "") or ""),
+                    "albumartist":        _s(getattr(ba, "albumartist", "") or getattr(ba, "artist", "") or ""),
+                    "albumartist_credit": _s(getattr(ba, "albumartist_credit", "") or ""),
+                    "albumartists":       _s(getattr(ba, "albumartists", "") or ""),
+                    "albumartists_credit": _s(getattr(ba, "albumartists_credit", "") or ""),
+                    "mb_albumartistid":   _s(getattr(ba, "mb_albumartistid", "") or ""),
+                    "mb_albumartistids":  _s(getattr(ba, "mb_albumartistids", "") or ""),
+                    "mb_albumid":         _s(getattr(ba, "mb_albumid", "") or ""),
+                    "mb_releasegroupid":  _s(getattr(ba, "mb_releasegroupid", "") or ""),
+                    "albumtype":          _s(getattr(ba, "albumtype", "") or "").lower(),
+                    "albumtypes":         _s(getattr(ba, "albumtypes", "") or "").lower(),
+                    "artpath":            _s(getattr(ba, "artpath", "") or ""),
+                }
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    def _track(item) -> dict:
+        p = _s(item.path)
+        abs_p = (_MROOT + "/" + p) if (p and not p.startswith("/")) else p
+        return {
+            "id":         int(getattr(item, "id", 0) or 0),
+            "album_id":   int(getattr(item, "album_id", 0) or 0),
+            "path":       abs_p or p,
+            "title":      _s(getattr(item, "title", "") or (Path(p).stem if p else "")),
+            "track":      int(getattr(item, "track", 0) or 0),
+            "disc":       int(getattr(item, "disc", 0) or 1) or 1,
+            "tracktotal":  int(getattr(item, "tracktotal", 0) or 0),
+            "ok":         True,
+            "missing":    False,
+            "imported":   True,
+            "disk_only":  False,
+            "status":     "imported",
+            "mb_trackid": _s(getattr(item, "mb_trackid", "") or ""),
+        }
+
+    # Group items by album id; album_id 0 are singletons bucketed per artist.
+    tracks_by_album: Dict[int, list] = defaultdict(list)
+    years_by_album: Dict[int, Counter] = defaultdict(Counter)
+    singletons_by_artist: Dict[str, list] = defaultdict(list)
+    for item in lib.items([], fields=_LIBRARY_ITEM_FIELDS):
+        aid = int(getattr(item, "album_id", 0) or 0)
+        if aid > 0:
+            tracks_by_album[aid].append(_track(item))
+            y = int(getattr(item, "year", 0) or 0)
+            if y:
+                years_by_album[aid][y] += 1
+        else:
+            artist = _s(getattr(item, "albumartist", "") or getattr(item, "artist", "") or "Unknown Artist")
+            singletons_by_artist[artist].append(_track(item))
+
+    def _card(album_name, year, tracks, meta) -> dict:
+        tracks = sorted(tracks, key=lambda t: t["track"] or 999)
+        expected = _expected_track_count_from_library_rows(tracks)
+        card = {
+            "album":              album_name,
+            "year":               year,
+            "tracks":             tracks,
+            "track_count":        len(tracks),
+            "expected_track_count": expected,
+            "not_imported":       0,
+            "not_imported_is_extra": False,
+            "pending_review":     False,
+            "missing":            0,
+            "album_id":           int(meta.get("id") or 0),
+            "albumartist":        meta.get("albumartist", ""),
+            "albumartist_credit": meta.get("albumartist_credit", ""),
+            "albumartists":       meta.get("albumartists", ""),
+            "albumartists_credit": meta.get("albumartists_credit", ""),
+            "mb_albumartistid":   meta.get("mb_albumartistid", ""),
+            "mb_albumartistids":  meta.get("mb_albumartistids", ""),
+            "artpath":            meta.get("artpath", ""),
+            "disk_art":           "",
+            "aldir":              "",
+            "mb_albumid":         meta.get("mb_albumid", ""),
+            "mb_releasegroupid":  meta.get("mb_releasegroupid", ""),
+            "albumtype":          meta.get("albumtype", ""),
+            "albumtypes":         meta.get("albumtypes", ""),
+        }
+        card.update(_fast_album_mb_health_fields(tracks, expected, 0))
+        return card
+
+    albums_by_artist: Dict[str, list] = defaultdict(list)
+    for aid, meta in album_meta.items():
+        tracks = tracks_by_album.get(aid)
+        if not tracks:
+            continue  # album row with no items in this engine snapshot
+        # Album year from the item rows (the album field allowlist has no
+        # "year"): the most common non-zero item year, else 0.
+        yc = years_by_album.get(aid)
+        year = yc.most_common(1)[0][0] if yc else 0
+        display = _artist_folder_name_without_mbid(meta.get("albumartist") or "Unknown Artist")
+        albums_by_artist[display].append(_card(meta.get("album", ""), year, tracks, meta))
+
+    for artist, tracks in singletons_by_artist.items():
+        display = _artist_folder_name_without_mbid(artist)
+        albums_by_artist[display].append(_card("(Singles)", 0, tracks, {"albumartist": artist}))
+
+    result = []
+    for display_name, albums in albums_by_artist.items():
+        albums.sort(key=lambda a: (
+            _TYPE_ORDER.get(a.get("albumtype", ""), 6),
+            a["year"] or 0,
+            a["album"].lower(),
+        ))
+        total = sum(int(a.get("track_count") or 0) for a in albums)
+        result.append({
+            "name":                display_name,
+            "albums":              albums,
+            "total":               total,
+            "imported":            total,
+            "not_imported":        0,
+            "missing":             0,
+            "empty_artist_folder": not albums,
+            "path":                "",
+        })
+
+    _apply_collaboration_album_views(result)
+    _attach_artist_image_cache_urls(result)
+    result.sort(key=lambda a: a["name"].lower())
+
+    total_artists = len(result)
+    total_albums  = sum(1 for a in result for al in a.get("albums", [])
+                        if not al.get("virtual_appearance"))
+    total_tracks  = sum(int(al.get("track_count") or len(al.get("tracks", [])))
+                        for a in result for al in a.get("albums", [])
+                        if not al.get("virtual_appearance"))
+    return {
+        "ok":          True,
+        "artists":     result,
+        "stats":       {"artists": total_artists, "albums": total_albums, "tracks": total_tracks},
+        # Stable while the cache is cold: generation only advances on store()/
+        # invalidate(), so repeated cold fast-tree responses carry the SAME
+        # version (the frontend keeps its poll budget) and it changes once the
+        # reconcile stores real data. Do not use library_cache.ts here -- it is
+        # 0.0 while cold, which fell through to a fresh time.time() every call.
+        "library_version": library_cache.generation,
+        "reconciled":  False,   # disk state (missing/disk-only) not merged yet
+        "reconciling": True,    # a background reconciliation is being scheduled
+    }
+
+
+def get_library_payload(*, force: bool = False, include_tracks: bool = False,
+                        include_disk_only: bool = False, block: bool = True) -> Dict[str, Any]:
+    """Library page payload (ARCH-001). Request-free service behind GET /api/library.
+
+    block=True (the default, pre-existing synchronous behavior): serve a fresh
+    cache, else build the full disk-walked payload inline. In-process callers
+    that need disk-reconciled data and already run off the page-load path (e.g.
+    the acquisition-queue build job) keep this default untouched.
+
+    block=False (the GET /api/library page-load path): never walks the NFS music
+    tree on the request thread. Serves the cached full payload if present (even
+    if stale), otherwise an engine-only fast tree, and schedules the disk
+    reconciliation as a background job_engine job when the cache is cold, stale,
+    or force-refreshed. The response carries ``reconciled``: True once the served
+    payload includes disk state (missing/disk-only), False while only the fast
+    tree is available."""
+    now = time.time()
+    cached_payload, cached_ts = library_cache.snapshot()
+    fresh = bool(cached_payload) and (now - cached_ts) < _LIB_CACHE_TTL
+
+    if block:
+        if force or not fresh:
+            cached_payload = _refresh_library_cache()
+        return _library_payload_for_response(cached_payload, include_tracks, include_disk_only)
+
+    if cached_payload is not None:
+        if force or not fresh:
+            _schedule_library_reconcile()
+        out = _library_payload_for_response(cached_payload, include_tracks, include_disk_only)
+        out["reconciled"] = True
+        out["reconciling"] = bool(force or not fresh)
+        return out
+    # Cold cache: build the engine-only tree FIRST, then schedule the disk
+    # reconcile. If the engine is offline the fast build raises (-> 503), so we
+    # must not leave a doomed reconcile job queued behind every failed load.
+    fast = _build_library_payload_fast()
+    _schedule_library_reconcile()
+    return _library_payload_for_response(fast, include_tracks, include_disk_only)
 
 
 def _refresh_library_cache() -> dict:
@@ -3619,6 +3852,401 @@ def _scan_folder_name_placeholders(progress: Optional[Any] = None,
             "final_summary": _folder_placeholder_summary(sorted_results, total_scanned=total_album_dirs),
         })
     return sorted_results
+
+
+def _placeholder_norm_path(p: Any) -> str:
+    """Case/sep-normalized absolute path, for matching a scan ``folder`` value
+    against item dirnames and against a resume checkpoint."""
+    return os.path.normcase(os.path.abspath(os.path.normpath(str(p))))
+
+
+def _placeholder_folder_db(adapter: Any = None) -> Dict[str, Dict[str, Any]]:
+    """dirname -> {album_ids, item_count} from the Beets item table, keyed by
+    normalized path. Mirrors the scan's DB map so apply routes DB-tracked
+    folders (db_item_count>0) to a Beets relocation instead of a bare rename."""
+    ad = adapter or beets_adapter
+    folder_db: Dict[str, Dict[str, Any]] = {}
+    try:
+        for row in ad.list_item_paths(details=True):
+            p = _s(row.get("path"))
+            d = os.path.dirname(p) if p else ""
+            if not d:
+                continue
+            key = _placeholder_norm_path(d)
+            slot = folder_db.setdefault(key, {"album_ids": set(), "item_count": 0})
+            if row.get("album_id"):
+                slot["album_ids"].add(int(row["album_id"]))
+            slot["item_count"] += 1
+    except Exception:
+        pass
+    return folder_db
+
+
+def _placeholder_folder_tracked(folder_db: Dict[str, Dict[str, Any]], key: str) -> Tuple[List[int], int]:
+    """Descendant-aware (not immediate-dirname-only) tracked lookup for the
+    apply/preview top gate, so a DB-tracked album whose tracks live under a
+    DISC SUBFOLDER is HELD identically in preview and apply (C6) -- matching
+    the engine's refusal, which is descendant-aware (``_library_refs_under``
+    uses ``startswith``). Returns (album_ids, item_count) summed over the
+    folder itself and every folder beneath it.
+
+    ponytail: O(candidates x dirnames) scan; the candidate list is the small
+    placeholder subset and this is a cleanup path, not hot. Key by ancestor if
+    it ever shows up hot."""
+    prefix = key.rstrip(os.sep) + os.sep
+    album_ids: set = set()
+    item_count = 0
+    for dk, slot in folder_db.items():
+        if dk == key or dk.startswith(prefix):
+            album_ids |= set(slot.get("album_ids") or ())
+            item_count += int(slot.get("item_count") or 0)
+    return sorted(album_ids), item_count
+
+
+def _ops_cover_source(operations: List[Dict[str, Any]], source: Any) -> bool:
+    """True when ``operations`` already carries a write-ahead marker for this
+    source folder (so resume need not re-recover it)."""
+    key = _placeholder_norm_path(source)
+    return any(op.get("source") and _placeholder_norm_path(op["source"]) == key
+               for op in operations)
+
+
+def _find_applied_folder_op(source: Any, store: Any = None) -> Optional[Dict[str, Any]]:
+    """Find the folder_cleanup_v1 op that renamed ``source`` and left a
+    rollback record, to recover an apply that crashed after the physical
+    rename but before its op reached the job checkpoint (F2). Returns the most
+    recent matching ``{operation_id, kind}`` or ``None`` when nothing applied."""
+    # C8: scan rows and match the STRUCTURED source (moved_records below), NOT
+    # query=str(source) -- the query does a substring match on JSON-serialized
+    # fields, so a folder name with a double-quote or backslash never matches
+    # its escaped form (silent recovery miss).
+    # ponytail: newest 500 rows (st.list caps there); recovery is the resume
+    # right after the crash, so the op we want is always recent. Paginate if a
+    # deployment ever buries it under 500 newer transactions.
+    st = store or composite_workflows.get_default_store()
+    key = _placeholder_norm_path(source)
+    try:
+        rows, _total = st.list(limit=500)
+    except Exception:
+        return None
+    for row in rows:  # newest first
+        meta = row.get("metadata") or {}
+        if meta.get("mutation_family") != "folder_cleanup_v1":
+            continue
+        if row.get("status") not in ("Completed", "Failed", "Partially Rolled Back", "Running"):
+            continue
+        recs = ((meta.get("engine_result") or {}).get("moved_records")
+                or meta.get("moved_records") or [])
+        if any(mr.get("source") and _placeholder_norm_path(mr["source"]) == key for mr in recs):
+            return {"operation_id": row.get("id"), "kind": "folder"}
+    return None
+
+
+def _apply_folder_name_placeholders(
+    folders: Optional[List[str]] = None,
+    *,
+    dry_run: bool = True,
+    approved_by: str = "operator (folder placeholder apply)",
+    cancel_event: Optional[Any] = None,
+    update_state: Optional[Any] = None,
+    resume_done: Optional[set] = None,
+    prior_operations: Optional[List[Dict[str, Any]]] = None,
+    batch_limit: int = 0,
+    adapter: Any = None,
+    store: Any = None,
+) -> Dict[str, Any]:
+    """Rename placeholder album folders to their clean names through the
+    canonical mutation engine. Preview (``dry_run``) never mutates.
+
+    ``folders`` is an explicit list of absolute folder paths (from the scan's
+    ``folder`` field). When omitted, every ``safe`` disk-only row of a fresh
+    scan is used (the 52 ``target_exists`` review cases are never auto-fixed).
+
+    This flow handles DISK-ONLY folders only: each row is RE-VERIFIED live at
+    apply time (source present, target still absent, still disk-only) to avoid
+    races with the background reconcile, then renamed through folder_cleanup_v1
+    (plan -> approve -> apply), which confines to MUSIC_ROOT, rejects symlinks
+    and an existing target, re-checks folder identity, and records the move for
+    rollback.
+
+    A DB-tracked folder (db_item_count>0) is NOT renamed here (F5): its clean
+    destination is whatever Beets' path templates compute, which this flow
+    cannot preview without applying and which could merge into an existing
+    folder via Beets suffixing. Such a folder is held for review
+    (``reason="tracked_needs_relocation"``); relocate the album(s) directly
+    through the album-relocation flow instead. The same holds when a disk-only
+    row gains Beets items mid-run (``folder_cleanup_db_references``).
+
+    Returns ``operations`` (operation ids + kind) so a single rollback can
+    restore every renamed folder from the transaction audit records. An op is
+    written ahead to the checkpoint BEFORE its rename so a crash still leaves it
+    reachable by rollback-by-job. ``ok`` is False when any row errored, so a
+    partial/failed apply is never recorded as a successful job (F4).
+    """
+    from backend.cleanup_service import _canonical_folder_name
+    resume_done_originals = list(resume_done or [])
+    resume_done = {_placeholder_norm_path(f) for f in resume_done_originals}
+
+    if folders is None:
+        scan_rows = _scan_folder_name_placeholders(cancel_event=cancel_event)
+        folders = [r["folder"] for r in scan_rows
+                   if r.get("safe") and int(r.get("db_item_count") or 0) == 0]
+
+    folder_db = _placeholder_folder_db(adapter)
+
+    # Carry a resumed run's earlier ops forward so one rollback-by-job undoes
+    # the whole batch even if it was applied across several resumed jobs.
+    operations: List[Dict[str, Any]] = list(prior_operations or [])
+    applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    done_folders: List[str] = list(resume_done_originals)
+    processed = 0
+    attempted = 0  # F3: only actionable rows (a rename, or a dry-run would-change)
+    #                count against batch_limit, never a skip -- else a leading
+    #                persistent skip consumes the batch budget and resume stalls.
+    total = len(folders)
+
+    def _emit(current: Optional[str] = None, result: Optional[str] = None) -> None:
+        if not update_state:
+            return
+        update_state({
+            "category": "Cleanup",
+            "current_task": "Previewing placeholder folder renames" if dry_run
+                            else "Renaming placeholder folders",
+            "current_path": current,
+            "total_count": total,
+            "scanned_count": processed,
+            "remaining_count": max(0, total - processed),
+            "changed_count": len(applied),
+            "skipped_count": len(skipped),
+            "error_count": len(errors),
+            "current_result": result,
+            # Durable progress: resume reads this to skip finished folders, and
+            # rollback reads ``operations`` to undo the batch.
+            "checkpoint": {"done_folders": list(done_folders), "operations": list(operations)},
+        })
+
+    for folder in folders:
+        if cancel_event and cancel_event.is_set():
+            break
+        key = _placeholder_norm_path(folder)
+        if key in resume_done:
+            continue
+        processed += 1
+        source = Path(folder)
+        proposed = _canonical_folder_name(source)
+        # C6: descendant-aware, matching the engine's DB-reference refusal, so a
+        # disc-subfolder album is held in preview and apply alike (preview==apply).
+        album_ids, item_count = _placeholder_folder_tracked(folder_db, key)
+        tracked = item_count > 0
+        record = {
+            "folder": str(source),
+            "proposed_folder": str(proposed) if proposed else None,
+            "db_item_count": item_count,
+            "db_album_ids": album_ids,
+            "mechanism": "folder_rename",
+        }
+
+        # F5: a DB-tracked folder is held for review, never bare-renamed. Its
+        # clean destination is the Beets template, which this flow cannot
+        # preview and which could merge into an existing folder. Decided before
+        # the dry_run branch so preview and apply agree (preview == apply).
+        if tracked:
+            skipped.append({**record, "reason": "tracked_needs_relocation",
+                            "error": "DB-tracked folder; relocate the album(s) directly."})
+            _emit(str(source), "skipped (DB-tracked -- relocate the album directly)")
+            continue
+
+        # Hard gates (re-verified live) -- never touch a collision or a no-op.
+        if proposed is None:
+            skipped.append({**record, "reason": "no_clean_name"})
+            _emit(str(source), "skipped (no clean name)")
+            continue
+        if not source.exists():
+            # Already renamed (resumed), or a prior run crashed after the
+            # rename but before its op reached the checkpoint. Recover the op
+            # (F2) so rollback-by-job can still undo it; don't silently drop it.
+            # Preview never emits ops, so recovery is apply-only.
+            if not dry_run and not _ops_cover_source(operations, source):
+                recovered = _find_applied_folder_op(source, store)
+                # C4: dedupe by operation_id. Carried prior_operations and
+                # F1-captured failure ops have no "source" key, so
+                # _ops_cover_source can't see them; without this, a resume
+                # re-recovers an op already present, which then rolls back
+                # twice and reports rollback_not_eligible on the second pass.
+                if recovered and not any(
+                        o.get("operation_id") == recovered["operation_id"] for o in operations):
+                    operations.append(recovered)
+            skipped.append({**record, "reason": "source_missing"})
+            done_folders.append(str(source))
+            _emit(str(source), "skipped (source already gone)")
+            continue
+        if proposed.exists():
+            skipped.append({**record, "reason": "target_exists"})  # the 52 review cases
+            _emit(str(source), "skipped (target exists -- needs review)")
+            continue
+
+        # F3: only an actionable row consumes the batch budget.
+        if batch_limit and attempted >= batch_limit:
+            processed -= 1  # not acted this run; resume retries it
+            break
+        attempted += 1
+
+        if dry_run:
+            record["would"] = "rename"
+            applied.append(record)
+            _emit(str(source), "would rename")
+            continue
+
+        # F2 write-ahead: persist the intent to the checkpoint BEFORE the
+        # rename, so a crash between the rename and recording the op still
+        # leaves a breadcrumb that rollback-by-job resolves to the applied op.
+        marker = {"pending": True, "kind": "folder", "source": str(source)}
+        operations.append(marker)
+        _emit(str(source), "renaming")
+        try:
+            res = composite_workflows.safe_rename_library_folder(
+                str(source), str(proposed), approved_by, store=store)
+        except Exception as exc:
+            # Crash/transport mid-apply: leave the marker in ``operations`` so
+            # rollback-by-job recovers the op from the store (F2); count it as
+            # an error so the job is not reported successful (F4).
+            errors.append({**record, "code": "apply_raised", "error": type(exc).__name__})
+            _emit(str(source), f"error: {type(exc).__name__}")
+            continue
+
+        operations[:] = [o for o in operations if o is not marker]
+        if res.get("ok"):
+            new_ops = res.get("operations") or (
+                [{"operation_id": res["operation_id"], "kind": "folder"}]
+                if res.get("operation_id") else [])
+            operations.extend(new_ops)
+            done_folders.append(str(source))
+            applied.append({**record, "operation_ids": [o["operation_id"] for o in new_ops]})
+            _emit(str(source), "renamed")
+        elif res.get("code") == "folder_cleanup_db_references":
+            # A disk-only row that gained Beets items under it since the
+            # folder_db snapshot (a genuine race; the common disc-subfolder
+            # case is now held at the top gate, C6). Never bare-renamed;
+            # surfaced for a manual relocation instead.
+            # C5: nothing mutated, so refund the batch budget -- only rows that
+            # actually mutated count against batch_limit, else a persistent
+            # became_tracked skip consumes the budget and resume stalls.
+            attempted -= 1
+            skipped.append({**record, "reason": "became_tracked_needs_relocation",
+                            "error": res.get("error")})
+            _emit(str(source), "skipped (now DB-tracked -- needs relocation)")
+        else:
+            # F1: a failure after a rollback record was written leaves its op
+            # in ``operations`` so rollback-by-job can reach the partial apply.
+            new_ops = list(res.get("operations") or [])
+            if not new_ops and res.get("operation_id"):
+                new_ops = [{"operation_id": res["operation_id"], "kind": "folder"}]
+            operations.extend(new_ops)
+            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
+                           "operation_ids": [o["operation_id"] for o in new_ops]})
+            _emit(str(source), f"error: {res.get('code')}")
+
+    cancelled = bool(cancel_event and cancel_event.is_set())
+    summary = {
+        "dry_run": dry_run,
+        "total_selected": total,
+        "processed": processed,
+        "changed_count": len(applied) if not dry_run else 0,
+        "would_change_count": len(applied) if dry_run else 0,
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
+        "remaining_count": max(0, total - processed),
+        "cancelled": cancelled,
+    }
+    return {
+        # F4: a run with any error is NOT a success -- job_engine.reports_failure
+        # records it as a failed job. All recovery/audit records are preserved
+        # (operations, applied, skipped, errors) so the operator can roll back.
+        "ok": len(errors) == 0,
+        "dry_run": dry_run,
+        "operations": operations,
+        "applied": applied,
+        "skipped": skipped,
+        "errors": errors,
+        "done_folders": done_folders,
+        "final_summary": summary,
+    }
+
+
+def _rollback_folder_placeholder_apply(
+    operations: List[Dict[str, Any]],
+    *,
+    cancel_event: Optional[Any] = None,
+    update_state: Optional[Any] = None,
+    adapter: Any = None,
+    store: Any = None,
+) -> Dict[str, Any]:
+    """Undo a placeholder-folder apply from its transaction audit records:
+    folder renames through folder_cleanup_v1 rollback, DB-tracked relocations
+    through album-relocation rollback. Each leaves Beets to move files back and
+    refuses (changing nothing) if the folder changed since.
+
+    A write-ahead marker (``pending`` entry with ``source`` and no
+    ``operation_id``, left by an apply that crashed mid-rename) is resolved
+    against the store to the op that actually applied (F2), so rollback-by-job
+    reaches a partially-applied op even when its id never reached the
+    checkpoint. A marker with nothing applied is a no-op."""
+    rolled_back: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    # Undo in reverse so a folder renamed after another is restored first.
+    for op in reversed(list(operations or [])):
+        if cancel_event and cancel_event.is_set():
+            break
+        op_id = op.get("operation_id")
+        kind = op.get("kind") or "folder"
+        if not op_id and op.get("pending") and op.get("source"):
+            recovered = _find_applied_folder_op(op["source"], store)
+            if recovered is None:
+                continue  # crashed before any rename; nothing to undo
+            op_id, kind = recovered["operation_id"], recovered["kind"]
+        if not op_id:
+            continue
+        try:
+            if kind == "album":
+                res = composite_workflows.rollback_album_relocation(op_id, adapter=adapter, store=store)
+            else:
+                res = composite_workflows.rollback_folder_cleanup(op_id, store=store)
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append({"operation_id": op_id, "kind": kind, "error": type(exc).__name__})
+            continue
+        if res.get("ok"):
+            rolled_back.append({"operation_id": op_id, "kind": kind, "status": res.get("status")})
+        elif res.get("code") == "rollback_not_eligible":
+            # C7: the op provably wrote nothing (an unapplied status: a failed
+            # safe_rename that returned an operation_id but mutated nothing --
+            # not_approved/already_applied), or it is already Rolled Back. Either
+            # way the folder is already in its original state, so this is a
+            # rollback no-op, not a failure of rollback-by-job.
+            rolled_back.append({"operation_id": op_id, "kind": kind,
+                                "status": res.get("status"), "noop": True})
+        else:
+            errors.append({"operation_id": op_id, "kind": kind,
+                           "code": res.get("code"), "error": res.get("error")})
+        if update_state:
+            update_state({
+                "category": "Cleanup",
+                "current_task": "Rolling back placeholder folder renames",
+                "changed_count": len(rolled_back),
+                "error_count": len(errors),
+                "current_result": f"rolled back {len(rolled_back)} of {len(operations or [])}",
+            })
+    return {
+        "ok": not errors,
+        "rolled_back": rolled_back,
+        "errors": errors,
+        "final_summary": {
+            "requested": len(operations or []),
+            "rolled_back_count": len(rolled_back),
+            "error_count": len(errors),
+        },
+    }
 
 
 def _root_folder_repair_scan(root: Optional[Path] = None) -> Dict[str, Any]:
