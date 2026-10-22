@@ -99,8 +99,29 @@ class BoundedStartupTests(unittest.TestCase):
 
     def test_get_rejects_path_traversal(self):
         store = self._store()
-        for bad in ("../secret", "..", ".", "a/b", "a\\b"):
+        # Anything that is not admitted by the positive _SAFE_JOB_ID allowlist
+        # must never reach the filesystem (CodeQL py/path-injection barrier).
+        for bad in ("../secret", "..", ".", "a/b", "a\\b", "a.b", "a\x00b",
+                    "", " ", "foo bar", "héllo", "x" * 129, "/etc/passwd",
+                    "..%2f..", "a/../b"):
             self.assertIsNone(store.get(bad))
+
+    def test_get_admits_real_job_id_formats(self):
+        # Every id Web Manager actually mints (uuid4 hex) and every plausible
+        # server token (token_hex, token_urlsafe with - and _) must still
+        # resolve its on-disk record.
+        import secrets
+        import uuid
+        ids = [uuid.uuid4().hex, uuid.uuid4().hex, secrets.token_hex(16),
+               secrets.token_urlsafe(24).rstrip("="), "job009", "A-b_C-9",
+               "x" * 128]
+        ids = [i for i in ids if i]  # token_urlsafe never empties, defensive
+        for jid in ids:
+            _write_record(self.root, jid)
+        store = self._store()
+        for jid in ids:
+            self.assertIsNotNone(store.get(jid), jid)
+            self.assertIsNotNone(job_engine._SAFE_JOB_ID.fullmatch(jid), jid)
 
     def test_interrupted_running_straggler_in_tail_is_recovered(self):
         job_engine.JOB_STARTUP_LOAD_LIMIT = 1

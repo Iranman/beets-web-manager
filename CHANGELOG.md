@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Security
+
+- **The lazy `JobStore.get()` id lookup now validates the job id with a positive, anchored allowlist before building a filesystem path, clearing two HIGH CodeQL `py/path-injection` alerts.** Job ids are server-generated (`uuid.uuid4().hex`), so the lookup already rejected path-separator/dot/`..` input, but CodeQL's taint tracker does not recognise a negative traversal check as sanitization. Both path-construction sites now route through a single `JobStore._record_path()` barrier that admits an id only via `_SAFE_JOB_ID = re.compile(r"\A[A-Za-z0-9_-]{1,128}\Z").fullmatch(...)` — a strict superset of every real id, with no separator/dot/traversal possible — before the id is joined onto the jobs directory; the `path.parent == root` check stays as defense in depth. Behaviour is unchanged: every valid id (server uuids, resumed/rollback ids, on-disk record stems) still resolves and only malformed/traversal input is refused.
+
 ### Fixed
 
 - **Lidarr now registers its operator-configured URL with the provider boundary, so a private LAN `LIDARR_URL` is trusted for Lidarr's own outbound calls (like Plex already is).** The folder MBID-name resolver's Lidarr call was rejected by the outbound URL policy (`ProviderOutcome.REJECTED`, "blocked by outbound URL policy") whenever `LIDARR_URL` resolved to a private/RFC-1918 address (e.g. `192.168.0.250:8686`) and the configured URL was not otherwise resolvable at call time: the boundary grants a provider implicit trust of its own configured URL, but Lidarr (unlike Plex) never registered an explicit resolver, so trust relied on a fragile fallback. `routes_lidarr` (a startup route module) now calls `provider_boundary.register_configured_url("lidarr", ...)` at import time, reading the same live `backend.app_runtime.LIDARR_URL` the resolver uses (env, then the `LIDARR_URL_FILE` fallback and default). Trust stays scoped to exactly that one configured scheme/host/port for Lidarr's own calls; the SSRF guard is unchanged for every other address and provider.

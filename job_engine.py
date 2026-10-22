@@ -48,6 +48,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -60,6 +61,14 @@ TERMINAL_STATUSES = ("success", "failed", "cancelled", "recovery_required")
 PRUNABLE_STATUSES = ("success", "failed", "cancelled")
 PERSIST_INTERVAL_SECONDS = 2.0
 HEARTBEAT_SECONDS = 15.0
+#: Positive allowlist for a job id that is about to become a filesystem path.
+#: Job ids are server-generated (``uuid.uuid4().hex``), so an anchored
+#: allowlist is both correct and stricter than a negative traversal check --
+#: no path separator, dot, or ``..`` can match, so no id can escape the jobs
+#: directory. An anchored ``fullmatch`` is also the barrier CodeQL recognises
+#: as a py/path-injection sanitizer (the equivalent negative check at the sink
+#: is functionally safe but not recognised by the taint tracker).
+_SAFE_JOB_ID = re.compile(r"\A[A-Za-z0-9_-]{1,128}\Z")
 LOG_TAIL_PERSISTED = 500
 RESULT_PERSIST_LIMIT_BYTES = 1_000_000
 
@@ -821,20 +830,41 @@ class JobStore:
                 thread.join(max(0.0, deadline - time.monotonic()))
         return not any(t is not None and t.is_alive() for t in threads)
 
+    def _record_path(self, jid) -> Optional[Path]:
+        """Map a job id to its on-disk record path, or ``None`` when the id is
+        not a safe bare record name.
+
+        Single barrier for every path built from a (possibly request-supplied)
+        job id: ``jid`` is admitted only by the positive, anchored
+        ``_SAFE_JOB_ID`` allowlist before it is ever joined onto ``self.root``,
+        so no separator/dot/``..`` can escape the jobs directory. The
+        ``path.parent == root`` check stays as defense in depth."""
+        if self.root is None:
+            return None
+        jid = str(jid)
+        if not _SAFE_JOB_ID.fullmatch(jid):
+            return None
+        path = self.root / f"{jid}.json"
+        try:
+            if path.parent != self.root:
+                return None
+        except OSError:
+            return None
+        return path
+
     def get(self, jid) -> Optional["PythonJob"]:
         job = self._jobs.get(jid)
         if job is not None or self.root is None or not jid:
             return job
         # Lazy-load history beyond the startup window by id (O(1)) so
         # rollback-by-job and resume resolve any non-pruned record. jid feeds a
-        # filesystem path and comes from request bodies, so reject anything
-        # that is not a bare record name before touching the disk.
-        jid = str(jid)
-        if any(c in jid for c in ("/", "\\", "\x00")) or jid in (".", ".."):
+        # filesystem path and comes from request bodies, so it is validated by
+        # the _record_path allowlist barrier before touching the disk.
+        path = self._record_path(jid)
+        if path is None:
             return None
-        path = self.root / f"{jid}.json"
         try:
-            if path.parent != self.root or not path.is_file():
+            if not path.is_file():
                 return None
         except OSError:
             return None
