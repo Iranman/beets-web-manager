@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   RecoverUploadsSection,
@@ -8,6 +8,7 @@ import {
   getRecoverRuns,
   importRecoverRun,
   recoverProbe,
+  startRecoverFetch,
 } from '../src/api/client';
 
 vi.mock('../src/api/client', () => ({
@@ -17,6 +18,12 @@ vi.mock('../src/api/client', () => ({
   retryRecoverRun: vi.fn(),
   startRecoverFetch: vi.fn(),
 }));
+
+/** Picks a basis in the required authorization selector. The label carries a
+ * required asterisk, so match it by regex rather than an exact string. */
+function chooseBasis(value: string) {
+  fireEvent.change(screen.getByLabelText(/Basis for recovery/), { target: { value } });
+}
 
 describe('mapRecoverState (backend verdict -> user label)', () => {
   it('maps each known provenance_status to its label', () => {
@@ -94,10 +101,72 @@ describe('RecoverUploadsSection', () => {
     vi.mocked(importRecoverRun).mockResolvedValue({ ok: true } as never);
 
     render(<RecoverUploadsSection />);
+    chooseBasis('own_account');
     fireEvent.click(await screen.findByRole('button', { name: 'Import' }));
     // First click only arms the confirm; no mutation yet.
     expect(importRecoverRun).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm import' }));
-    await waitFor(() => expect(importRecoverRun).toHaveBeenCalledWith('run-123456789012'));
+    await waitFor(() =>
+      expect(importRecoverRun).toHaveBeenCalledWith('run-123456789012', { basis: 'own_account', note: undefined }),
+    );
+  });
+
+  it('blocks Fetch until a basis is chosen and shows an inline message', async () => {
+    vi.mocked(getRecoverRuns).mockResolvedValue({ ok: true, runs: [] } as never);
+
+    render(<RecoverUploadsSection />);
+    fireEvent.change(screen.getByLabelText('Upload URL'), { target: { value: 'https://youtu.be/abc' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Fetch' }));
+
+    // No basis -> no request, and the user is told why.
+    expect(startRecoverFetch).not.toHaveBeenCalled();
+    await screen.findByText(/Choose how you are authorized/i);
+  });
+
+  it('sends the chosen basis and note as the authorization payload on Fetch', async () => {
+    vi.mocked(getRecoverRuns).mockResolvedValue({ ok: true, runs: [] } as never);
+    vi.mocked(startRecoverFetch).mockResolvedValue({ ok: true, run_id: 'run-1' } as never);
+
+    render(<RecoverUploadsSection />);
+    fireEvent.change(screen.getByLabelText('Upload URL'), { target: { value: 'https://youtu.be/abc' } });
+    chooseBasis('original_creation');
+    fireEvent.change(screen.getByLabelText('Note (optional)'), { target: { value: 'my band' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Fetch' }));
+
+    await waitFor(() =>
+      expect(startRecoverFetch).toHaveBeenCalledWith(
+        ['https://youtu.be/abc'],
+        { basis: 'original_creation', note: 'my band' },
+      ),
+    );
+  });
+
+  it('maps the Verified vs Asserted badge from authorization.verified', async () => {
+    vi.mocked(getRecoverRuns).mockResolvedValue({
+      ok: true,
+      runs: [
+        {
+          run_id: 'run-verified-00', status: 'imported', recovered_count: 1, imported_count: 1, failed_count: 0,
+          authorization: { asserted_basis: 'own_account', verified: true },
+        },
+        {
+          run_id: 'run-asserted-00', status: 'recovered', recovered_count: 1, imported_count: 0, failed_count: 0,
+          authorization: { asserted_basis: 'original_creation', asserted_note: 'mine', verified: false },
+        },
+      ],
+    } as never);
+
+    render(<RecoverUploadsSection />);
+    await screen.findByRole('table');
+    // Scope to the runs table: the basis labels also appear as selector options.
+    const table = within(screen.getByRole('table'));
+    expect(table.getByText('Verified')).toBeTruthy();
+    expect(table.getByText('Asserted (pending review)')).toBeTruthy();
+    // Asserted claim is explicitly described as routed to review, not auto-imported.
+    expect(table.getByText(/routed to review, not auto-imported/i)).toBeTruthy();
+    // The asserted-basis label and user note render in the rows.
+    expect(table.getByText('Uploaded to an account I control')).toBeTruthy();
+    expect(table.getByText('I created this recording')).toBeTruthy();
+    expect(table.getByText(/mine/)).toBeTruthy();
   });
 });

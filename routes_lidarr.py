@@ -117,6 +117,10 @@ def _album_payload(album: Dict[str, Any], artist_path: str) -> Dict[str, Any]:
         "track_file_count": track_file_count,
         "track_count": track_count,
         "percent": round(max(0.0, min(100.0, percent_value)), 1),
+        # NOTE: Lidarr's foreignAlbumId is the release-GROUP MBID (mb_releasegroupid),
+        # not the release-level mb_albumid. The "mb_albumid" key name is a historical
+        # misnomer kept for the existing frontend caller; see
+        # backend.lidarr_rgid_resolver for the correctly-named release-group resolver.
         "mb_albumid": _s(album.get("foreignAlbumId") or album.get("mbAlbumId") or ""),
         "cover_url": _cover_url(album),
         "disk_path": disk_path,

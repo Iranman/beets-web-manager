@@ -20,6 +20,8 @@ import {
   startRecoverFetch,
 } from '../../api/client';
 import type {
+  RecoverAuthorization,
+  RecoverAuthorizationBasis,
   RecoverProbeResponse,
   RecoverRun,
   RecoverStreamDiagnostics,
@@ -86,6 +88,27 @@ export function mapRecoverState(provenanceStatus?: string, category?: string): R
   return FALLBACK_STATE;
 }
 
+// User-facing labels for the authorization basis the backend requires. The
+// backend owns validation; these only name the four accepted bases.
+export const BASIS_LABELS: Record<RecoverAuthorizationBasis, string> = {
+  original_creation: 'I created this recording',
+  own_account: 'Uploaded to an account I control',
+  licensed_permission: 'Licensed/permitted archival copy',
+  open_license: 'Public-domain or openly licensed',
+};
+
+const BASIS_ORDER: RecoverAuthorizationBasis[] = [
+  'original_creation',
+  'own_account',
+  'licensed_permission',
+  'open_license',
+];
+
+function basisLabel(basis?: string): string {
+  if (!basis) return 'Unspecified';
+  return BASIS_LABELS[basis as RecoverAuthorizationBasis] ?? basis;
+}
+
 function runStatusSeverity(status?: string): Severity {
   const s = (status ?? '').toLowerCase();
   if (s.includes('fail') || s.includes('error')) return 'error';
@@ -112,6 +135,36 @@ function diagnosticRows(diag: RecoverStreamDiagnostics, platform?: string): Arra
   return rows;
 }
 
+/** Renders a run's recorded authorization: the asserted-basis label, the
+ * optional user note, and a Verified-vs-Asserted badge driven ONLY by the
+ * backend's `authorization.verified`. It never fabricates a verified state, and
+ * it states that an asserted (unverified) claim is routed to review. */
+export const AuthorizationCell: React.FC<{ authorization?: RecoverAuthorization }> = ({ authorization }) => {
+  if (!authorization || (authorization.asserted_basis == null && authorization.verified == null)) {
+    return <Typography variant="caption" color="text.secondary">—</Typography>;
+  }
+  const verified = authorization.verified === true;
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, alignItems: 'flex-start' }}>
+      <Chip
+        size="small"
+        color={verified ? 'success' : 'warning'}
+        variant={verified ? 'filled' : 'outlined'}
+        label={verified ? 'Verified' : 'Asserted (pending review)'}
+      />
+      <Typography variant="caption">{basisLabel(authorization.asserted_basis)}</Typography>
+      {authorization.asserted_note && (
+        <Typography variant="caption" color="text.secondary">&ldquo;{authorization.asserted_note}&rdquo;</Typography>
+      )}
+      {!verified && (
+        <Typography variant="caption" color="text.secondary">
+          Your claim — routed to review, not auto-imported.
+        </Typography>
+      )}
+    </Box>
+  );
+};
+
 /**
  * Recover My Uploads. A user re-downloads their OWN YouTube/SoundCloud uploads
  * through the guarded yt-dlp path. The backend owns every decision (what is
@@ -120,6 +173,9 @@ function diagnosticRows(diag: RecoverStreamDiagnostics, platform?: string): Arra
  */
 export const RecoverUploadsSection: React.FC = () => {
   const [url, setUrl] = useState('');
+  // Required authorization declaration shared by Fetch and Import. '' = none chosen.
+  const [basis, setBasis] = useState<RecoverAuthorizationBasis | ''>('');
+  const [note, setNote] = useState('');
   const [probe, setProbe] = useState<RecoverProbeResponse | null>(null);
   const [runs, setRuns] = useState<RecoverRun[]>([]);
   const [busy, setBusy] = useState(false);
@@ -153,6 +209,20 @@ export const RecoverUploadsSection: React.FC = () => {
     }
   };
 
+  // Both Fetch and Import require an authorization basis. Block with a clear
+  // inline message until one is chosen; the backend re-validates it regardless.
+  const requireAuthorization = (): { basis: RecoverAuthorizationBasis; note?: string } | null => {
+    if (!basis) {
+      setMessage({
+        severity: 'warning',
+        text: 'Choose how you are authorized to recover this upload before continuing. An asserted basis is reviewed, not independently confirmed.',
+      });
+      return null;
+    }
+    const trimmedNote = note.trim();
+    return { basis, note: trimmedNote || undefined };
+  };
+
   const onProbe = () =>
     run(async () => {
       const trimmed = url.trim();
@@ -174,7 +244,9 @@ export const RecoverUploadsSection: React.FC = () => {
         setMessage({ severity: 'warning', text: 'Paste a URL to fetch first.' });
         return;
       }
-      const res = await startRecoverFetch([trimmed]);
+      const authorization = requireAuthorization();
+      if (!authorization) return;
+      const res = await startRecoverFetch([trimmed], authorization);
       setMessage({ severity: 'success', text: `Fetch started (run ${res.run_id ?? ''}). It downloads and stages the upload.` });
       await loadRuns();
     });
@@ -188,8 +260,10 @@ export const RecoverUploadsSection: React.FC = () => {
 
   const onImport = (runId: string) =>
     run(async () => {
+      const authorization = requireAuthorization();
+      if (!authorization) return;
       setConfirmImportId(null);
-      const res = await importRecoverRun(runId);
+      const res = await importRecoverRun(runId, authorization);
       setMessage({
         severity: res.ok ? 'success' : 'error',
         text: res.ok ? `Import started for run ${runId}.` : (res.error || 'Import failed.'),
@@ -219,6 +293,44 @@ export const RecoverUploadsSection: React.FC = () => {
         <Button variant="outlined" onClick={onFetch} disabled={busy}>Fetch</Button>
       </Box>
 
+      <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+        <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Authorization declaration</Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+          Required for Fetch and Import. This records your claim — it is not an
+          independent verification. An asserted basis routes the item to review,
+          not auto-import.
+        </Typography>
+        <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <TextField
+            select
+            required
+            size="small"
+            label="Basis for recovery"
+            value={basis}
+            onChange={(e) => setBasis(e.target.value as RecoverAuthorizationBasis | '')}
+            disabled={busy}
+            error={!basis}
+            helperText={basis ? ' ' : 'Choose a basis to enable Fetch and Import.'}
+            slotProps={{ select: { native: true }, inputLabel: { shrink: true } }}
+            sx={{ flex: '1 1 280px', minWidth: 0 }}
+          >
+            <option value="">Select a basis…</option>
+            {BASIS_ORDER.map((b) => (
+              <option key={b} value={b}>{BASIS_LABELS[b]}</option>
+            ))}
+          </TextField>
+          <TextField
+            size="small"
+            label="Note (optional)"
+            placeholder="e.g. my own band's channel"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            disabled={busy}
+            sx={{ flex: '1 1 280px', minWidth: 0 }}
+          />
+        </Box>
+      </Paper>
+
       {message && <Alert severity={message.severity} sx={{ mb: 2 }}>{message.text}</Alert>}
 
       {probe && probeState && (
@@ -231,7 +343,14 @@ export const RecoverUploadsSection: React.FC = () => {
             {probe.title && <Typography variant="subtitle2">{probe.title}</Typography>}
             {probe.uploader && <Typography variant="body2" color="text.secondary">by {probe.uploader}</Typography>}
           </Box>
-          <Alert severity={probeState.severity} sx={{ mb: diag ? 2 : 0 }}>{probeState.hint}</Alert>
+          <Alert severity={probeState.severity} sx={{ mb: diag || probe.authorization ? 2 : 0 }}>{probeState.hint}</Alert>
+
+          {probe.authorization && (
+            <Box sx={{ mb: diag ? 2 : 0 }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Authorization</Typography>
+              <AuthorizationCell authorization={probe.authorization} />
+            </Box>
+          )}
 
           {diag && (
             <Box>
@@ -259,13 +378,14 @@ export const RecoverUploadsSection: React.FC = () => {
               <TableCell>Run</TableCell>
               <TableCell>Status</TableCell>
               <TableCell>Results</TableCell>
+              <TableCell>Authorization</TableCell>
               <TableCell align="right">Actions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {runs.length === 0 && (
               <TableRow>
-                <TableCell colSpan={4}>
+                <TableCell colSpan={5}>
                   <Typography variant="body2" color="text.secondary">No recovery runs yet. Probe a URL, then Fetch to start one.</Typography>
                 </TableCell>
               </TableRow>
@@ -278,6 +398,9 @@ export const RecoverUploadsSection: React.FC = () => {
                 </TableCell>
                 <TableCell sx={{ fontSize: '0.8rem' }}>
                   {`recovered ${r.recovered_count ?? 0} · imported ${r.imported_count ?? 0} · failed ${r.failed_count ?? 0}`}
+                </TableCell>
+                <TableCell>
+                  <AuthorizationCell authorization={r.authorization} />
                 </TableCell>
                 <TableCell align="right">
                   {confirmImportId === r.run_id ? (

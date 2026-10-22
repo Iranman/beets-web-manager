@@ -15,7 +15,7 @@ from job_engine import DuplicateJobError
 from backend.app_runtime import MAINTENANCE_RUNNER_LAST_FILE, MUSIC_ROOT, _app_logger, _s, jobs, registered_flask_app, transactions
 from backend.dedup_service import _maintenance_full_duplicate_scan
 import backend.job_contract as job_contract
-from backend.transaction_engine import validated_settings
+from backend.transaction_engine import RECOVER_IMPORT_FAMILY, validated_settings
 from backend.job_service import _running_job_of_type, _wait_for_child_job
 from backend.library_service import _artist_id_alias_groups, _folder_placeholder_summary, _run_item_metadata_restore, _run_item_recording_id_restore, _scan_folder_name_placeholders, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _library_health_payload, _maintenance_artist_folder_merge_step, _maintenance_clean_all_counts, _maintenance_extract_child_job_id, _maintenance_final_verification, _maintenance_initial_task_state, _maintenance_load_last_report, _maintenance_release_group_merge, _maintenance_remove_missing_file_rows, _maintenance_resume_from_report, _maintenance_resume_summary, _maintenance_root_folder_repair, _maintenance_running_job, _maintenance_save_last_report, _maintenance_task_result_summary
@@ -946,6 +946,22 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     def refused(code: str, reason: str) -> Dict[str, Any]:
         return {"allowed": False, "code": code, "reason": reason}
 
+    if meta.get("mutation_family") == RECOVER_IMPORT_FAMILY:
+        # recover_import_v1 undoes a Recover My Uploads singleton import. Its
+        # executor (transaction_engine.rollback_recover_import) enforces the
+        # content-proof guards; this mirrors only its state/availability gate so
+        # the UI can offer the operator-initiated rollback button.
+        rb = tx.get("rollback") or {}
+        ops = rb.get("operations") or []
+        if not rb.get("available") or len(ops) != 1 or (ops[0] or {}).get("type") != "remove_recovered_item":
+            return refused("not_applied", rb.get("reason") or "Nothing was applied, so there is nothing to roll back.")
+        if status == "Rolled Back":
+            return refused("already_rolled_back", "This transaction is already rolled back.")
+        # Completed is the normal case; Running / Recovery Required / Partially
+        # Rolled Back let a crash mid-rollback resume (same set the executor accepts).
+        if status not in ("Completed", "Running", "Recovery Required", "Partially Rolled Back"):
+            return refused("not_completed", f"Only an applied transaction can be rolled back (status is {status}).")
+        return {"allowed": True, "code": "allowed", "reason": ""}
     if meta.get("mutation_family") == FOLDER_CLEANUP_FAMILY:
         if not meta.get("engine_result"):
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
@@ -1133,6 +1149,24 @@ def api_transaction_rollback(transaction_id):
         except Exception:
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
     family = (tx.get("metadata") or {}).get("mutation_family")
+    if family == RECOVER_IMPORT_FAMILY:
+        # Operator-initiated undo of a Recover My Uploads singleton import (F4).
+        # It is NEVER automatic: it runs only from this authenticated route.
+        # The executor re-proves every guard (path under current MUSIC_ROOT,
+        # item->path, content sha256+size) and audits the result.
+        verdict = rollback_eligibility(tx)
+        if not verdict["allowed"]:
+            return jsonify({"ok": False, "code": verdict["code"], "error": verdict["reason"],
+                            "status": tx.get("status"), "mutated": False, "rollback_available": False}), 409
+        try:
+            res = transactions.rollback(transaction_id)
+        except (KeyError, ValueError) as exc:
+            return jsonify({"ok": False, "error": _s(exc), "mutated": False}), 409
+        body = _rollback_dispatch_body(res)
+        if res.get("ok"):
+            return jsonify(body), 200
+        refused_codes = {"recover_rollback_already", "rollback_not_eligible", "recover_rollback_unavailable"}
+        return jsonify(body), 409 if res.get("code") in refused_codes else 400
     if family == FOLDER_CLEANUP_FAMILY:
         # Its apply/rollback steps run in Beets through the plugin; the
         # engine claims Completed/Failed -> Running (CAS) first (D3). An

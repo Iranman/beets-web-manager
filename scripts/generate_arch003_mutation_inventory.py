@@ -73,6 +73,7 @@ _ENGINE_FUNCTION_FAMILY = {
     "rollback_track_replacement": "track_replacement_v1",
     "execute_import_folder_apply": "import_folder_v1",
     "rollback_import_folder": "import_folder_v1",
+    "rollback_recover_import": "recover_import_v1",
     "execute_import_review_cleanup_plan": "import_review_cleanup_v1",
     "create_album_cleanup_plan": "album_cleanup_v1",
     "create_track_replacement_plan": "track_replacement_v1",
