@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **A provider's configured-URL trust can no longer be lost in the long-lived serving process when its registered resolver comes back empty.** The outbound boundary grants each operator-hosted provider implicit trust of its own configured URL (`provider_boundary.configured_url`), resolved either from a registered resolver (Plex, Lidarr) or, as a robust fallback, from the `backend.app_runtime` constant the service actually calls (`_RUNTIME_URL_CONSTANTS`: Lidarr, slskd, qBittorrent, yt-dlp PO). A registered resolver that returned `""` — e.g. a module-level closure in a route module that loaded before the setting was present, which is exactly how the running server could differ from a fresh `import app` — previously **shadowed** that fallback, so the configured URL earned no trust and the provider's own call to a private-LAN address (the Lidarr folder-MBID resolver's `192.168.0.250:8686`, `ProviderOutcome.REJECTED`, "blocked by outbound URL policy") was rejected. `configured_url` now falls through to the `_RUNTIME_URL_CONSTANTS` / `sys.modules["backend.app_runtime"]` value whenever the resolver yields nothing, so registering a resolver can only ADD a trust source, never remove the one the provider already had. Trust stays scoped to exactly the one configured scheme/host/port; the SSRF guard is unchanged for every other address and provider. New real-app-context regression tests (`tests/test_lidarr_trust_boot_activation.py`) boot the app the way the server does and assert the Lidarr configured URL is admitted through `provider_boundary.opened` end to end, including on a worker thread (the job engine runs jobs on threads), plus the resolver-fallthrough guard.
+
 ## v0.13.2 - 2026-10-22
 
 ### Security

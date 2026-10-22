@@ -443,7 +443,15 @@ def configured_url(provider: str) -> str:
     try:
         resolver = _CONFIGURED_URL_RESOLVERS.get(provider)
         if resolver is not None:
-            return str(resolver() or "").strip()
+            resolved = str(resolver() or "").strip()
+            if resolved:
+                return resolved
+            # A registered resolver that yields nothing (e.g. a module-level
+            # closure that captured a constant before the serving process had
+            # the setting, or a provider whose owner module loaded late) must
+            # never SHADOW the robust fallback below: falling through to the
+            # app_runtime constant / env keeps the configured URL's trust
+            # active in the long-lived server, not just a fresh `import app`.
         constant = _RUNTIME_URL_CONSTANTS.get(provider)
         # Looked up, never imported: importing app_runtime here would run the
         # process boot from a low-level module. Every running app has it.
