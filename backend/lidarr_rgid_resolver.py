@@ -251,6 +251,73 @@ def _lidarr_base():
     return url, key
 
 
+# ── TEMPORARY boot-trust diagnostic (v0.13.3) ─────────────────────────────────
+# Fires ONLY when the folder-MBID resolver's Lidarr call is REJECTED by the
+# outbound URL policy, to capture (from the live serving process's own job
+# thread) why the configured-URL trust was not active there while a fresh
+# `import app` admits the same call. One WARNING line, once per process. Logs
+# only non-secret base URLs (userinfo stripped), rule and module ids -- NEVER
+# the Lidarr API key. Remove once the live cause is confirmed.
+_rejection_diagnostic_logged = False
+
+
+def _redact_origin(url: str) -> str:
+    """scheme://host:port only (drop any userinfo/path/query), so a logged URL
+    can never carry a credential even if one were ever embedded."""
+    try:
+        import urllib.parse as _up
+        p = _up.urlsplit(_s(url or "").strip())
+        if not p.scheme or not p.hostname:
+            return "" if not url else "<unparseable>"
+        host = f"[{p.hostname}]" if ":" in p.hostname else p.hostname
+        return f"{p.scheme}://{host}" + (f":{p.port}" if p.port else "")
+    except Exception:
+        return "<redacted>"
+
+
+def _log_rejection_diagnostic(err: Any) -> None:
+    global _rejection_diagnostic_logged
+    try:
+        if getattr(err, "outcome", None) != provider_boundary.ProviderOutcome.REJECTED:
+            return
+        if _rejection_diagnostic_logged:
+            return
+        _rejection_diagnostic_logged = True
+        import sys as _sys
+        from backend import security as _security
+        resolver = provider_boundary._CONFIGURED_URL_RESOLVERS.get("lidarr")
+        resolver_value = None
+        if resolver is not None:
+            try:
+                resolver_value = _redact_origin(resolver())
+            except Exception as exc:  # pragma: no cover - diagnostic must never raise
+                resolver_value = f"<resolver raised {type(exc).__name__}>"
+        cfg_url = provider_boundary.configured_url("lidarr")
+        # What opened() computes as the trust for this call. _TRUSTED_RULE itself
+        # is already reset here (opened()'s finally ran before this except), so
+        # recompute it: not-None here but a rejected call would mean the trust
+        # was built yet not seen at urlopen (a duplicate backend.security);
+        # None here means the configured-URL path yielded no trusting rule.
+        would_trust = _security.implicit_rule_for_url(cfg_url)
+        app_runtime._app_logger.warning(
+            "LIDARR TRUST DIAGNOSTIC (temporary, v0.13.3): folder-MBID Lidarr call "
+            "REJECTED by outbound policy. configured_url(lidarr)=%r resolver_registered=%s "
+            "resolver()=%r app_runtime.LIDARR_URL=%r would_trust_rule=%r live_TRUSTED_RULE=%r "
+            "ids{app_runtime=%s security=%s provider_boundary=%s}",
+            _redact_origin(cfg_url),
+            resolver is not None,
+            resolver_value,
+            _redact_origin(getattr(app_runtime, "LIDARR_URL", "")),
+            repr(would_trust),            # OutboundAllowRule: scheme/host/ip/port only, no credential
+            repr(_security._TRUSTED_RULE.get()),
+            id(_sys.modules.get("backend.app_runtime")),
+            id(_sys.modules.get("backend.security")),
+            id(_sys.modules.get("backend.provider_boundary")),
+        )
+    except Exception:  # pragma: no cover - a diagnostic must never change behavior
+        pass
+
+
 def _lidarr_get_list(path: str, *, timeout: float) -> List[Dict[str, Any]]:
     """GET a Lidarr v1 JSON array via the provider boundary ("lidarr").
 
@@ -268,11 +335,13 @@ def _lidarr_get_list(path: str, *, timeout: float) -> List[Dict[str, Any]]:
     try:
         with provider_boundary.opened("lidarr", req, timeout=timeout) as resp:
             data = json.loads(resp.read() or b"[]")
-    except provider_boundary.ProviderError:
+    except provider_boundary.ProviderError as err:
+        _log_rejection_diagnostic(err)
         raise
     except Exception as exc:  # classify timeout/HTTP/URL/malformed/policy -> ProviderError
         err = provider_boundary.classify_exception(exc)
         err.provider = err.provider or "lidarr"
+        _log_rejection_diagnostic(err)
         raise err from exc
     if not isinstance(data, list):
         raise provider_boundary.ProviderError(

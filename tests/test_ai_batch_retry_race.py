@@ -1891,6 +1891,62 @@ class RetryReconciliationRegressionTests(BehavioralTestCase):
         self.assertTrue(APP._ai_batch_process_decisions.called)
 
 
+class FreshBatchSourceScanRevisionTests(BehavioralTestCase):
+    """Regression for the live source-scan-of-/downloads failure: 'ERROR:
+    expected_revision is required to update existing batch <id> ...'.
+
+    _start_ai_batch_job creates (and bumps the revision of) the batch's
+    store row before it unblocks the worker. On a fresh (non-recover) run
+    the worker's _run_ai_batch_import previously built a brand-new
+    _ai_batch_initial_state, which carries no `revision`; its first
+    _ai_batch_commit therefore attempted an un-revisioned update of the
+    already-existing row, which the ARCH-010 CAS contract correctly rejects
+    with the exact error the user saw. The worker must instead load the
+    persisted row and thread its current revision through every commit."""
+
+    def setUp(self):
+        super().setUp()
+        self._suggestions_patcher = patch_app_family(APP, "_ai_batch_run_folders", return_value="done")
+        self._decisions_patcher = patch_app_family(APP, "_ai_batch_process_decisions", return_value={})
+        self._suggestions_patcher.start()
+        self._decisions_patcher.start()
+        self.addCleanup(self._suggestions_patcher.stop)
+        self.addCleanup(self._decisions_patcher.stop)
+
+    def _simulate_startup_created_row(self) -> int:
+        # Mirror _start_ai_batch_job's non-recover startup: an initial
+        # commit (INSERT -> revision 1) followed by the status/job_id commit
+        # (UPDATE -> revision 2) -- both land before the worker is unblocked.
+        startup_state = APP._ai_batch_initial_state(self.batch_job_id, _behavioral_scan_path())
+        APP._ai_batch_commit(startup_state, None)
+        startup_state["status"] = "running"
+        startup_state["job_id"] = "test-job"
+        APP._ai_batch_commit(startup_state, None)
+        persisted = APP._ai_batch_load_state(self.batch_job_id)
+        self.assertIsNotNone(persisted, "startup must have created a durable batch row")
+        self.assertGreaterEqual(persisted["revision"], 2)
+        return persisted["revision"]
+
+    def test_fresh_worker_commit_threads_startup_revision(self):
+        start_rev = self._simulate_startup_created_row()
+
+        # On unfixed code this raises ValueError("expected_revision is
+        # required to update existing batch ..."); after the fix the
+        # worker loads the row, threads its revision, and the update
+        # succeeds with the CAS contract intact.
+        result = APP._run_ai_batch_import(
+            self.batch_job_id, _behavioral_scan_path(), log=[],
+            recover=False, job_id="test-job",
+        )
+
+        self.assertIsInstance(result, dict)
+        persisted = APP._ai_batch_load_state(self.batch_job_id)
+        self.assertIsNotNone(persisted)
+        # The worker's commits bumped the revision forward from the
+        # startup-created row -- no silent overwrite, no reset to 1.
+        self.assertGreater(persisted["revision"], start_rev)
+
+
 class ContradictoryTerminalStateHealingTests(BehavioralTestCase):
     def test_terminal_status_with_unfinished_folder_reopens(self):
         folders = {"f1": _make_folder(self.batch_job_id, "f1", status="ai_queued")}
