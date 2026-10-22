@@ -91,6 +91,29 @@ def _release_group_mbid(album: Dict[str, Any]) -> str:
     return value if _is_valid_mb_uuid(value) else ""
 
 
+def _collapse_rgid(matches: List[Dict[str, Any]]) -> Optional[str]:
+    """The single release-group MBID shared by *all* matches, or None.
+
+    None means it is NOT safe to tie-break: either no match carries a valid
+    RGID, or the matches span more than one distinct release group. Renaming a
+    folder with an RGID establishes canonical identity, so choosing among
+    *different* release groups would be a guess -- that is held for review, not
+    tie-broken. Choosing among editions of ONE release group is safe: the
+    emitted RGID is identical whichever edition wins."""
+    rgids = {_release_group_mbid(a) for a in matches}
+    if len(rgids) == 1:
+        return next(iter(rgids)) or None  # "" (all missing) -> None
+    return None
+
+
+def _multi_unresolved_reason(matches: List[Dict[str, Any]]) -> str:
+    """Reason for a multi-match set that _collapse_rgid refused to resolve:
+    all missing a valid RGID -> missing; otherwise distinct RGIDs -> ambiguous."""
+    if any(_release_group_mbid(a) for a in matches):
+        return AMBIGUOUS_MULTIPLE_ALBUMS
+    return LIDARR_MISSING_RGID
+
+
 # -- the tiered matcher ---------------------------------------------------------
 
 def _tie_break(candidates: List[Dict[str, Any]], want_year: str) -> Optional[Dict[str, Any]]:
@@ -155,18 +178,25 @@ def resolve(index: Dict[str, List[Dict[str, Any]]], *, artist_mbid: str, album_t
         tier_a = [a for a in candidates if _norm(_album_basename(a)) == want_base]
         if len(tier_a) == 1:
             return _resolved(tier_a[0], "path_exact")
-        if len(tier_a) > 1:
-            chosen = _tie_break(tier_a, want_year)
-            if chosen is not None:
-                return _resolved(chosen, "path_exact")
+        if len(tier_a) > 1 and _collapse_rgid(tier_a):
+            # Multiple basename matches but a single distinct RGID: editions of
+            # one release group -- safe to resolve. Different RGIDs fall through
+            # to the title tiers (Tier A is never terminal).
+            chosen = _tie_break(tier_a, want_year) or tier_a[0]
+            return _resolved(chosen, "path_exact")
 
     if not want_title:
         # No title to match on and Tier A did not uniquely resolve.
         return {"status": "unresolved", "reason": ALBUM_NOT_IN_LIDARR}
 
-    # Tier B: normalized title + year. Tier C: normalized title only. A
-    # multi-match that tie-breakers cannot settle is terminal -- the broader
-    # title-only tier can only widen it, never shrink it.
+    # Tier B: normalized title + year. Tier C: normalized title only. A match
+    # resolves only when every matched album shares ONE release-group MBID --
+    # a single edition, or several editions of the same release group (a
+    # tie-break then only picks which edition's id to report, never which
+    # RGID). If matches span DISTINCT release groups, renaming the folder would
+    # bake in a guessed identity, so it is held for review. A multi-match is
+    # terminal: the broader title-only tier can only widen the set, never
+    # shrink it to one release group.
     for tier, matches in (
         ("title_year", [a for a in candidates if _norm(a.get("title") or a.get("albumTitle")) == want_title
                          and want_year and _album_year(a) == want_year]),
@@ -176,10 +206,10 @@ def resolve(index: Dict[str, List[Dict[str, Any]]], *, artist_mbid: str, album_t
             continue
         if len(matches) == 1:
             return _resolved(matches[0], tier)
-        chosen = _tie_break(matches, want_year)
-        if chosen is not None:
+        if _collapse_rgid(matches):
+            chosen = _tie_break(matches, want_year) or matches[0]
             return _resolved(chosen, tier)
-        return {"status": "unresolved", "reason": AMBIGUOUS_MULTIPLE_ALBUMS}
+        return {"status": "unresolved", "reason": _multi_unresolved_reason(matches)}
 
     return {"status": "unresolved", "reason": ALBUM_NOT_IN_LIDARR}
 
