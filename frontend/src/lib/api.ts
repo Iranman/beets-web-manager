@@ -58,7 +58,11 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
     }
     throw new ApiError(0, 'Could not reach Beets Web Manager.', 'network');
   }
-  settle();
+  // A 5xx may still have started the job server-side: keep the key so the
+  // retry follows that job instead of starting a second one (#344).
+  if (res.status < 500) {
+    settle();
+  }
 
   if (!res.ok) {
     let serverMessage = `HTTP ${res.status}`;

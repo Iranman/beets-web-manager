@@ -56,28 +56,53 @@ function newKey(): string {
 // One key per user action: an identical request sent again while the first
 // is in flight, or after it got no answer (network loss, timeout), reuses the
 // key, so the server reports the job it already started instead of starting
-// a second one. Any HTTP answer settles the action.
+// a second one. A definitive answer (< 500) settles the action; a 5xx or a
+// network loss keeps it, because the server may have started the job.
+//
+// A multipart upload has no body string to fingerprint, so its key is scoped
+// to the upload's own fields and file metadata. Sharing one key per
+// method+url made two different uploads collide for ten minutes (H9).
 const RETRY_WINDOW_MS = 10 * 60_000;
 const openActions = new Map<string, { key: string; at: number }>();
 
-/** Begin a mutating request. Returns the key to send and a settle callback
- * to call once the server answered (any HTTP status). */
-export function beginIdempotentRequest(method: string, url: string, body: unknown): { key: string; settle: () => void } {
-  if (typeof body !== 'string' && body !== undefined && body !== null) {
-    // FormData cannot be fingerprinted; reuse the most recent key for this
-    // method+url within the window, and NEVER settle it on a 5xx retry.
-    // A 5xx must not discard the key or we start a second job on retry (#344).
-    const fingerprint = `${method} ${url}`;
-    const now = Date.now();
-    const open = openActions.get(fingerprint);
-    const key = open && now - open.at < RETRY_WINDOW_MS ? open.key : newKey();
-    openActions.set(fingerprint, { key, at: now });
-    return { key, settle: () => {} };
+function multipartFingerprint(body: unknown): string {
+  if (typeof FormData !== 'undefined' && body instanceof FormData) {
+    const parts: string[] = [];
+    try {
+      for (const [name, value] of body.entries()) {
+        if (typeof value === 'string') {
+          parts.push(`${name}=${value}`);
+        } else {
+          const file = value as File;
+          parts.push(`${name}=file:${file.name}:${file.size}:${file.lastModified}:${file.type}`);
+        }
+      }
+    } catch {
+      return '';
+    }
+    return parts.join('\n');
   }
-  const fingerprint = `${method} ${url}\n${body ?? ''}`;
+  if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+    return body.toString();
+  }
+  if (typeof Blob !== 'undefined' && body instanceof Blob) {
+    return `blob:${body.size}:${body.type}`;
+  }
+  return '';
+}
+
+/** Begin a mutating request. Returns the key to send and a settle callback
+ * to call on a definitive server answer (< 500). */
+export function beginIdempotentRequest(method: string, url: string, body: unknown): { key: string; settle: () => void } {
+  const isForm = typeof body !== 'string' && body !== undefined && body !== null;
+  const detail = isForm ? multipartFingerprint(body) : String(body ?? '');
+  const fingerprint = detail ? `${method} ${url}\n${detail}` : `${method} ${url}\n#no-body-detail`;
   const now = Date.now();
   const open = openActions.get(fingerprint);
   const key = open && now - open.at < RETRY_WINDOW_MS ? open.key : newKey();
   openActions.set(fingerprint, { key, at: now });
+  // Cleared on any definitive answer, including a 4xx: the next deliberate
+  // upload of the same file must get its own key. A 5xx/timeout keeps it for
+  // the retry (#344).
   return { key, settle: () => openActions.delete(fingerprint) };
 }
