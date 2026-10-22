@@ -263,19 +263,22 @@ class FetchFailureMatrixTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def _fetch_with(self, effect):
+        # A non-empty artist set forces the first network call (GET /api/v1/artist);
+        # every failure mode must raise on it (classification lives in the shared
+        # _lidarr_get_list helper, so a per-artist album call fails identically).
         with mock.patch.object(urllib.request, "urlopen", side_effect=effect):
-            return resolver.fetch_album_snapshot(timeout=5)
+            return resolver.fetch_album_snapshot({ARTIST_A}, timeout=5)
 
     def test_not_configured_missing_key(self):
         with mock.patch.object(app_runtime, "LIDARR_KEY", ""):
             with self.assertRaises(pb.ProviderError) as ctx:
-                resolver.fetch_album_snapshot(timeout=5)
+                resolver.fetch_album_snapshot({ARTIST_A}, timeout=5)
         self.assertEqual(ctx.exception.outcome, pb.ProviderOutcome.NOT_CONFIGURED)
 
     def test_not_configured_missing_url(self):
         with mock.patch.object(app_runtime, "LIDARR_URL", ""):
             with self.assertRaises(pb.ProviderError) as ctx:
-                resolver.fetch_album_snapshot(timeout=5)
+                resolver.fetch_album_snapshot({ARTIST_A}, timeout=5)
         self.assertEqual(ctx.exception.outcome, pb.ProviderOutcome.NOT_CONFIGURED)
 
     def test_timeout_is_transient(self):
@@ -318,21 +321,80 @@ class FetchFailureMatrixTests(unittest.TestCase):
             self._fetch_with([_Resp({"error": "unexpected object"})])
         self.assertEqual(ctx.exception.outcome, pb.ProviderOutcome.TRANSIENT_ERROR)
 
-    def test_success_returns_album_list_and_routes_through_boundary(self):
-        snap = [album(1, ARTIST_A, "X"), album(2, ARTIST_B, "Y")]
-        with mock.patch.object(urllib.request, "urlopen", side_effect=[_Resp(snap)]) as urlopen:
-            data = resolver.fetch_album_snapshot(timeout=5)
-        self.assertEqual(urlopen.call_count, 1)
-        self.assertEqual([a["id"] for a in data], [1, 2])
-        # The call was recorded by the provider boundary under "lidarr".
+    @staticmethod
+    def _urls(urlopen):
+        # urllib.request.urlopen(request, timeout=...) -> request.full_url
+        return [call.args[0].full_url for call in urlopen.call_args_list]
+
+    def test_success_scoped_fetch_routes_through_boundary(self):
+        artists = [{"id": 10, "foreignArtistId": ARTIST_A},
+                   {"id": 20, "foreignArtistId": ARTIST_B}]
+        albums_a = [album(1, ARTIST_A, "X")]
+        with mock.patch.object(urllib.request, "urlopen",
+                               side_effect=[_Resp(artists), _Resp(albums_a)]) as urlopen:
+            data = resolver.fetch_album_snapshot({ARTIST_A}, timeout=5)
+        urls = self._urls(urlopen)
+        # One /artist map call, then one scoped /album?artistId= call -- and
+        # NEVER the unscoped global album list.
+        self.assertEqual(len(urls), 2)
+        self.assertTrue(urls[0].endswith("/api/v1/artist"))
+        self.assertIn("/api/v1/album?artistId=10", urls[1])
+        self.assertFalse(any(u.rstrip("/").endswith("/api/v1/album") for u in urls))
+        self.assertEqual([a["id"] for a in data], [1])
+        # The calls were recorded by the provider boundary under "lidarr".
         self.assertEqual(pb.provider_health()["lidarr"]["last_outcome"], "confirmed")
+
+    def test_large_multi_artist_set_issues_one_album_call_per_artist(self):
+        # 50 distinct artists on disk -> one /artist call + 50 scoped /album
+        # calls, each carrying artistId=; never a single global /api/v1/album.
+        mbids = [f"{i:08d}-0000-0000-0000-000000000000" for i in range(50)]
+        artists = [{"id": 1000 + i, "foreignArtistId": m} for i, m in enumerate(mbids)]
+        effects = [_Resp(artists)] + [_Resp([album(i, mbids[i], "T")]) for i in range(50)]
+        with mock.patch.object(urllib.request, "urlopen", side_effect=effects) as urlopen:
+            data = resolver.fetch_album_snapshot(mbids, timeout=5)
+        urls = self._urls(urlopen)
+        self.assertEqual(len(urls), 51)  # 1 artist map + 50 per-artist album calls
+        album_calls = [u for u in urls if "/api/v1/album" in u]
+        self.assertEqual(len(album_calls), 50)
+        self.assertTrue(all("artistId=" in u for u in album_calls))  # none unscoped
+        self.assertEqual(len(data), 50)
+
+    def test_artist_absent_in_lidarr_issues_no_album_call(self):
+        # ARTIST_A known, ARTIST_B unknown to Lidarr -> only A's album call made;
+        # downstream resolve() yields ARTIST_NOT_IN_LIDARR for B's folders.
+        artists = [{"id": 10, "foreignArtistId": ARTIST_A}]
+        with mock.patch.object(urllib.request, "urlopen",
+                               side_effect=[_Resp(artists), _Resp([album(1, ARTIST_A, "X")])]) as urlopen:
+            r = resolver.LidarrRgidResolver.from_lidarr(artist_mbids={ARTIST_A, ARTIST_B}, timeout=5)
+        urls = self._urls(urlopen)
+        self.assertEqual(len(urls), 2)  # /artist + only ARTIST_A's /album call
+        self.assertNotIn(ARTIST_B, r.index)
+        self.assertEqual(r.resolve(artist_mbid=ARTIST_B, album_title="X", album_year="2016"),
+                         {"status": "unresolved", "reason": resolver.ARTIST_NOT_IN_LIDARR})
+
+    def test_empty_artist_set_makes_no_call(self):
+        with mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("no call")) as urlopen:
+            data = resolver.fetch_album_snapshot(set(), timeout=5)
+        self.assertEqual(data, [])
+        self.assertEqual(urlopen.call_count, 0)
+
+    def test_provider_failure_on_per_artist_album_call_raises(self):
+        # The /artist map succeeds; the per-artist /album call fails -> the run
+        # aborts (never downgraded to unresolved).
+        artists = [{"id": 10, "foreignArtistId": ARTIST_A}]
+        with mock.patch.object(urllib.request, "urlopen",
+                               side_effect=[_Resp(artists), http_error(503)]):
+            with self.assertRaises(pb.ProviderError) as ctx:
+                resolver.fetch_album_snapshot({ARTIST_A}, timeout=5)
+        self.assertEqual(ctx.exception.outcome, pb.ProviderOutcome.UNAVAILABLE)
 
 
 class ResolverObjectTests(unittest.TestCase):
     def test_from_lidarr_then_resolve(self):
         snap = [album(1, ARTIST_A, "The Getaway", year="2016")]
-        with mock.patch.object(resolver, "fetch_album_snapshot", return_value=snap):
-            r = resolver.LidarrRgidResolver.from_lidarr()
+        with mock.patch.object(resolver, "fetch_album_snapshot", return_value=snap) as fetch:
+            r = resolver.LidarrRgidResolver.from_lidarr(artist_mbids={ARTIST_A})
+        fetch.assert_called_once_with({ARTIST_A}, timeout=30.0)
         out = r.resolve(artist_mbid=ARTIST_A, album_title="The Getaway", album_year="2016")
         self.assertEqual((out["status"], out["matched_tier"], out["release_group_mbid"]),
                          ("resolved", "title_year", RGID_1))
@@ -341,7 +403,7 @@ class ResolverObjectTests(unittest.TestCase):
         err = pb.ProviderError(pb.ProviderOutcome.UNAVAILABLE, "down", provider="lidarr")
         with mock.patch.object(resolver, "fetch_album_snapshot", side_effect=err):
             with self.assertRaises(pb.ProviderError):
-                resolver.LidarrRgidResolver.from_lidarr()
+                resolver.LidarrRgidResolver.from_lidarr(artist_mbids={ARTIST_A})
 
 
 if __name__ == "__main__":

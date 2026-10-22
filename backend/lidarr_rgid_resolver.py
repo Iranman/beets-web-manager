@@ -6,8 +6,13 @@ mutation. The folder-rename workflow (library-transaction-engineer) consumes
 
 Lidarr's ``album.foreignAlbumId`` IS the release-group MBID and
 ``artist.foreignArtistId`` IS the artist MBID (confirmed against the official
-Lidarr v1 API docs). One bulk ``GET /api/v1/album`` snapshot per run carries
-both, so a single call indexes every album by its artist MBID.
+Lidarr v1 API docs). The snapshot is SCOPED to the artists actually on disk:
+one ``GET /api/v1/artist`` maps each needed artist MBID to its internal
+``artist.id``, then one ``GET /api/v1/album?artistId=<id>`` per needed artist
+pulls just that artist's albums (each still carries ``artist.foreignArtistId``,
+so the in-memory index groups by artist MBID exactly as before). The full
+``GET /api/v1/album`` (tens of thousands of albums, hundreds of MB -- it times
+out on a large Lidarr) is NEVER fetched.
 
 Contract (``resolve`` / ``LidarrRgidResolver.resolve``):
     {"status": "resolved", "release_group_mbid", "matched_tier", "lidarr_album_id"}
@@ -214,7 +219,7 @@ def resolve(index: Dict[str, List[Dict[str, Any]]], *, artist_mbid: str, album_t
     return {"status": "unresolved", "reason": ALBUM_NOT_IN_LIDARR}
 
 
-# -- the snapshot (one bulk call per run) ---------------------------------------
+# -- the snapshot (scoped per-artist fetch) -------------------------------------
 
 def index_by_artist(snapshot: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Group a ``GET /api/v1/album`` snapshot by artist MBID (foreignArtistId).
@@ -231,14 +236,10 @@ def index_by_artist(snapshot: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, 
     return index
 
 
-def fetch_album_snapshot(*, timeout: float = 30.0) -> List[Dict[str, Any]]:
-    """Fetch the full Lidarr album list via the provider boundary ("lidarr").
-
-    One bulk ``GET /api/v1/album`` (37k+ albums). Reads LIDARR_URL/LIDARR_KEY
-    the same way the rest of the app does (backend.app_runtime, honouring the
-    *_FILE fallbacks resolved at boot). Raises ``provider_boundary.ProviderError``
-    -- classified (not configured / auth / rate limited / unavailable /
-    transient / rejected) -- on any failure, so the caller aborts the run."""
+def _lidarr_base():
+    """(LIDARR_URL, LIDARR_KEY), read the same way the rest of the app does
+    (backend.app_runtime, honouring the *_FILE fallbacks resolved at boot).
+    Raises NOT_CONFIGURED if either is missing."""
     url = _s(getattr(app_runtime, "LIDARR_URL", "")).strip()
     key = _s(getattr(app_runtime, "LIDARR_KEY", "")).strip()
     if not key:
@@ -247,9 +248,20 @@ def fetch_album_snapshot(*, timeout: float = 30.0) -> List[Dict[str, Any]]:
     if not url:
         raise provider_boundary.ProviderError(
             provider_boundary.ProviderOutcome.NOT_CONFIGURED, "LIDARR_URL not configured", provider="lidarr")
+    return url, key
 
+
+def _lidarr_get_list(path: str, *, timeout: float) -> List[Dict[str, Any]]:
+    """GET a Lidarr v1 JSON array via the provider boundary ("lidarr").
+
+    ``path`` is an absolute API path, e.g. ``/api/v1/artist`` or
+    ``/api/v1/album?artistId=3``. Raises a classified
+    ``provider_boundary.ProviderError`` (not configured / auth / rate limited /
+    unavailable / transient / rejected) on ANY failure, so the caller aborts the
+    run -- a provider failure is never downgraded to an "unresolved" result."""
+    url, key = _lidarr_base()
     req = _ur.Request(
-        f"{url.rstrip('/')}/api/v1/album",
+        f"{url.rstrip('/')}{path}",
         headers={"Accept": "application/json", "X-Api-Key": key},
         method="GET",
     )
@@ -268,20 +280,72 @@ def fetch_album_snapshot(*, timeout: float = 30.0) -> List[Dict[str, Any]]:
     return data
 
 
+def fetch_artist_id_map(*, timeout: float = 30.0) -> Dict[str, int]:
+    """One ``GET /api/v1/artist`` -> {artist MBID (foreignArtistId, lowercased):
+    internal ``artist.id``}. The artist list is far smaller than the album list
+    (one artist row vs all its albums), so a single call is cheap. Raises
+    ``provider_boundary.ProviderError`` on any provider failure."""
+    out: Dict[str, int] = {}
+    for artist in _lidarr_get_list("/api/v1/artist", timeout=timeout):
+        if not isinstance(artist, dict):
+            continue
+        mbid = _s(artist.get("foreignArtistId") or "").strip().lower()
+        aid = artist.get("id")
+        if mbid and isinstance(aid, int):
+            out[mbid] = aid
+    return out
+
+
+def fetch_albums_for_artist(artist_id: int, *, timeout: float = 30.0) -> List[Dict[str, Any]]:
+    """One ``GET /api/v1/album?artistId=<id>`` -- just this artist's albums (a
+    small payload). Each album still embeds ``artist.foreignArtistId``, so
+    ``index_by_artist`` groups it by artist MBID exactly as before. Raises
+    ``provider_boundary.ProviderError`` on any provider failure."""
+    return _lidarr_get_list(f"/api/v1/album?artistId={int(artist_id)}", timeout=timeout)
+
+
+def fetch_album_snapshot(artist_mbids, *, timeout: float = 30.0) -> List[Dict[str, Any]]:
+    """Scoped album snapshot for only the given artist MBIDs.
+
+    One ``GET /api/v1/artist`` maps the DISTINCT needed MBIDs to internal ids,
+    then one ``GET /api/v1/album?artistId=<id>`` per artist that Lidarr knows.
+    The full ``GET /api/v1/album`` (tens of thousands of albums) is NEVER
+    fetched. An artist MBID not in Lidarr is simply skipped (no album call); the
+    resolver then yields ``ARTIST_NOT_IN_LIDARR`` for that artist's folders.
+    Lookups are deduped and cached for the run (the DISTINCT MBID set + one
+    artist map). Raises a classified ``provider_boundary.ProviderError`` on any
+    provider failure, so the caller aborts the run."""
+    wanted = sorted({_s(m).strip().lower() for m in (artist_mbids or ()) if _s(m).strip()})
+    if not wanted:
+        return []
+    id_map = fetch_artist_id_map(timeout=timeout)
+    snapshot: List[Dict[str, Any]] = []
+    for mbid in wanted:
+        aid = id_map.get(mbid)
+        if aid is None:
+            continue  # artist absent in Lidarr -> ARTIST_NOT_IN_LIDARR downstream
+        snapshot.extend(fetch_albums_for_artist(aid, timeout=timeout))
+    return snapshot
+
+
 class LidarrRgidResolver:
     """One snapshot, many resolves.
 
-    ``LidarrRgidResolver.from_lidarr()`` makes the single bulk call (and
-    raises ``provider_boundary.ProviderError`` on a provider failure, aborting
-    the run); ``.resolve(...)`` is then called once per on-disk album folder
-    against the in-memory index and never touches the network."""
+    ``LidarrRgidResolver.from_lidarr(artist_mbids)`` fetches only those artists'
+    albums (and raises ``provider_boundary.ProviderError`` on a provider
+    failure, aborting the run); ``.resolve(...)`` is then called once per
+    on-disk album folder against the in-memory index and never touches the
+    network."""
 
     def __init__(self, snapshot: List[Dict[str, Any]]):
         self.index = index_by_artist(snapshot)
 
     @classmethod
-    def from_lidarr(cls, *, timeout: float = 30.0) -> "LidarrRgidResolver":
-        return cls(fetch_album_snapshot(timeout=timeout))
+    def from_lidarr(cls, artist_mbids, *, timeout: float = 30.0) -> "LidarrRgidResolver":
+        """Fetch albums for only ``artist_mbids`` (an iterable of artist MBIDs,
+        deduped) and index them. See ``fetch_album_snapshot`` for the scoped
+        fetch contract -- the full album list is never fetched."""
+        return cls(fetch_album_snapshot(artist_mbids, timeout=timeout))
 
     def resolve(self, *, artist_mbid: str, album_title: str, album_year: str = "",
                 album_basename: str = "") -> Dict[str, Any]:
