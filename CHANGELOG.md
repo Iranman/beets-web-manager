@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Added
+
+- **Folder MBID names — name every album folder `Album (Year) {release-group-mbid}` from the Lidarr resolver, through the controlled mutation engine.** New `POST /api/library/folder-mbid-names/apply` (dry-run by default; `confirmed:true` required to mutate; optional `batch_limit`, `resume_from_job`) and `POST /api/library/folder-mbid-names/rollback` (by `job_id` or explicit `operations`). This is the correct replacement for the earlier strip-based placeholder apply, which wrongly *removed* the `{...}` token instead of *filling* the release-group MBID. One bulk Lidarr snapshot is taken per run (`LidarrRgidResolver.from_lidarr`); a provider failure **aborts the run touching nothing** and surfaces the provider error (never downgraded to "unresolved"). Per album folder: an already-correctly-named folder is an idempotent **skip** (`already_correct`); a disk-only folder is renamed through `folder_cleanup_v1`; a DB-tracked album is **relocated** through Beets (so its DB item paths follow) **only when the DB `mb_releasegroupid` already equals the resolver's**, so a non-resolver MBID is never written; an unresolved folder, a target-path collision, a DB-rgid mismatch, or a multi-album folder is **held for review** with its reason. The MBID written to disk or to the DB template always comes verbatim from the resolver. Reuses the hardened placeholder-apply machinery (write-ahead checkpoint, `batch_limit` counts only mutations, resume dedup, descendant-aware tracked detection, `ok:false` on any error, running-job 409 guard, single-call rollback-by-job from the transaction audit records). The `review` list (unresolved folders, collisions, mismatches) is produced for a later manual-resolution UI; choosing/writing `LIDARR_URL` config is a deploy-time step.
+
+
+
 ## v0.12.0 - 2026-10-21
 
 ### Fixed
