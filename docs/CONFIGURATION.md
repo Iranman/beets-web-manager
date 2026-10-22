@@ -88,6 +88,8 @@ Absolute paths inside the Web Manager container. They must match the mount targe
 | `BEETS_CONFIG` | `/config/config.yaml` | Beets `config.yaml` inside the container. The config editor reads and writes only this file. It refuses a relative path or a file outside the Beets config directory (`BEETSDIR`, default `/config`). |
 | `WEB_MANAGER_DATA_DIR` | `/web-manager-data` | Web Manager's own durable state. Playlist job checkpoints go to `PLAYLIST_JOB_STATE_DIR` (default `WEB_MANAGER_DATA_DIR/playlists/jobs`, which is also used when it is empty or relative). Keep it on the data volume, or interrupted playlist jobs cannot resume after the container is recreated. |
 | `BEETS_TRANSACTION_DIR` | `/web-manager-data/transactions` | Transaction and audit records. |
+| `JOB_STARTUP_LOAD_LIMIT` | `200` | How many of the most recent durable job records (`WEB_MANAGER_DATA_DIR/jobs`) are read at startup, so cold start stays fast and bounded no matter how much job history has accumulated. Older records stay on disk and load on demand by id, so the Jobs page shows the most recent runs while rollback-by-job and resume still resolve any non-pruned job. The long tail (recovering any interrupted job, pruning old records) is swept in the background after startup. `0` or less reads every record (the pre-0.13.2 behaviour). |
+| `JOB_RETENTION_DAYS` | `7` | Terminal job records (`success`/`failed`/`cancelled`) older than this are pruned from the jobs directory by the background startup sweep, so it stays bounded. `recovery_required` records and anything still running are never auto-pruned. |
 | `BEETS_LIBRARY` | | Deprecated. Web Manager does not open the Beets database. This variable will be removed. |
 
 ### Operator-only settings (Compose `environment:` only)

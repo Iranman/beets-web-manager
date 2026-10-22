@@ -3,6 +3,7 @@
 Registered after app.py initializes. Keeps Lidarr HTTP glue out of the large app
 module while reusing the existing acquisition helpers and outbound URL policy.
 """
+import backend.app_runtime as app_runtime
 import backend.provider_boundary as provider_boundary
 import json
 import re
@@ -20,6 +21,13 @@ from app import (  # noqa: E402
     _ur,
     app,
 )
+
+
+# The Lidarr endpoint the outbound policy trusts for Lidarr's own calls is
+# exactly the one the resolver uses (backend.app_runtime.LIDARR_URL: env, then
+# the LIDARR_URL_FILE fallback and default, resolved at boot). Read live so an
+# operator's private LAN URL is trusted without an allowlist entry, like Plex.
+provider_boundary.register_configured_url("lidarr", lambda: _s(getattr(app_runtime, "LIDARR_URL", "")))
 
 
 def _lidarr_config_error() -> str:
