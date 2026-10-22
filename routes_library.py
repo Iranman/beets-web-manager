@@ -1283,9 +1283,11 @@ def artist_discography():
             result_holder["error"] = str(exc)
             log.append(f"error:{exc}")
 
-    job = jobs.start_python(_run, label=f"Discography: {artist_name}")
+    job = jobs.start_python(_run, label=f"Discography: {artist_name}",
+                            metadata={"mutating": False, "type": "artist-discography",
+                                      "dedupe_key": f"artist-discography:{artist_name.lower()}"})
     return jsonify({"ok": True, "status": "running", "job_id": job.job_id,
-                    "artist": artist_name})
+                    "artist": artist_name, "type": "artist-discography", "mutating": False})
 
 
 @app.get("/api/artist-discography/discogs")
@@ -1320,9 +1322,12 @@ def artist_discography_discogs():
         except Exception as exc:
             log.append(f"error:{exc}")
 
-    job = jobs.start_python(_run, label=f"Discogs discography: {artist_name}")
+    job = jobs.start_python(_run, label=f"Discogs discography: {artist_name}",
+                            metadata={"mutating": False, "type": "artist-discography-discogs",
+                                      "dedupe_key": f"artist-discography-discogs:{artist_name.lower()}"})
     return jsonify({"ok": True, "status": "running", "job_id": job.job_id,
-                    "artist": artist_name, "source": "discogs"})
+                    "artist": artist_name, "source": "discogs", "type": "artist-discography-discogs",
+                    "mutating": False})
 
 
 _artist_img_cache: Dict[str, str] = {}

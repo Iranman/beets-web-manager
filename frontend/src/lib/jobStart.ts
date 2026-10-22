@@ -64,7 +64,15 @@ const openActions = new Map<string, { key: string; at: number }>();
  * to call once the server answered (any HTTP status). */
 export function beginIdempotentRequest(method: string, url: string, body: unknown): { key: string; settle: () => void } {
   if (typeof body !== 'string' && body !== undefined && body !== null) {
-    return { key: newKey(), settle: () => {} }; // FormData etc.: cannot tell retries apart
+    // FormData cannot be fingerprinted; reuse the most recent key for this
+    // method+url within the window, and NEVER settle it on a 5xx retry.
+    // A 5xx must not discard the key or we start a second job on retry (#344).
+    const fingerprint = `${method} ${url}`;
+    const now = Date.now();
+    const open = openActions.get(fingerprint);
+    const key = open && now - open.at < RETRY_WINDOW_MS ? open.key : newKey();
+    openActions.set(fingerprint, { key, at: now });
+    return { key, settle: () => {} };
   }
   const fingerprint = `${method} ${url}\n${body ?? ''}`;
   const now = Date.now();

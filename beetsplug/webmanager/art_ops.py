@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 from flask import g, jsonify, request
 
 from . import operations as ops
+from . import plugin_ops
 from .engine_common import (
     MANIFEST_NAME,
     _error,
@@ -55,6 +56,9 @@ MAX_REQUEST_BYTES = MAX_IMAGE_BYTES * 4 // 3 + 64 * 1024
 MAX_IMAGE_SIDE = 12_000
 MAX_IMAGE_PIXELS = 50_000_000
 MANIFEST_KIND = "album_art"
+#: The manifest kind of a fetched (not supplied) cover: same shape, so the
+#: same rollback restores it.
+MANIFEST_KIND_FETCH = "album_art_fetch"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -324,6 +328,104 @@ def _set_album_art():
         return fail("Setting album art failed", "ALBUM_ART_FAILED", 500)
 
 
+@ops.webmanager_bp.route("/album-art/fetch", methods=["POST"])
+def run_fetch_album_art():
+    """Fetch cover art for one album and embed it into its tracks, with a
+    manifest that puts the previous cover and embedded images back.
+
+    Beets' own fetchart plugin fetches and Beets' own embedart plugin
+    embeds; this module only snapshots what they are about to replace, so
+    the change can be undone. The Web Manager decides *whether* to fetch
+    (the operator's request); this module only performs it inside Beets.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    lib = g.lib
+    album, err = _album_check(lib, data)
+    if err is not None:
+        return _error(*err)
+    items = list(album.items())
+    if not items:
+        return _error("the album has no items, so Beets has no folder for its art", "ALBUM_EMPTY")
+    if not plugin_ops.is_capability_available("fetchart"):
+        return _error("fetchart plugin is not loaded or configured on this Beets server",
+                      "CAPABILITY_UNAVAILABLE", 409)
+    op_id, _fingerprint, early = ops._idempotency_precheck("album_art_fetch", data)
+    if early is not None:
+        return early
+
+    def fail(message: str, code: str, status: int = 400):
+        ops.update_operation(op_id, "failed", error=message, error_code=code)
+        return _error(message, code, status)
+
+    old_artpath = _fspath(album.artpath)
+    if old_artpath and not _inside_allowed(old_artpath):
+        return fail("the current cover is outside the allowed roots", "OLD_ART_PATH_INVALID")
+    try:
+        destination = _fspath(album.art_destination(os.fsencode("cover.jpg")))
+    except Exception:
+        destination = ""
+    if destination and not _inside_allowed(destination):
+        return fail("the cover path is outside the allowed roots", "DESTINATION_PATH_INVALID")
+
+    art_id = uuid.uuid4().hex
+    folder = os.path.join(_quarantine_root(), art_id)
+    manifest: Dict[str, Any] = {"kind": MANIFEST_KIND_FETCH, "album_id": album.id, "status": "applying",
+                                "old_artpath": old_artpath, "previous_cover": "", "new_artpath": "",
+                                "embedded": {}}
+    try:
+        with ops.mutation_lock:
+            os.makedirs(folder)
+            if old_artpath and os.path.isfile(old_artpath):
+                manifest["previous_cover"] = os.path.join(
+                    folder, "previous" + os.path.splitext(old_artpath)[1])
+                shutil.copy2(old_artpath, manifest["previous_cover"])
+            # The cover file fetchart is about to write over, if it is not
+            # the current cover: kept so the rollback can put it back.
+            if destination and os.path.isfile(destination) \
+                    and os.path.normpath(destination) != os.path.normpath(old_artpath or "."):
+                manifest["displaced"] = {"path": destination,
+                                         "copy": os.path.join(folder, "displaced" + os.path.splitext(destination)[1])}
+                shutil.copy2(destination, manifest["displaced"]["copy"])
+            manifest["embedded"] = _snapshot_embedded(items, folder)
+            _write_manifest(folder, manifest)
+
+            plugin_ops.run_fetchart(lib, [album.id], False)
+            plugin_ops.run_embedart(lib, [album.id])
+            album.load()
+            new_artpath = _fspath(album.artpath)
+            changed = sum(
+                1 for item in lib.items(f"album_id:{album.id}")
+                if [_sha(i.data) for i in _embedded_images(item)]
+                != [e["sha256"] for e in manifest["embedded"].get(str(item.id), [])])
+            manifest.update(status="applied", new_artpath=new_artpath)
+            _write_manifest(folder, manifest)
+        result = {"success": True, "album_id": album.id, "art_id": art_id, "artpath": new_artpath,
+                  "old_artpath": old_artpath, "embedded_items": changed, "item_count": len(items)}
+        ops.update_operation(op_id, "succeeded", result=result)
+        return jsonify({"operation_id": op_id, **result})
+    except plugin_ops.PluginCapabilityError as ex:
+        ops.log.warning("album-art fetch has no fetchart plugin: %s", ex)
+        ops.update_operation(op_id, "failed", error=str(ex), error_code="CAPABILITY_UNAVAILABLE")
+        return fail("fetchart plugin is not loaded or configured on this Beets server",
+                    "CAPABILITY_UNAVAILABLE", 409)
+    except plugin_ops.PluginIncompatibleError as ex:
+        ops.log.warning("album-art fetch failed: %s", ex)
+        ops.update_operation(op_id, "failed", error=str(ex), error_code="CAPABILITY_UNAVAILABLE")
+        return fail("fetchart plugin is not usable on this Beets version", "CAPABILITY_UNAVAILABLE", 409)
+    except Exception:
+        ops.log.exception("album-art fetch failed; restoring")
+        try:
+            with ops.mutation_lock:
+                album.load()
+                if os.path.exists(os.path.join(folder, MANIFEST_NAME)):
+                    _restore(lib, album, manifest, folder)
+                    manifest["status"] = "compensated"
+                    _write_manifest(folder, manifest)
+        except Exception:
+            ops.log.exception("album-art fetch restore failed")
+        return fail("Fetching album art failed", "ALBUM_ART_FAILED", 500)
+
+
 @ops.webmanager_bp.route("/album-art/rollback", methods=["POST"])
 def run_album_art_rollback():
     with ops.mutation_lock:
@@ -354,7 +456,7 @@ def _album_art_rollback():
             manifest = json.load(fh)
     except (OSError, ValueError):
         return fail("no engine album-art record for this id", "ART_RECORD_NOT_FOUND", 404)
-    if not isinstance(manifest, dict) or manifest.get("kind") != MANIFEST_KIND \
+    if not isinstance(manifest, dict) or manifest.get("kind") not in (MANIFEST_KIND, MANIFEST_KIND_FETCH) \
             or manifest.get("status") != "applied":
         return fail("no applied album-art change for this id", "ART_RECORD_NOT_FOUND", 404)
     if not _manifest_ok(manifest):

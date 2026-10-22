@@ -841,6 +841,7 @@ def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None)
 #: Engine-backed transaction families: (apply, rollback). Each apply needs an
 #: Approved transaction, holds its durable resource locks, records the engine
 #: request first and verifies afterwards; see backend/transaction_recovery.py.
+#: A single dispatch table feeds both the generic routes and rollback_eligibility().
 _ENGINE_FAMILIES = {
     composite_workflows.ITEM_FILE_REPLACEMENT_FAMILY: (composite_workflows.apply_track_replacement,
                                                        composite_workflows.rollback_track_replacement),
@@ -863,6 +864,14 @@ _ENGINE_FAMILIES = {
     # plan, approve (the operator's click) and apply it themselves.
     composite_workflows.ALBUM_RELOCATION_FAMILY: (composite_workflows.apply_album_relocation,
                                                   composite_workflows.rollback_album_relocation),
+    composite_workflows.ALBUM_ARTWORK_FETCH_FAMILY: (composite_workflows.apply_album_artwork_fetch,
+                                                     composite_workflows.rollback_album_artwork_fetch),
+    composite_workflows.ALBUM_ARTWORK_FAMILY: (composite_workflows.apply_album_artwork,
+                                               composite_workflows.rollback_album_artwork),
+    composite_workflows.ALBUM_MAINTENANCE_FAMILY: (composite_workflows.apply_album_maintenance,
+                                                  composite_workflows.rollback_album_maintenance),
+    composite_workflows.CONFIRMED_IMPORT_FAMILY: (composite_workflows.apply_confirmed_import,
+                                                  composite_workflows.rollback_import_folder),
 }
 
 #: Families applied only by their own workflow (the generic apply route
@@ -884,6 +893,10 @@ _ROLLBACK_EVIDENCE_KEY = {
     untracked_recovery.QUARANTINE_FAMILY: "record_id",
     untracked_recovery.ATTACH_ALBUM_FAMILY: "record_id",
     composite_workflows.ALBUM_ART_REPLACE_FAMILY: "art_id",
+    composite_workflows.ALBUM_ARTWORK_FAMILY: "art_id",
+    composite_workflows.ALBUM_ARTWORK_FETCH_FAMILY: "art_id",
+    composite_workflows.ALBUM_MAINTENANCE_FAMILY: "album_row_id",
+    composite_workflows.CONFIRMED_IMPORT_FAMILY: "album_id",
     composite_workflows.ALBUM_RELOCATION_FAMILY: "after",
 }
 
@@ -944,6 +957,18 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     if meta.get("mutation_family") in _ENGINE_FAMILIES or meta.get("mutation_family") in _ROLLBACK_ONLY_FAMILIES:
         if meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY:
             return refused("not_supported", "Album cleanup has no rollback.")
+        if meta.get("mutation_family") in {composite_workflows.ALBUM_ARTWORK_FAMILY,
+                                           composite_workflows.ALBUM_ARTWORK_FETCH_FAMILY,
+                                           composite_workflows.ALBUM_MAINTENANCE_FAMILY}:
+            key = _ROLLBACK_EVIDENCE_KEY.get(meta.get("mutation_family"))
+            engine = meta.get("engine_result") or {}
+            if not isinstance(engine, dict) or not engine.get(key):
+                return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
+            if status == "Rolled Back":
+                return refused("already_rolled_back", "This transaction is already rolled back.")
+            if status in ("Cancelled", "Preview", "Approved"):
+                return refused("not_completed", f"Only an applied transaction can be rolled back (status is {status}).")
+            return {"allowed": True, "code": "allowed", "reason": ""}
         key = _ROLLBACK_EVIDENCE_KEY.get(meta.get("mutation_family"))
         if not meta.get("engine_result") or (key and not (meta.get("engine_result") or {}).get(key)):
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
@@ -1084,6 +1109,8 @@ def api_transaction_rollback(transaction_id):
                 res = composite_workflows.rollback_album_maintenance(transaction_id)
             elif mutation_family == "album_artwork_v1":
                 res = composite_workflows.rollback_album_artwork(transaction_id)
+            elif mutation_family == "album_artwork_fetch_v1":
+                res = composite_workflows.rollback_album_artwork_fetch(transaction_id)
             elif mutation_family == "import_folder_v1":
                 res = composite_workflows.rollback_import_folder(transaction_id)
             elif mutation_family == "folder_cleanup_v1":

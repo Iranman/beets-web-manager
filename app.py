@@ -289,6 +289,15 @@ from werkzeug.exceptions import HTTPException as _WerkzeugHTTPException
 def _handle_http_error(exc):
     return jsonify({"ok": False, "error": exc.description, "status": exc.code}), exc.code
 
+try:
+    from backend.job_contract import WorkflowBusyError
+    @app.errorhandler(WorkflowBusyError)
+    def _handle_workflow_busy(exc):
+        return jsonify({"ok": False, "error": str(exc) or "Another workflow is already running.", "code": "workflow_busy"}), 409
+except Exception:
+    pass
+
+
 @app.errorhandler(AiBatchStateConflictError)
 def _handle_ai_batch_state_conflict(exc):
     # Wave 26 independent review (section 25): AiBatchStateConflictError
@@ -557,6 +566,10 @@ if __name__ == "__main__":
     # Running, from engine evidence (never by replaying them).
     import backend.transaction_recovery as _transaction_recovery
     _transaction_recovery.start_background_sweep()
+    try:
+        _transaction_recovery.sweep()
+    except Exception:
+        _app_logger.exception("Failed to sweep engine transactions on startup")
     _start_playlist_auto_sync_worker()
     if os.environ.get("PLAYLIST_WARM_INDEX", "0") not in ("0", "", "false", "False", "no"):
         _start_playlist_index_warm_worker()

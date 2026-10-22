@@ -83,6 +83,16 @@ def resolve_transaction(tx: Dict[str, Any], *, adapter: Optional[BeetsAdapter] =
     meta = tx.get("metadata") or {}
     fam = _families().get(meta.get("mutation_family"))
     if fam is None or tx.get("status") != "Running":
+        # An in-flight rollback has no engine_request to recover from; if it
+        # was interrupted the transaction must go to Recovery Required (ARCH-023).
+        rollback_req = (meta.get("rollback_request") or {})
+        if isinstance(rollback_req, dict) and rollback_req and not rollback_req.get("outcome"):
+            if tx.get("status") == "Running":
+                st.update(op, status="Recovery Required",
+                          append_logs=["Recovered after restart: a rollback was in progress; "
+                                       "whether it changed the library cannot be proven; "
+                                       "check the library before retrying."])
+                return {"operation_id": op, "action": "recovery_required_interrupted_rollback"}
         return {"operation_id": op, "action": "skipped"}
     if "engine_request" not in meta:
         # Running was never followed by an engine request: nothing was sent.
