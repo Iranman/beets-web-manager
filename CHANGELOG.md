@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Added
+
+- **Regression guard: `POST /api/library/folder-mbid-names/apply` starts its heavy work in the job, not the request thread.** A new route-level test (`tests/test_folder_mbid_async_start.py`) asserts the endpoint returns `{ok, job_id}` promptly (sub-second) while the album-folder walk under `MUSIC_ROOT` and the Lidarr resolver snapshot — the ~9,022-dir-over-NFS cost that could block a request for ~173s and time out a client — run inside the job body (on the job thread), never synchronously in the request thread. The confirmed-gate (non-dry-run without `confirmed:true` → 400) is checked without touching the walk/resolver. Test-only; the handler already delegated the walk/resolver to the job via `jobs.start_python`, and this locks that structure against regression.
+
 ## v0.13.1 - 2026-10-22
 
 ### Security
