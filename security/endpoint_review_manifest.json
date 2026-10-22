@@ -4096,6 +4096,42 @@
     },
     {
       "method": "POST",
+      "endpoint": "apply_folder_placeholders_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Preview (dry_run default) or, with confirmed:true, rename disk-only placeholder album folders through the controlled folder_cleanup_v1 mutation engine; DB-tracked and target-collision rows are held for review, never auto-renamed.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "rollback_folder_placeholders_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Reverse a prior placeholder-folder apply from its transaction audit records through folder_cleanup_v1 rollback; refuses to roll back a still-running apply job (409).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
       "endpoint": "scan_leaked_db_paths_job",
       "security_classification": "ADMIN_ONLY",
       "purpose": "Start a background scan for DB rows with leaked template-token paths.",
