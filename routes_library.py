@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from flask import jsonify, request, send_file, redirect
 from backend.matching_contract import AiState
 from backend.transaction_engine import metadata_diff
+from job_engine import TERMINAL_STATUSES
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_mb_release_id
 from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsAdapterNotFoundError, BeetsAdapterConnectionError, BeetsAdapterTimeoutError
 import backend.composite_workflows as composite_workflows
@@ -4989,6 +4990,12 @@ def apply_folder_placeholders_job():
     if resume_from_job:
         prior = jobs.get(resume_from_job)
         if prior is not None:
+            # F6: a still-running source job's checkpoint misses its later ops;
+            # resuming it would skip or double-apply folders. Require it done.
+            if getattr(prior, "status", None) not in TERMINAL_STATUSES:
+                return jsonify({"ok": False, "error": (
+                    f"Source job {resume_from_job} is still {prior.status}; "
+                    "wait for it to finish before resuming it.")}), 409
             ckpt = (getattr(prior, "state", None) or {}).get("checkpoint") or {}
             result = getattr(prior, "result", None) or {}
             resume_done = set(ckpt.get("done_folders") or result.get("done_folders") or [])
@@ -5048,6 +5055,12 @@ def rollback_folder_placeholders_job():
         prior = jobs.get(job_id)
         if prior is None:
             return jsonify({"ok": False, "error": f"Job {job_id} not found"}), 404
+        # F6: a still-running apply keeps extending its checkpoint; rolling it
+        # back now would miss the ops it has not recorded yet. Require it done.
+        if getattr(prior, "status", None) not in TERMINAL_STATUSES:
+            return jsonify({"ok": False, "error": (
+                f"Job {job_id} is still {prior.status}; "
+                "wait for it to finish (or cancel it) before rolling it back.")}), 409
         ckpt = (getattr(prior, "state", None) or {}).get("checkpoint") or {}
         result = getattr(prior, "result", None) or {}
         operations = ckpt.get("operations") or result.get("operations") or []

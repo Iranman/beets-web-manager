@@ -121,6 +121,103 @@ class _DiskOnly(_Env):
         self.assertTrue(src.exists())  # original name restored
         self.assertFalse((self.music / "Jade/Hot & Wet (2003)").exists())
 
+    def test_rollback_spans_resumed_runs(self):
+        a = self.make_folder(f"A/One (2001){PH}")
+        b = self.make_folder(f"B/Two (2002){PH}")
+        first = self.apply([a, b], batch_limit=1)
+        self.assertEqual(first["final_summary"]["changed_count"], 1, first)
+        self.assertEqual(len(first["operations"]), 1)
+        self.assertEqual(first["done_folders"], [str(a)])
+        self.assertFalse(a.exists()); self.assertTrue(b.exists())
+        second = self.apply([a, b], resume_done=set(first["done_folders"]), prior_operations=first["operations"])
+        self.assertEqual(second["final_summary"]["changed_count"], 1, second)
+        self.assertEqual(len(second["operations"]), 2, second)
+        self.assertFalse(b.exists())
+        rb = ls._rollback_folder_placeholder_apply(second["operations"], store=self.store)
+        self.assertTrue(rb["ok"], rb)
+        self.assertEqual(rb["final_summary"]["rolled_back_count"], 2)
+        self.assertTrue(a.exists() and b.exists())
+
+    def test_batch_limit_leading_collision_resumes(self):
+        # F3: a persistent skip at/before the batch limit must not stall resume.
+        coll = self.make_folder(f"C/Coll (2000){PH}")
+        self.make_folder("C/Coll (2000)")          # collision present -> coll held
+        a = self.make_folder(f"A/One (2001){PH}")
+        b = self.make_folder(f"B/Two (2002){PH}")
+        folders = [coll, a, b]
+        first = self.apply(folders, batch_limit=1)
+        self.assertEqual(first["final_summary"]["changed_count"], 1, first)  # a renamed, coll skipped
+        self.assertFalse(a.exists()); self.assertTrue(b.exists())
+        second = self.apply(folders, batch_limit=1,
+                            resume_done=set(first["done_folders"]),
+                            prior_operations=first["operations"])
+        self.assertEqual(second["final_summary"]["changed_count"], 1, second)  # progress past coll
+        self.assertFalse(b.exists())                # b renamed on resume
+        self.assertTrue(coll.exists())              # collision never touched
+
+    def test_failed_op_id_captured_for_rollback(self):
+        # F1 + F4: a row that fails AFTER leaving a rollback record keeps its
+        # op in `operations`, and the run is reported as a failure.
+        a = self.make_folder(f"A/One (2001){PH}")   # succeeds
+        b = self.make_folder(f"B/Two (2002){PH}")   # applied, then reports failure
+        real = cw.safe_rename_library_folder
+
+        def rename_then_report_failure(src, tgt, *a_, **kw):
+            out = real(src, tgt, *a_, **kw)          # renames + records a rollback-able op
+            if "Two (2002)" in src:
+                return {"ok": False, "code": "folder_cleanup_move_failed",
+                        "error": "simulated post-apply failure", "operation_id": out["operation_id"]}
+            return out
+
+        with mock.patch.object(cw, "safe_rename_library_folder", rename_then_report_failure):
+            res = self.apply([a, b])
+        self.assertFalse(res["ok"], res)                           # F4
+        self.assertEqual(res["final_summary"]["error_count"], 1, res)
+        self.assertEqual(res["final_summary"]["changed_count"], 1, res)
+        self.assertEqual(len(res["operations"]), 2, res["operations"])  # failed op NOT dropped
+        rb = ls._rollback_folder_placeholder_apply(res["operations"], store=self.store)
+        self.assertTrue(rb["ok"], rb)
+        self.assertEqual(rb["final_summary"]["rolled_back_count"], 2)
+        self.assertTrue(a.exists() and b.exists())                 # both restored
+
+    def test_crash_before_checkpoint_still_rollbackable(self):
+        # F2: a crash between the rename and recording its op must still be
+        # rollback-able -- the write-ahead marker is resolved from the store.
+        a = self.make_folder(f"A/One (2001){PH}")
+        real = cw.safe_rename_library_folder
+
+        def rename_then_crash(src, tgt, *a_, **kw):
+            real(src, tgt, *a_, **kw)                # physical rename + store record
+            raise RuntimeError("crash after rename, before checkpoint")
+
+        with mock.patch.object(cw, "safe_rename_library_folder", rename_then_crash):
+            res = self.apply([a])
+        self.assertFalse(res["ok"], res)                           # F4
+        self.assertFalse(a.exists())                               # the rename happened
+        self.assertTrue((self.music / "A/One (2001)").is_dir())
+        self.assertTrue(any(o.get("pending") for o in res["operations"]), res["operations"])
+        rb = ls._rollback_folder_placeholder_apply(res["operations"], store=self.store)
+        self.assertTrue(rb["ok"], rb)
+        self.assertEqual(rb["final_summary"]["rolled_back_count"], 1)
+        self.assertTrue(a.exists())                                # restored
+        self.assertFalse((self.music / "A/One (2001)").is_dir())
+
+    def test_source_missing_on_resume_recovers_op(self):
+        # F2 (b): on resume a vanished source is recovered from the store, not
+        # silently marked done with its op dropped.
+        a = self.make_folder(f"A/One (2001){PH}")
+        first = self.apply([a])
+        self.assertTrue(first["ok"], first)
+        self.assertFalse(a.exists())
+        # Resume with NO carried operations (checkpoint lost): the renamed
+        # source is gone, but its op must be recovered so rollback still works.
+        second = self.apply([a], resume_done=set(), prior_operations=[])
+        self.assertEqual(second["skipped"][0]["reason"], "source_missing", second)
+        self.assertEqual(len(second["operations"]), 1, second["operations"])
+        rb = ls._rollback_folder_placeholder_apply(second["operations"], store=self.store)
+        self.assertTrue(rb["ok"], rb)
+        self.assertTrue(a.exists())
+
     def test_empty_clean_name_skipped(self):
         src = self.make_folder(PH)  # name is only the placeholder -> empty after strip
         res = self.apply([src])
@@ -129,8 +226,12 @@ class _DiskOnly(_Env):
         self.assertTrue(src.exists())
 
 
-class TrackedRelocationTests(unittest.TestCase):
-    """DB-tracked placeholder folder: relocation updates the DB path."""
+class TrackedFolderHeldTests(unittest.TestCase):
+    """F5 decision: a DB-tracked placeholder folder is NOT relocated by this
+    disk-only rename flow. Its clean destination is whatever Beets' path
+    templates compute -- which this flow cannot preview and which could merge
+    into an existing folder via Beets suffixing. So a tracked folder is held
+    for review (relocate the album directly instead), and preview == apply."""
 
     def setUp(self):
         from tests.test_album_relocation_transaction import _Engine
@@ -138,29 +239,98 @@ class TrackedRelocationTests(unittest.TestCase):
         self.eng.setUp()
         self.addCleanup(self.eng.doCleanups)
 
-    def test_tracked_folder_relocation_updates_db_path(self):
+    def test_tracked_folder_is_held_not_renamed(self):
         eng = self.eng
         folder = os.path.join(eng.music, "A", f"B{PH}")
         album = eng.make_album(folder)
         before_paths, _art = eng.beets_state(album.id)
-        self.assertTrue(all(os.path.dirname(p) == folder for p in before_paths.values()))
 
         res = ls._apply_folder_name_placeholders(
             [folder], dry_run=False, adapter=eng.ad, store=eng.store)
-        self.assertTrue(res["ok"], res)
-        self.assertEqual(res["final_summary"]["changed_count"], 1, res)
-        self.assertEqual(res["operations"][0]["kind"], "album")
+        self.assertTrue(res["ok"], res)                      # a held row is not an error
+        self.assertEqual(res["final_summary"]["changed_count"], 0, res)
+        self.assertEqual(res["operations"], [], res)         # nothing mutated
+        self.assertEqual(res["skipped"][0]["reason"], "tracked_needs_relocation", res)
+        self.assertTrue(os.path.exists(folder))              # folder untouched
+        self.assertEqual(eng.beets_state(album.id)[0], before_paths)  # DB untouched
 
-        after_paths, _ = eng.beets_state(album.id)
-        dest = os.path.join(eng.music, "A", "B")  # Beets template, placeholder gone
-        self.assertTrue(all(os.path.dirname(p) == dest for p in after_paths.values()), after_paths)
-        self.assertFalse(os.path.exists(folder))  # old placeholder folder vacated
+    def test_tracked_preview_matches_apply(self):
+        eng = self.eng
+        folder = os.path.join(eng.music, "A", f"B{PH}")
+        eng.make_album(folder)
+        preview = ls._apply_folder_name_placeholders(
+            [folder], dry_run=True, adapter=eng.ad, store=eng.store)
+        apply = ls._apply_folder_name_placeholders(
+            [folder], dry_run=False, adapter=eng.ad, store=eng.store)
+        # preview holds the tracked folder exactly as apply does
+        self.assertEqual(preview["skipped"][0]["reason"], "tracked_needs_relocation", preview)
+        self.assertEqual(apply["skipped"][0]["reason"], "tracked_needs_relocation", apply)
+        self.assertEqual(preview["final_summary"]["would_change_count"], 0, preview)
+        self.assertEqual(apply["final_summary"]["changed_count"], 0, apply)
 
-        # Single rollback restores the DB path.
-        rb = ls._rollback_folder_placeholder_apply(res["operations"], adapter=eng.ad, store=eng.store)
-        self.assertTrue(rb["ok"], rb)
-        restored, _ = eng.beets_state(album.id)
-        self.assertEqual(restored, before_paths)
+
+class _FakeJob:
+    def __init__(self, status, job_id="started-job"):
+        self.status = status
+        self.job_id = job_id
+        self.state = {"checkpoint": {"done_folders": [], "operations": []}}
+        self.result = {}
+
+
+class _FakeJobs:
+    """Returns one job for any id; start_python returns a stub without running
+    the work, so a guard that (correctly) passes starts nothing real."""
+    def __init__(self, job):
+        self.job = job
+
+    def get(self, _job_id):
+        return self.job
+
+    def start_python(self, *_a, **_kw):
+        return _FakeJob("running", job_id="started-job")
+
+
+class RunningJobGuardTests(unittest.TestCase):
+    """F6: resume_from_job / rollback job_id must refuse a non-terminal source
+    job, whose checkpoint would miss the ops it has not recorded yet."""
+
+    @classmethod
+    def setUpClass(cls):
+        import app
+        import routes_library
+        cls.routes_library = routes_library
+        cls.flask_app = app.app
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.client = self.flask_app.test_client()
+
+    def _patch_jobs(self, status):
+        p = mock.patch.object(self.routes_library, "jobs", _FakeJobs(_FakeJob(status)))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_resume_refuses_running_source_job(self):
+        self._patch_jobs("running")
+        r = self.client.post("/api/library/folder-placeholders/apply",
+                             json={"dry_run": True, "resume_from_job": "job-x"})
+        self.assertEqual(r.status_code, 409, r.get_data(as_text=True))
+        self.assertFalse(r.get_json()["ok"])
+
+    def test_resume_allows_terminal_source_job(self):
+        self._patch_jobs("success")
+        r = self.client.post("/api/library/folder-placeholders/apply",
+                             json={"dry_run": True, "resume_from_job": "job-x"})
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True))  # guard passes, job starts
+
+    def test_rollback_refuses_running_source_job(self):
+        self._patch_jobs("running")
+        r = self.client.post("/api/library/folder-placeholders/rollback",
+                             json={"job_id": "job-x"})
+        self.assertEqual(r.status_code, 409, r.get_data(as_text=True))
+        self.assertFalse(r.get_json()["ok"])
 
 
 if __name__ == "__main__":
