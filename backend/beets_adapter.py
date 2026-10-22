@@ -785,6 +785,24 @@ class BeetsAdapter:
         return self._request("POST", "/webmanager/import/rollback/undo", json_data=payload, headers=headers,
                              timeout=max(self.timeout or 0, 300))
 
+    def restore_item_paths(
+        self,
+        items: List[Dict[str, Any]],
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Move explicit tracks back to the exact paths in ``items`` (C3).
+
+        Each entry is ``{"id": N, "path": "...", "sha256": "..."}``. Used by
+        the artist-folder rollback: Beets' own move applies the path format,
+        which can rename a file, so restoring ``albumartist`` alone is not a
+        path restore. The plugin op never overwrites a file and accepts a file
+        already at the target when its digest matches (crash resume).
+        """
+        payload = {"items": [dict(item) for item in (items or [])]}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/item-path/restore", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
+
     def relocate_album(
         self,
         album_id: int,

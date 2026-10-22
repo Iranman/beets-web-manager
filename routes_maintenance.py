@@ -879,6 +879,12 @@ _ENGINE_FAMILIES = {
 #: (#318). Eligibility follows the engine-family rule.
 _ROLLBACK_ONLY_FAMILIES = {
     composite_workflows.ALBUM_METADATA_FAMILY: composite_workflows.rollback_album_metadata,
+    composite_workflows.ITEM_METADATA_FAMILY: composite_workflows.rollback_item_metadata,
+    composite_workflows.GENRE_REPAIR_FAMILY: composite_workflows.rollback_album_genre_repair,
+    composite_workflows.ALBUM_MB_TRACK_REPAIR_FAMILY: composite_workflows.rollback_album_mb_track_repair,
+    # The apply runs from the artist-folder job as well, but its rollback is
+    # the generic route's (C3): files must move back to the plan's paths.
+    "artist_folder_reconcile_v1": composite_workflows.rollback_artist_folder_reconcile,
 }
 
 #: The ``engine_result`` key each executor's rollback requires (#245 F1): a
@@ -897,8 +903,39 @@ _ROLLBACK_EVIDENCE_KEY = {
     composite_workflows.ALBUM_ARTWORK_FETCH_FAMILY: "art_id",
     composite_workflows.ALBUM_MAINTENANCE_FAMILY: "album_row_id",
     composite_workflows.CONFIRMED_IMPORT_FAMILY: "album_id",
+    composite_workflows.ITEM_METADATA_FAMILY: "before_state",
+    composite_workflows.GENRE_REPAIR_FAMILY: "before_state",
+    composite_workflows.ALBUM_MB_TRACK_REPAIR_FAMILY: "album_identity",
     composite_workflows.ALBUM_RELOCATION_FAMILY: "after",
 }
+
+
+def _rollback_evidence_available(family: str, engine: Any) -> bool:
+    """Whether ``engine_result`` holds what the family's executor needs.
+
+    Eligibility must not promise a rollback the executor will refuse (C1):
+    every condition here mirrors the executor's own ``rollback_unavailable``
+    gate. A result that merely exists is not proof of a usable snapshot.
+    """
+    if not isinstance(engine, dict) or not engine:
+        return False
+    key = _ROLLBACK_EVIDENCE_KEY.get(family)
+    if key and not engine.get(key):
+        return False
+    if family == composite_workflows.CONFIRMED_IMPORT_FAMILY:
+        try:
+            album_id = int(engine.get("album_id") or 0)
+        except (TypeError, ValueError):
+            return False
+        item_ids = [i for i in (engine.get("item_ids") or []) if str(i).strip()]
+        return bool(album_id and item_ids)
+    if family == composite_workflows.ITEM_METADATA_FAMILY:
+        before = engine.get("before_state")
+        return isinstance(before, dict) and bool(before.get("items"))
+    if family == composite_workflows.GENRE_REPAIR_FAMILY:
+        before = engine.get("before_state")
+        return isinstance(before, dict) and bool(before.get("album") or before.get("items"))
+    return True
 
 #: Families whose rollback executor acquires its resource locks before any
 #: engine call or store write, so a ResourceLockConflictError from it proves
@@ -927,7 +964,8 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
     executors apply, so the UI reads it instead of copying it:
 
     * folder cleanup: needs ``metadata.engine_result`` and status Completed,
-      Failed (a part-way apply) or Partially Rolled Back (retry the rest);
+      Failed (a part-way apply), Partially Rolled Back (retry the rest), or
+      Running with an unfinished ``rollback_request`` (a resumable crash);
     * engine family (``_ENGINE_FAMILIES``): needs ``metadata.engine_result``
       and a status an apply leaves behind (not Rolled Back, nor one of
       composite_workflows.ROLLBACK_UNAPPLIED_STATUSES); album cleanup has
@@ -967,30 +1005,37 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
         if status == "Rolled Back":
             return refused("already_rolled_back", "This transaction is already rolled back.")
-        if status not in ("Completed", "Failed", "Partially Rolled Back"):  # #298 N4: retry the rest
+        req = meta.get("rollback_request")
+        resumable_rollback = (status == "Running" and isinstance(req, dict) and req
+                              and not req.get("outcome"))
+        if status not in ("Completed", "Failed", "Partially Rolled Back") and not resumable_rollback:
+            # #298 N4: retry the rest. A crash-interrupted folder rollback is
+            # resumable from the engine's durable step records (#486 C4).
             return refused("not_completed", f"Only a completed transaction can be rolled back (status is {status}).")
         return {"allowed": True, "code": "allowed", "reason": ""}
     if meta.get("mutation_family") in _ENGINE_FAMILIES or meta.get("mutation_family") in _ROLLBACK_ONLY_FAMILIES:
         if meta.get("mutation_family") == composite_workflows.ALBUM_CLEANUP_FAMILY:
             return refused("not_supported", "Album cleanup has no rollback.")
-        if meta.get("mutation_family") in {composite_workflows.ALBUM_ARTWORK_FAMILY,
-                                           composite_workflows.ALBUM_ARTWORK_FETCH_FAMILY,
-                                           composite_workflows.ALBUM_MAINTENANCE_FAMILY}:
-            key = _ROLLBACK_EVIDENCE_KEY.get(meta.get("mutation_family"))
-            engine = meta.get("engine_result") or {}
-            if not isinstance(engine, dict) or not engine.get(key):
-                return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
-            if status == "Rolled Back":
-                return refused("already_rolled_back", "This transaction is already rolled back.")
-            if status in ("Cancelled", "Preview", "Approved"):
-                return refused("not_completed", f"Only an applied transaction can be rolled back (status is {status}).")
-            return {"allowed": True, "code": "allowed", "reason": ""}
         key = _ROLLBACK_EVIDENCE_KEY.get(meta.get("mutation_family"))
         if not meta.get("engine_result") or (key and not (meta.get("engine_result") or {}).get(key)):
             return refused("not_applied", "Nothing was applied, so there is nothing to roll back.")
-        if (meta.get("mutation_family") == composite_workflows.ALBUM_METADATA_FAMILY
-                and not isinstance(meta.get("before_state"), dict)):
-            return refused("unavailable", "This transaction recorded no before-state to restore.")
+        if not _rollback_evidence_available(meta.get("mutation_family"), meta.get("engine_result")):
+            return refused("unavailable", "This transaction recorded no usable snapshot to restore.")
+        if meta.get("mutation_family") == composite_workflows.ALBUM_METADATA_FAMILY:
+            before = meta.get("before_state")
+            if not isinstance(before, dict) or not (before.get("album") or before.get("items")):
+                return refused("unavailable", "This transaction recorded no before-state to restore.")
+        if meta.get("mutation_family") == composite_workflows.ALBUM_MB_TRACK_REPAIR_FAMILY:
+            before = meta.get("before_state")
+            if not isinstance(before, dict) or not (before.get("album") or before.get("items")):
+                return refused("unavailable", "This transaction recorded no before-state to restore.")
+        if meta.get("mutation_family") == "artist_folder_reconcile_v1":
+            before = meta.get("before_state")
+            usable = isinstance(before, list) and any(
+                isinstance(snap, dict) and snap.get("album_id") and snap.get("albumartist")
+                for snap in before)
+            if not usable:
+                return refused("unavailable", "This transaction recorded no usable before-state to restore.")
         if status == "Rolled Back":
             return refused("already_rolled_back", "This transaction is already rolled back.")
         if (meta.get("mutation_family") in _ROLLBACK_ONLY_FAMILIES
@@ -1127,6 +1172,10 @@ def api_transaction_rollback(transaction_id):
                 res = composite_workflows.rollback_album_artwork(transaction_id)
             elif mutation_family == "album_artwork_fetch_v1":
                 res = composite_workflows.rollback_album_artwork_fetch(transaction_id)
+            elif mutation_family == "item_metadata_repair_v1":
+                res = composite_workflows.rollback_item_metadata(transaction_id)
+            elif mutation_family == "genre_repair_v1":
+                res = composite_workflows.rollback_album_genre_repair(transaction_id)
             elif mutation_family == "import_folder_v1":
                 res = composite_workflows.rollback_import_folder(transaction_id)
             elif mutation_family == "folder_cleanup_v1":

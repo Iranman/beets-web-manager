@@ -211,9 +211,11 @@ class TestCompositeWorkflows(unittest.TestCase):
         rel, rg = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
         self.mock_adapter.get_album.return_value = {"id": 20, "album": "Repair Album",
                                                     "mb_albumid": rel, "mb_releasegroupid": rg}
-        self.mock_adapter.find_all_items_by_album_id.return_value = [
-            {"id": 201, "title": "Track 1", "mb_trackid": "old-mbid-1"}
-        ]
+        items = {201: {"id": 201, "album_id": 20, "title": "Track 1", "mb_trackid": "old-mbid-1"}}
+        self.mock_adapter.find_all_items_by_album_id.return_value = list(items.values())
+        # The rollback verifies each restored row independently (H11), so the
+        # fake needs to return the row, not an unconfigured MagicMock.
+        self.mock_adapter.get_item.side_effect = lambda iid: items.get(int(iid))
 
         with patch("backend.composite_workflows._release_group_for_release", return_value=rg):
             plan_res = plan_album_mb_track_repair(

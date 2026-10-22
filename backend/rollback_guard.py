@@ -147,15 +147,22 @@ def rollback_guard(
         if source is None:
             yield not_eligible(operation_id, status)
             return
-        claimed = store.transition(operation_id, source, "Running")
+        # The claim and recovery marker must be one durable write. A crash
+        # between them otherwise leaves Running with only the old apply's
+        # evidence, which the restart sweep could misread as Completed.
+        claimed = store.transition(operation_id, source, "Running", metadata={"rollback_request": {
+            "started_at": time.time(), "family": family, "owner": owner,
+            "claimed_from": source, "outcome": None}})
         if claimed is None:
             # Another rollback (or an apply) won the race for this
             # transaction while this one waited for the locks.
             yield conflict(operation_id)
             return
-        store.update(operation_id, metadata={"rollback_request": {
-            "started_at": time.time(), "family": family, "owner": owner, "outcome": None}})
-        yield {"ok": True, "transaction": claimed, "owner": owner, "keys": held}
+        # ``source`` is the pre-claim status. The claimed row itself is
+        # already ``Running``, so an executor that restores the previous
+        # status on a deferral must use this value, not the row's status.
+        yield {"ok": True, "transaction": claimed, "source": source,
+               "owner": owner, "keys": held}
 
 
 def finish(
@@ -197,6 +204,35 @@ def finish(
                 "rollback_ok": restored, "rollback_failed": failed, "recorded": False}
     return {"ok": not failed, "operation_id": operation_id, "status": final,
             "rollback_ok": restored, "rollback_failed": failed, "recorded": True}
+
+
+def record_outcome(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    status: str,
+    restored: int = 0,
+    failed: int = 0,
+    logs: Optional[List[str]] = None,
+) -> bool:
+    """Record a finished rollback whose executor moved the status itself.
+
+    The folder-cleanup engine transitions ``Running`` to its final status
+    inside its own apply lock, so :func:`finish` cannot be used: its
+    compare-and-set would lose. This writes the same outcome marker without
+    moving the status, so the restart sweep never mistakes a finished
+    rollback for an interrupted one (C4).
+    """
+    try:
+        meta = store.get(operation_id).get("metadata") or {}
+    except KeyError:
+        return False
+    request = dict(meta.get("rollback_request") or {})
+    request["outcome"] = status
+    store.update(operation_id, metadata={"rollback_request": request},
+                 counts={"rollback_ok": restored, "rollback_failed": failed},
+                 append_logs=list(logs or []))
+    return True
 
 
 def abandon(
