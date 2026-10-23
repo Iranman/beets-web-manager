@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Security
+
+- **Import Review keeps only the identity a client proposes, never its evidence.** `POST /api/folders/import-with-id` stored the request's whole `ai_suggestion`: when the import was refused, its `preflight`, `track_mapping`, `mb_valid`, `review_evidence` and `folder_signature` went into the Review queue as if the server had computed them, bypassing the rule `POST /api/ai-pending-review` already enforced. Both routes now keep only a proposed identity (Release, Release Group, artist, album, year, label, country, reason) and bounded display-only origin labels, whose folder is always the validated one; revalidation recomputes everything else. An `ai_suggestion` that is not an object is ignored instead of failing the job.
+
+### Fixed
+
+- **AI match history records only a suggestion that was imported.** After every Review import, history recorded the submitted suggestion, including imports of a different release the operator chose and manual imports with no suggestion at all. It now records an entry only when the suggestion's Release Group (or, without one, its Release) is what Beets imported, stores the server-verified IDs, and writes the file atomically.
+- **The unattended Review import no longer acts on a suggestion computed for different files.** `auto-enqueue-ready` imports from the stored track mapping and evidence, and the folder signature meant to detect a folder that changed after Find Match was never checked. It is now: a changed folder is skipped with "The folder changed after its match was computed" in the job log until it is revalidated. Find Match and revalidation take the signature before they gather evidence, so files arriving during a check also make the stored result stale. Suggestions stored before signatures existed are not treated as stale.
+- **Find Match can no longer occupy every server worker.** Each Find Match runs for seconds (fingerprints, rate-limited MusicBrainz, the AI call) inside a web request, and the Review page started one for every item the cursor landed on, so paging through the queue could stall the whole UI. The folder, album and item Find Match routes now run at most two at once (one when `WEBCONTROL_THREADS` is below 8) and answer `503 suggest_busy` straight away beyond that; the page runs one automatic Find Match at a time, gives the item under the cursor its turn when it finishes, and shows a refusal as a warning to retry.
+- **Find Match and import-with-id answer a malformed request body with an error instead of a 500.** A non-object JSON body or a non-text `path` no longer raises inside the route.
+
 ## v0.13.5 - 2026-10-22
 
 ### Performance

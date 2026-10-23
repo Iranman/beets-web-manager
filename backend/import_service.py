@@ -9,7 +9,7 @@ from backend.matching import verify_audio_against_request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _pending_review_has_path, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
@@ -34,7 +34,7 @@ from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED_MESSAGE, _album
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
-from backend.serializers import _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
+from backend.serializers import _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
 from backend.plex_service import _trigger_plex_refresh
 
@@ -2422,8 +2422,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
       "mb_releasegroupid": "canonical-release-group-uuid"
     }
     """
-    payload    = payload_in
-    folder_path   = payload.get("path",  "").strip()
+    payload    = payload_in if isinstance(payload_in, dict) else {}
+    folder_path   = _s(payload.get("path")).strip()
     raw_mb_albumid = _s(payload.get("mb_albumid") or payload.get("mbid")).strip()
     raw_mb_releasegroupid = _s(
         payload.get("mb_releasegroupid")
@@ -2450,7 +2450,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     input_looks_like_release_group = (
         bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid
     )
-    ai_suggestion = payload.get("ai_suggestion")   # optional — records in AI match history
+    raw_ai_suggestion = payload.get("ai_suggestion")   # optional: a proposed identity and its origin
     use_move      = bool(payload.get("move", False))
     # Wave 25 Round 4: test-only pass-through for the dedicated Docker
     # acceptance crash/resume scenario. Inert in every real deployment --
@@ -2511,6 +2511,14 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if folder_error or trusted_folder is None:
         return {"ok": False, "error": folder_error or "Source path is not allowed."}, 400
     folder_path = str(trusted_folder)
+    # F16: the caller (the Review page, or the auto-import replaying a stored
+    # suggestion) proposes an identity; its evidence is never kept. The review
+    # paths below queue only this, and revalidation recomputes the evidence.
+    ai_suggestion = {**_client_review_suggestion(raw_ai_suggestion),
+                     **_client_review_origin(raw_ai_suggestion, folder_path)}
+    raw_confidence = _s(raw_ai_suggestion.get("confidence")).strip().lower() \
+        if isinstance(raw_ai_suggestion, dict) else ""
+    ai_confidence_label = raw_confidence if raw_confidence in {"high", "medium", "low"} else ""
     if not raw_mb_input:
         return {
             "ok": False,
@@ -3004,12 +3012,19 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         else:
             log.append("  [plex] Refresh skipped for Import Review; playlist/batch jobs trigger Plex separately.")
         log.append(f"Done — '{Path(folder_path).name}' imported and tagged.")
-        # Record AI suggestion in history if this came from an AI-suggested match
-        if ai_suggestion and isinstance(ai_suggestion, dict):
+        # History records a suggestion only when it named what Beets imported
+        # (verified above): an operator's override or a bare origin is not a match.
+        if _ai_suggestion_names_import(ai_suggestion, mb_albumid, selected_releasegroupid):
             try:
-                _record_ai_match(folder_path, ai_suggestion)
-            except Exception:
-                pass
+                _record_ai_match(folder_path, {
+                    **ai_suggestion,
+                    "mb_albumid": mb_albumid,
+                    "mb_releasegroupid": selected_releasegroupid,
+                    "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+                    "confidence": ai_confidence_label,
+                })
+            except Exception as ex:
+                log.append(f"  [history] AI match history was not updated ({type(ex).__name__}).")
 
     def _do_locked(log, cancel_event=None):
         log.append("[import] Queued — waiting for import worker slot…")

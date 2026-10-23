@@ -368,6 +368,39 @@ def _review_origin_payload(folder_path: str = "", suggestion: Optional[Dict[str,
     return {field: payload.get(field, "") for field in REVIEW_ORIGIN_FIELDS if payload.get(field, "") != ""}
 
 
+# F16: a client may propose an identity, never evidence. Everything the
+# server computes (mb_valid, confidence, preflight, track_mapping, status,
+# review_evidence, folder_signature, ...) is dropped; revalidation recomputes it.
+REVIEW_CLIENT_SUGGESTION_FIELDS = (
+    "mb_albumid", "mb_releasegroupid", "representative_mb_albumid", "album", "albumartist",
+    "artist", "year", "label", "country", "reason",
+)
+REVIEW_CLIENT_TEXT_MAX = 500  # per client-supplied string (suggestion and origin)
+
+
+def _client_review_suggestion(raw: Any) -> Dict[str, Any]:
+    """The identity a client proposes for a Review item, bounded."""
+    if not isinstance(raw, dict):
+        return {}
+    return {k: (v[:REVIEW_CLIENT_TEXT_MAX] if isinstance(v, str) else v)
+            for k in REVIEW_CLIENT_SUGGESTION_FIELDS
+            for v in (raw.get(k),)
+            if isinstance(v, (str, int)) and not isinstance(v, bool)}
+
+
+def _client_review_origin(raw: Any, folder_path: str) -> Dict[str, str]:
+    """Display-only origin labels a client sent beside a suggestion: plain
+    bounded strings, and the folder is always the validated one."""
+    if not isinstance(raw, dict):
+        return {}
+    origin = {field: _s(raw.get(field))[:REVIEW_CLIENT_TEXT_MAX] for field in REVIEW_ORIGIN_FIELDS
+              if isinstance(raw.get(field), (str, int)) and not isinstance(raw.get(field), bool)
+              and _s(raw.get(field)).strip()}
+    if origin:
+        origin["source_folder"] = folder_path
+    return origin
+
+
 def _compact_mb_candidate(candidate: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     c = candidate or {}
     score = c.get("_match_score") or {}
