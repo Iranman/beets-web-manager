@@ -217,8 +217,10 @@ def _import_review_suggestion_is_stale(item: Dict[str, Any]) -> bool:
     matches the folder's current contents. An empty stored signature is
     inconclusive (older items predate this field), not stale — don't
     false-positive on those."""
-    stored_sig = _s((item or {}).get("folder_signature") or "")
-    path = _s((item or {}).get("path") or "")
+    item = item or {}
+    suggestion = item.get("suggestion") if isinstance(item.get("suggestion"), dict) else {}
+    stored_sig = _s(suggestion.get("folder_signature") or item.get("folder_signature") or "")
+    path = _s(item.get("path") or "")
     if not stored_sig or not path:
         return False
     return _import_review_folder_signature(path) != stored_sig
@@ -950,6 +952,8 @@ def _pending_item_is_ready_for_backend_auto_import(item: Dict[str, Any]) -> bool
 
 
 _UNTRUSTED_STORED_REVIEW_PATH = "Stored review path is not under an approved import root."
+_STALE_STORED_SUGGESTION = ("The folder changed after its match was computed; "
+                            "revalidate it before it can be imported automatically.")
 
 
 def _run_import_review_auto_enqueue_ready_batch(limit: int = 5,
@@ -978,6 +982,15 @@ def _run_import_review_auto_enqueue_ready_batch(limit: int = 5,
                 continue
             if not _pending_item_is_ready_for_backend_auto_import(item):
                 skipped += 1
+                continue
+            # This import replays the stored track mapping and evidence; they
+            # describe the files that were fingerprinted, not ones added or
+            # replaced since.
+            if _import_review_suggestion_is_stale(item):
+                skipped += 1
+                results.append({"path": path, "queued": False, "reason": _STALE_STORED_SUGGESTION})
+                if log is not None:
+                    log.append(f"Skipped {Path(path).name or path}: {_STALE_STORED_SUGGESTION}")
                 continue
             item_payload = _import_review_payload_from_pending_item(item)
             eligibility = evaluate_import_eligibility(item_payload)
@@ -1232,6 +1245,8 @@ def _update_pending_review_revalidation(
                 suggestion["representative_release_group_id"] = selected_match.get("representative_release_group_id", "")
                 suggestion["rejected_representative_release_id"] = selected_match.get("rejected_representative_release_id", "")
                 suggestion["confidence_score"] = selected_match.get("confidence_score")
+                # The evidence above is new; the old signature would mark it stale.
+                suggestion["folder_signature"] = _s(selected_match.get("folder_signature"))
                 item["suggestion"] = suggestion
                 evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
                 evidence = dict(evidence)
@@ -1332,6 +1347,9 @@ def _run_import_review_revalidation(review_ids: Iterable[str], *, auto_enqueue: 
                     "error": "Review item has no source path or MusicBrainz Release Group ID.",
                 })
                 continue
+            # Taken before the comparison, so files that change while it runs
+            # leave the stored match stale rather than apparently current.
+            folder_signature = _import_review_folder_signature(path)
             comparison = _candidate_track_comparison_payload(
                 representative_release_id,
                 path,
@@ -1360,6 +1378,7 @@ def _run_import_review_revalidation(review_ids: Iterable[str], *, auto_enqueue: 
             ) if representative_release_id else None
             preflight = _import_review_revalidation_preflight(comparison, acoustic_preflight)
             selected_match = _import_review_build_revalidated_match(item, comparison, preflight)
+            selected_match["folder_signature"] = folder_signature
             note = selected_match.get("preflight_reason", "")
             if _update_pending_review_revalidation(path, selected_match, preflight, note):
                 updated += 1
