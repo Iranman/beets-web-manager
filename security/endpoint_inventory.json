@@ -7,7 +7,7 @@
     "security_classification/purpose/destructive_or_high_impact/rate_limit_required/existing_security_tests are read from security/endpoint_review_manifest.json (a separate, hand-reviewed file this script only ever reads, never writes) for routes that already exist there; routes not yet in that manifest are marked 'NEEDS_REVIEW' in those fields rather than guessed -- see needs_review_route_count below.",
     "Static inventory does not prove object-level authorization or every helper a route calls."
   ],
-  "route_count": 288,
+  "route_count": 290,
   "needs_review_route_count": 0,
   "public_endpoint_allowlist": [
     {
@@ -6241,6 +6241,58 @@
       ]
     },
     {
+      "method": "POST",
+      "route": "/api/plex/sync/audit",
+      "endpoint": "plex_sync_audit",
+      "source_file": "routes_plex_sync.py",
+      "line": 49,
+      "auth_required": true,
+      "public_pre_setup_only": false,
+      "changes_state": true,
+      "csrf_required": true,
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Starts the read-only Plex library-sync audit as a tracked job: folder naming verdicts across MUSIC_ROOT, per-file readability judged for the group the Plex server runs as (POSIX ACL masks), the embedded beets library joined by album directory, and the Plex music section track index joined by file path. Writes nothing and touches no music file; outbound calls are Plex reads only.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "POST",
+      "route": "/api/plex/sync/heal",
+      "endpoint": "plex_sync_heal",
+      "source_file": "routes_plex_sync.py",
+      "line": 62,
+      "auth_required": true,
+      "public_pre_setup_only": false,
+      "changes_state": true,
+      "csrf_required": true,
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Starts the Plex library-sync heal as a tracked job with individually opt-in actions: chmod adds group read/traverse bits (and chgrps only where no POSIX ACL entry covers the Plex group; bits never removed), touch bumps repaired album directories and their parents so Plex rescan sees them, refresh triggers one Plex scan. Nothing is deleted, moved or rewritten; each action defaults off and must be enabled by environment or request body; PLEX_SYNC_MAX_REPAIR_PATHS caps edits per run.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
       "method": "GET",
       "route": "/api/setup/status",
       "endpoint": "setup_status",
@@ -7370,5 +7422,5 @@
       ]
     }
   ],
-  "generated_at": "2026-10-22"
+  "generated_at": "2026-10-23"
 }
