@@ -275,7 +275,7 @@ def _redact_origin(url: str) -> str:
         return "<redacted>"
 
 
-def _log_rejection_diagnostic(err: Any) -> None:
+def _log_rejection_diagnostic(err: Any, raw_exc: Any = None) -> None:
     global _rejection_diagnostic_logged
     try:
         if getattr(err, "outcome", None) != provider_boundary.ProviderOutcome.REJECTED:
@@ -285,6 +285,12 @@ def _log_rejection_diagnostic(err: Any) -> None:
         _rejection_diagnostic_logged = True
         import sys as _sys
         from backend import security as _security
+        # The RAW policy exception names the exact refusal (classify_exception
+        # collapses it to "blocked by outbound URL policy"): e.g. a cross-origin
+        # redirect carries the redacted target origin here. Fixed sentences +
+        # redacted origins only, never a secret.
+        raw_type = type(raw_exc).__name__ if raw_exc is not None else type(err).__name__
+        raw_msg = str(raw_exc) if raw_exc is not None else str(err)
         resolver = provider_boundary._CONFIGURED_URL_RESOLVERS.get("lidarr")
         resolver_value = None
         if resolver is not None:
@@ -301,9 +307,11 @@ def _log_rejection_diagnostic(err: Any) -> None:
         would_trust = _security.implicit_rule_for_url(cfg_url)
         app_runtime._app_logger.warning(
             "LIDARR TRUST DIAGNOSTIC (temporary, v0.13.3): folder-MBID Lidarr call "
-            "REJECTED by outbound policy. configured_url(lidarr)=%r resolver_registered=%s "
-            "resolver()=%r app_runtime.LIDARR_URL=%r would_trust_rule=%r live_TRUSTED_RULE=%r "
-            "ids{app_runtime=%s security=%s provider_boundary=%s}",
+            "REJECTED by outbound policy. raw_error=%s: %s configured_url(lidarr)=%r "
+            "resolver_registered=%s resolver()=%r app_runtime.LIDARR_URL=%r would_trust_rule=%r "
+            "live_TRUSTED_RULE=%r ids{app_runtime=%s security=%s provider_boundary=%s}",
+            raw_type,
+            raw_msg,
             _redact_origin(cfg_url),
             resolver is not None,
             resolver_value,
@@ -336,12 +344,12 @@ def _lidarr_get_list(path: str, *, timeout: float) -> List[Dict[str, Any]]:
         with provider_boundary.opened("lidarr", req, timeout=timeout) as resp:
             data = json.loads(resp.read() or b"[]")
     except provider_boundary.ProviderError as err:
-        _log_rejection_diagnostic(err)
+        _log_rejection_diagnostic(err, err)
         raise
     except Exception as exc:  # classify timeout/HTTP/URL/malformed/policy -> ProviderError
         err = provider_boundary.classify_exception(exc)
         err.provider = err.provider or "lidarr"
-        _log_rejection_diagnostic(err)
+        _log_rejection_diagnostic(err, exc)
         raise err from exc
     if not isinstance(data, list):
         raise provider_boundary.ProviderError(

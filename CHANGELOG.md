@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## v0.13.4 - 2026-10-22
+
+### Changed
+
+- **A refused cross-origin redirect from a configured service URL now names the redacted redirect target.** `SafeRedirectHandler` already refuses a redirect that leaves a configured service's own origin (the implicit trust pins scheme+host+port); its `OutboundPolicyError` now includes the redacted target origin (`scheme://host:port`, path hashed — never a secret), so an operator diagnostic can say exactly where the service tried to redirect. Behaviour is otherwise unchanged.
+
+- **Temporary Lidarr boot-trust diagnostic (v0.13.3) extended to log the RAW outbound-policy error.** The live v0.13.3 diagnostic confirmed the folder-MBID resolver's Lidarr call is rejected with a VALID configured-URL trust rule (`configured_url` correct, `would_trust_rule` valid) — i.e. not the empty-resolver case and, per direct instrumentation, not a thread/contextvar-inheritance case (the trusted rule IS visible to `secure_urlopen` on the worker thread). The one path that rejects a correctly-configured call is a cross-origin redirect from the service endpoint. The diagnostic now also logs `type(exc)` and the raw policy message (fixed sentences + redacted origins, no secret), so the next deploy names the exact redirect target (e.g. `http -> https` on the same host:port, or a different port). Still fires only on `ProviderOutcome.REJECTED`, once per process, and remains temporary pending removal once the live target is confirmed and the redirect-trust policy decision is made. New regression tests: `tests/test_provider_trust_redirect_diagnostic.py`.
+
 ## v0.13.3 - 2026-10-22
 
 ### Fixed
