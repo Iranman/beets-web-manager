@@ -4620,13 +4620,21 @@ def _apply_folder_mbid_names(
             done_folders.append(str(source))
             applied.append({**record, "operation_ids": [o["operation_id"] for o in new_ops]})
             _emit(str(source), "renamed")
-        elif res.get("code") == "folder_cleanup_db_references":
-            # A disk-only row that gained Beets items since the folder_db
-            # snapshot (a genuine race). Nothing mutated -> refund the budget.
+        elif res.get("code") == "folder_cleanup_db_references" or res.get("step_error_code") == "PATH_IS_TRACKED":
+            # Beets refused: the folder still holds tracked items -- caught by
+            # the plan-time DB-reference check (``folder_cleanup_db_references``)
+            # OR the plugin's apply-time guard (``PATH_IS_TRACKED``), which reads
+            # the live Beets DB directly. Web Manager's own path view missed it
+            # (a disk-only row that just gained items, or a path-representation
+            # gap between the adapter and Beets), so it was routed here as a bare
+            # rename. Both guards precede the on-disk rename, so NOTHING was
+            # mutated: refund the budget and HOLD for a direct relocation, never
+            # record a failed job on a folder that is actually tracked (the live
+            # folder_cleanup_rename_failed / PATH_IS_TRACKED error).
             attempted -= 1
             skipped.append({**record, "reason": "became_tracked_needs_relocation",
                             "error": res.get("error")})
-            _emit(str(source), "skipped (now DB-tracked -- needs relocation)")
+            _emit(str(source), "skipped (DB-tracked -- needs relocation)")
         else:
             new_ops = list(res.get("operations") or [])
             if not new_ops and res.get("operation_id"):

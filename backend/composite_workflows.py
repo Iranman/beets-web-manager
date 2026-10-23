@@ -1809,8 +1809,12 @@ def safe_rename_library_folder(
             st.update(op_id, status="Failed", append_logs=[f"Apply raised: {exc}"])
             raise
     if not res.get("ok"):
+        # Surface the plugin's step code (e.g. PATH_IS_TRACKED from the
+        # apply-time tracked guard) so a caller can tell a tracked-folder
+        # refusal apart from a real failure and HOLD instead of erroring.
         return {"ok": False, "renamed": False, "operation_id": op_id,
-                "code": res.get("code") or "apply_failed", "error": res.get("error") or "Rename failed."}
+                "code": res.get("code") or "apply_failed", "error": res.get("error") or "Rename failed.",
+                "step_error_code": res.get("step_error_code")}
     return {"ok": True, "renamed": bool(res.get("moved_records")), "operation_id": op_id,
             "status": res.get("status"), "moved_records": res.get("moved_records") or []}
 
