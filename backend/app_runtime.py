@@ -219,6 +219,23 @@ PLEX_SYNC_MAX_UNMATCHED_REPLACE = _env_int("PLEX_SYNC_MAX_UNMATCHED_REPLACE", 25
 PLEX_PLAYLIST_CHUNK_SIZE = _env_int("PLEX_PLAYLIST_CHUNK_SIZE", 200, minimum=25, maximum=500)
 
 
+# Plex library-sync audit / auto-heal controls.
+# PLEX_FS_GID is the numeric primary group the Plex media server runs as on the
+# host (linuxserver.io images document PUID/PGID 568, which TrueNAS maps to the
+# "apps"/"plex" group). Music files Plex cannot read by this group never reach
+# the library, so the audit uses it to classify files and the heal to decide
+# permission repairs. It is a documented default, never an identity assumption.
+PLEX_FS_GID = _env_int("PLEX_FS_GID", 568, minimum=0)
+# Every auto-heal action is individually opt-in and off by default.
+# chmod is followed by an mtime bump (touch) because that pairing is what
+# makes a repaired file visible to Plex's incremental scanner; the refresh
+# then asks Plex to rescan.
+PLEX_SYNC_AUTO_CHMOD = _env_flag("PLEX_SYNC_AUTO_CHMOD", False)
+PLEX_SYNC_AUTO_TOUCH = _env_flag("PLEX_SYNC_AUTO_TOUCH", False)
+PLEX_SYNC_AUTO_REFRESH = _env_flag("PLEX_SYNC_AUTO_REFRESH", False)
+PLEX_SYNC_MAX_REPAIR_PATHS = _env_int("PLEX_SYNC_MAX_REPAIR_PATHS", 20000, minimum=100)
+
+
 LIDARR_URL    = (
     os.environ.get("LIDARR_URL", "").strip()
     or _config_file_first_line("LIDARR_URL_FILE", "/config/lidarr_url")
