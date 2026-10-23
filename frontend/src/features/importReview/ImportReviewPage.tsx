@@ -1695,6 +1695,15 @@ function optionalAiWarning(message: string): string {
     ? 'AI ranking was skipped because no provider is configured.'
     : '';
 }
+
+/** The server refused this Find Match because others are running (503
+ * suggest_busy): retryable, not a failure. */
+function findMatchBusyMessage(err: unknown): string {
+  const body = apiErrorBody(err);
+  return body?.code === 'suggest_busy'
+    ? body.error || 'Find Match is already running for other items; try again in a moment.'
+    : '';
+}
 export function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?: SelectedMatch): { rows: MatchingSafetyRow[]; warnings: string[] } {
   const suggestion = response?.suggestion ?? response?.suggestions;
   const contract = isRecordValue(selectedMatch?.matching_contract)
@@ -3421,6 +3430,9 @@ export function ImportReviewPage({
   const targetPreviewKeysRef = useRef<Record<string, string>>({});
   const queueSnapshotRef = useRef('');
   const reviewItemStateKeysRef = useRef<Record<string, string>>({});
+  const autoSuggestInFlightRef = useRef('');
+  const autoSuggestTriedRef = useRef('');
+  const [autoSuggestSettled, setAutoSuggestSettled] = useState(0);
   const [confirmIntent, setConfirmIntent] = useState<ConfirmIntent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -3885,8 +3897,11 @@ export function ImportReviewPage({
   }, [activeItem, selectedMatches]);
 
   // Auto-start Find Match only while the Review tab is active and the item needs identification.
-  // Fires only when the cursor moves to a new item; checks current state synchronously
-  // so it won't re-fire after the suggestion arrives.
+  // One runs at a time: each holds a server worker for seconds (fingerprints, rate-limited
+  // MusicBrainz, AI), so stepping through items must not start one per item. When it settles,
+  // the item now under the cursor gets its turn. Each item is tried once per visit, so a
+  // refusal or failure is never retried in a loop.
+  useEffect(() => { autoSuggestTriedRef.current = ''; }, [activeItem?.id]);
   useEffect(() => {
     if (!active) return;
     if (!activeItem) return;
@@ -3896,9 +3911,15 @@ export function ImportReviewPage({
     if (mbids[item.id]) return;
     if (actions[item.id]?.status === 'running') return;
     if (submittedItemIdsRef.current.has(item.id)) return;
-    void handleSuggest(item);
+    if (autoSuggestTriedRef.current === item.id || autoSuggestInFlightRef.current) return;
+    autoSuggestTriedRef.current = item.id;
+    autoSuggestInFlightRef.current = item.id;
+    void handleSuggest(item).finally(() => {
+      autoSuggestInFlightRef.current = '';
+      setAutoSuggestSettled((count) => count + 1);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, activeItem?.id]);
+  }, [active, activeItem?.id, autoSuggestSettled]);
 
   const handleCleanupStale = useCallback(async () => {
     setCleanupBusy(true);
@@ -4199,8 +4220,8 @@ export function ImportReviewPage({
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        const aiWarning = optionalAiWarning(message);
-        setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
+        const warning = findMatchBusyMessage(err) || optionalAiWarning(message);
+        setAction(item.id, { status: warning ? 'warning' : 'error', message: warning || message });
       }
       return;
     }
@@ -4243,8 +4264,8 @@ export function ImportReviewPage({
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const aiWarning = optionalAiWarning(message);
-      setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
+      const warning = findMatchBusyMessage(err) || optionalAiWarning(message);
+      setAction(item.id, { status: warning ? 'warning' : 'error', message: warning || message });
     }
   }, [setAction]);
 
