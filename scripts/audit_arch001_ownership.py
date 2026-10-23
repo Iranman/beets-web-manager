@@ -77,7 +77,7 @@ EXTRA_OWNERS = {
     "CLEANUP": ["routes_cleanup.py"],
     "DEDUP": ["routes_cleanup.py"],
     "PLAYLIST": ["routes_playlist.py"],
-    "PLEX": ["routes_playlist.py"],
+    "PLEX": ["routes_playlist.py", "backend/plex_sync_service.py", "routes_plex_sync.py"],
     "MAINTENANCE": ["routes_maintenance.py"],
     "TRANSACTIONS": ["routes_maintenance.py"],
     "ACQUISITION": ["routes_acquisition.py"],

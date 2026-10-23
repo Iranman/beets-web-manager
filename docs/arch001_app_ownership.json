@@ -209,6 +209,7 @@
    "callers": [
     "_album_cleanup_safe_artwork_relative",
     "_album_title_match",
+    "_build_plex_presence",
     "_music_format_replace_rows",
     "_music_format_scan_library",
     "_playlist_apply_manifest_replacements",
@@ -230,10 +231,9 @@
     "_playlist_matched_rows_page",
     "_playlist_rows_for_saved_playlist",
     "_playlist_run_source_sync",
-    "_playlist_suggestions_for_track",
-    "_playlist_sync_all"
+    "_playlist_suggestions_for_track"
    ],
-   "caller_count": 36,
+   "caller_count": 37,
    "dependencies": [
     "react_index_response"
    ]
@@ -452,8 +452,8 @@
    "name": "__getattr__",
    "module": "app.py",
    "lines": [
-    507,
-    517
+    508,
+    518
    ],
    "size": 11,
    "body_lines": 10,
@@ -470,8 +470,8 @@
    "name": "_load_route_module",
    "module": "app.py",
    "lines": [
-    534,
-    547
+    536,
+    549
    ],
    "size": 14,
    "body_lines": 13,
@@ -525,7 +525,7 @@
     "_ai_batch_load_state",
     "_ai_batch_normalize_folder_outcome"
    ],
-   "caller_count": 643,
+   "caller_count": 650,
    "dependencies": []
   },
   {
@@ -669,8 +669,8 @@
    "name": "validated_downloads_root",
    "module": "backend/app_runtime.py",
    "lines": [
-    335,
-    340
+    352,
+    357
    ],
    "size": 6,
    "body_lines": 3,
@@ -690,8 +690,8 @@
    "name": "_is_valid_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    505,
-    506
+    522,
+    523
    ],
    "size": 2,
    "body_lines": 1,
@@ -714,8 +714,8 @@
    "name": "_extract_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    599,
-    606
+    616,
+    623
    ],
    "size": 8,
    "body_lines": 6,
@@ -746,8 +746,8 @@
    "name": "_read_beets_plugin_list",
    "module": "backend/app_runtime.py",
    "lines": [
-    615,
-    635
+    632,
+    652
    ],
    "size": 21,
    "body_lines": 19,
@@ -766,8 +766,8 @@
    "name": "_sqlite_is_locked_error",
    "module": "backend/app_runtime.py",
    "lines": [
-    647,
-    651
+    664,
+    668
    ],
    "size": 5,
    "body_lines": 4,
@@ -786,8 +786,8 @@
    "name": "_sqlite_write_retry",
    "module": "backend/app_runtime.py",
    "lines": [
-    654,
-    664
+    671,
+    681
    ],
    "size": 11,
    "body_lines": 10,
@@ -806,8 +806,8 @@
    "name": "_redact_secret_assignment_match",
    "module": "backend/app_runtime.py",
    "lines": [
-    700,
-    703
+    717,
+    720
    ],
    "size": 4,
    "body_lines": 3,
@@ -826,8 +826,8 @@
    "name": "_redact_security_text",
    "module": "backend/app_runtime.py",
    "lines": [
-    720,
-    724
+    737,
+    741
    ],
    "size": 5,
    "body_lines": 4,
@@ -838,6 +838,7 @@
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
     "_ai_review_album_track_candidates",
+    "_build_plex_presence",
     "_fetch_artwork_after_retag",
     "_handle_unexpected_error",
     "_item_attach_recording",
@@ -852,12 +853,13 @@
     "_trigger_plex_refresh",
     "_ytdlp_auth_smoke_check",
     "ai_batch_reconcile_artwork",
+    "apply_plex_sync_heal",
     "create_unmatched_draft",
     "playlist_create",
     "playlist_delete",
     "start_album_download"
    ],
-   "caller_count": 19,
+   "caller_count": 21,
    "dependencies": [
     "_redact_secret_assignment_match",
     "_s"
@@ -867,8 +869,8 @@
    "name": "_split_mbid_values",
    "module": "backend/app_runtime.py",
    "lines": [
-    727,
-    737
+    744,
+    754
    ],
    "size": 11,
    "body_lines": 10,
@@ -890,8 +892,8 @@
    "name": "_path_is_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    740,
-    745
+    757,
+    762
    ],
    "size": 6,
    "body_lines": 5,
@@ -934,8 +936,8 @@
    "name": "_split_beets_multi",
    "module": "backend/app_runtime.py",
    "lines": [
-    748,
-    759
+    765,
+    776
    ],
    "size": 12,
    "body_lines": 10,
@@ -962,8 +964,8 @@
    "name": "_split_collab_credit",
    "module": "backend/app_runtime.py",
    "lines": [
-    762,
-    779
+    779,
+    796
    ],
    "size": 18,
    "body_lines": 11,
@@ -985,8 +987,8 @@
    "name": "_path_lexically_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    782,
-    789
+    799,
+    806
    ],
    "size": 8,
    "body_lines": 7,
@@ -1009,8 +1011,8 @@
    "name": "_path_has_symlink_component_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    792,
-    806
+    809,
+    823
    ],
    "size": 15,
    "body_lines": 14,
@@ -1038,8 +1040,8 @@
    "name": "_normalize_name",
    "module": "backend/app_runtime.py",
    "lines": [
-    836,
-    839
+    853,
+    856
    ],
    "size": 4,
    "body_lines": 3,
@@ -1063,8 +1065,8 @@
    "name": "_path_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    842,
-    852
+    859,
+    869
    ],
    "size": 11,
    "body_lines": 10,
@@ -1099,8 +1101,8 @@
    "name": "_safe_path_component",
    "module": "backend/app_runtime.py",
    "lines": [
-    855,
-    869
+    872,
+    886
    ],
    "size": 15,
    "body_lines": 14,
@@ -1125,8 +1127,8 @@
    "name": "_same_resolved_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    872,
-    876
+    889,
+    893
    ],
    "size": 5,
    "body_lines": 4,
@@ -1147,8 +1149,8 @@
    "name": "_safe_beets_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    879,
-    898
+    896,
+    915
    ],
    "size": 20,
    "body_lines": 11,
@@ -1169,8 +1171,8 @@
    "name": "_safe_inventory_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    901,
-    910
+    918,
+    927
    ],
    "size": 10,
    "body_lines": 7,
@@ -1193,8 +1195,8 @@
    "name": "_safe_operation_status_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    913,
-    922
+    930,
+    939
    ],
    "size": 10,
    "body_lines": 7,
@@ -1215,8 +1217,8 @@
    "name": "_safe_apply_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    925,
-    935
+    942,
+    952
    ],
    "size": 11,
    "body_lines": 7,
@@ -1237,8 +1239,8 @@
    "name": "_norm",
    "module": "backend/app_runtime.py",
    "lines": [
-    940,
-    941
+    957,
+    958
    ],
    "size": 2,
    "body_lines": 1,
@@ -1274,15 +1276,15 @@
     "_playlist_run_source_sync",
     "_playlist_saved_job_states_for_name"
    ],
-   "caller_count": 43,
+   "caller_count": 44,
    "dependencies": []
   },
   {
    "name": "_db",
    "module": "backend/app_runtime.py",
    "lines": [
-    946,
-    954
+    963,
+    971
    ],
    "size": 9,
    "body_lines": 2,
@@ -1299,8 +1301,8 @@
    "name": "_durable_jobs_dir",
    "module": "backend/app_runtime.py",
    "lines": [
-    970,
-    975
+    987,
+    992
    ],
    "size": 6,
    "body_lines": 3,
@@ -1317,8 +1319,8 @@
    "name": "register_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    988,
-    990
+    1005,
+    1007
    ],
    "size": 3,
    "body_lines": 2,
@@ -1335,8 +1337,8 @@
    "name": "registered_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    993,
-    996
+    1010,
+    1013
    ],
    "size": 4,
    "body_lines": 3,
@@ -4085,10 +4087,10 @@
    "module": "backend/plex_service.py",
    "lines": [
     581,
-    606
+    622
    ],
-   "size": 26,
-   "body_lines": 24,
+   "size": 42,
+   "body_lines": 40,
    "route": null,
    "mutation_capable": false,
    "domain": "PLEX",
@@ -4128,8 +4130,8 @@
    "name": "_plex_is_final_library_path",
    "module": "backend/plex_service.py",
    "lines": [
-    609,
-    631
+    625,
+    647
    ],
    "size": 23,
    "body_lines": 22,
@@ -4156,8 +4158,8 @@
    "name": "_plex_beets_path_candidates",
    "module": "backend/plex_service.py",
    "lines": [
-    634,
-    672
+    650,
+    688
    ],
    "size": 39,
    "body_lines": 37,
@@ -4183,8 +4185,8 @@
    "name": "_plex_path_keys_for_beets_item",
    "module": "backend/plex_service.py",
    "lines": [
-    675,
-    680
+    691,
+    696
    ],
    "size": 6,
    "body_lines": 4,
@@ -4206,8 +4208,8 @@
    "name": "_plex_path_keys_for_plex_file",
    "module": "backend/plex_service.py",
    "lines": [
-    683,
-    695
+    699,
+    711
    ],
    "size": 13,
    "body_lines": 11,
@@ -4231,8 +4233,8 @@
    "name": "_plex_track_part_paths",
    "module": "backend/plex_service.py",
    "lines": [
-    698,
-    705
+    714,
+    721
    ],
    "size": 8,
    "body_lines": 7,
@@ -4256,8 +4258,8 @@
    "name": "_plex_duration_seconds",
    "module": "backend/plex_service.py",
    "lines": [
-    708,
-    717
+    724,
+    733
    ],
    "size": 10,
    "body_lines": 9,
@@ -4277,8 +4279,8 @@
    "name": "_plex_track_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    720,
-    728
+    736,
+    744
    ],
    "size": 9,
    "body_lines": 8,
@@ -4300,8 +4302,8 @@
    "name": "_plex_item_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    731,
-    732
+    747,
+    748
    ],
    "size": 2,
    "body_lines": 1,
@@ -4323,8 +4325,8 @@
    "name": "_plex_duration_values",
    "module": "backend/plex_service.py",
    "lines": [
-    735,
-    737
+    751,
+    753
    ],
    "size": 3,
    "body_lines": 2,
@@ -4346,8 +4348,8 @@
    "name": "_plex_track_mbids",
    "module": "backend/plex_service.py",
    "lines": [
-    740,
-    745
+    756,
+    761
    ],
    "size": 6,
    "body_lines": 5,
@@ -4368,8 +4370,8 @@
    "name": "_plex_item_lookup_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    748,
-    767
+    764,
+    783
    ],
    "size": 20,
    "body_lines": 19,
@@ -4393,8 +4395,8 @@
    "name": "_plex_track_lookup_rows",
    "module": "backend/plex_service.py",
    "lines": [
-    770,
-    792
+    786,
+    808
    ],
    "size": 23,
    "body_lines": 22,
@@ -4420,8 +4422,8 @@
    "name": "_plex_find_track",
    "module": "backend/plex_service.py",
    "lines": [
-    795,
-    808
+    811,
+    824
    ],
    "size": 14,
    "body_lines": 11,
@@ -4443,8 +4445,8 @@
    "name": "_plex_section_track_index",
    "module": "backend/plex_service.py",
    "lines": [
-    811,
-    982
+    827,
+    998
    ],
    "size": 172,
    "body_lines": 170,
@@ -4481,8 +4483,8 @@
    "name": "_plex_section_track_lookup",
    "module": "backend/plex_service.py",
    "lines": [
-    985,
-    987
+    1001,
+    1003
    ],
    "size": 3,
    "body_lines": 1,
@@ -4501,8 +4503,8 @@
    "name": "_plex_unique_index_value",
    "module": "backend/plex_service.py",
    "lines": [
-    990,
-    994
+    1006,
+    1010
    ],
    "size": 5,
    "body_lines": 4,
@@ -4521,8 +4523,8 @@
    "name": "_plex_pending_match_reason",
    "module": "backend/plex_service.py",
    "lines": [
-    997,
-    1024
+    1013,
+    1040
    ],
    "size": 28,
    "body_lines": 24,
@@ -4546,8 +4548,8 @@
    "name": "_plex_pending_match_row",
    "module": "backend/plex_service.py",
    "lines": [
-    1027,
-    1043
+    1043,
+    1059
    ],
    "size": 17,
    "body_lines": 13,
@@ -4570,8 +4572,8 @@
    "name": "_plex_track_keys_for_items",
    "module": "backend/plex_service.py",
    "lines": [
-    1046,
-    1354
+    1062,
+    1370
    ],
    "size": 309,
    "body_lines": 306,
@@ -4613,8 +4615,8 @@
    "name": "_playlist_path_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    1357,
-    1394
+    1373,
+    1410
    ],
    "size": 38,
    "body_lines": 37,
@@ -4639,8 +4641,8 @@
    "name": "_plex_track_file",
    "module": "backend/plex_service.py",
    "lines": [
-    1397,
-    1399
+    1413,
+    1415
    ],
    "size": 3,
    "body_lines": 2,
@@ -4661,8 +4663,8 @@
    "name": "_plex_failure",
    "module": "backend/plex_service.py",
    "lines": [
-    1402,
-    1426
+    1418,
+    1442
    ],
    "size": 25,
    "body_lines": 21,
@@ -4687,8 +4689,8 @@
    "name": "_plex_configured",
    "module": "backend/plex_service.py",
    "lines": [
-    1429,
-    1432
+    1445,
+    1448
    ],
    "size": 4,
    "body_lines": 2,
@@ -4711,8 +4713,8 @@
    "name": "_plex_display_url",
    "module": "backend/plex_service.py",
    "lines": [
-    1435,
-    1437
+    1451,
+    1453
    ],
    "size": 3,
    "body_lines": 1,
@@ -4731,8 +4733,8 @@
    "name": "_plex_status_payload",
    "module": "backend/plex_service.py",
    "lines": [
-    1440,
-    1480
+    1456,
+    1496
    ],
    "size": 41,
    "body_lines": 40,
@@ -4760,8 +4762,8 @@
    "name": "_playlist_status_id",
    "module": "backend/plex_service.py",
    "lines": [
-    1482,
-    1485
+    1498,
+    1501
    ],
    "size": 4,
    "body_lines": 3,
@@ -10074,9 +10076,10 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_album_cleanup_build_issue",
-    "_apply_folder_mbid_names"
+    "_apply_folder_mbid_names",
+    "audit_plex_sync"
    ],
-   "caller_count": 2,
+   "caller_count": 3,
    "dependencies": [
     "_album_cleanup_safe_component",
     "_s"
@@ -23754,9 +23757,9 @@
    "module": "backend/library_service.py",
    "lines": [
     4326,
-    4346
+    4350
    ],
-   "size": 21,
+   "size": 25,
    "body_lines": 12,
    "route": null,
    "mutation_capable": false,
@@ -23773,8 +23776,8 @@
    "name": "_apply_folder_mbid_names",
    "module": "backend/library_service.py",
    "lines": [
-    4349,
-    4674
+    4353,
+    4678
    ],
    "size": 326,
    "body_lines": 275,
@@ -23805,8 +23808,8 @@
    "name": "_root_folder_repair_scan",
    "module": "backend/library_service.py",
    "lines": [
-    4677,
-    4769
+    4681,
+    4773
    ],
    "size": 93,
    "body_lines": 84,
@@ -23828,8 +23831,8 @@
    "name": "_root_folder_repair_apply_safe",
    "module": "backend/library_service.py",
    "lines": [
-    4772,
-    4905
+    4776,
+    4909
    ],
    "size": 134,
    "body_lines": 125,
@@ -23854,8 +23857,8 @@
    "name": "_album_cleanup_duplicate_file_choice",
    "module": "backend/library_service.py",
    "lines": [
-    4908,
-    4915
+    4912,
+    4919
    ],
    "size": 8,
    "body_lines": 5,
@@ -23876,8 +23879,8 @@
    "name": "_root_folder_repair_save_report",
    "module": "backend/library_service.py",
    "lines": [
-    4918,
-    4928
+    4922,
+    4932
    ],
    "size": 11,
    "body_lines": 10,
@@ -23898,8 +23901,8 @@
    "name": "_merge_artist_dir_contents",
    "module": "backend/library_service.py",
    "lines": [
-    4931,
-    4990
+    4935,
+    4994
    ],
    "size": 60,
    "body_lines": 51,
@@ -23924,8 +23927,8 @@
    "name": "_artist_folder_repair_root",
    "module": "backend/library_service.py",
    "lines": [
-    4993,
-    5031
+    4997,
+    5035
    ],
    "size": 39,
    "body_lines": 25,
@@ -23950,8 +23953,8 @@
    "name": "_apply_artist_folder_groups",
    "module": "backend/library_service.py",
    "lines": [
-    5034,
-    5168
+    5038,
+    5172
    ],
    "size": 135,
    "body_lines": 132,
@@ -23980,8 +23983,8 @@
    "name": "_artist_folder_mbid_from_name",
    "module": "backend/library_service.py",
    "lines": [
-    5177,
-    5179
+    5181,
+    5183
    ],
    "size": 3,
    "body_lines": 2,
@@ -24002,8 +24005,8 @@
    "name": "_artist_folder_canonical_name",
    "module": "backend/library_service.py",
    "lines": [
-    5182,
-    5188
+    5186,
+    5192
    ],
    "size": 7,
    "body_lines": 5,
@@ -24025,8 +24028,8 @@
    "name": "_stamp_db_path_prefix_pairs",
    "module": "backend/library_service.py",
    "lines": [
-    5191,
-    5195
+    5195,
+    5199
    ],
    "size": 5,
    "body_lines": 4,
@@ -24043,8 +24046,8 @@
    "name": "_stamp_artist_folder_scan",
    "module": "backend/library_service.py",
    "lines": [
-    5198,
-    5458
+    5202,
+    5462
    ],
    "size": 261,
    "body_lines": 252,
@@ -24077,8 +24080,8 @@
    "name": "_stamp_artist_folder_candidates",
    "module": "backend/library_service.py",
    "lines": [
-    5461,
-    5462
+    5465,
+    5466
    ],
    "size": 2,
    "body_lines": 1,
@@ -24097,8 +24100,8 @@
    "name": "_append_stamp_candidate_log",
    "module": "backend/library_service.py",
    "lines": [
-    5465,
-    5477
+    5469,
+    5481
    ],
    "size": 13,
    "body_lines": 12,
@@ -24117,8 +24120,8 @@
    "name": "_append_stamp_skipped_log",
    "module": "backend/library_service.py",
    "lines": [
-    5480,
-    5498
+    5484,
+    5502
    ],
    "size": 19,
    "body_lines": 12,
@@ -24138,8 +24141,8 @@
    "name": "item_dict",
    "module": "backend/library_service.py",
    "lines": [
-    5501,
-    5514
+    5505,
+    5518
    ],
    "size": 14,
    "body_lines": 13,
@@ -24163,8 +24166,8 @@
    "name": "item_dict_full",
    "module": "backend/library_service.py",
    "lines": [
-    5517,
-    5525
+    5521,
+    5529
    ],
    "size": 9,
    "body_lines": 8,
@@ -24186,8 +24189,8 @@
    "name": "album_dict",
    "module": "backend/library_service.py",
    "lines": [
-    5528,
-    5538
+    5532,
+    5542
    ],
    "size": 11,
    "body_lines": 10,
@@ -24211,8 +24214,8 @@
    "name": "start_fetch_missing_art",
    "module": "backend/library_service.py",
    "lines": [
-    5543,
-    5614
+    5547,
+    5618
    ],
    "size": 72,
    "body_lines": 70,
@@ -24238,8 +24241,8 @@
    "name": "_missing_mb_album_row",
    "module": "backend/library_service.py",
    "lines": [
-    5630,
-    5658
+    5634,
+    5662
    ],
    "size": 29,
    "body_lines": 28,
@@ -24261,8 +24264,8 @@
    "name": "_missing_mb_item_row",
    "module": "backend/library_service.py",
    "lines": [
-    5661,
-    5718
+    5665,
+    5722
    ],
    "size": 58,
    "body_lines": 57,
@@ -24284,8 +24287,8 @@
    "name": "_missing_mb_rows",
    "module": "backend/library_service.py",
    "lines": [
-    5729,
-    5774
+    5733,
+    5778
    ],
    "size": 46,
    "body_lines": 43,
@@ -24311,8 +24314,8 @@
    "name": "library_missing_mb_payload",
    "module": "backend/library_service.py",
    "lines": [
-    5777,
-    5798
+    5781,
+    5802
    ],
    "size": 22,
    "body_lines": 12,
@@ -31024,6 +31027,546 @@
    ]
   },
   {
+   "name": "_stat",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    87,
+    91
+   ],
+   "size": 5,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "apply_plex_sync_heal",
+    "filesystem_findings"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_getxattr",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    94,
+    101
+   ],
+   "size": 8,
+   "body_lines": 7,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "apply_plex_sync_heal",
+    "filesystem_findings"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_chmod",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    104,
+    105
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "apply_plex_sync_heal"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_chown",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    108,
+    112
+   ],
+   "size": 5,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "apply_plex_sync_heal"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_utime",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    115,
+    116
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "apply_plex_sync_heal"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_decode_posix_acl",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    121,
+    144
+   ],
+   "size": 24,
+   "body_lines": 20,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "apply_plex_sync_heal",
+    "filesystem_findings"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_perm_allows",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    147,
+    151
+   ],
+   "size": 5,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_file_readable_for_gid",
+    "_repair_plan"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_file_readable_for_gid",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    154,
+    177
+   ],
+   "size": 24,
+   "body_lines": 18,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_repair_plan",
+    "filesystem_findings"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_perm_allows"
+   ]
+  },
+  {
+   "name": "_repair_plan",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    180,
+    221
+   ],
+   "size": 42,
+   "body_lines": 35,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "apply_plex_sync_heal",
+    "filesystem_findings"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_file_readable_for_gid",
+    "_perm_allows"
+   ]
+  },
+  {
+   "name": "_classify_dir_name",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    226,
+    245
+   ],
+   "size": 20,
+   "body_lines": 16,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "filesystem_findings"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_worse_name_status",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    251,
+    254
+   ],
+   "size": 4,
+   "body_lines": 3,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": []
+  },
+  {
+   "name": "_iter_child_dirs",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    259,
+    264
+   ],
+   "size": 6,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "filesystem_findings"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_audio_suffixes",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    267,
+    277
+   ],
+   "size": 11,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "audit_plex_sync",
+    "filesystem_findings"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_album_audio_scan",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    280,
+    309
+   ],
+   "size": 30,
+   "body_lines": 24,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "audit_plex_sync",
+    "filesystem_findings"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "filesystem_findings",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    312,
+    400
+   ],
+   "size": 89,
+   "body_lines": 86,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "apply_plex_sync_heal",
+    "audit_plex_sync"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_album_audio_scan",
+    "_audio_suffixes",
+    "_classify_dir_name",
+    "_decode_posix_acl",
+    "_file_readable_for_gid",
+    "_getxattr",
+    "_iter_child_dirs",
+    "_repair_plan",
+    "_stat"
+   ]
+  },
+  {
+   "name": "_beets_album_dirs",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    405,
+    434
+   ],
+   "size": 30,
+   "body_lines": 24,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "audit_plex_sync"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s",
+    "items"
+   ]
+  },
+  {
+   "name": "_build_plex_presence",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    437,
+    461
+   ],
+   "size": 25,
+   "body_lines": 22,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "audit_plex_sync"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_redact_security_text",
+    "_s",
+    "index"
+   ]
+  },
+  {
+   "name": "_path_in_plex",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    464,
+    476
+   ],
+   "size": 13,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "audit_plex_sync"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_plex_section_counts",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    479,
+    490
+   ],
+   "size": 12,
+   "body_lines": 11,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "audit_plex_sync"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_cap",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    495,
+    496
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "apply_plex_sync_heal",
+    "audit_plex_sync"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "audit_plex_sync",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    499,
+    602
+   ],
+   "size": 104,
+   "body_lines": 101,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "plex_sync_audit_job"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_album_audio_scan",
+    "_album_cleanup_canonical_name",
+    "_audio_suffixes",
+    "_beets_album_dirs",
+    "_build_plex_presence",
+    "_cap",
+    "_norm",
+    "_path_in_plex",
+    "_plex_section_counts",
+    "_s",
+    "filesystem_findings"
+   ]
+  },
+  {
+   "name": "plex_sync_audit_job",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    605,
+    608
+   ],
+   "size": 4,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "audit_plex_sync"
+   ]
+  },
+  {
+   "name": "apply_plex_sync_heal",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    613,
+    741
+   ],
+   "size": 129,
+   "body_lines": 122,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "plex_sync_heal_job"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_cap",
+    "_chmod",
+    "_chown",
+    "_decode_posix_acl",
+    "_getxattr",
+    "_redact_security_text",
+    "_repair_plan",
+    "_s",
+    "_stat",
+    "_utime",
+    "filesystem_findings"
+   ]
+  },
+  {
+   "name": "plex_sync_heal_job",
+   "module": "backend/plex_sync_service.py",
+   "lines": [
+    744,
+    749
+   ],
+   "size": 6,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "PLEX",
+   "desired_owner": "backend/plex_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "apply_plex_sync_heal"
+   ]
+  },
+  {
    "name": "api_plex_status",
    "module": "routes_playlist.py",
    "lines": [
@@ -31702,6 +32245,7 @@
     "_art_repair_attach_last_run",
     "_art_repair_build_report",
     "_artist_folder_album_rows",
+    "_beets_album_dirs",
     "_build_acquisition_queue_payload",
     "_compact_revalidation_summary",
     "_create_playlist_outputs",
@@ -31711,10 +32255,9 @@
     "_folder_track_search_titles",
     "_load_pending_reviews_locked",
     "_mark_pending_review_status",
-    "_match_album_run",
-    "_move_artwork_to_target"
+    "_match_album_run"
    ],
-   "caller_count": 48,
+   "caller_count": 49,
    "dependencies": [
     "item_dict"
    ]
@@ -37703,7 +38246,8 @@
   "favicon": "BOOTSTRAP",
   "react_spa_fallback": "BOOTSTRAP",
   "rollback_eligibility": "TRANSACTIONS",
-  "_missing_mb_rows": "LIBRARY"
+  "_missing_mb_rows": "LIBRARY",
+  "filesystem_findings": "PLEX"
  },
  "summary": {
   "BOOTSTRAP": {
@@ -37719,7 +38263,7 @@
    "lines": 11
   }
  },
- "app_py_lines": 578,
+ "app_py_lines": 580,
  "extracted_modules": [
   "backend/app_runtime.py",
   "backend/auth_service.py",
@@ -37749,6 +38293,7 @@
   "backend/import_review_service.py",
   "backend/dedup_service.py",
   "backend/transaction_service.py",
+  "backend/plex_sync_service.py",
   "routes_playlist.py",
   "routes_library.py",
   "routes_cleanup.py",
