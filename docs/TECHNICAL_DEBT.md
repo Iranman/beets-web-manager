@@ -302,6 +302,16 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Current risk: low. No queue item is lost; the cost is latency (N3), a repeated import attempt (N1) and less evidence on the review row (N2).
 - Priority: P3. Status: Open.
 
+## ARCH-034 AI Suggest In The Review Queue
+
+- Affected area: `backend/import_service.py` (`start_folder_import_with_id`), `backend/ai_service.py` (Find Match, AI match history), `backend/import_review_service.py` (auto-enqueue-ready, revalidation), `frontend/src/features/importReview/ImportReviewPage.tsx`.
+- (RESOLVED) `POST /api/folders/import-with-id` kept the client's whole `ai_suggestion`. A refused import queued its `preflight`, `track_mapping`, `mb_valid`, `review_evidence` and `folder_signature` as if the server had computed them, bypassing the F16 rule that `POST /api/ai-pending-review` already enforced, and a value that was not an object failed the job with a `TypeError`. Both routes now share `serializers._client_review_suggestion` and `_client_review_origin`: a proposed identity plus bounded, display-only origin labels whose folder is always the validated one.
+- (RESOLVED) AI match history recorded the submitted suggestion after every Review import, including imports of a different release the operator chose and manual imports with no suggestion. It now records only when the suggestion's Release Group (or, without one, its Release) is what Beets imported, stores the server-verified IDs, and writes atomically.
+- (RESOLVED) The `folder_signature` meant to detect a stored suggestion whose folder changed was never checked, so `auto-enqueue-ready` could import from a track mapping and evidence computed for other files. Find Match and revalidation now take the signature before gathering evidence, revalidation stores it with the match, and the unattended import skips a stale item and logs why. A suggestion stored before signatures existed is inconclusive, not stale.
+- (RESOLVED) Find Match runs synchronously for seconds, and the Review page started one for every item the cursor landed on, which could occupy every Waitress worker. The folder, album and item routes share a limit (two at the default `WEBCONTROL_THREADS=8`) and answer `503 suggest_busy` (retryable, with `Retry-After`) at once beyond it. The page runs one automatic Find Match at a time and shows a refusal as a warning.
+- Open: the AI review state files (`ai_match_history.json`, `recent_imports.json`, `ai_review_decisions.json`) are hardcoded under `/config`, the Beets config mount, instead of `WEB_MANAGER_DATA_DIR`; moving them is a state migration (a MINOR release). The Review page does not mark a stored suggestion as stale. Only the unattended import reads stored evidence; Apply on the page always needs a fresh Find Match or a validated ID and a fresh target preview.
+- Priority: P3 for the open items. Status: Open (narrowed).
+
 ## SEC-003 User-Supplied Outbound URLs (CodeQL #1350; supersedes the #18 dismissal)
 
 - Scope: `POST /api/submissions/reference-url` (`routes_submissions._fetch_open_graph_metadata`) and artwork image URLs from users or provider responses (`backend/artwork_service.py` `_download_album_art_bytes` and `_cache_artist_image`, `backend/musicbrainz_service.py` `_release_art_download`, `POST /api/albums/<id>/art/url`).
