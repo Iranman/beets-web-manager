@@ -2392,7 +2392,19 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
 
 
 def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_event=None, update_state=None, *, recover: bool = False, retry_failed: bool = False, job_id: str = "") -> Dict[str, Any]:
-    state = _ai_batch_load_state(batch_job_id) if recover else None
+    # Always load the persisted state first, for the fresh (non-recover) run
+    # too. _start_ai_batch_job already created -- and bumped the revision of
+    # -- this batch's store row before unblocking this worker, so a freshly
+    # built _ai_batch_initial_state (which has no `revision`) would make this
+    # worker's first _ai_batch_commit attempt an un-revisioned update of an
+    # already-existing row, which the ARCH-010 CAS contract correctly rejects
+    # ("expected_revision is required to update existing batch ..."). Loading
+    # threads the current revision through so the update passes the revision
+    # the row was last written at. For a fresh batch the loaded row is just
+    # that startup-created initial state (empty folder_states, which the
+    # non-recover disk walk below populates), so this is behavior-preserving;
+    # initial_state remains the fallback only if no row exists yet.
+    state = _ai_batch_load_state(batch_job_id)
     if not state:
         state = _ai_batch_initial_state(batch_job_id, scan_path, job_id=job_id)
     state["batch_job_id"] = batch_job_id

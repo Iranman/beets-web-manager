@@ -539,9 +539,14 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if self.trusted is not None and not rule_names_origin(self.trusted, newurl):
-            LOG.warning("blocked cross-origin redirect from a configured service URL: %s",
-                        redact_url_for_log(req.full_url))
-            raise OutboundPolicyError("cross-origin redirect from a configured service URL is refused")
+            LOG.warning("blocked cross-origin redirect from a configured service URL: %s -> %s",
+                        redact_url_for_log(req.full_url), redact_url_for_log(newurl))
+            # The redacted target origin (scheme/host:port, path hashed -- no
+            # secret) is carried in the message so an operator diagnostic can
+            # name exactly where the service tried to redirect.
+            raise OutboundPolicyError(
+                "cross-origin redirect from a configured service URL is refused "
+                f"(to {redact_url_for_log(newurl)})")
         validate_outbound_url(newurl, policy=self.policy, trusted=self.trusted)
         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_req is not None:
