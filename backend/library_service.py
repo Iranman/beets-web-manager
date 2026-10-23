@@ -4331,7 +4331,11 @@ def _album_db_paths_stale(adapter: Any, album_id: int) -> bool:
     A relocation moves files FROM their recorded DB paths, so against a stale
     DB it would skip every track (a partial-move error) and leave DB and disk
     inconsistent. Detecting it lets the caller HOLD (``needs_db_resync``)
-    instead of erroring or desyncing further -- never losing a file."""
+    instead of erroring or desyncing further -- never losing a file.
+
+    Uses ``os.path.exists`` (follows symlinks), not ``lexists``: a DANGLING
+    symlink at the DB path has no real file for Beets to move, so it must be
+    treated as stale -> HOLD, never relocated into a loud partial_move."""
     ad = adapter or beets_adapter
     try:
         album = ad.get_album(int(album_id), expand=True)
@@ -4342,7 +4346,7 @@ def _album_db_paths_stale(adapter: Any, album_id: int) -> bool:
     paths = composite_workflows._album_item_paths(album, ad, int(album_id))
     if not paths:
         return True
-    return any(not os.path.lexists(composite_workflows._item_abs_path(p))
+    return any(not os.path.exists(composite_workflows._item_abs_path(p))
                for p in paths.values())
 
 

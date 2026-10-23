@@ -377,6 +377,31 @@ class TrackedRelocationTests(unittest.TestCase):
         for p in os.listdir(folder):  # the renamed files are all still present
             self.assertTrue(p.startswith("resynced_") or p == "cover.jpg", p)
 
+    def test_dangling_symlink_db_path_held_needs_db_resync(self):
+        # A DB path that is a DANGLING symlink (link present, target gone) has
+        # no real file to move. os.path.lexists would call it present and let
+        # the relocation run -> Beets skips every track -> a loud rollback-able
+        # partial_move. os.path.exists treats it as stale -> HOLD needs_db_resync.
+        # Fails on lexists, passes on exists.
+        eng = self.eng
+        folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
+        album = self._album(folder, RGID)
+        before_paths, _ = eng.beets_state(album.id)
+        for p in list(before_paths.values()):  # replace each real file with a dangling link
+            os.remove(p)
+            try:
+                os.symlink(os.path.join(os.path.dirname(p), "gone-target"), p)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+        resolver = FakeResolver({"B": _resolved()})
+        res = ls._apply_folder_mbid_names([folder], dry_run=False, adapter=eng.ad,
+                                          store=eng.store, resolver=resolver)
+        self.assertTrue(res["ok"], res)  # not a partial_move error
+        self.assertEqual(res["final_summary"]["changed_count"], 0, res)
+        self.assertEqual(res["skipped"][0]["reason"], "needs_db_resync", res)
+        self.assertEqual(res["operations"], [])
+        self.assertEqual(eng.beets_state(album.id)[0], before_paths)  # DB untouched
+
     def test_tracked_dry_run_mutates_nothing(self):
         eng = self.eng
         folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")

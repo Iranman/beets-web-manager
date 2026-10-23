@@ -13,6 +13,7 @@ import base64
 import contextlib
 import copy
 import errno
+import functools
 import hashlib
 import inspect
 import json
@@ -1647,6 +1648,20 @@ def rollback_track_replacement(
 # -----------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=8)
+def _music_root_written_real(root: str) -> Tuple[str, str]:
+    """(abspath-normpath, realpath) of the MUSIC_ROOT string, cached.
+
+    ``realpath`` is a filesystem syscall and ``norm_library_path`` runs once
+    per Beets item during a full-library DB scan that repeats on every rename
+    (~5k renames x N items on the live library) -- resolving the root per item
+    turned the scan into a realpath syscall storm. The root is a stable mount
+    for the process's life, so caching it (keyed on the configured string, so
+    a changed MUSIC_ROOT recomputes) keeps the result identical while doing the
+    syscall once per distinct root."""
+    return os.path.abspath(os.path.normpath(root)), os.path.realpath(root)
+
+
 def norm_library_path(p: Any) -> str:
     """Normalize an absolute path for comparison against Beets item paths:
     absolute + normpath + normcase, with the configured MUSIC_ROOT (as
@@ -1660,13 +1675,13 @@ def norm_library_path(p: Any) -> str:
     classified tracked by the apply too, and no tracked (or realpath-desynced)
     path is ever sent down the disk-only bare-rename (C5/C6).
 
-    A pure string transform: nothing here touches the filesystem with the
-    caller's path (CodeQL #1381)."""
+    A pure string transform of the caller's path: the only filesystem access
+    is ``realpath`` of the trusted MUSIC_ROOT itself (CodeQL #1381)."""
     from backend.config_layers import music_root
-    written = os.path.abspath(os.path.normpath(music_root()))
+    written, real = _music_root_written_real(music_root())
     n = os.path.abspath(os.path.normpath(str(p)))
     if n == written or n.startswith(written.rstrip(os.sep) + os.sep):
-        n = os.path.realpath(music_root()) + n[len(written):]
+        n = real + n[len(written):]
     return os.path.normcase(n)
 
 
