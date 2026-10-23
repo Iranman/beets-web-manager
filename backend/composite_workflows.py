@@ -13,6 +13,7 @@ import base64
 import contextlib
 import copy
 import errno
+import functools
 import hashlib
 import inspect
 import json
@@ -1647,6 +1648,43 @@ def rollback_track_replacement(
 # -----------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=8)
+def _music_root_written_real(root: str) -> Tuple[str, str]:
+    """(abspath-normpath, realpath) of the MUSIC_ROOT string, cached.
+
+    ``realpath`` is a filesystem syscall and ``norm_library_path`` runs once
+    per Beets item during a full-library DB scan that repeats on every rename
+    (~5k renames x N items on the live library) -- resolving the root per item
+    turned the scan into a realpath syscall storm. The root is a stable mount
+    for the process's life, so caching it (keyed on the configured string, so
+    a changed MUSIC_ROOT recomputes) keeps the result identical while doing the
+    syscall once per distinct root."""
+    return os.path.abspath(os.path.normpath(root)), os.path.realpath(root)
+
+
+def norm_library_path(p: Any) -> str:
+    """Normalize an absolute path for comparison against Beets item paths:
+    absolute + normpath + normcase, with the configured MUSIC_ROOT (as
+    written) rewritten onto its realpath (F-243-2) so a symlinked MUSIC_ROOT
+    matches however Beets stored the item path.
+
+    The single source of truth for "is this path under that folder": the
+    engine's DB-reference refusal (``_library_refs_under``) AND the
+    folder-cleanup apply's tracked-detection both normalize through this, so
+    the two can never disagree -- a folder the engine treats as tracked is
+    classified tracked by the apply too, and no tracked (or realpath-desynced)
+    path is ever sent down the disk-only bare-rename (C5/C6).
+
+    A pure string transform of the caller's path: the only filesystem access
+    is ``realpath`` of the trusted MUSIC_ROOT itself (CodeQL #1381)."""
+    from backend.config_layers import music_root
+    written, real = _music_root_written_real(music_root())
+    n = os.path.abspath(os.path.normpath(str(p)))
+    if n == written or n.startswith(written.rstrip(os.sep) + os.sep):
+        n = real + n[len(written):]
+    return os.path.normcase(n)
+
+
 def _library_refs_under(folder: Any, adapter: Optional[BeetsAdapter] = None) -> List[Dict[str, Any]]:
     """Beets items whose file lies under ``folder``, read through the adapter
     (BA-7: Web Manager never opens the Beets library file). Raises when Beets
@@ -1654,28 +1692,17 @@ def _library_refs_under(folder: Any, adapter: Optional[BeetsAdapter] = None) -> 
     ponytail: item paths only; an album's artpath is not checked (an album
     with art but no items under the folder is not seen).
 
-    A pure string comparison of normalized absolute paths: nothing here
-    touches the filesystem with the caller's path (CodeQL #1381). Paths
-    under the configured MUSIC_ROOT as written are rewritten onto its
-    realpath (F-243-2), so a symlinked MUSIC_ROOT matches however Beets
-    stores the item path (relative items are already built on the realpath)."""
-    from backend.config_layers import music_root
-    written = os.path.abspath(os.path.normpath(music_root()))
-    real = os.path.realpath(music_root())
-
-    def norm(p: Any) -> str:
-        n = os.path.abspath(os.path.normpath(str(p)))
-        if n == written or n.startswith(written.rstrip(os.sep) + os.sep):
-            n = real + n[len(written):]
-        return os.path.normcase(n)
-
-    target = norm(_decode_path(folder))
+    Normalizes both sides through ``norm_library_path`` (realpath-aware), the
+    same transform the apply's tracked-detection uses, so a symlinked
+    MUSIC_ROOT matches however Beets stores the item path (relative items are
+    already built on the realpath)."""
+    target = norm_library_path(_decode_path(folder))
     prefix = target.rstrip(os.sep) + os.sep
     refs = []
     for rec in (adapter or beets_adapter).list_item_paths(details=True):
         if not rec.get("path"):
             continue
-        p = norm(_item_abs_path(rec.get("path")))
+        p = norm_library_path(_item_abs_path(rec.get("path")))
         if p == target or p.startswith(prefix):
             refs.append({"table": "items", "id": rec.get("id"), "path": _decode_path(rec.get("path"))})
     return refs
@@ -1797,8 +1824,12 @@ def safe_rename_library_folder(
             st.update(op_id, status="Failed", append_logs=[f"Apply raised: {exc}"])
             raise
     if not res.get("ok"):
+        # Surface the plugin's step code (e.g. PATH_IS_TRACKED from the
+        # apply-time tracked guard) so a caller can tell a tracked-folder
+        # refusal apart from a real failure and HOLD instead of erroring.
         return {"ok": False, "renamed": False, "operation_id": op_id,
-                "code": res.get("code") or "apply_failed", "error": res.get("error") or "Rename failed."}
+                "code": res.get("code") or "apply_failed", "error": res.get("error") or "Rename failed.",
+                "step_error_code": res.get("step_error_code")}
     return {"ok": True, "renamed": bool(res.get("moved_records")), "operation_id": op_id,
             "status": res.get("status"), "moved_records": res.get("moved_records") or []}
 

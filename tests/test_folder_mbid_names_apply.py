@@ -281,6 +281,127 @@ class TrackedRelocationTests(unittest.TestCase):
         self.assertTrue(os.path.exists(folder))
         self.assertEqual(eng.beets_state(album.id)[0], before_paths)  # DB untouched
 
+    def test_path_is_tracked_desync_relocates_not_folder_rename(self):
+        # Live failure (25-folder batch): Beets reports a TRACKED album's item
+        # paths RELATIVE to the library dir (the engine already anticipates this:
+        # _item_abs_path rebuilds them on MUSIC_ROOT). On base the apply's
+        # dirname-only tracked map keys those relative paths off the CWD, so it
+        # reports db_item_count=0, picks the disk-only folder_rename, and the
+        # engine's DB-reference refusal -- which DOES resolve the relative paths
+        # -- rejects it (folder_cleanup_rename_failed / PATH_IS_TRACKED). After
+        # the fix both detectors resolve+normalize through the same path helper,
+        # so it is classified tracked and RELOCATED (DB paths follow), never
+        # bare-renamed. Fail-on-base: base returns ok:false (PATH_IS_TRACKED).
+        eng = self.eng
+        folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
+        album = self._album(folder, RGID)
+        before_paths, _ = eng.beets_state(album.id)
+        real_list = eng.ad.list_item_paths
+
+        def relative_paths(*a, **kw):  # Beets with a relative library: paths are rel to MUSIC_ROOT
+            out = []
+            for rec in real_list(*a, **kw):
+                p = rec.get("path") or ""
+                out.append({**rec, "path": os.path.relpath(p, eng.music) if os.path.isabs(p) else p})
+            return out
+
+        resolver = FakeResolver({"B": _resolved()})
+        with mock.patch.dict(os.environ, {"MUSIC_ROOT": eng.music}), \
+                mock.patch.object(eng.ad, "list_item_paths", side_effect=relative_paths), \
+                mock.patch.object(cw, "beets_adapter", eng.ad):  # the engine refusal reads the global
+            res = ls._apply_folder_mbid_names([folder], dry_run=False, adapter=eng.ad,
+                                              store=eng.store, resolver=resolver)
+        self.assertTrue(res["ok"], res)  # base: PATH_IS_TRACKED error -> ok False
+        self.assertEqual(res["final_summary"]["changed_count"], 1, res)
+        self.assertEqual(res["operations"][0]["kind"], "album", res)  # relocated, not folder_rename
+        after_paths, _ = eng.beets_state(album.id)
+        self.assertNotEqual(after_paths, before_paths)  # DB item paths moved with the files
+        for p in after_paths.values():
+            self.assertTrue(os.path.exists(p), p)  # no file lost
+
+    def test_plugin_path_is_tracked_held_not_errored(self):
+        # Exact live error: Web Manager's path view of the library is blind to a
+        # tracked album (adapter list_item_paths returns nothing for it -- a
+        # path-representation gap with Beets), so BOTH the apply's tracked map
+        # and the engine's plan-time DB-reference refusal miss it and route a
+        # bare folder rename. The Beets PLUGIN's apply-time guard then refuses
+        # (PATH_IS_TRACKED) before touching disk. On base that surfaces as
+        # folder_cleanup_rename_failed and a failed job; the fix recognizes the
+        # tracked refusal and HOLDS (needs relocation), ok, folder untouched.
+        eng = self.eng
+        folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
+        album = self._album(folder, RGID)
+        before_paths, _ = eng.beets_state(album.id)
+        resolver = FakeResolver({"B": _resolved()})
+        import backend.beets_adapter as ba_mod
+        # Blind the Web-Manager-side detectors (list_item_paths empty); the real
+        # plugin -- reached via the bridge on folder_op, unaffected by that patch
+        # -- still sees the items and raises PATH_IS_TRACKED. MUSIC_ROOT=eng.music
+        # so the engine's allowed-root check passes and it reaches the plugin.
+        with mock.patch.dict(os.environ, {"MUSIC_ROOT": eng.music}), \
+                mock.patch.object(eng.ad, "list_item_paths", return_value=[]), \
+                mock.patch.object(cw, "beets_adapter", eng.ad), \
+                mock.patch.object(ba_mod, "beets_adapter", eng.ad):
+            res = ls._apply_folder_mbid_names([folder], dry_run=False, adapter=eng.ad,
+                                              store=eng.store, resolver=resolver)
+        self.assertTrue(res["ok"], res)  # base: folder_cleanup_rename_failed -> ok False
+        self.assertEqual(res["final_summary"]["changed_count"], 0, res)
+        self.assertEqual(res["skipped"][0]["reason"], "became_tracked_needs_relocation", res)
+        self.assertTrue(os.path.exists(folder))  # plugin refused before renaming
+        self.assertEqual(eng.beets_state(album.id)[0], before_paths)  # DB untouched
+        self.assertFalse((os.path.dirname(folder) and os.path.exists(
+            os.path.join(os.path.dirname(folder), f"B {{{RGID}}}"))))  # no target created
+
+    def test_stale_db_paths_held_needs_db_resync(self):
+        # Strip-desync: the DB names files under the folder that an earlier
+        # rename already moved away (gone on disk). Relocating off those stale
+        # paths would skip every track (partial_move error) and desync further.
+        # The fix HOLDS (needs_db_resync) instead: ok, nothing changed, no file
+        # lost. Fail-on-base: base relocates off stale paths and returns ok:false.
+        eng = self.eng
+        folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
+        album = self._album(folder, RGID)
+        before_paths, _ = eng.beets_state(album.id)
+        # Rename the FILES on disk under the SAME folder, so the folder is still
+        # detected tracked (DB paths lie under it) but every DB path is now gone.
+        for p in list(before_paths.values()):
+            os.rename(p, os.path.join(os.path.dirname(p), "resynced_" + os.path.basename(p)))
+        resolver = FakeResolver({"B": _resolved()})
+        res = ls._apply_folder_mbid_names([folder], dry_run=False, adapter=eng.ad,
+                                          store=eng.store, resolver=resolver)
+        self.assertTrue(res["ok"], res)  # a held row is not an error (base: ok False)
+        self.assertEqual(res["final_summary"]["changed_count"], 0, res)
+        self.assertEqual(res["skipped"][0]["reason"], "needs_db_resync", res)
+        self.assertEqual(res["operations"], [])
+        self.assertEqual(eng.beets_state(album.id)[0], before_paths)  # DB untouched
+        for p in os.listdir(folder):  # the renamed files are all still present
+            self.assertTrue(p.startswith("resynced_") or p == "cover.jpg", p)
+
+    def test_dangling_symlink_db_path_held_needs_db_resync(self):
+        # A DB path that is a DANGLING symlink (link present, target gone) has
+        # no real file to move. os.path.lexists would call it present and let
+        # the relocation run -> Beets skips every track -> a loud rollback-able
+        # partial_move. os.path.exists treats it as stale -> HOLD needs_db_resync.
+        # Fails on lexists, passes on exists.
+        eng = self.eng
+        folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
+        album = self._album(folder, RGID)
+        before_paths, _ = eng.beets_state(album.id)
+        for p in list(before_paths.values()):  # replace each real file with a dangling link
+            os.remove(p)
+            try:
+                os.symlink(os.path.join(os.path.dirname(p), "gone-target"), p)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+        resolver = FakeResolver({"B": _resolved()})
+        res = ls._apply_folder_mbid_names([folder], dry_run=False, adapter=eng.ad,
+                                          store=eng.store, resolver=resolver)
+        self.assertTrue(res["ok"], res)  # not a partial_move error
+        self.assertEqual(res["final_summary"]["changed_count"], 0, res)
+        self.assertEqual(res["skipped"][0]["reason"], "needs_db_resync", res)
+        self.assertEqual(res["operations"], [])
+        self.assertEqual(eng.beets_state(album.id)[0], before_paths)  # DB untouched
+
     def test_tracked_dry_run_mutates_nothing(self):
         eng = self.eng
         folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
