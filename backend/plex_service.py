@@ -575,7 +575,7 @@ def _plex_section_locations(section_key: Any) -> List[str]:
     return locations
 
 
-_ALLOWED_PLEX_REFRESH_WORKFLOWS = {"batch", "playlist", "manual"}
+_ALLOWED_PLEX_REFRESH_WORKFLOWS = {"batch", "playlist", "manual", "sync"}
 
 
 def _trigger_plex_refresh(log: list, *, workflow: str = "") -> bool:
@@ -583,23 +583,39 @@ def _trigger_plex_refresh(log: list, *, workflow: str = "") -> bool:
     workflow_key = _s(workflow).strip().casefold()
     if workflow_key not in _ALLOWED_PLEX_REFRESH_WORKFLOWS:
         if log is not None:
-            log.append("  [plex] Refresh skipped; automatic scans run only for playlist and batch jobs.")
+            log.append("  [plex] Refresh skipped; automatic scans run only for approved workflows (playlist, batch, sync).")
         return False
     settings = _plex_settings()
     if not settings.get("url") or not settings.get("token"):
         return False
     # Runs inline in the calling job (BA-16): each Plex request carries its
     # own timeout, so no helper thread is left running after a timeout.
-    try:
-        _, section_key, section_title = _plex_find_music_section()
-        if not section_key:
-            log.append("  [plex] No Plex music library section found")
-            return False
-        _plex_request(f"/library/sections/{section_key}/refresh", timeout=10, attempts=1)
-    except Exception as ex:
+    last_error: Optional[BaseException] = None
+    section_key = None
+    section_title = None
+    for attempt in (1, 2):
+        try:
+            _, section_key, section_title = _plex_find_music_section()
+            if not section_key:
+                log.append("  [plex] No Plex music library section found")
+                return False
+            _plex_request(f"/library/sections/{section_key}/refresh", timeout=10, attempts=1)
+            last_error = None
+            break
+        except Exception as ex:
+            last_error = ex
+            # A refresh POST is idempotent: re-sending it cannot duplicate
+            # anything, unlike a playlist append. That is why this loop may
+            # re-send once even though the provider boundary refuses blanket
+            # POST retries (BA-5 protects only non-idempotent resends). A busy
+            # Plex has been seen answering its first refresh with a transient
+            # 404 and accepting an identical request seconds later.
+            if attempt == 1:
+                time.sleep(2)
+    if last_error is not None:
         # The job log can reach a route response, so it gets a fixed line;
         # the detail goes to the server log only (CodeQL #1374).
-        _app_logger.warning("Plex refresh failed: %s", _redact_security_text(str(ex)))
+        _app_logger.warning("Plex refresh failed: %s", _redact_security_text(str(last_error)))
         log.append("  [plex] Refresh failed; continuing without it (see server logs).")
         return False
     log.append(f"  [plex] Refresh triggered ({section_title or section_key})")
