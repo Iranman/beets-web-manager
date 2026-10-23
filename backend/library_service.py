@@ -3868,11 +3868,19 @@ def _placeholder_folder_db(adapter: Any = None) -> Dict[str, Dict[str, Any]]:
     folder_db: Dict[str, Dict[str, Any]] = {}
     try:
         for row in ad.list_item_paths(details=True):
-            p = _s(row.get("path"))
-            d = os.path.dirname(p) if p else ""
+            abs_p = composite_workflows._item_abs_path(row.get("path"))
+            if not abs_p:
+                continue
+            # Key EXACTLY as the engine's DB-reference refusal keys item paths
+            # (``_library_refs_under`` -> ``norm_library_path``): absolute, with
+            # a symlinked MUSIC_ROOT rewritten onto its realpath. A relative or
+            # realpath-desynced DB path that raw ``os.path.dirname`` missed is
+            # now seen, so apply and engine agree on which folders are tracked
+            # (C5/C6) and no tracked path is bare-renamed into PATH_IS_TRACKED.
+            d = os.path.dirname(composite_workflows.norm_library_path(abs_p))
             if not d:
                 continue
-            key = _placeholder_norm_path(d)
+            key = d
             slot = folder_db.setdefault(key, {"album_ids": set(), "item_count": 0})
             if row.get("album_id"):
                 slot["album_ids"].add(int(row["album_id"]))
@@ -3882,7 +3890,7 @@ def _placeholder_folder_db(adapter: Any = None) -> Dict[str, Dict[str, Any]]:
     return folder_db
 
 
-def _placeholder_folder_tracked(folder_db: Dict[str, Dict[str, Any]], key: str) -> Tuple[List[int], int]:
+def _placeholder_folder_tracked(folder_db: Dict[str, Dict[str, Any]], folder: Any) -> Tuple[List[int], int]:
     """Descendant-aware (not immediate-dirname-only) tracked lookup for the
     apply/preview top gate, so a DB-tracked album whose tracks live under a
     DISC SUBFOLDER is HELD identically in preview and apply (C6) -- matching
@@ -3890,9 +3898,15 @@ def _placeholder_folder_tracked(folder_db: Dict[str, Dict[str, Any]], key: str) 
     uses ``startswith``). Returns (album_ids, item_count) summed over the
     folder itself and every folder beneath it.
 
+    ``folder`` is normalized through ``norm_library_path`` -- the SAME
+    transform ``folder_db`` keys the item paths with and the engine refuses
+    with -- so a symlinked/realpath-desynced MUSIC_ROOT is classified
+    identically here and in the engine (C5), never bare-renamed.
+
     ponytail: O(candidates x dirnames) scan; the candidate list is the small
     placeholder subset and this is a cleanup path, not hot. Key by ancestor if
     it ever shows up hot."""
+    key = composite_workflows.norm_library_path(folder)
     prefix = key.rstrip(os.sep) + os.sep
     album_ids: set = set()
     item_count = 0
@@ -4038,7 +4052,7 @@ def _apply_folder_name_placeholders(
         proposed = _canonical_folder_name(source)
         # C6: descendant-aware, matching the engine's DB-reference refusal, so a
         # disc-subfolder album is held in preview and apply alike (preview==apply).
-        album_ids, item_count = _placeholder_folder_tracked(folder_db, key)
+        album_ids, item_count = _placeholder_folder_tracked(folder_db, folder)
         tracked = item_count > 0
         record = {
             "folder": str(source),
@@ -4309,6 +4323,29 @@ def _album_rgid_via_adapter(adapter: Any, album_ids: List[int]) -> str:
     return ""
 
 
+def _album_db_paths_stale(adapter: Any, album_id: int) -> bool:
+    """True when Beets points this album at paths that are no longer on disk
+    (the strip-desync: an earlier folder rename moved the files but the DB
+    still names the old location, or ``include_paths`` reports nothing).
+
+    A relocation moves files FROM their recorded DB paths, so against a stale
+    DB it would skip every track (a partial-move error) and leave DB and disk
+    inconsistent. Detecting it lets the caller HOLD (``needs_db_resync``)
+    instead of erroring or desyncing further -- never losing a file."""
+    ad = adapter or beets_adapter
+    try:
+        album = ad.get_album(int(album_id), expand=True)
+    except Exception:
+        return True
+    if not album:
+        return True
+    paths = composite_workflows._album_item_paths(album, ad, int(album_id))
+    if not paths:
+        return True
+    return any(not os.path.lexists(composite_workflows._item_abs_path(p))
+               for p in paths.values())
+
+
 def _apply_folder_mbid_names(
     folders: Optional[List[str]] = None,
     *,
@@ -4344,6 +4381,12 @@ def _apply_folder_mbid_names(
             mb_releasegroupid already equals the resolver's (so the
             template-driven rename writes the resolver's MBID, never another);
             otherwise HELD (``tracked_rgid_mismatch`` / ``tracked_multiple_albums``).
+            Tracked status is the SAME descendant-aware, realpath-aware
+            DB-reference check the engine refuses with (``norm_library_path``),
+            so no tracked (or realpath-desynced) folder is bare-renamed into a
+            PATH_IS_TRACKED error. When the DB names paths no longer on disk
+            (the strip-desync), it is HELD (``needs_db_resync``) rather than
+            relocated off stale paths -- never losing a file or desyncing.
       * resolved, disk-only, target absent -> rename via folder_cleanup_v1.
       * resolved, target path exists   -> HELD (``target_exists``), never clobbered.
 
@@ -4452,7 +4495,7 @@ def _apply_folder_mbid_names(
         source = Path(folder)
         parsed = _album_cleanup_parse_folder_name(source.name)
         artist_mbid = _artist_mbid_from_folder(source.parent.name)
-        album_ids, item_count = _placeholder_folder_tracked(folder_db, key)
+        album_ids, item_count = _placeholder_folder_tracked(folder_db, folder)
         tracked = item_count > 0
         record: Dict[str, Any] = {
             "folder": str(source),
@@ -4506,6 +4549,16 @@ def _apply_folder_mbid_names(
             if target_path.exists() and _placeholder_norm_path(target_path) != key:
                 skipped.append({**record, "reason": "target_exists"})
                 _emit(str(source), "skipped (target exists -- needs review)")
+                continue
+            # Strip-desync: the DB may name paths an earlier rename already moved
+            # away. Relocation moves files FROM the DB paths, so a stale DB would
+            # skip every track and leave DB/disk inconsistent. HOLD for a resync
+            # (preview == apply), never error, never lose a file.
+            if _album_db_paths_stale(adapter, album_ids[0]):
+                skipped.append({**record, "reason": "needs_db_resync",
+                                "error": "Beets points this album at paths that are no longer on disk; "
+                                         "resync the DB to the current folder, then rename."})
+                _emit(str(source), "skipped (needs DB resync)")
                 continue
             if batch_limit and attempted >= batch_limit:
                 processed -= 1

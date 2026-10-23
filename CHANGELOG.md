@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Renaming a Beets-TRACKED album folder to `Album (Year) {release-group-mbid}` no longer fails with `PATH_IS_TRACKED` when the DB and disk paths are desynced.** The folder-MBID apply (`_apply_folder_mbid_names`) decided tracked-vs-disk-only from its own item-count map (`_placeholder_folder_db`), which keyed item paths with a raw `os.path.dirname` — no realpath rewrite and no relative-path resolution. On a symlinked/realpath-diverging `MUSIC_ROOT` (and after an earlier placeholder-strip left the DB naming the pre-rename path) that map reported `db_item_count=0` for a folder the engine still considered tracked, so the apply picked the disk-only `folder_rename` and the engine's descendant-aware, realpath-aware DB-reference refusal (`_library_refs_under`) rejected it (`folder_cleanup_rename_failed` / `PATH_IS_TRACKED`). Both detectors now normalize through one shared `composite_workflows.norm_library_path`, so a folder the engine treats as tracked is classified tracked by the apply and routed to the DB-aware relocation (`relocate_album` / Beets `Album.move`) — folder and DB item/album paths move together. When Beets names paths that are no longer on disk (the strip-desync), the album is HELD (`needs_db_resync`) rather than relocated off stale paths, so no file is lost and DB and disk never diverge. The existing holds (`tracked_rgid_mismatch`, `tracked_multiple_albums`, `target_exists`), disk-only renames, idempotent `already_correct`, dry-run, the confirmed gate, `batch_limit`, resume and rollback-by-job are unchanged. Regression tests: `tests/test_folder_mbid_names_apply.py::TrackedRelocationTests` (realpath-desynced tracked relocation; stale-DB `needs_db_resync` hold).
+
 ## v0.13.4 - 2026-10-22
 
 ### Changed

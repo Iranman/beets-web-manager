@@ -281,6 +281,62 @@ class TrackedRelocationTests(unittest.TestCase):
         self.assertTrue(os.path.exists(folder))
         self.assertEqual(eng.beets_state(album.id)[0], before_paths)  # DB untouched
 
+    def test_realpath_desynced_tracked_relocates_not_folder_rename(self):
+        # Live failure (25-folder batch): a TRACKED album whose DB item paths are
+        # stored on the MUSIC_ROOT realpath while the scan walks a symlinked
+        # MUSIC_ROOT. On base the apply's dirname-only tracked check misses it,
+        # picks the disk-only folder_rename, and the engine's realpath-aware
+        # DB-reference refusal rejects it: folder_cleanup_rename_failed /
+        # PATH_IS_TRACKED. After the fix both detectors normalize through
+        # norm_library_path, so it is classified tracked and RELOCATED (DB paths
+        # follow), never bare-renamed. Fail-on-base: base returns ok:false.
+        eng = self.eng
+        link = os.path.join(eng.td, "music_link")
+        try:
+            os.symlink(eng.music, link)  # realpath(link) == eng.music
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        real_folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
+        album = self._album(real_folder, RGID)  # Beets stores realpath (eng.music)
+        before_paths, _ = eng.beets_state(album.id)
+        link_folder = os.path.join(link, f"Artist ({ARTIST_MBID})", f"B{PH}")  # symlinked view
+        resolver = FakeResolver({"B": _resolved()})
+        with mock.patch.dict(os.environ, {"MUSIC_ROOT": link}):
+            res = ls._apply_folder_mbid_names([link_folder], dry_run=False, adapter=eng.ad,
+                                              store=eng.store, resolver=resolver)
+        self.assertTrue(res["ok"], res)  # base: PATH_IS_TRACKED error -> ok False
+        self.assertEqual(res["final_summary"]["changed_count"], 1, res)
+        self.assertEqual(res["operations"][0]["kind"], "album", res)  # relocated, not folder_rename
+        after_paths, _ = eng.beets_state(album.id)
+        self.assertNotEqual(after_paths, before_paths)  # DB item paths moved with the files
+        for p in after_paths.values():
+            self.assertTrue(os.path.exists(p), p)  # no file lost
+
+    def test_stale_db_paths_held_needs_db_resync(self):
+        # Strip-desync: the DB names files under the folder that an earlier
+        # rename already moved away (gone on disk). Relocating off those stale
+        # paths would skip every track (partial_move error) and desync further.
+        # The fix HOLDS (needs_db_resync) instead: ok, nothing changed, no file
+        # lost. Fail-on-base: base relocates off stale paths and returns ok:false.
+        eng = self.eng
+        folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
+        album = self._album(folder, RGID)
+        before_paths, _ = eng.beets_state(album.id)
+        # Rename the FILES on disk under the SAME folder, so the folder is still
+        # detected tracked (DB paths lie under it) but every DB path is now gone.
+        for p in list(before_paths.values()):
+            os.rename(p, os.path.join(os.path.dirname(p), "resynced_" + os.path.basename(p)))
+        resolver = FakeResolver({"B": _resolved()})
+        res = ls._apply_folder_mbid_names([folder], dry_run=False, adapter=eng.ad,
+                                          store=eng.store, resolver=resolver)
+        self.assertTrue(res["ok"], res)  # a held row is not an error (base: ok False)
+        self.assertEqual(res["final_summary"]["changed_count"], 0, res)
+        self.assertEqual(res["skipped"][0]["reason"], "needs_db_resync", res)
+        self.assertEqual(res["operations"], [])
+        self.assertEqual(eng.beets_state(album.id)[0], before_paths)  # DB untouched
+        for p in os.listdir(folder):  # the renamed files are all still present
+            self.assertTrue(p.startswith("resynced_") or p == "cover.jpg", p)
+
     def test_tracked_dry_run_mutates_nothing(self):
         eng = self.eng
         folder = os.path.join(eng.music, f"Artist ({ARTIST_MBID})", f"B{PH}")
