@@ -25546,9 +25546,9 @@
    "module": "backend/ai_service.py",
    "lines": [
     2394,
-    2531
+    2543
    ],
-   "size": 138,
+   "size": 150,
    "body_lines": 137,
    "route": null,
    "mutation_capable": false,
@@ -25585,8 +25585,8 @@
    "name": "_record_recent_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2544,
-    2562
+    2556,
+    2574
    ],
    "size": 19,
    "body_lines": 16,
@@ -25605,8 +25605,8 @@
    "name": "_record_recent_import_for_album",
    "module": "backend/ai_service.py",
    "lines": [
-    2565,
-    2587
+    2577,
+    2599
    ],
    "size": 23,
    "body_lines": 19,
@@ -25633,8 +25633,8 @@
    "name": "_ai_import_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2590,
-    2723
+    2602,
+    2735
    ],
    "size": 134,
    "body_lines": 126,
@@ -25666,8 +25666,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2726,
-    2760
+    2738,
+    2772
    ],
    "size": 35,
    "body_lines": 25,
