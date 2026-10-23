@@ -57,6 +57,9 @@ class ReplaceAlbumArtTransactionTests(_Base):
         ad.get_album.side_effect = [
             {"id": 7, "album": "Album", "mb_releasegroupid": RG, "artpath": "/music/A/old.png"},
             {"id": 7, "album": "Album", "mb_releasegroupid": RG, "artpath": artpath},
+            # rollback re-reads the album after the engine restore to prove
+            # the artpath really went back (H10).
+            {"id": 7, "album": "Album", "mb_releasegroupid": RG, "artpath": "/music/A/old.png"},
         ]
         ad.set_album_art.return_value = {"operation_id": "x", "success": True, "art_id": "a" * 32,
                                          "artpath": "/music/A/cover.jpg", "embedded_items": 2, "item_count": 2}

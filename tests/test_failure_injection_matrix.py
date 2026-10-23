@@ -112,6 +112,28 @@ class FailureInjectionMatrixTests(_FolderEnv):
         self.assertIn("Recovered after restart", str(tx["logs"]))
         self.assert_nothing_lost()
 
+    def test_crash_interrupted_rollback_stays_resumable_after_restart(self):
+        """#486 C4: a folder rollback's engine steps are durable, so the
+        restart sweep must not close its only resumable path."""
+        self.use(_Beets(self.music))
+        self.store.transition(self.op, "Preview", "Approved")
+        self.assertEqual(te.execute_folder_cleanup_apply(self.store, self.op)["status"], "Completed")
+        self.store.update(self.op, status="Running", metadata={"rollback_request": {
+            "started_at": time.time() - 1, "family": cw.FOLDER_CLEANUP_FAMILY,
+            "claimed_from": "Completed", "outcome": None}})
+
+        recovery.sweep(store=self.store, before=time.time() + 1)
+        tx = self.store.get(self.op)
+        self.assertEqual(tx["status"], "Running", tx)
+        from routes_maintenance import rollback_eligibility
+        self.assertTrue(rollback_eligibility(tx)["allowed"])
+
+        res = cw.rollback_folder_cleanup(self.op, store=self.store)
+        self.assertEqual((res.get("ok"), res.get("status")), (True, "Rolled Back"), res)
+        self.assertEqual(self.layout(), self.original)
+        self.assertEqual(self.store.get(self.op)["metadata"]["rollback_request"]["outcome"],
+                         "Rolled Back")
+
     def test_failure_during_rollback_is_partial_and_a_retry_finishes(self):
         beets = self.use(_Beets(self.music))
         self.store.transition(self.op, "Preview", "Approved")

@@ -31,6 +31,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import backend.duplicate_identity as duplicate_identity
 from backend.beets_adapter import BeetsAdapter, beets_adapter
 from backend.composite_workflows import _decode_path, _get_store, _rollback_conflict, _s, engine_rollback_refusal
+from backend.rollback_guard import abandon as abandon_rollback
+from backend.rollback_guard import finish as finish_rollback_guard
+from backend.rollback_guard import rollback_guard
 from backend.transaction_engine import TransactionStore
 
 REVIEWED_CLEANUP_FAMILY = "duplicate_cleanup_v1"
@@ -376,12 +379,28 @@ def finish_reviewed_cleanup(
             "items_before": items_before, "items_after": items_after, "verification_problems": problems}
 
 
+def _cleanup_lock_keys(meta: Dict[str, Any]) -> List[str]:
+    """The resource locks a reviewed-cleanup rollback must hold: the same
+    album and item locks the apply took, so a rollback cannot interleave
+    with an apply or a second rollback of the same album or item (#227)."""
+    pairs = meta.get("pairs") or []
+    ids = sorted({int(p["delete_item_id"]) for p in pairs} | {int(p["keep_item_id"]) for p in pairs})
+    rows = sorted({int(p["retire_album"][k]) for p in pairs if p.get("retire_album")
+                   for k in ("album_id", "keeper_album_id")})
+    return [f"album:{a}" for a in rows] + [f"item:{i}" for i in ids]
+
+
 def rollback_reviewed_cleanup(
     operation_id: str,
     *,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Restore a reviewed duplicate cleanup from the engine's manifest.
+
+    The rollback takes the same album and item locks the apply took and
+    claims the transaction with a compare-and-set before it reaches the
+    engine, so two concurrent rollbacks cannot both restore (#227, ARCH-023)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     try:
@@ -397,25 +416,37 @@ def rollback_reviewed_cleanup(
     refusal = engine_rollback_refusal(tx)
     if refusal:
         return refusal
-    res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
-    result = res.get("result") if isinstance(res.get("result"), dict) else res
-    problems: List[str] = []
-    for p in meta.get("pairs") or []:
-        row = p.get("retire_album")
-        if not row:
-            continue
-        album = ad.get_album(int(row["album_id"]), expand=False) or {}
-        if _s(album.get("mb_albumid")).lower() != row["mb_albumid"]:
-            problems.append(f"album row {row['album_id']} was not restored")
-        members = [int(i.get("id")) for i in ad.find_all_items_by_album_id(int(row["album_id"])) or []]
-        if members != [int(p["delete_item_id"])]:
-            problems.append(f"item {p['delete_item_id']} is not back in album row {row['album_id']}")
-    status = "Rolled Back" if not problems else "Recovery Required"
-    if st.transition(operation_id, tx.get("status"), status,
-                     metadata={**meta, "rollback_result": result, "rollback_problems": problems},
-                     append_logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
-                           for r in result.get("restored") or []] + [f"Rollback problem: {x}" for x in problems]) is None:
-        return _rollback_conflict(operation_id)
+    with rollback_guard(st, operation_id, _cleanup_lock_keys(meta), family=REVIEWED_CLEANUP_FAMILY,
+                        unknown_ok=True) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the reviewed cleanup failed; the outcome is unknown."])
+            raise
+        result = res.get("result") if isinstance(res.get("result"), dict) else res
+        problems: List[str] = []
+        for p in meta.get("pairs") or []:
+            row = p.get("retire_album")
+            if not row:
+                continue
+            album = ad.get_album(int(row["album_id"]), expand=False) or {}
+            if _s(album.get("mb_albumid")).lower() != row["mb_albumid"]:
+                problems.append(f"album row {row['album_id']} was not restored")
+            members = [int(i.get("id")) for i in ad.find_all_items_by_album_id(int(row["album_id"])) or []]
+            if members != [int(p["delete_item_id"])]:
+                problems.append(f"item {p['delete_item_id']} is not back in album row {row['album_id']}")
+        status = "Rolled Back" if not problems else "Recovery Required"
+        out = finish_rollback_guard(
+            st, operation_id, restored=len(result.get("restored") or []), failed=len(problems), status=status,
+            metadata={"rollback_result": result, "rollback_problems": problems},
+            logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
+                  for r in result.get("restored") or []] + [f"Rollback problem: {x}" for x in problems],
+        )
+        if not out.get("recorded"):
+            return _rollback_conflict(operation_id)
     return {"ok": not problems, "operation_id": operation_id, "status": status,
             "restored": result.get("restored") or [], "rollback_problems": problems}
 

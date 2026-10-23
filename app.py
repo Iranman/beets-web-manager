@@ -289,6 +289,15 @@ from werkzeug.exceptions import HTTPException as _WerkzeugHTTPException
 def _handle_http_error(exc):
     return jsonify({"ok": False, "error": exc.description, "status": exc.code}), exc.code
 
+try:
+    from backend.job_contract import WorkflowBusyError
+    @app.errorhandler(WorkflowBusyError)
+    def _handle_workflow_busy(exc):
+        return jsonify({"ok": False, "error": str(exc) or "Another workflow is already running.", "code": "workflow_busy"}), 409
+except Exception:
+    pass
+
+
 @app.errorhandler(AiBatchStateConflictError)
 def _handle_ai_batch_state_conflict(exc):
     # Wave 26 independent review (section 25): AiBatchStateConflictError

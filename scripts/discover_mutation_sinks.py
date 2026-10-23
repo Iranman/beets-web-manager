@@ -371,6 +371,9 @@ def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
                 "beets_adapter.run_import", "beets_adapter.fetch_art", "beets_adapter.embed_art",
                 "beets_adapter.lastgenre", "beets_adapter.mbsync", "beets_adapter.mbsubmit",
                 "beets_adapter.run", "beets_adapter.update_album_metadata", "beets_adapter.update_item_metadata",
+                "beets_adapter.fetch_album_art", "beets_adapter.remove_album_row",
+                "beets_adapter.rollback_album_row", "beets_adapter.rollback_import",
+                "beets_adapter.undo_import_rollback", "beets_adapter.rollback_album_art",
             ):
                 kind = "subprocess"
 

@@ -159,7 +159,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.18.5")
+        self.assertEqual(data["plugin_version"], "1.19.0")
         self.assertIn("library_fields", data["capabilities"])
         self.assertTrue(data["plugin_mutations_enabled"])
         # 1.6.0: path diagnostics are exposed only behind the bearer token
@@ -173,7 +173,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.18.5")
+        self.assertEqual(PLUGIN_VERSION, "1.19.0")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(
@@ -561,6 +561,7 @@ class WebManagerPhase3MutationTests(unittest.TestCase):
         caps = res.get_json()["capabilities"]
         self.assertIn("remove", caps)
         self.assertIn("move", caps)
+        self.assertIn("item_path_restore", caps)
         for gated in ("mbsync", "fetchart", "embedart", "lastgenre"):
             self.assertNotIn(gated, caps)
 

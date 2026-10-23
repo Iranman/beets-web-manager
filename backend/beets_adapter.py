@@ -720,6 +720,89 @@ class BeetsAdapter:
         return self._request("POST", "/webmanager/album-art/rollback", json_data=payload, headers=headers,
                              timeout=max(self.timeout or 0, 300))
 
+    def fetch_album_art(
+        self,
+        album_id: int,
+        expected_mb_releasegroupid: str = "",
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Fetch cover art for one album and embed it into its tracks
+        (plugin 1.19.0). The engine snapshots the previous cover file and
+        each item's embedded images and returns their id (``art_id``), so
+        rollback_album_art() can put them back."""
+        payload = {"album_id": int(album_id),
+                   "expected_mb_releasegroupid": str(expected_mb_releasegroupid or "")}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-art/fetch", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
+
+    def remove_album_row(
+        self,
+        album_id: int,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Remove one empty album row (plugin 1.19.0). The engine snapshots
+        the row and returns its id (``album_row_id``), so
+        rollback_album_row() can re-create it at its original id."""
+        payload = {"album_id": int(album_id)}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-row/remove", json_data=payload, headers=headers)
+
+    def rollback_album_row(
+        self,
+        album_row_id: str,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Re-create a removed album row from the engine's own manifest."""
+        payload = {"album_row_id": str(album_row_id or "")}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/album-row/rollback", json_data=payload, headers=headers)
+
+    def rollback_import(
+        self,
+        album_id: int,
+        item_ids: List[int],
+        move_files: bool = True,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Undo a confirmed import (plugin 1.19.0): every imported item's
+        file is moved into an engine-owned quarantine folder (never deleted)
+        and its library row is removed; the imported album row goes too."""
+        payload = {"album_id": int(album_id), "item_ids": [int(i) for i in (item_ids or [])],
+                   "move_files": bool(move_files)}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/import/rollback", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
+
+    def undo_import_rollback(
+        self,
+        quarantine_id: str,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Put an undone import back from the engine's own manifest."""
+        payload = {"quarantine_id": str(quarantine_id or "")}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/import/rollback/undo", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
+
+    def restore_item_paths(
+        self,
+        items: List[Dict[str, Any]],
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Move explicit tracks back to the exact paths in ``items`` (C3).
+
+        Each entry is ``{"id": N, "path": "...", "sha256": "..."}``. Used by
+        the artist-folder rollback: Beets' own move applies the path format,
+        which can rename a file, so restoring ``albumartist`` alone is not a
+        path restore. The plugin op never overwrites a file and accepts a file
+        already at the target when its digest matches (crash resume).
+        """
+        payload = {"items": [dict(item) for item in (items or [])]}
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        return self._request("POST", "/webmanager/item-path/restore", json_data=payload, headers=headers,
+                             timeout=max(self.timeout or 0, 300))
+
     def relocate_album(
         self,
         album_id: int,
