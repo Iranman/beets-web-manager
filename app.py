@@ -494,6 +494,7 @@ _ARCH001_OWNED_MODULES = (
     "backend.import_review_service",
     "backend.dedup_service",
     "backend.transaction_service",
+    "backend.plex_sync_service",
     "routes_playlist",
     "routes_library",
     "routes_cleanup",
@@ -525,6 +526,7 @@ ROUTE_MODULES = (
     "routes_jobs", "routes_lidarr", "routes_setup", "routes_submissions",
     "routes_library", "routes_cleanup", "routes_import", "routes_playlist",
     "routes_acquisition", "routes_maintenance", "routes_system",
+    "routes_plex_sync",
 )
 
 

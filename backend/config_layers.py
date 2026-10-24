@@ -149,6 +149,11 @@ APP_KEYS = frozenset({
     "AI_MODEL",
     "PLEX_URL",
     "PLEX_MUSIC_SECTION",
+    "PLEX_FS_GID",                # read once at app_runtime import (restart)
+    "PLEX_SYNC_AUTO_CHMOD",       # read once at app_runtime import (restart)
+    "PLEX_SYNC_AUTO_TOUCH",       # read once at app_runtime import (restart)
+    "PLEX_SYNC_AUTO_REFRESH",     # read once at app_runtime import (restart)
+    "PLEX_SYNC_MAX_REPAIR_PATHS",  # read once at app_runtime import (restart)
     "LIDARR_URL",
     "SLSKD_URL",
     "SLSKD_SLSK_USERNAME",
@@ -212,6 +217,11 @@ _RESTART_APP_KEYS = frozenset({
     "PLAYLIST_AUTO_SYNC_INTERVAL",
     "PLAYLIST_DOWNLOAD_METHODS",
     "PLAYLIST_MIN_DOWNLOAD_SECONDS",
+    "PLEX_FS_GID",
+    "PLEX_SYNC_AUTO_CHMOD",
+    "PLEX_SYNC_AUTO_TOUCH",
+    "PLEX_SYNC_AUTO_REFRESH",
+    "PLEX_SYNC_MAX_REPAIR_PATHS",
     "YTDLP_PO_PROVIDER_URL",
     "YTDLP_COOKIE_FILE",
     "YTDLP_ALLOW_BROWSER_COOKIES",

@@ -293,6 +293,8 @@ class ApiContractTests(unittest.TestCase):
             ("/api/library/folder-placeholders/rollback", "rollback_folder_placeholders_job"),
             ("/api/library/folder-mbid-names/apply", "apply_folder_mbid_names_job"),
             ("/api/library/folder-mbid-names/rollback", "rollback_folder_mbid_names_job"),
+            ("/api/plex/sync/audit", "plex_sync_audit"),
+            ("/api/plex/sync/heal", "plex_sync_heal"),
         }
         self.assertEqual(base - live, set())
         self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)
