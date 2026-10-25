@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
 from backend import config_layers
-import copy, difflib, json, math, os, re, threading, time
+import copy, difflib, json, math, os, re, threading, time, uuid
 import urllib.error
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -16,6 +16,7 @@ from backend.ai_service import _ai_match_evidence_packet, _validate_import_sourc
 from backend.import_service import _delete_staged_import_folder, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
 from backend.library_service import _album_folder_for_album_id, _build_folder_evidence, _representative_tracktotal, _resolve_album_release_for_import, get_library_payload
 from backend.pending_review_store import _queue_folder_for_manual_review
+import backend.recovery_carrier as recovery_carrier
 from backend.playlist_service import _playlist_download_audio_allowed, _playlist_download_match, _playlist_filter_preview_downloads, _playlist_identity_log, _playlist_stamp_download_tags
 from backend.app_runtime import _path_under, _redact_security_text, validated_downloads_root
 from helpers_mb import _resolve_release_group_to_release
@@ -170,7 +171,60 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if method == "slskd" and not slskd_configured() and not try_source_fallback:
         return {"ok": False, "error": SLSKD_NOT_CONFIGURED}, 200
 
+    # ── Phase-2 missing-track recovery carrier (identity SPINE) ──
+    # A download that targets a known existing album for specific missing
+    # track(s) IS a recovery. We mint a durable carrier id up front so the
+    # staged folder can be bound to the album identity and found later by the
+    # AI-batch scan, pending-review and preflight. A plain full-album download
+    # (no existing_album_id / no wanted tracks) is not a recovery and gets no
+    # carrier. Canonical identity is the Release Group (ADR-0002).
+    _is_recovery = bool(existing_album_id and wanted_tracks)
+    _recovery_carrier_id = uuid.uuid4().hex if _is_recovery else ""
+    _recovery_box: Dict[str, str] = {"job_id": ""}
+    _requested_rgid = ""
+    _rg_match = re.search(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        _s(data.get("mb_releasegroupid")), re.I)
+    if _rg_match:
+        _requested_rgid = _rg_match.group(0).lower()
+
     def _do(log, cancel_event=None):
+        def _recovery_bind_folder(folder_path: str) -> None:
+            """Bind the staged download folder to the recovery carrier so
+            load_for_folder() resolves the album identity (AI-batch scan,
+            pending-review, preflight). Best-effort: a store failure never
+            breaks the download/import."""
+            if not _recovery_carrier_id or not _s(folder_path).strip():
+                return
+            try:
+                recovery_carrier.bind_staged_folder(_recovery_carrier_id, folder_path)
+            except Exception as ex:
+                log.append(f"  [recovery] WARN could not bind staged folder: {type(ex).__name__}")
+
+        def _recovery_create_carrier() -> None:
+            """Create/refresh the carrier once identity is resolved (stage 5).
+            Canonical mb_releasegroupid required; the Release is supporting.
+            Best-effort."""
+            if not _recovery_carrier_id:
+                return
+            rgid = _s(resolved_release_group_id or _requested_rgid).strip()
+            if not rgid or not job_wanted_tracks:
+                return
+            try:
+                recovery_carrier.create_carrier(
+                    carrier_id=_recovery_carrier_id,
+                    existing_album_id=existing_album_id,
+                    mb_releasegroupid=rgid,
+                    release_id=_s(resolved_mbid),
+                    destination_album_path=_s(_album_folder_for_album_id(existing_album_id) or ""),
+                    wanted_tracks=job_wanted_tracks,
+                    source={"method": method, "provenance": "download-import"},
+                    origin_job_id=_recovery_box.get("job_id", ""),
+                    state="downloading",
+                )
+            except Exception as ex:
+                log.append(f"  [recovery] WARN could not create recovery carrier: {type(ex).__name__}")
+
         download_result: Dict[str, Any]
         resolved_mbid = mb_albumid
         effective_track_count = track_count
@@ -216,6 +270,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     f"[import] Missing-track mode: {len(job_wanted_tracks)} track(s) "
                     f"will be downloaded for existing album_id {existing_album_id}"
                 )
+                _recovery_create_carrier()
             elif existing_album_id:
                 review_reason = (
                     "Requested missing track(s) are not missing for the selected "
@@ -348,6 +403,9 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         ) -> Dict[str, Any]:
             if not resolved_mbid:
                 raise RuntimeError("Could not resolve a MusicBrainz release ID for import")
+            # Spine: bind the staged folder so a Review hand-off from the
+            # reimport-disk child job carries the recovery identity.
+            _recovery_bind_folder(import_dir)
             active_wanted_tracks = (
                 _normalise_wanted_tracks(import_wanted_tracks)
                 if import_wanted_tracks is not None
@@ -810,6 +868,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             download_result = _download_ytdlp_selection(direct_method=method)
 
         if not auto_import:
+            # Spine: bind the folder left in /downloads so the AI-batch scan
+            # and pending-review resolve the album identity instead of
+            # re-deriving it from the folder name (Phase-1 root cause).
+            _recovery_bind_folder(_s(download_result.get("aldir")))
             return download_result
 
         aldir = download_result["aldir"]
@@ -831,7 +893,12 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                                       "missing_track_count": len(wanted_tracks),
                                       "try_source_fallback": try_source_fallback,
                                       "try_ytdlp_fallback": try_source_fallback,
-                                      "fallback_methods": source_fallback_methods})
+                                      "fallback_methods": source_fallback_methods,
+                                      "recovery_carrier_id": _recovery_carrier_id})
+    # Thread the origin job id to the carrier (provenance + recovery-job
+    # resume via recovery_carrier.load_for_job). The carrier is created inside
+    # _do after the download, by which time this is set.
+    _recovery_box["job_id"] = job.job_id
     return {"ok": True, "job_id": job.job_id}, 200
 
 

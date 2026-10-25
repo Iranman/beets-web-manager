@@ -550,6 +550,14 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             if sink.kind == "sql":
                 return "APP_STATE", "", "ai-batch-state-store-sqlite"
             return "APP_STATE", "", "ai-batch-state-store-filesystem"
+        if file == "backend/recovery_carrier.py":
+            # Missing-track recovery carrier (Phase-2 identity spine): a
+            # versioned/CAS SQLite store of web-manager state under
+            # WEB_MANAGER_DATA_DIR (its own DB + parent mkdir), never the Beets
+            # library or media. Same disposition as ai_batch_state_store.
+            if sink.kind == "sql":
+                return "APP_STATE", "", "recovery-carrier-state-store-sqlite"
+            return "APP_STATE", "", "recovery-carrier-state-store-filesystem"
         if file == "backend/recover_service.py":
             if func == "_probe_file_duration":
                 return "READ_ONLY_FALSE_POSITIVE", "none", "recover-ffprobe-read-only-duration"

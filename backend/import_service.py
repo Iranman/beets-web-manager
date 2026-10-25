@@ -13,6 +13,7 @@ from backend.ai_service import _record_recent_import_for_album, _ai_match_eviden
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _pending_review_has_path, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
+import backend.recovery_carrier as recovery_carrier
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
@@ -218,6 +219,13 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
     unproven slot keeps both files and both rows and is recorded for review.
     This function only gathers inputs and applies the planned engine
     transactions.
+
+    HOOK(library-transaction): the verified single-track insertion/merge for a
+    recovery carrier (backend.recovery_carrier) targets this existing album via
+    the controlled transaction workflow. The carrier names existing_album_id,
+    canonical mb_releasegroupid and expected track#/disc#, and carries a
+    recovery/rollback state (advance_state) to reuse the merged durable
+    rollback (transaction_recovery/rollback_guard) — not a new mutation path.
 
     Returns existing_album_id when the planned moves were applied, and
     imported_album_id when nothing was moved (different album identity,
@@ -561,9 +569,19 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                                 reason: str, *, allow_existing: bool = False,
                                 evidence: Optional[Dict[str, Any]] = None) -> bool:
             if queue_review_on_uncertain or light_confirm:
+                # Phase-2 spine: if a recovery carrier was created for this
+                # staged folder at download time, the Review row keeps its
+                # structured album identity instead of the `allow_existing`
+                # boolean + free-text suggestion that Phase-1 proved lossy.
+                carrier = None
+                try:
+                    carrier = recovery_carrier.load_for_folder(folder_path)
+                except Exception:
+                    carrier = None
                 return _queue_folder_for_manual_review(
                     folder_path, suggestion, reason, log,
-                    allow_existing=allow_existing, evidence=evidence)
+                    allow_existing=allow_existing, evidence=evidence,
+                    carrier=carrier)
             mode = "light-confirm" if light_confirm else "no-review"
             log.append(
                 f"  Skipped Pending Review ({mode}): {reason} "

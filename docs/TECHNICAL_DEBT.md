@@ -264,6 +264,15 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Desired state: Lidarr `history/since` to drop rows Lidarr imported itself, if still needed.
 - Priority: P3. Status: Open (narrowed).
 
+## ARCH-030 Missing-Track Recovery Loses Track→Album Identity
+
+- Affected area: the download→verify→import-into-existing-album→Plex pipeline across `backend/acquisition_service.py`, `backend/import_service.py`, `backend/pending_review_store.py`, `backend/matching_service.py`, `backend/ai_service.py`.
+- Evidence (Phase-1, proven in code): a single downloaded missing track (`<album> - <source> missing <ts>` under `/downloads`) was treated as a brand-new full-album import and failed full-tracklist preflight. The track→album identity (existing album, canonical `mb_releasegroupid`, expected recording/track#, destination) lived only in the live download job's closure/metadata; at the Review hand-off it was reduced to the `allow_existing` boolean + a free-text suggestion, and every consumer re-entering from the folder on disk re-derived identity from the folder name.
+- Desired state: one durable, resumable recovery record binds the staged download to the album it recovers a track for; preflight treats a single-track recovery as a first-class mode; the verified track is inserted/merged into the existing album through the controlled transaction workflow; identity is never derived from a folder name; no verification threshold is lowered.
+- Phase 2 (IMPLEMENTED — identity SPINE + published contract): `backend/recovery_carrier.py` is the durable, schema-versioned, CAS SQLite carrier (see ARCHITECTURE.md → State Ownership). It is created at download, bound to the staged folder, found by `load_for_folder`/`load_for_job`, and threaded into the Review hand-off as structured identity (canonical Release Group, supporting Release stored separately). Tests: `tests/test_recovery_carrier.py`.
+- Remaining (specialist depth, tracked here): preflight single-track-recovery mode (music-identity), verified insertion/merge via `transaction_engine` reusing the durable rollback (library-transaction), AI-batch/pending-review consumption of the carrier (music-identity), provider-specific carrier population + auto-import use (integrations), and the Review UI for a recovery vs a new-album import (frontend). All plug into the `# HOOK(<owner>)` markers in the spine.
+- Priority: P1. Status: Open (Phase-2 spine landed; specialist phases pending).
+
 ## ARCH-031 Cold `/api/library` Build Cost
 
 - Affected area: `backend/library_service.py` `_build_library_payload` (cold `GET /api/library`, the 2-minute cache warmer, and the Find Music build's library read), `backend/beets_adapter.py` `get_items`/`get_albums`.

@@ -378,7 +378,15 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     `fingerprint_evidence` (I-8, opt-in): give each locally scanned file's
     answered AcoustID hits to the canonical evaluator. Only the deterministic
     folder identification sets it; every other caller keeps the earlier
-    behavior, so fingerprints do not widen AI or repair gates."""
+    behavior, so fingerprints do not widen AI or repair gates.
+
+    HOOK(music-identity): a single-track recovery must not be judged against
+    the full release tracklist. When a recovery carrier exists for this folder
+    (backend.recovery_carrier.load_for_folder), make this a first-class
+    single-track-recovery preflight mode keyed off the carrier's existing
+    album + canonical RG + expected tracks, rather than relying on the
+    `existing_album_id`-only subset relaxation below (the Phase-1 gap). Do NOT
+    lower the AcoustID/confidence/identity-proof thresholds."""
     result: Dict[str, Any] = {
         "ok": False,
         "matches": 0,

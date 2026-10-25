@@ -1931,6 +1931,11 @@ def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None,
             if log is not None:
                 log.append(f"folder left in place (not importable as a folder: {err}): {folder}")
             continue
+        # HOOK(music-identity): a discovered folder with a recovery carrier
+        # (backend.recovery_carrier.load_for_folder(folder)) is a single-track
+        # recovery for a KNOWN album, not an unknown new-album. Consume the
+        # carrier's canonical mb_releasegroupid / wanted tracks here instead of
+        # re-deriving identity from the folder name. Spine only binds it today.
         result.append(folder)
     return result
 
