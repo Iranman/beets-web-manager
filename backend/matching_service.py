@@ -470,6 +470,13 @@ def _recovery_duration_conflicts(proof_files: List[Dict[str, Any]],
     return conflicts
 
 
+# Carrier states a best-effort preflight evidence write must never clobber: a
+# claimed ('importing') or completed/terminal carrier is owned by its recovery
+# job, not by a late folder re-scan.
+_CARRIER_PREFLIGHT_NO_DOWNGRADE = frozenset(
+    {"importing", "imported", "rolled_back", "failed"})
+
+
 def _record_carrier_preflight_evidence(carrier: Dict[str, Any],
                                        result: Dict[str, Any]) -> None:
     """Record what this single-track-recovery preflight proved into the carrier
@@ -500,15 +507,27 @@ def _record_carrier_preflight_evidence(carrier: Dict[str, Any],
     }
     try:
         from backend import recovery_carrier
+        current = recovery_carrier.get_carrier(carrier_id)
+        if not current:
+            return
+        # No-downgrade guard: a delayed/concurrent preflight on the same staged
+        # folder must never move a carrier that has already been CLAIMED for
+        # import or reached a terminal state back to 'verifying'/'review_required'
+        # -- doing so would reopen the _recovery_claim_importing state gate for a
+        # second claimer (duplicate import). CAS on the just-read revision also
+        # closes the read->write window if a claim lands concurrently.
+        if _s(current.get("state")) in _CARRIER_PREFLIGHT_NO_DOWNGRADE:
+            return
         recovery_carrier.advance_state(
             carrier_id,
             "verifying" if verified else "review_required",
             checkpoint="VERIFIED" if verified else "",
             evidence=evidence,
+            expected_revision=int(current.get("revision") or 0),
         )
     except Exception:
         # Best-effort only (ADR-0003 safety): never fail the preflight on a
-        # carrier write.
+        # carrier write (including a lost CAS against a concurrent claim).
         pass
 
 
