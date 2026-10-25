@@ -605,9 +605,9 @@
       "DISPLAY_ONLY",
       "Revalidation loop moved from the route (F10); eligibility is evaluate_import_eligibility."
     ],
-    "routes_import.py::<module>": [
+    "backend/serializers.py::<module>": [
       "DISPLAY_ONLY",
-      "Allowlist of client identity fields for POST /api/ai-pending-review (F16); trust fields are dropped, not decided."
+      "Allowlist of client identity fields for POST /api/ai-pending-review and the import-with-id ai_suggestion (F16); trust fields are dropped, not decided."
     ],
     "routes_import.py::_review_row_search_text": [
       "DISPLAY_ONLY",
