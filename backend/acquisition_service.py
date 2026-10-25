@@ -201,6 +201,21 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             except Exception as ex:
                 log.append(f"  [recovery] WARN could not bind staged folder: {type(ex).__name__}")
 
+        def _recovery_advance(state: str, checkpoint: str) -> None:
+            """Advance the recovery carrier as the download progresses
+            (CREATED->DOWNLOADED->STAGED) so the single guarded recovery
+            workflow can resume from the last checkpoint. Best-effort: a store
+            failure never breaks the download/import."""
+            if not _recovery_carrier_id:
+                return
+            try:
+                recovery_carrier.advance_state(
+                    _recovery_carrier_id, state, checkpoint=checkpoint)
+            except Exception as ex:
+                log.append(
+                    f"  [recovery] WARN could not advance carrier to {checkpoint}: "
+                    f"{type(ex).__name__}")
+
         def _recovery_create_carrier() -> None:
             """Create/refresh the carrier once identity is resolved (stage 5).
             Canonical mb_releasegroupid required; the Release is supporting.
@@ -218,6 +233,21 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     release_id=_s(resolved_mbid),
                     destination_album_path=_s(_album_folder_for_album_id(existing_album_id) or ""),
                     wanted_tracks=job_wanted_tracks,
+                    # Recording-level evidence the verifier (music-identity) needs
+                    # to prove a downloaded file IS the expected track. Sourced
+                    # from the missing-track queue (already reconciled against MB
+                    # completeness by _wanted_tracks_not_in_album). mb_trackid is
+                    # the MB recording id; duration is the MB length in ms.
+                    expected_tracks=[
+                        {
+                            "recording_id": t.get("mb_trackid"),
+                            "track": t.get("track"),
+                            "disc": t.get("disc"),
+                            "duration": t.get("duration_ms"),
+                            "title": t.get("title"),
+                        }
+                        for t in job_wanted_tracks
+                    ],
                     source={"method": method, "provenance": "download-import"},
                     origin_job_id=_recovery_box.get("job_id", ""),
                     state="downloading",
@@ -404,8 +434,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             if not resolved_mbid:
                 raise RuntimeError("Could not resolve a MusicBrainz release ID for import")
             # Spine: bind the staged folder so a Review hand-off from the
-            # reimport-disk child job carries the recovery identity.
+            # reimport-disk child job carries the recovery identity, and record
+            # that the files landed in it (DOWNLOADED = folder bound).
             _recovery_bind_folder(import_dir)
+            _recovery_advance("downloaded", "DOWNLOADED")
             active_wanted_tracks = (
                 _normalise_wanted_tracks(import_wanted_tracks)
                 if import_wanted_tracks is not None
@@ -421,6 +453,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     fallback_artist=forced_albumartist or artist,
                 )
             _validate_import_source_audio(import_dir, log, reject_downloads=True)
+            # Verified audio is staged and ready for Beets (STAGED). Later
+            # checkpoints (VERIFIED/IMPORTED/PLEX_SYNCED) are advanced by the
+            # downstream import/verify/Plex owners.
+            _recovery_advance("downloaded", "STAGED")
             log.append(f"[import] Starting Beets import/tag/move for {import_dir}")
             import_job_id = _start_reimport_disk_job_internal(
                 import_dir, resolved_mbid, albumartist=forced_albumartist,
@@ -882,7 +918,14 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     _do_and_patch = _mark_queue_done_after(_do, mbid=mb_albumid, album_id=existing_album_id)
     label = f"{_download_method_job_label(method)} Import: {artist} – {album}"
     # One download+import per album at a time, across processes and restarts.
-    workflow = "download-import-" + job_contract.slug(f"{artist}|{album}|{mb_albumid}")
+    # A missing-track recovery runs as ONE guarded, resumable workflow keyed on
+    # the carrier id, so a restart resumes the same recovery (its job record
+    # carries this slug) instead of splitting into decoupled jobs (ARCH-030).
+    # A plain full-album download keeps the per-album download-import workflow.
+    if _is_recovery and _recovery_carrier_id:
+        workflow = recovery_carrier.recovery_workflow_id(_recovery_carrier_id)
+    else:
+        workflow = "download-import-" + job_contract.slug(f"{artist}|{album}|{mb_albumid}")
     job = jobs.start_python(job_contract.guarded(_do_and_patch, workflow=workflow, fail_fast_in_process=True), label=label,
                             metadata={"type": "download-import", "mutating": True, "artist": artist,
                                       "album": album, "year": year,
