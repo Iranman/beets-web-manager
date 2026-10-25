@@ -47,6 +47,7 @@ import {
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
+import { RecoveryIdentityPanel, getRecoveryIdentity } from './MbidLink';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -2729,7 +2730,14 @@ export function ReviewCard({
     ? blockedActionHint(applyBlockedReason)
     : storedBlockedNextAction(item) || (visibleBlockReason ? blockedActionHint(visibleBlockReason) : '');
   const queueingImport = actionState?.status === 'running' && /queueing/i.test(actionState.message || '');
-  const lifecycleLabel = queueingImport
+  // Missing-track recovery (ARCH-030): a carrier-backed item is a recovery INTO
+  // an existing album, not a new-album import. It reaches Review unverified
+  // (mb_valid=false), so its lifecycle must read as "needs verification", never
+  // as a green success/ready state.
+  const recoveryIdentity = getRecoveryIdentity(item);
+  const lifecycleLabel = recoveryIdentity
+    ? 'Recovery · needs verification'
+    : queueingImport
     ? 'Import enqueueing'
     : item.status === 'format_policy_rejected'
       ? 'Format policy rejected'
@@ -2738,7 +2746,9 @@ export function ReviewCard({
         : item.status && item.status !== 'Pending AI'
           ? item.status.replace(/_/g, ' ')
           : typeLabels[item.type];
-  const lifecycleTone = queueingImport
+  const lifecycleTone = recoveryIdentity
+    ? 'border-violet-300 bg-violet-50 text-violet-900'
+    : queueingImport
     ? 'border-sky-200 bg-sky-50 text-sky-800'
     : item.status === 'format_policy_rejected'
       ? 'border-amber-300 bg-amber-50 text-amber-900'
@@ -2838,6 +2848,8 @@ export function ReviewCard({
 
             <h2 className="mt-3 truncate text-lg font-semibold text-zinc-950">{itemTitle(item)}</h2>
             {meta.length ? <div className="mt-1 text-sm text-zinc-600">{meta.join(' / ')}</div> : null}
+
+            <RecoveryIdentityPanel item={item} />
 
             {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
             {item.path ? <div className="mt-3 truncate font-mono text-xs text-zinc-500">{item.path}</div> : null}
@@ -3070,16 +3082,21 @@ export function ReviewCard({
               Submit Metadata
             </Button>
             {canDeleteFolder(item) ? (
-              <Button
-                size="small"
-                variant="outlined"
-                color="error"
-                onClick={onDeleteFolder}
-                disabled={busy || Boolean(importJobActive)}
-                title={importJobActive ? 'Import job is active for this folder — wait for it to finish before deleting' : wrongSourceNote || undefined}
-              >
-                {deleteFolderActionLabel(item)}
-              </Button>
+              <div className="mt-2 rounded border border-rose-200 bg-rose-50/60 p-2" aria-label="Destructive actions">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-700">Destructive</div>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="error"
+                  fullWidth
+                  onClick={onDeleteFolder}
+                  disabled={busy || Boolean(importJobActive)}
+                  title={importJobActive ? 'Import job is active for this folder — wait for it to finish before deleting' : wrongSourceNote || undefined}
+                >
+                  {deleteFolderActionLabel(item)}
+                </Button>
+                <div className="mt-1 text-xs text-rose-700">Permanent. Asks for confirmation first.</div>
+              </div>
             ) : needsOnlyReleaseGroup(item) ? (
               <span className="self-center text-xs text-zinc-600">Use Fix proven matches to add the release group.</span>
             ) : null}
@@ -4206,8 +4223,9 @@ export function ImportReviewPage({
         const aiAvailable = s?.ai_available ?? response.ai_available;
         const aiReason = s?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
         const notChecked = notCheckedReason(response);
+        // Truthful status: a 200 with no recording candidate is NOT a success.
         setAction(item.id, {
-          status: notChecked ? 'warning' : aiAvailable === false ? 'warning' : 'success',
+          status: notChecked ? 'warning' : !mbTrackId ? 'warning' : aiAvailable === false ? 'warning' : 'success',
           message: s?.reason || backendCandidate?.reason || (mbTrackId
             ? aiAvailable === false
               ? `Recording evidence ready. ${aiReason}`
@@ -4250,8 +4268,13 @@ export function ImportReviewPage({
       const aiAvailable = suggestion?.ai_available ?? response.ai_available;
       const aiReason = suggestion?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
       const notChecked = notCheckedReason(response);
+      // Truthful status: a 200 with no selected match / no valid MB id is NOT a
+      // success (it is "no candidate" / "manual review required"), so it must
+      // not render a green success banner.
+      const matched = Boolean(backendSelectedMatch?.release_group_id)
+        || Boolean(suggestion?.mb_valid && suggestion.mb_albumid);
       setAction(item.id, {
-        status: notChecked ? 'warning' : aiAvailable === false ? 'warning' : 'success',
+        status: notChecked ? 'warning' : !matched ? 'warning' : aiAvailable === false ? 'warning' : 'success',
         message: suggestion?.reason || (backendSelectedMatch
           ? aiAvailable === false
             ? `Matched using MusicBrainz and AcoustID. ${aiReason}`
