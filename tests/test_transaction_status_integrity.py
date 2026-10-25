@@ -169,7 +169,9 @@ class EngineRollbackStatusTests(_Env):
         ad = mock.Mock()
 
         def other_rollback_finishes_first(*_a, **_k):
-            self.store.transition(op, "Completed", "Recovery Required")
+            # The guard claims Running before it reaches the engine; a
+            # concurrent change moves it out of Running.
+            self.store.transition(op, "Running", "Recovery Required")
             return {"result": {}}
 
         ad.rollback_replace_item_file.side_effect = other_rollback_finishes_first

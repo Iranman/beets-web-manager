@@ -46,7 +46,11 @@ class CompositeApplyEdges(_Env):
         tx = self.store.get(op)
         self.assertEqual(tx["status"], "Failed")
         self.assertTrue(tx["metadata"]["engine_result"]["mutation_started"])
-        self.assertEqual(cw.rollback_album_genre_repair(op, store=self.store)["status"], "Rolled Back")
+        # The rollback restores through Beets (#224): an unreachable engine
+        # must not be reported as "Rolled Back".
+        self.assertNotEqual(cw.rollback_album_genre_repair(op, store=self.store)["status"], "Rolled Back")
+        # With an engine the rollback restores and reports the truth.
+        self.assertEqual(cw.rollback_album_genre_repair(op, adapter=ad, store=self.store)["status"], "Rolled Back")
 
     def test_recovery_required_is_never_marked_rolled_back(self):
         op = cw.plan_album_genre_repair({"album_id": 1}, store=self.store)["operation_id"]

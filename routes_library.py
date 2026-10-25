@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from flask import jsonify, request, send_file, redirect
 from backend.matching_contract import AiState
 from backend.transaction_engine import metadata_diff
-from job_engine import TERMINAL_STATUSES
+from job_engine import DuplicateJobError, TERMINAL_STATUSES
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_mb_release_id
 from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsAdapterNotFoundError, BeetsAdapterConnectionError, BeetsAdapterTimeoutError
 import backend.composite_workflows as composite_workflows
@@ -1284,9 +1284,17 @@ def artist_discography():
             result_holder["error"] = str(exc)
             log.append(f"error:{exc}")
 
-    job = jobs.start_python(_run, label=f"Discography: {artist_name}")
+    try:
+        job = jobs.start_python(_run, label=f"Discography: {artist_name}",
+                                metadata={"mutating": False, "type": "artist-discography",
+                                          "dedupe_key": f"artist-discography:{artist_name.lower()}"})
+    except DuplicateJobError as exc:
+        # A concurrent same-artist request already started the lookup. This
+        # route's contract is "job_id while running", so follow that job
+        # instead of raising 409 at the caller (the UI already polls it).
+        job = exc.job
     return jsonify({"ok": True, "status": "running", "job_id": job.job_id,
-                    "artist": artist_name})
+                    "artist": artist_name, "type": "artist-discography", "mutating": False})
 
 
 @app.get("/api/artist-discography/discogs")
@@ -1321,9 +1329,15 @@ def artist_discography_discogs():
         except Exception as exc:
             log.append(f"error:{exc}")
 
-    job = jobs.start_python(_run, label=f"Discogs discography: {artist_name}")
+    try:
+        job = jobs.start_python(_run, label=f"Discogs discography: {artist_name}",
+                                metadata={"mutating": False, "type": "artist-discography-discogs",
+                                          "dedupe_key": f"artist-discography-discogs:{artist_name.lower()}"})
+    except DuplicateJobError as exc:
+        job = exc.job
     return jsonify({"ok": True, "status": "running", "job_id": job.job_id,
-                    "artist": artist_name, "source": "discogs"})
+                    "artist": artist_name, "source": "discogs", "type": "artist-discography-discogs",
+                    "mutating": False})
 
 
 _artist_img_cache: Dict[str, str] = {}

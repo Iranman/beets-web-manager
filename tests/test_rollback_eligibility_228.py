@@ -112,6 +112,34 @@ class RollbackEligibilityTests(_RouteEnv):
         self.assertEqual(self._verdict(tx)["code"], "not_supported")
         self.assertEqual(self._rollback(tx).get_json()["code"], "not_supported")
 
+    def test_artist_folder_family_is_reachable_through_the_generic_route(self):
+        """C3: the artist-folder rollback must be dispatched by the route,
+        not only reachable by calling the executor directly."""
+        self.assertIs(self.rm._ROLLBACK_ONLY_FAMILIES["artist_folder_reconcile_v1"],
+                      cw.rollback_artist_folder_reconcile)
+        tx = self.store.create(
+            operation_type="Artist Folder Reconcile", status="Completed",
+            metadata={"mutation_family": "artist_folder_reconcile_v1",
+                      "engine_result": {"move": True, "write": True},
+                      "before_state": [{"album_id": 1, "albumartist": "Old",
+                                        "items": []}]})["id"]
+        self.assertTrue(self._verdict(tx)["allowed"])
+        fake = lambda op_id: {"ok": True, "operation_id": op_id, "status": "Rolled Back"}
+        with mock.patch.dict(self.rm._ROLLBACK_ONLY_FAMILIES,
+                             {"artist_folder_reconcile_v1": fake}):
+            resp = self._rollback(tx)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["status"], "Rolled Back")
+
+    def test_artist_folder_without_before_state_is_refused(self):
+        tx = self._engine("Completed", family="artist_folder_reconcile_v1",
+                          engine_result={"move": True, "write": True})
+        verdict = self._verdict(tx)
+        self.assertEqual((verdict["allowed"], verdict["code"]), (False, "unavailable"))
+        resp = self._rollback(tx)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["code"], "rollback_unavailable")
+
     # -- responses -------------------------------------------------------
     def test_list_rows_carry_eligibility(self):
         ok = self._local("Completed")
@@ -133,8 +161,9 @@ class RollbackEligibilityTests(_RouteEnv):
 
 
 class HonestPlanFlagsTests(_RouteEnv):
-    """#228 F4: these plans record no rollback operations and no engine
-    family, so they must not claim rollback is available."""
+    """#228 F4: these plans record no ``rollback.operations``, so
+    ``rollback.available`` stays false; the generic route exposes their
+    eligibility separately as ``rollback.allowed``."""
 
     def test_artist_folder_reconcile_plan(self):
         ad = mock.MagicMock()
@@ -142,6 +171,14 @@ class HonestPlanFlagsTests(_RouteEnv):
         plan = cw.plan_artist_folder_reconcile({"artist": "X", "album_ids": [1]}, adapter=ad, store=self.store)
         tx_id = plan.get("operation_id") or plan["transaction"]["id"]
         self.assertFalse(self.store.get(tx_id)["rollback"]["available"])
+        # The plan itself must name the family: route dispatch and eligibility
+        # never infer it from the operation type (C3).
+        self.assertEqual(self.store.get(tx_id)["metadata"].get("mutation_family"),
+                         "artist_folder_reconcile_v1")
+        self.store.update(tx_id, status="Completed",
+                          metadata={"engine_result": {"move": True, "write": True}})
+        from routes_maintenance import rollback_eligibility
+        self.assertTrue(rollback_eligibility(self.store.get(tx_id))["allowed"])
 
     def test_album_mb_track_repair_plan(self):
         ad = mock.MagicMock()

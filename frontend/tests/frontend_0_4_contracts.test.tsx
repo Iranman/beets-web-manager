@@ -60,6 +60,47 @@ describe('job start idempotency (#344)', () => {
     b.settle();
   });
 
+  it('scopes a multipart key to the upload fields and file metadata (H9)', () => {
+    const file = new File(['abc'], 'one.flac', { type: 'audio/flac', lastModified: 123 });
+    const first = new FormData();
+    first.append('file', file);
+    const same = new FormData();
+    same.append('file', new File(['abc'], 'one.flac', { type: 'audio/flac', lastModified: 123 }));
+    const different = new FormData();
+    different.append('file', new File(['abcd'], 'two.flac', { type: 'audio/flac', lastModified: 456 }));
+
+    const a = beginIdempotentRequest('POST', '/api/upload-scope', first);
+    const b = beginIdempotentRequest('POST', '/api/upload-scope', same);
+    const c = beginIdempotentRequest('POST', '/api/upload-scope', different);
+    expect(b.key).toBe(a.key);
+    expect(c.key).not.toBe(a.key);
+    a.settle();
+    c.settle();
+  });
+
+  it('keeps the multipart key after a 5xx and settles after a 4xx', async () => {
+    const form = new FormData();
+    form.append('file', new File(['abc'], 'retry.flac', { type: 'audio/flac', lastModified: 123 }));
+    const fetchSpy = vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(jsonResponse(500, { error: 'boom' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }))
+      .mockResolvedValueOnce(jsonResponse(500, { error: 'boom' }))
+      .mockResolvedValueOnce(jsonResponse(400, { error: 'bad request' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const key = (i: number) => new Headers(fetchSpy.mock.calls[i][1]?.headers).get('Idempotency-Key');
+
+    await expect(apiJson('/api/upload-retry', { method: 'POST', body: form })).rejects.toThrow();
+    await apiJson('/api/upload-retry', { method: 'POST', body: form });
+    expect(key(1)).toBe(key(0)); // 5xx keeps the action open
+
+    await expect(apiJson('/api/upload-retry', { method: 'POST', body: form })).rejects.toThrow();
+    expect(key(2)).not.toBe(key(1)); // the 200 settled the first action
+
+    await expect(apiJson('/api/upload-retry', { method: 'POST', body: form })).rejects.toThrow();
+    await apiJson('/api/upload-retry', { method: 'POST', body: form });
+    expect(key(4)).not.toBe(key(3)); // a 4xx is definitive, so the next upload is new
+  });
+
   it('follows the running job on 409 job_already_running (both clients)', async () => {
     vi.spyOn(global, 'fetch').mockImplementation(async () =>
       jsonResponse(409, { ok: false, code: 'job_already_running', job_id: 'run-1', status: 'running', replay: false }));

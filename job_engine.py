@@ -96,7 +96,7 @@ JOB_RETENTION_DAYS = _env_int("JOB_RETENTION_DAYS", 7)
 READ_ONLY_JOB_TYPES = frozenset({
     "dedup-scan", "dedup-ai-review", "untracked-inventory", "library-health-scan", "leaked-db-path-scan",
     "folder-placeholder-scan", "artist-folder-scan", "root-folder-repair-scan", "album-folder-cleanup-scan",
-    "music-format-scan", "musicbrainz-match", "batch-ai-suggest", "ytdlp-youtube-test",
+    "music-format-scan", "batch-ai-suggest", "ytdlp-youtube-test",
 })
 
 _log = logging.getLogger("app.job_engine")

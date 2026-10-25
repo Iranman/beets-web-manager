@@ -194,7 +194,9 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw netErr;
   }
 
-  settle();
+  if (response.status < 500) {
+    settle();
+  }
   const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
 
   // Same job already running, or this key already started it: follow it.

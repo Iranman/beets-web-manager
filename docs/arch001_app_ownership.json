@@ -137,8 +137,8 @@
    "name": "_handle_ai_batch_state_conflict",
    "module": "app.py",
    "lines": [
-    293,
-    304
+    302,
+    313
    ],
    "size": 12,
    "body_lines": 1,
@@ -155,8 +155,8 @@
    "name": "_handle_provider_unavailable",
    "module": "app.py",
    "lines": [
-    307,
-    313
+    316,
+    322
    ],
    "size": 7,
    "body_lines": 4,
@@ -173,8 +173,8 @@
    "name": "_handle_unexpected_error",
    "module": "app.py",
    "lines": [
-    316,
-    323
+    325,
+    332
    ],
    "size": 8,
    "body_lines": 7,
@@ -193,8 +193,8 @@
    "name": "index",
    "module": "app.py",
    "lines": [
-    329,
-    330
+    338,
+    339
    ],
    "size": 2,
    "body_lines": 1,
@@ -242,8 +242,8 @@
    "name": "react_assets",
    "module": "app.py",
    "lines": [
-    333,
-    339
+    342,
+    348
    ],
    "size": 7,
    "body_lines": 5,
@@ -265,8 +265,8 @@
    "name": "react_next_static",
    "module": "app.py",
    "lines": [
-    343,
-    348
+    352,
+    357
    ],
    "size": 6,
    "body_lines": 4,
@@ -288,8 +288,8 @@
    "name": "favicon",
    "module": "app.py",
    "lines": [
-    352,
-    360
+    361,
+    369
    ],
    "size": 9,
    "body_lines": 8,
@@ -309,8 +309,8 @@
    "name": "_health_checks",
    "module": "app.py",
    "lines": [
-    363,
-    389
+    372,
+    398
    ],
    "size": 27,
    "body_lines": 26,
@@ -329,8 +329,8 @@
    "name": "health",
    "module": "app.py",
    "lines": [
-    393,
-    399
+    402,
+    408
    ],
    "size": 7,
    "body_lines": 1,
@@ -363,8 +363,8 @@
    "name": "health_detail",
    "module": "app.py",
    "lines": [
-    403,
-    408
+    412,
+    417
    ],
    "size": 6,
    "body_lines": 4,
@@ -386,8 +386,8 @@
    "name": "render_index",
    "module": "app.py",
    "lines": [
-    433,
-    444
+    442,
+    453
    ],
    "size": 12,
    "body_lines": 11,
@@ -406,8 +406,8 @@
    "name": "react_index_response",
    "module": "app.py",
    "lines": [
-    447,
-    452
+    456,
+    461
    ],
    "size": 6,
    "body_lines": 5,
@@ -429,8 +429,8 @@
    "name": "react_spa_fallback",
    "module": "app.py",
    "lines": [
-    456,
-    460
+    465,
+    469
    ],
    "size": 5,
    "body_lines": 3,
@@ -452,8 +452,8 @@
    "name": "__getattr__",
    "module": "app.py",
    "lines": [
-    508,
-    518
+    517,
+    527
    ],
    "size": 11,
    "body_lines": 10,
@@ -470,8 +470,8 @@
    "name": "_load_route_module",
    "module": "app.py",
    "lines": [
-    536,
-    549
+    545,
+    558
    ],
    "size": 14,
    "body_lines": 13,
@@ -32617,10 +32617,10 @@
    "module": "routes_library.py",
    "lines": [
     1261,
-    1289
+    1297
    ],
-   "size": 29,
-   "body_lines": 27,
+   "size": 37,
+   "body_lines": 35,
    "route": {
     "method": "GET",
     "path": "/api/artist-discography"
@@ -32639,11 +32639,11 @@
    "name": "artist_discography_discogs",
    "module": "routes_library.py",
    "lines": [
-    1293,
-    1326
+    1301,
+    1340
    ],
-   "size": 34,
-   "body_lines": 32,
+   "size": 40,
+   "body_lines": 38,
    "route": {
     "method": "GET",
     "path": "/api/artist-discography/discogs"
@@ -32662,8 +32662,8 @@
    "name": "artist_image_cache",
    "module": "routes_library.py",
    "lines": [
-    1336,
-    1351
+    1350,
+    1365
    ],
    "size": 16,
    "body_lines": 15,
@@ -32685,8 +32685,8 @@
    "name": "release_art_cache",
    "module": "routes_library.py",
    "lines": [
-    1355,
-    1370
+    1369,
+    1384
    ],
    "size": 16,
    "body_lines": 15,
@@ -32708,8 +32708,8 @@
    "name": "release_art_api",
    "module": "routes_library.py",
    "lines": [
-    1374,
-    1381
+    1388,
+    1395
    ],
    "size": 8,
    "body_lines": 6,
@@ -32731,8 +32731,8 @@
    "name": "artist_image_url_api",
    "module": "routes_library.py",
    "lines": [
-    1385,
-    1424
+    1399,
+    1438
    ],
    "size": 40,
    "body_lines": 38,
@@ -32757,8 +32757,8 @@
    "name": "library_art_repair_report",
    "module": "routes_library.py",
    "lines": [
-    1428,
-    1459
+    1442,
+    1473
    ],
    "size": 32,
    "body_lines": 31,
@@ -32781,8 +32781,8 @@
    "name": "album_art",
    "module": "routes_library.py",
    "lines": [
-    1463,
-    1546
+    1477,
+    1560
    ],
    "size": 84,
    "body_lines": 81,
@@ -32806,8 +32806,8 @@
    "name": "album_art_status",
    "module": "routes_library.py",
    "lines": [
-    1550,
-    1554
+    1564,
+    1568
    ],
    "size": 5,
    "body_lines": 4,
@@ -32829,8 +32829,8 @@
    "name": "album_fetch_art",
    "module": "routes_library.py",
    "lines": [
-    1558,
-    1585
+    1572,
+    1599
    ],
    "size": 28,
    "body_lines": 26,
@@ -32854,8 +32854,8 @@
    "name": "album_fetch_embed_artwork",
    "module": "routes_library.py",
    "lines": [
-    1589,
-    1617
+    1603,
+    1631
    ],
    "size": 29,
    "body_lines": 13,
@@ -32877,8 +32877,8 @@
    "name": "album_replace_art_from_url",
    "module": "routes_library.py",
    "lines": [
-    1621,
-    1667
+    1635,
+    1681
    ],
    "size": 47,
    "body_lines": 45,
@@ -32903,8 +32903,8 @@
    "name": "album_upload_art",
    "module": "routes_library.py",
    "lines": [
-    1671,
-    1714
+    1685,
+    1728
    ],
    "size": 44,
    "body_lines": 42,
@@ -32930,8 +32930,8 @@
    "name": "album_delete_art",
    "module": "routes_library.py",
    "lines": [
-    1718,
-    1741
+    1732,
+    1755
    ],
    "size": 24,
    "body_lines": 22,
@@ -32953,8 +32953,8 @@
    "name": "album_remove",
    "module": "routes_library.py",
    "lines": [
-    1745,
-    1773
+    1759,
+    1787
    ],
    "size": 29,
    "body_lines": 27,
@@ -32974,8 +32974,8 @@
    "name": "album_rename",
    "module": "routes_library.py",
    "lines": [
-    1777,
-    1795
+    1791,
+    1809
    ],
    "size": 19,
    "body_lines": 17,
@@ -32997,8 +32997,8 @@
    "name": "album_move_to_library",
    "module": "routes_library.py",
    "lines": [
-    1799,
-    1820
+    1813,
+    1834
    ],
    "size": 22,
    "body_lines": 20,
@@ -33020,8 +33020,8 @@
    "name": "album_fix_metadata",
    "module": "routes_library.py",
    "lines": [
-    1824,
-    1926
+    1838,
+    1940
    ],
    "size": 103,
    "body_lines": 101,
@@ -33044,8 +33044,8 @@
    "name": "album_deduplicate",
    "module": "routes_library.py",
    "lines": [
-    1930,
-    2171
+    1944,
+    2185
    ],
    "size": 242,
    "body_lines": 216,
@@ -33072,8 +33072,8 @@
    "name": "disk_art_serve",
    "module": "routes_library.py",
    "lines": [
-    2182,
-    2199
+    2196,
+    2213
    ],
    "size": 18,
    "body_lines": 15,
@@ -33095,8 +33095,8 @@
    "name": "match_album",
    "module": "routes_library.py",
    "lines": [
-    2203,
-    2221
+    2217,
+    2235
    ],
    "size": 19,
    "body_lines": 15,
@@ -33118,8 +33118,8 @@
    "name": "_match_album_run",
    "module": "routes_library.py",
    "lines": [
-    2224,
-    2342
+    2238,
+    2356
    ],
    "size": 119,
    "body_lines": 111,
@@ -33149,8 +33149,8 @@
    "name": "plan_album_cleanup_route",
    "module": "routes_library.py",
    "lines": [
-    2347,
-    2371
+    2361,
+    2385
    ],
    "size": 25,
    "body_lines": 24,
@@ -33172,8 +33172,8 @@
    "name": "apply_album_cleanup_route",
    "module": "routes_library.py",
    "lines": [
-    2375,
-    2405
+    2389,
+    2419
    ],
    "size": 31,
    "body_lines": 30,
@@ -33196,8 +33196,8 @@
    "name": "album_art_url_api",
    "module": "routes_library.py",
    "lines": [
-    2409,
-    2422
+    2423,
+    2436
    ],
    "size": 14,
    "body_lines": 12,
@@ -33219,8 +33219,8 @@
    "name": "save_album_art",
    "module": "routes_library.py",
    "lines": [
-    2426,
-    2467
+    2440,
+    2481
    ],
    "size": 42,
    "body_lines": 40,
@@ -33248,8 +33248,8 @@
    "name": "fetch_missing_art",
    "module": "routes_library.py",
    "lines": [
-    2471,
-    2474
+    2485,
+    2488
    ],
    "size": 4,
    "body_lines": 2,
@@ -33272,8 +33272,8 @@
    "name": "rebuild_album_art",
    "module": "routes_library.py",
    "lines": [
-    2478,
-    2575
+    2492,
+    2589
    ],
    "size": 98,
    "body_lines": 96,
@@ -33302,8 +33302,8 @@
    "name": "library_missing_mb_ids",
    "module": "routes_library.py",
    "lines": [
-    2579,
-    2609
+    2593,
+    2623
    ],
    "size": 31,
    "body_lines": 28,
@@ -33327,8 +33327,8 @@
    "name": "_batch_write_album",
    "module": "routes_library.py",
    "lines": [
-    2617,
-    2642
+    2631,
+    2656
    ],
    "size": 26,
    "body_lines": 22,
@@ -33349,8 +33349,8 @@
    "name": "_batch_write_item",
    "module": "routes_library.py",
    "lines": [
-    2645,
-    2665
+    2659,
+    2679
    ],
    "size": 21,
    "body_lines": 18,
@@ -33372,8 +33372,8 @@
    "name": "_batch_beets_error",
    "module": "routes_library.py",
    "lines": [
-    2668,
-    2673
+    2682,
+    2687
    ],
    "size": 6,
    "body_lines": 5,
@@ -33392,8 +33392,8 @@
    "name": "library_missing_mb_ids_batch_preview",
    "module": "routes_library.py",
    "lines": [
-    2677,
-    2698
+    2691,
+    2712
    ],
    "size": 22,
    "body_lines": 20,
@@ -33416,8 +33416,8 @@
    "name": "library_missing_mb_ids_batch_apply",
    "module": "routes_library.py",
    "lines": [
-    2702,
-    2719
+    2716,
+    2733
    ],
    "size": 18,
    "body_lines": 16,
@@ -33442,8 +33442,8 @@
    "name": "library_full",
    "module": "routes_library.py",
    "lines": [
-    2723,
-    2784
+    2737,
+    2798
    ],
    "size": 62,
    "body_lines": 51,
@@ -33467,8 +33467,8 @@
    "name": "ai_suggest_album",
    "module": "routes_library.py",
    "lines": [
-    2788,
-    2794
+    2802,
+    2808
    ],
    "size": 7,
    "body_lines": 6,
@@ -33490,8 +33490,8 @@
    "name": "batch_ai_suggest",
    "module": "routes_library.py",
    "lines": [
-    2798,
-    2872
+    2812,
+    2886
    ],
    "size": 75,
    "body_lines": 74,
@@ -33517,8 +33517,8 @@
    "name": "album_mb_format",
    "module": "routes_library.py",
    "lines": [
-    2876,
-    2905
+    2890,
+    2919
    ],
    "size": 30,
    "body_lines": 28,
@@ -33538,8 +33538,8 @@
    "name": "album_tracks",
    "module": "routes_library.py",
    "lines": [
-    2909,
-    2999
+    2923,
+    3013
    ],
    "size": 91,
    "body_lines": 90,
@@ -33564,8 +33564,8 @@
    "name": "album_merge_split_album",
    "module": "routes_library.py",
    "lines": [
-    3003,
-    3113
+    3017,
+    3127
    ],
    "size": 111,
    "body_lines": 109,
@@ -33590,8 +33590,8 @@
    "name": "albums",
    "module": "routes_library.py",
    "lines": [
-    3117,
-    3125
+    3131,
+    3139
    ],
    "size": 9,
    "body_lines": 8,
@@ -33627,8 +33627,8 @@
    "name": "recent",
    "module": "routes_library.py",
    "lines": [
-    3131,
-    3143
+    3145,
+    3157
    ],
    "size": 13,
    "body_lines": 12,
@@ -33651,8 +33651,8 @@
    "name": "library_mbid_status",
    "module": "routes_library.py",
    "lines": [
-    3147,
-    3259
+    3161,
+    3273
    ],
    "size": 113,
    "body_lines": 111,
@@ -33676,8 +33676,8 @@
    "name": "reimport_disk",
    "module": "routes_library.py",
    "lines": [
-    3263,
-    3266
+    3277,
+    3280
    ],
    "size": 4,
    "body_lines": 2,
@@ -33700,8 +33700,8 @@
    "name": "library_import_all",
    "module": "routes_library.py",
    "lines": [
-    3270,
-    3461
+    3284,
+    3475
    ],
    "size": 192,
    "body_lines": 185,
@@ -33733,8 +33733,8 @@
    "name": "library_import_all_last",
    "module": "routes_library.py",
    "lines": [
-    3465,
-    3471
+    3479,
+    3485
    ],
    "size": 7,
    "body_lines": 6,
@@ -33756,8 +33756,8 @@
    "name": "library_import_all_retry_failed",
    "module": "routes_library.py",
    "lines": [
-    3475,
-    3492
+    3489,
+    3506
    ],
    "size": 18,
    "body_lines": 17,
@@ -33782,8 +33782,8 @@
    "name": "library_scan",
    "module": "routes_library.py",
    "lines": [
-    3496,
-    3503
+    3510,
+    3517
    ],
    "size": 8,
    "body_lines": 7,
@@ -33807,8 +33807,8 @@
    "name": "library_scan_status",
    "module": "routes_library.py",
    "lines": [
-    3507,
-    3520
+    3521,
+    3534
    ],
    "size": 14,
    "body_lines": 13,
@@ -33830,8 +33830,8 @@
    "name": "library_merge_artist",
    "module": "routes_library.py",
    "lines": [
-    3524,
-    3585
+    3538,
+    3599
    ],
    "size": 62,
    "body_lines": 59,
@@ -33853,8 +33853,8 @@
    "name": "library_sync_deleted",
    "module": "routes_library.py",
    "lines": [
-    3589,
-    3689
+    3603,
+    3703
    ],
    "size": 101,
    "body_lines": 98,
@@ -33876,8 +33876,8 @@
    "name": "create_unmatched_draft",
    "module": "routes_library.py",
    "lines": [
-    3693,
-    3814
+    3707,
+    3828
    ],
    "size": 122,
    "body_lines": 106,
@@ -33903,8 +33903,8 @@
    "name": "library_move_all",
    "module": "routes_library.py",
    "lines": [
-    3818,
-    3972
+    3832,
+    3986
    ],
    "size": 155,
    "body_lines": 153,
@@ -33927,8 +33927,8 @@
    "name": "library_mbsync_all",
    "module": "routes_library.py",
    "lines": [
-    3976,
-    3997
+    3990,
+    4011
    ],
    "size": 22,
    "body_lines": 18,
@@ -33950,8 +33950,8 @@
    "name": "library_genre_stats",
    "module": "routes_library.py",
    "lines": [
-    4001,
-    4016
+    4015,
+    4030
    ],
    "size": 16,
    "body_lines": 14,
@@ -33974,8 +33974,8 @@
    "name": "library_fix_genres",
    "module": "routes_library.py",
    "lines": [
-    4020,
-    4023
+    4034,
+    4037
    ],
    "size": 4,
    "body_lines": 2,
@@ -33998,8 +33998,8 @@
    "name": "album_fix_genre",
    "module": "routes_library.py",
    "lines": [
-    4027,
-    4060
+    4041,
+    4074
    ],
    "size": 34,
    "body_lines": 32,
@@ -34027,8 +34027,8 @@
    "name": "library_normalize_artists",
    "module": "routes_library.py",
    "lines": [
-    4064,
-    4130
+    4078,
+    4144
    ],
    "size": 67,
    "body_lines": 64,
@@ -34051,8 +34051,8 @@
    "name": "library_merge_artist_id",
    "module": "routes_library.py",
    "lines": [
-    4134,
-    4164
+    4148,
+    4178
    ],
    "size": 31,
    "body_lines": 30,
@@ -34077,8 +34077,8 @@
    "name": "library_confirm_artist_alias",
    "module": "routes_library.py",
    "lines": [
-    4168,
-    4201
+    4182,
+    4215
    ],
    "size": 34,
    "body_lines": 33,
@@ -34103,8 +34103,8 @@
    "name": "browse",
    "module": "routes_library.py",
    "lines": [
-    4205,
-    4221
+    4219,
+    4235
    ],
    "size": 17,
    "body_lines": 13,
@@ -34126,8 +34126,8 @@
    "name": "_album_mb_error_response",
    "module": "routes_library.py",
    "lines": [
-    4236,
-    4241
+    4250,
+    4255
    ],
    "size": 6,
    "body_lines": 5,
@@ -34147,8 +34147,8 @@
    "name": "album_duplicate_resolver",
    "module": "routes_library.py",
    "lines": [
-    4245,
-    4251
+    4259,
+    4265
    ],
    "size": 7,
    "body_lines": 6,
@@ -34171,8 +34171,8 @@
    "name": "apply_album_duplicate_resolver",
    "module": "routes_library.py",
    "lines": [
-    4255,
-    4525
+    4269,
+    4539
    ],
    "size": 271,
    "body_lines": 270,
@@ -34200,8 +34200,8 @@
    "name": "album_mb_completeness",
    "module": "routes_library.py",
    "lines": [
-    4529,
-    4536
+    4543,
+    4550
    ],
    "size": 8,
    "body_lines": 7,
@@ -34224,8 +34224,8 @@
    "name": "repair_album_mb_tracks",
    "module": "routes_library.py",
    "lines": [
-    4540,
-    4620
+    4554,
+    4634
    ],
    "size": 81,
    "body_lines": 80,
@@ -34249,8 +34249,8 @@
    "name": "library_mbid_sticking_repair",
    "module": "routes_library.py",
    "lines": [
-    4624,
-    4631
+    4638,
+    4645
    ],
    "size": 8,
    "body_lines": 7,
@@ -34272,8 +34272,8 @@
    "name": "library_mb_full_sync",
    "module": "routes_library.py",
    "lines": [
-    4635,
-    4642
+    4649,
+    4656
    ],
    "size": 8,
    "body_lines": 7,
@@ -34295,8 +34295,8 @@
    "name": "_db_path_value",
    "module": "routes_library.py",
    "lines": [
-    4645,
-    4648
+    4659,
+    4662
    ],
    "size": 4,
    "body_lines": 3,
@@ -34315,8 +34315,8 @@
    "name": "library_template_token_cleanup",
    "module": "routes_library.py",
    "lines": [
-    4652,
-    4689
+    4666,
+    4703
    ],
    "size": 38,
    "body_lines": 37,
@@ -34341,8 +34341,8 @@
    "name": "scan_leaked_db_paths_job",
    "module": "routes_library.py",
    "lines": [
-    4693,
-    4743
+    4707,
+    4757
    ],
    "size": 51,
    "body_lines": 46,
@@ -34365,8 +34365,8 @@
    "name": "fix_leaked_db_paths",
    "module": "routes_library.py",
    "lines": [
-    4747,
-    4896
+    4761,
+    4910
    ],
    "size": 150,
    "body_lines": 145,
@@ -34390,8 +34390,8 @@
    "name": "scan_folder_placeholders_job",
    "module": "routes_library.py",
    "lines": [
-    4900,
-    4956
+    4914,
+    4970
    ],
    "size": 57,
    "body_lines": 55,
@@ -34414,8 +34414,8 @@
    "name": "apply_folder_placeholders_job",
    "module": "routes_library.py",
    "lines": [
-    4960,
-    5040
+    4974,
+    5054
    ],
    "size": 81,
    "body_lines": 67,
@@ -34438,8 +34438,8 @@
    "name": "rollback_folder_placeholders_job",
    "module": "routes_library.py",
    "lines": [
-    5044,
-    5085
+    5058,
+    5099
    ],
    "size": 42,
    "body_lines": 35,
@@ -34462,8 +34462,8 @@
    "name": "apply_folder_mbid_names_job",
    "module": "routes_library.py",
    "lines": [
-    5089,
-    5187
+    5103,
+    5201
    ],
    "size": 99,
    "body_lines": 76,
@@ -34486,8 +34486,8 @@
    "name": "rollback_folder_mbid_names_job",
    "module": "routes_library.py",
    "lines": [
-    5191,
-    5232
+    5205,
+    5246
    ],
    "size": 42,
    "body_lines": 33,
@@ -34510,8 +34510,8 @@
    "name": "item_replacement_plan",
    "module": "routes_library.py",
    "lines": [
-    5236,
-    5271
+    5250,
+    5285
    ],
    "size": 36,
    "body_lines": 29,
@@ -34533,8 +34533,8 @@
    "name": "item_replacement_apply",
    "module": "routes_library.py",
    "lines": [
-    5275,
-    5296
+    5289,
+    5310
    ],
    "size": 22,
    "body_lines": 16,
@@ -34556,8 +34556,8 @@
    "name": "_start_library_mbid_sticking_repair",
    "module": "routes_library.py",
    "lines": [
-    5299,
-    5577
+    5313,
+    5591
    ],
    "size": 279,
    "body_lines": 271,
@@ -37223,14 +37223,34 @@
    ]
   },
   {
+   "name": "_rollback_evidence_available",
+   "module": "routes_maintenance.py",
+   "lines": [
+    913,
+    938
+   ],
+   "size": 26,
+   "body_lines": 19,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "rollback_eligibility"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "rollback_eligibility",
    "module": "routes_maintenance.py",
    "lines": [
-    910,
-    986
+    960,
+    1056
    ],
-   "size": 77,
-   "body_lines": 57,
+   "size": 97,
+   "body_lines": 76,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -37241,14 +37261,16 @@
     "api_transaction_rollback"
    ],
    "caller_count": 2,
-   "dependencies": []
+   "dependencies": [
+    "_rollback_evidence_available"
+   ]
   },
   {
    "name": "_rollback_fields",
    "module": "routes_maintenance.py",
    "lines": [
-    989,
-    993
+    1059,
+    1063
    ],
    "size": 5,
    "body_lines": 2,
@@ -37270,8 +37292,8 @@
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    997,
-    1019
+    1067,
+    1089
    ],
    "size": 23,
    "body_lines": 22,
@@ -37295,8 +37317,8 @@
    "name": "_rollback_dispatch_body",
    "module": "routes_maintenance.py",
    "lines": [
-    1022,
-    1042
+    1092,
+    1112
    ],
    "size": 21,
    "body_lines": 17,
@@ -37315,11 +37337,11 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    1046,
-    1245
+    1116,
+    1321
    ],
-   "size": 200,
-   "body_lines": 199,
+   "size": 206,
+   "body_lines": 205,
    "route": {
     "method": "POST",
     "path": "/api/transactions/<transaction_id>/rollback"
@@ -37344,8 +37366,8 @@
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    1249,
-    1258
+    1325,
+    1334
    ],
    "size": 10,
    "body_lines": 9,
@@ -37365,8 +37387,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    1261,
-    1266
+    1337,
+    1342
    ],
    "size": 6,
    "body_lines": 5,
@@ -38263,7 +38285,7 @@
    "lines": 11
   }
  },
- "app_py_lines": 580,
+ "app_py_lines": 589,
  "extracted_modules": [
   "backend/app_runtime.py",
   "backend/auth_service.py",
