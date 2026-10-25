@@ -338,7 +338,7 @@ class RecoveryCarrierStore:
                 base_payload = {}
             base_payload.update(payload or {})
             folder_key = _folder_key(merged_cols.get("staged_folder_path", ""))
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE recovery_carrier SET
                     revision = revision + 1,
@@ -362,6 +362,20 @@ class RecoveryCarrierStore:
                     ident, int(row["revision"]),
                 ),
             )
+            # Atomic CAS backstop (mirrors ai_batch_state_store L246): the
+            # Python pre-check above is only a fast path. Two WAL connections
+            # can both SELECT the same revision before either commits, both
+            # pass that pre-check, then one UPDATE matches 1 row (winner) and
+            # the other matches 0 rows WITHOUT raising. Without this check the
+            # loser would fall through to ``get(ident)`` and be handed the
+            # WINNER's record as a false success -- defeating the
+            # ``_recovery_claim_importing`` serializer and allowing two
+            # confirmers to import the same track. A genuine 0-row UPDATE of an
+            # existing row is a lost race, including on an expected_revision=None
+            # blind write (the UPDATE still targets the revision we just read).
+            if cur.rowcount == 0:
+                raise RecoveryCarrierConflictError(
+                    f"carrier {ident!r} revision changed concurrently")
         got = self.get(ident)
         if got is None:
             raise RecoveryCarrierConflictError(f"carrier {ident!r} vanished during update")
