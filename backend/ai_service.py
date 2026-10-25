@@ -1932,10 +1932,29 @@ def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None,
                 log.append(f"folder left in place (not importable as a folder: {err}): {folder}")
             continue
         # HOOK(music-identity): a discovered folder with a recovery carrier
-        # (backend.recovery_carrier.load_for_folder(folder)) is a single-track
-        # recovery for a KNOWN album, not an unknown new-album. Consume the
-        # carrier's canonical mb_releasegroupid / wanted tracks here instead of
-        # re-deriving identity from the folder name. Spine only binds it today.
+        # (backend.recovery_carrier.load_for_folder) is a single-track recovery
+        # for a KNOWN album, not an unknown new-album. Its canonical identity
+        # (existing album + canonical mb_releasegroupid) comes from the carrier
+        # store, never re-derived from the folder name (ADR-0002, Phase-1 root
+        # cause). The generic new-album batch must not import it as a new
+        # album; its own guarded recovery workflow owns it (carrier-driven),
+        # so it is consumed here and left out of the new-album scan.
+        carrier = None
+        try:
+            from backend import recovery_carrier
+            carrier = recovery_carrier.load_for_folder(folder)
+        except Exception:
+            carrier = None
+        if carrier and _s(carrier.get("mb_releasegroupid")).strip():
+            if log is not None:
+                log.append(
+                    "recovery carrier folder skipped (single-track recovery for "
+                    f"album_id {int(carrier.get('existing_album_id') or 0)}, "
+                    f"Release Group {_s(carrier.get('mb_releasegroupid'))}); "
+                    f"handled by the missing-track recovery workflow, not re-imported "
+                    f"as a new album: {folder}"
+                )
+            continue
         result.append(folder)
     return result
 
