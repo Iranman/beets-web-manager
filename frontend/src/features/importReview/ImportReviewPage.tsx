@@ -47,7 +47,7 @@ import {
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
-import { RecoveryIdentityPanel, getRecoveryIdentity } from './MbidLink';
+import { MbidLink, RecoveryIdentityPanel, getRecoveryIdentity } from './MbidLink';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -1037,9 +1037,6 @@ function RecordingIdEvidencePanel({
   const localYear = evidenceYear(local.year);
   const suggestedYear = evidenceYear(displayCandidate?.release_year ?? displayCandidate?.year ?? displayCandidate?.selected_release?.year ?? displayCandidate?.release_date);
   const linkedReleases = displayCandidate?.linked_releases ?? [];
-  const recordingUrl = displayCandidate?.musicbrainz_url || displayCandidate?.mb_url || musicBrainzRecordingUrl(displayCandidate?.mb_trackid || mbid);
-  const releaseUrl = musicBrainzUrl(displayCandidate?.mb_albumid || displayCandidate?.selected_release?.mb_albumid);
-  const rgUrl = displayCandidate?.mb_releasegroupurl || musicBrainzReleaseGroupUrl(displayCandidate?.mb_releasegroupid || displayCandidate?.selected_release?.mb_releasegroupid);
 
   return (
     <div className="mt-3 rounded border border-cyan-200 bg-cyan-50 p-3 text-xs text-zinc-700">
@@ -1074,11 +1071,23 @@ function RecordingIdEvidencePanel({
             <div className="mt-2 grid grid-cols-2 gap-2">
               <DetailRow label="Displayed candidate" value={displayReason} />
               {displayMetric ? <DetailRow label={displayMetric.label} value={displayMetric.value} /> : null}
-              <DetailRow label="Suggested Recording ID" value={displayCandidate.mb_trackid} href={recordingUrl} mono />
+              {displayCandidate.mb_trackid ? (
+                <div><MbidLink entity="recording" id={displayCandidate.mb_trackid} status="suggested" label="Suggested Recording ID" /></div>
+              ) : (
+                <DetailRow label="Suggested Recording ID" value={displayCandidate.mb_trackid} mono />
+              )}
               <DetailRow label="Recording title" value={displayCandidate.recording_title || displayCandidate.title} />
               <DetailRow label="Recording artist credit" value={displayCandidate.recording_artist || displayCandidate.artist} />
-              <DetailRow label="Release ID" value={displayCandidate.mb_albumid || displayCandidate.selected_release?.mb_albumid} href={releaseUrl} mono />
-              <DetailRow label="Release Group ID" value={displayCandidate.mb_releasegroupid || displayCandidate.selected_release?.mb_releasegroupid} href={rgUrl} mono />
+              {(displayCandidate.mb_albumid || displayCandidate.selected_release?.mb_albumid) ? (
+                <div><MbidLink entity="release" id={displayCandidate.mb_albumid || displayCandidate.selected_release?.mb_albumid} status="suggested" label="Release ID" /></div>
+              ) : (
+                <DetailRow label="Release ID" value="-" mono />
+              )}
+              {(displayCandidate.mb_releasegroupid || displayCandidate.selected_release?.mb_releasegroupid) ? (
+                <div><MbidLink entity="release-group" id={displayCandidate.mb_releasegroupid || displayCandidate.selected_release?.mb_releasegroupid} status="suggested" label="Release Group ID" /></div>
+              ) : (
+                <DetailRow label="Release Group ID" value="-" mono />
+              )}
               <DetailRow label="Release title" value={displayCandidate.release_title || displayCandidate.album || displayCandidate.selected_release?.album} />
               <DetailRow label="Release year/date" value={displayCandidate.release_year || displayCandidate.year || displayCandidate.release_date || displayCandidate.selected_release?.year || displayCandidate.selected_release?.date} />
               <DetailRow label="Backend status" value={displayCandidate.safety_result || displayCandidate.safety_key} />
@@ -1136,12 +1145,11 @@ function RecordingIdEvidencePanel({
           </div>
           <div className="mt-2 grid gap-2 md:grid-cols-2">
             {linkedReleases.slice(0, 4).map((release, index) => {
-              const releaseHref = musicBrainzUrl(release.mb_albumid);
               return (
                 <div key={`${release.mb_albumid || index}`} className="rounded border border-graphite-200 bg-white px-2 py-1.5">
                   <div className="truncate font-medium text-zinc-800">{release.album || '(unknown release)'}</div>
                   <div className="truncate text-zinc-500">{[release.artist, release.year || release.date, release.country, release.medium_format || release.media_format].filter(Boolean).join(' / ')}</div>
-                  {releaseHref ? <a className="font-mono text-[0.7rem] text-sky-700 underline" href={releaseHref} target="_blank" rel="noreferrer">{release.mb_albumid}</a> : null}
+                  {release.mb_albumid ? <MbidLink entity="release" id={release.mb_albumid} status="suggested" label="Release" /> : null}
                 </div>
               );
             })}
@@ -2243,21 +2251,16 @@ function CandidateCarousel({
               ))}
             </div>
             {rgid ? (
-              <div className="mt-1.5 text-xs text-zinc-500">
-                <span className="font-medium">Release group:</span>{' '}
-                {rgUrl ? (
-                  <a className="font-mono underline decoration-zinc-400 hover:text-zinc-700" href={rgUrl} target="_blank" rel="noreferrer">
-                    {rgid}
-                  </a>
-                ) : (
-                  <span className="font-mono">{rgid}</span>
-                )}
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                <MbidLink entity="release-group" id={rgid} status="suggested" label="Release group" />
                 {current.release_group_primary_type ? (
-                  <span className="ml-2 rounded bg-graphite-100 px-1 py-0.5 text-zinc-500">{current.release_group_primary_type}</span>
+                  <span className="rounded bg-graphite-100 px-1 py-0.5 text-xs text-zinc-500">{current.release_group_primary_type}</span>
                 ) : null}
               </div>
             ) : mbid ? (
-              <div className="mt-1 truncate font-mono text-xs text-zinc-500">{mbid}</div>
+              <div className="mt-1.5">
+                <MbidLink entity="release" id={mbid} status="suggested" label="Release" />
+              </div>
             ) : null}
             {matchSummary ? (
               <div className="mt-1 text-xs font-medium text-zinc-600">{matchSummary}</div>
@@ -2698,7 +2701,6 @@ export function ReviewCard({
     ? item.mb_url || musicBrainzRecordingUrl(mbid || item.mb_trackid)
     : item.mb_url || musicBrainzUrl(item.mb_albumid);
   const itemReleaseGroupId = item.mb_releasegroupid || item.evidence?.preflight?.release_group || '';
-  const itemReleaseGroupUrl = item.mb_releasegroupurl || musicBrainzReleaseGroupUrl(itemReleaseGroupId);
   const busy = actionState?.status === 'running';
   const [mbsubmitOpen, setMbsubmitOpen] = useState(false);
   const [addMbidsOpen, setAddMbidsOpen] = useState(false);
@@ -2808,7 +2810,7 @@ export function ReviewCard({
                 {lifecycleLabel}
               </span>
               {item.missing_reason === 'missing_release_group' && item.current_mb_albumid ? (
-                <span className="break-all font-mono text-xs text-zinc-600">Release ID: {item.current_mb_albumid}</span>
+                <MbidLink entity="release" id={item.current_mb_albumid} status="suggested" label="Release ID" />
               ) : null}
               <span className={`rounded border px-2 py-1 text-xs font-semibold ${matchTones[visibleMatchBucket]}`}>
                 {matchLabels[visibleMatchBucket]}
@@ -2854,15 +2856,13 @@ export function ReviewCard({
             {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
             {item.path ? <div className="mt-3 truncate font-mono text-xs text-zinc-500">{item.path}</div> : null}
             {itemReleaseGroupId ? (
-              <div className="mt-2 text-xs text-zinc-500">
-                <span className="font-medium">MusicBrainz Release Group ID:</span>{' '}
-                {itemReleaseGroupUrl ? (
-                  <a className="font-mono underline decoration-zinc-400 hover:text-zinc-700" href={itemReleaseGroupUrl} target="_blank" rel="noreferrer">
-                    {itemReleaseGroupId}
-                  </a>
-                ) : (
-                  <span className="font-mono">{itemReleaseGroupId}</span>
-                )}
+              <div className="mt-2">
+                <MbidLink
+                  entity="release-group"
+                  id={itemReleaseGroupId}
+                  status={item.mb_valid ? 'verified' : 'suggested'}
+                  label="MusicBrainz Release Group ID"
+                />
               </div>
             ) : null}
             {visibleMatchNote ? (
@@ -3237,7 +3237,12 @@ function ConfirmDialog({
               ) : null}
               {intent?.kind === 'attach_recording_confirm' ? (
                 <div className="mt-2 space-y-2 text-xs text-zinc-600">
-                  <div className="truncate font-mono">{intent.candidate.mb_trackid}</div>
+                  <MbidLink
+                    entity="recording"
+                    id={intent.candidate.mb_trackid}
+                    status={(intent.candidate.conflicts || []).length ? 'conflicting' : 'suggested'}
+                    label="Recording ID"
+                  />
                   {(intent.candidate.conflicts || []).length ? (
                     <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-rose-800">
                       <div className="font-semibold">Conflicts</div>
