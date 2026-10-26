@@ -35,6 +35,33 @@ def _recovery_carrier_review_identity(carrier: Optional[Dict[str, Any]]) -> Dict
         return {}
 
 
+def _refresh_recovery_stage(evidence: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a copy of a Review item's evidence with ``recovery_carrier.
+    recovery_stage`` recomputed FRESH from the live carrier (QA Finding 7).
+
+    The stage stored at queue time is a snapshot (taken by the non-auto
+    hand-off BEFORE the carrier advances to review_required), so the queue can
+    show a stale stage. Recomputing on read reflects the carrier's current
+    state+checkpoint. A missing/unreadable carrier keeps the stored snapshot
+    unchanged -- never crash, never fabricate a stage."""
+    if not isinstance(evidence, dict):
+        return evidence or {}
+    rc = evidence.get("recovery_carrier")
+    carrier_id = _s(rc.get("recovery_carrier_id")).strip() if isinstance(rc, dict) else ""
+    if not carrier_id:
+        return evidence
+    try:
+        carrier = recovery_carrier.get_carrier(carrier_id)
+        if not carrier:
+            return evidence  # carrier gone: keep the stored snapshot
+        fresh = recovery_carrier.workflow_stage(carrier)
+    except Exception:
+        return evidence  # unreadable store: keep the stored snapshot
+    evidence = dict(evidence)
+    evidence["recovery_carrier"] = {**rc, "recovery_stage": fresh}
+    return evidence
+
+
 def _queue_folder_for_manual_review(folder_path: str, suggestion: Optional[dict],
                                     reason: str, log: Optional[list] = None,
                                     allow_existing: bool = False,

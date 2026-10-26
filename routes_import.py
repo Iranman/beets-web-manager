@@ -23,7 +23,7 @@ from backend.import_service import _cached_import_target_preview, _import_review
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _remove_pending_review_for_path, _save_pending_reviews
+from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
 from backend.serializers import REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
@@ -497,7 +497,10 @@ def import_review_queue():
                 "existing_album_id": int((s.get("existing_album_ids") or [0])[0] or 0),
                 "tracks": 0,
                 "sort_ts": float(item.get("added_at") or 0),
-                "evidence": item.get("evidence") or {},
+                # Recompute the carrier-backed recovery stage FRESH at read time
+                # so the queue reflects the carrier's current state, not the
+                # snapshot captured when the item was queued (QA Finding 7).
+                "evidence": _refresh_recovery_stage(item.get("evidence") or {}),
                 **origin_info,
             })
     except Exception:

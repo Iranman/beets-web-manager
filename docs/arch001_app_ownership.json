@@ -525,7 +525,7 @@
     "_ai_batch_json_safe",
     "_ai_batch_load_state"
    ],
-   "caller_count": 666,
+   "caller_count": 667,
    "dependencies": []
   },
   {
@@ -20776,11 +20776,33 @@
    "dependencies": []
   },
   {
-   "name": "_queue_folder_for_manual_review",
+   "name": "_refresh_recovery_stage",
    "module": "backend/pending_review_store.py",
    "lines": [
     38,
-    114
+    62
+   ],
+   "size": 25,
+   "body_lines": 16,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "import_review_queue"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_queue_folder_for_manual_review",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    65,
+    141
    ],
    "size": 77,
    "body_lines": 62,
@@ -20807,8 +20829,8 @@
    "name": "_is_music_root_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    117,
-    131
+    144,
+    158
    ],
    "size": 15,
    "body_lines": 11,
@@ -20831,8 +20853,8 @@
    "name": "_library_album_ids_for_folder",
    "module": "backend/pending_review_store.py",
    "lines": [
-    134,
-    145
+    161,
+    172
    ],
    "size": 12,
    "body_lines": 10,
@@ -20858,8 +20880,8 @@
    "name": "_review_album_is_resolved",
    "module": "backend/pending_review_store.py",
    "lines": [
-    148,
-    180
+    175,
+    207
    ],
    "size": 33,
    "body_lines": 32,
@@ -20881,8 +20903,8 @@
    "name": "_review_folder_has_audio",
    "module": "backend/pending_review_store.py",
    "lines": [
-    186,
-    201
+    213,
+    228
    ],
    "size": 16,
    "body_lines": 15,
@@ -20903,8 +20925,8 @@
    "name": "_review_path_is_resolved",
    "module": "backend/pending_review_store.py",
    "lines": [
-    204,
-    225
+    231,
+    252
    ],
    "size": 22,
    "body_lines": 19,
@@ -20928,8 +20950,8 @@
    "name": "_pending_review_item_is_resolved",
    "module": "backend/pending_review_store.py",
    "lines": [
-    228,
-    237
+    255,
+    264
    ],
    "size": 10,
    "body_lines": 9,
@@ -20952,8 +20974,8 @@
    "name": "_review_download_folder_is_gone",
    "module": "backend/pending_review_store.py",
    "lines": [
-    240,
-    265
+    267,
+    292
    ],
    "size": 26,
    "body_lines": 18,
@@ -20975,8 +20997,8 @@
    "name": "_apply_review_origin",
    "module": "backend/pending_review_store.py",
    "lines": [
-    268,
-    276
+    295,
+    303
    ],
    "size": 9,
    "body_lines": 8,
@@ -20998,8 +21020,8 @@
    "name": "_record_ai_review_decision",
    "module": "backend/pending_review_store.py",
    "lines": [
-    308,
-    335
+    335,
+    362
    ],
    "size": 28,
    "body_lines": 23,
@@ -21025,8 +21047,8 @@
    "name": "_save_pending_reviews",
    "module": "backend/pending_review_store.py",
    "lines": [
-    343,
-    346
+    370,
+    373
    ],
    "size": 4,
    "body_lines": 2,
@@ -21053,8 +21075,8 @@
    "name": "_load_pending_reviews",
    "module": "backend/pending_review_store.py",
    "lines": [
-    349,
-    351
+    376,
+    378
    ],
    "size": 3,
    "body_lines": 2,
@@ -21087,8 +21109,8 @@
    "name": "_load_pending_reviews_locked",
    "module": "backend/pending_review_store.py",
    "lines": [
-    354,
-    441
+    381,
+    468
    ],
    "size": 88,
    "body_lines": 84,
@@ -21119,8 +21141,8 @@
    "name": "_add_to_pending",
    "module": "backend/pending_review_store.py",
    "lines": [
-    443,
-    506
+    470,
+    533
    ],
    "size": 64,
    "body_lines": 61,
@@ -21151,8 +21173,8 @@
    "name": "_load_recorded_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    519,
-    526
+    546,
+    553
    ],
    "size": 8,
    "body_lines": 7,
@@ -21173,8 +21195,8 @@
    "name": "_write_recorded_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    529,
-    534
+    556,
+    561
    ],
    "size": 6,
    "body_lines": 4,
@@ -21194,8 +21216,8 @@
    "name": "_record_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    537,
-    555
+    564,
+    582
    ],
    "size": 19,
    "body_lines": 15,
@@ -21218,8 +21240,8 @@
    "name": "_forget_import_skip",
    "module": "backend/pending_review_store.py",
    "lines": [
-    558,
-    576
+    585,
+    603
    ],
    "size": 19,
    "body_lines": 15,
@@ -21242,8 +21264,8 @@
    "name": "_remove_pending_review_for_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    579,
-    631
+    606,
+    658
    ],
    "size": 53,
    "body_lines": 50,
@@ -21274,8 +21296,8 @@
    "name": "_pending_review_has_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    634,
-    646
+    661,
+    673
    ],
    "size": 13,
    "body_lines": 9,
@@ -21300,8 +21322,8 @@
    "name": "_pending_review_path_key",
    "module": "backend/pending_review_store.py",
    "lines": [
-    649,
-    656
+    676,
+    683
    ],
    "size": 8,
    "body_lines": 7,
@@ -21324,8 +21346,8 @@
    "name": "_pending_review_path_set",
    "module": "backend/pending_review_store.py",
    "lines": [
-    659,
-    665
+    686,
+    692
    ],
    "size": 7,
    "body_lines": 6,
@@ -21350,8 +21372,8 @@
    "name": "_import_review_folder_signature",
    "module": "backend/pending_review_store.py",
    "lines": [
-    668,
-    686
+    695,
+    713
    ],
    "size": 19,
    "body_lines": 15,
@@ -21374,8 +21396,8 @@
    "name": "_review_id_matches_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    689,
-    698
+    716,
+    725
    ],
    "size": 10,
    "body_lines": 9,
@@ -21397,8 +21419,8 @@
    "name": "_trusted_stored_review_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    701,
-    733
+    728,
+    760
    ],
    "size": 33,
    "body_lines": 24,
@@ -21420,8 +21442,8 @@
    "name": "_pending_review_matches",
    "module": "backend/pending_review_store.py",
    "lines": [
-    736,
-    750
+    763,
+    777
    ],
    "size": 15,
    "body_lines": 14,
@@ -21448,8 +21470,8 @@
    "name": "_finalize_pending_review_format_policy_rejection",
    "module": "backend/pending_review_store.py",
    "lines": [
-    753,
-    786
+    780,
+    813
    ],
    "size": 34,
    "body_lines": 30,
@@ -21477,8 +21499,8 @@
    "name": "_mark_pending_review_status",
    "module": "backend/pending_review_store.py",
    "lines": [
-    789,
-    833
+    816,
+    860
    ],
    "size": 45,
    "body_lines": 43,
@@ -36522,10 +36544,10 @@
    "module": "routes_import.py",
    "lines": [
     440,
-    570
+    573
    ],
-   "size": 131,
-   "body_lines": 127,
+   "size": 134,
+   "body_lines": 130,
    "route": {
     "method": "GET",
     "path": "/api/import/review-queue"
@@ -36541,6 +36563,7 @@
     "_import_skipped_items",
     "_load_pending_reviews",
     "_normalize_review_origin_type",
+    "_refresh_recovery_stage",
     "_review_blocked_metadata",
     "_review_item_origin_type",
     "_review_origin_payload",
@@ -36556,8 +36579,8 @@
    "name": "import_cleanup_stale",
    "module": "routes_import.py",
    "lines": [
-    574,
-    617
+    577,
+    620
    ],
    "size": 44,
    "body_lines": 43,
@@ -36584,8 +36607,8 @@
    "name": "candidate_tracks",
    "module": "routes_import.py",
    "lines": [
-    621,
-    627
+    624,
+    630
    ],
    "size": 7,
    "body_lines": 5,
@@ -36607,8 +36630,8 @@
    "name": "import_review_manual_id_validate",
    "module": "routes_import.py",
    "lines": [
-    631,
-    646
+    634,
+    649
    ],
    "size": 16,
    "body_lines": 14,
@@ -36633,8 +36656,8 @@
    "name": "import_target_preview",
    "module": "routes_import.py",
    "lines": [
-    650,
-    653
+    653,
+    656
    ],
    "size": 4,
    "body_lines": 2,
@@ -36656,8 +36679,8 @@
    "name": "import_review_decision",
    "module": "routes_import.py",
    "lines": [
-    657,
-    668
+    660,
+    671
    ],
    "size": 12,
    "body_lines": 7,
@@ -36677,8 +36700,8 @@
    "name": "import_review_auto_enqueue_ready",
    "module": "routes_import.py",
    "lines": [
-    672,
-    677
+    675,
+    680
    ],
    "size": 6,
    "body_lines": 5,
@@ -36702,8 +36725,8 @@
    "name": "import_review_auto_enqueue_ready_job",
    "module": "routes_import.py",
    "lines": [
-    681,
-    695
+    684,
+    698
    ],
    "size": 15,
    "body_lines": 14,
@@ -36727,8 +36750,8 @@
    "name": "import_reconciliation_reviews",
    "module": "routes_import.py",
    "lines": [
-    699,
-    705
+    702,
+    708
    ],
    "size": 7,
    "body_lines": 5,
@@ -36750,8 +36773,8 @@
    "name": "import_reconciliation_resolve",
    "module": "routes_import.py",
    "lines": [
-    709,
-    723
+    712,
+    726
    ],
    "size": 15,
    "body_lines": 13,
@@ -36774,8 +36797,8 @@
    "name": "import_review_auto_enqueue",
    "module": "routes_import.py",
    "lines": [
-    727,
-    768
+    730,
+    771
    ],
    "size": 42,
    "body_lines": 41,
@@ -36803,8 +36826,8 @@
    "name": "import_review_auto_enqueue_reconcile",
    "module": "routes_import.py",
    "lines": [
-    772,
-    867
+    775,
+    870
    ],
    "size": 96,
    "body_lines": 95,
@@ -36834,8 +36857,8 @@
    "name": "import_reconcile_job",
    "module": "routes_import.py",
    "lines": [
-    871,
-    963
+    874,
+    966
    ],
    "size": 93,
    "body_lines": 92,
@@ -36862,8 +36885,8 @@
    "name": "import_review_revalidate",
    "module": "routes_import.py",
    "lines": [
-    967,
-    1010
+    970,
+    1013
    ],
    "size": 44,
    "body_lines": 43,
@@ -36889,8 +36912,8 @@
    "name": "ai_suggest_folder",
    "module": "routes_import.py",
    "lines": [
-    1015,
-    1023
+    1018,
+    1026
    ],
    "size": 9,
    "body_lines": 4,
@@ -36914,8 +36937,8 @@
    "name": "import_folder_with_id",
    "module": "routes_import.py",
    "lines": [
-    1027,
-    1031
+    1030,
+    1034
    ],
    "size": 5,
    "body_lines": 3,
@@ -36938,8 +36961,8 @@
    "name": "get_ai_pending_review",
    "module": "routes_import.py",
    "lines": [
-    1038,
-    1039
+    1041,
+    1042
    ],
    "size": 2,
    "body_lines": 1,
@@ -36961,8 +36984,8 @@
    "name": "get_ai_review_decisions",
    "module": "routes_import.py",
    "lines": [
-    1043,
-    1056
+    1046,
+    1059
    ],
    "size": 14,
    "body_lines": 13,
@@ -36985,8 +37008,8 @@
    "name": "add_ai_pending_review",
    "module": "routes_import.py",
    "lines": [
-    1064,
-    1088
+    1067,
+    1091
    ],
    "size": 25,
    "body_lines": 24,
@@ -37013,8 +37036,8 @@
    "name": "clear_ai_pending_review",
    "module": "routes_import.py",
    "lines": [
-    1092,
-    1122
+    1095,
+    1125
    ],
    "size": 31,
    "body_lines": 30,
@@ -37040,8 +37063,8 @@
    "name": "ai_batch_reconcile_artwork",
    "module": "routes_import.py",
    "lines": [
-    1126,
-    1220
+    1129,
+    1223
    ],
    "size": 95,
    "body_lines": 77,
@@ -37069,8 +37092,8 @@
    "name": "ai_batch_skip",
    "module": "routes_import.py",
    "lines": [
-    1224,
-    1246
+    1227,
+    1249
    ],
    "size": 23,
    "body_lines": 22,
@@ -37095,8 +37118,8 @@
    "name": "ai_batch_pause",
    "module": "routes_import.py",
    "lines": [
-    1250,
-    1261
+    1253,
+    1264
    ],
    "size": 12,
    "body_lines": 11,
@@ -37123,8 +37146,8 @@
    "name": "ai_batch_stop",
    "module": "routes_import.py",
    "lines": [
-    1265,
-    1289
+    1268,
+    1292
    ],
    "size": 25,
    "body_lines": 24,
@@ -37152,8 +37175,8 @@
    "name": "ai_batch_import_status",
    "module": "routes_import.py",
    "lines": [
-    1293,
-    1315
+    1296,
+    1318
    ],
    "size": 23,
    "body_lines": 22,
@@ -37179,8 +37202,8 @@
    "name": "ai_batch_import_recover",
    "module": "routes_import.py",
    "lines": [
-    1319,
-    1355
+    1322,
+    1358
    ],
    "size": 37,
    "body_lines": 36,
@@ -37210,8 +37233,8 @@
    "name": "start_ai_batch_import",
    "module": "routes_import.py",
    "lines": [
-    1359,
-    1399
+    1362,
+    1402
    ],
    "size": 41,
    "body_lines": 39,
@@ -37240,8 +37263,8 @@
    "name": "start_import",
    "module": "routes_import.py",
    "lines": [
-    1406,
-    1492
+    1409,
+    1495
    ],
    "size": 87,
    "body_lines": 86,
@@ -37270,8 +37293,8 @@
    "name": "import_preflight",
    "module": "routes_import.py",
    "lines": [
-    1496,
-    1601
+    1499,
+    1604
    ],
    "size": 106,
    "body_lines": 105,
@@ -37296,8 +37319,8 @@
    "name": "_ai_batch_reconnect_response",
    "module": "routes_import.py",
    "lines": [
-    1604,
-    1679
+    1607,
+    1682
    ],
    "size": 76,
    "body_lines": 45,
@@ -37323,8 +37346,8 @@
    "name": "_start_ai_batch_job",
    "module": "routes_import.py",
    "lines": [
-    1682,
-    1838
+    1685,
+    1841
    ],
    "size": 157,
    "body_lines": 148,
@@ -38658,6 +38681,7 @@
   "_health_checks": "BOOTSTRAP",
   "_fetch_discography": "LIBRARY",
   "_review_blocked_metadata": "IMPORT_REVIEW",
+  "_refresh_recovery_stage": "IMPORT_REVIEW",
   "_target_preview_source_files": "IMPORT",
   "_normalize_review_origin_type": "IMPORT_REVIEW",
   "_path_origin_hint": "IMPORT_REVIEW",
