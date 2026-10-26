@@ -384,5 +384,64 @@ class WorkflowStageMappingTests(unittest.TestCase):
         self.assertEqual(ident["recovery_stage"]["stage"], "importing")
 
 
+# ─────────── QA Finding 7: recovery_stage is recomputed fresh on read ───────────
+class RecoveryStageFreshnessTests(unittest.TestCase):
+    """The Review queue must show the carrier's CURRENT stage, not the snapshot
+    taken when the item was queued (the non-auto hand-off snapshots BEFORE the
+    carrier advances to review_required)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._env = mock.patch.dict(os.environ, {"RECOVERY_CARRIER_STATE_DIR": self.tmp})
+        self._env.start()
+        rc._store_registry.clear()  # pick up the temp DB path
+
+    def tearDown(self):
+        self._env.stop()
+        rc._store_registry.clear()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _queued_evidence(self):
+        """Create a carrier mid-workflow and snapshot it the way the hand-off
+        does: evidence.recovery_carrier = review_identity(carrier)."""
+        carrier = rc.create_carrier(
+            carrier_id="c-fresh", existing_album_id=7, mb_releasegroupid=RGID,
+            state="verifying",
+        )
+        rc.advance_state(carrier["carrier_id"], "verifying", checkpoint="STAGED")
+        snapshot = rc.review_identity(rc.get_carrier("c-fresh"))
+        self.assertEqual(snapshot["recovery_stage"]["stage"], "verifying")  # stale stage
+        return {"recovery_carrier": snapshot}
+
+    def test_read_recomputes_stage_from_live_carrier(self):
+        from backend.pending_review_store import _refresh_recovery_stage
+        evidence = self._queued_evidence()
+        # The carrier advances AFTER the item was queued.
+        rc.advance_state("c-fresh", "review_required")
+        fresh = _refresh_recovery_stage(evidence)
+        self.assertEqual(fresh["recovery_carrier"]["recovery_stage"]["stage"], "needs_review")
+        # Shape + no-secrets invariant preserved.
+        self.assertEqual(set(fresh["recovery_carrier"]["recovery_stage"]),
+                         {"stage", "stage_index", "label", "terminal", "note"})
+        # The input snapshot is not mutated in place.
+        self.assertEqual(evidence["recovery_carrier"]["recovery_stage"]["stage"], "verifying")
+
+    def test_missing_carrier_keeps_stored_snapshot(self):
+        from backend.pending_review_store import _refresh_recovery_stage
+        evidence = self._queued_evidence()
+        rc._store_registry.clear()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)  # carrier gone/unreadable
+        fresh = _refresh_recovery_stage(evidence)
+        self.assertEqual(fresh["recovery_carrier"]["recovery_stage"]["stage"], "verifying")
+
+    def test_non_recovery_evidence_untouched(self):
+        from backend.pending_review_store import _refresh_recovery_stage
+        self.assertEqual(_refresh_recovery_stage({}), {})
+        self.assertEqual(_refresh_recovery_stage({"preflight": {"ok": True}}),
+                         {"preflight": {"ok": True}})
+
+
 if __name__ == "__main__":
     unittest.main()
