@@ -47,7 +47,7 @@ import {
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
-import { MbidLink, RecoveryIdentityPanel, RecoveryStageIndicator, getRecoveryIdentity } from './MbidLink';
+import { MbidLink, RecoveryIdentityPanel, RecoveryStageIndicator, getRecoveryIdentity, isValidMbid } from './MbidLink';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -654,16 +654,18 @@ function candidateMeta(candidate: ReviewCandidate): string[] {
 }
 
 
+// A malformed id must never yield a dead outbound link: validate the UUID
+// (reusing MbidLink's isValidMbid) before building any musicbrainz.org URL.
 function musicBrainzUrl(mbAlbumId?: string): string {
-  return mbAlbumId ? `https://musicbrainz.org/release/${mbAlbumId}` : '';
+  return isValidMbid(mbAlbumId) ? `https://musicbrainz.org/release/${mbAlbumId.trim().toLowerCase()}` : '';
 }
 
 function musicBrainzReleaseGroupUrl(mbReleaseGroupId?: string): string {
-  return mbReleaseGroupId ? `https://musicbrainz.org/release-group/${mbReleaseGroupId}` : '';
+  return isValidMbid(mbReleaseGroupId) ? `https://musicbrainz.org/release-group/${mbReleaseGroupId.trim().toLowerCase()}` : '';
 }
 
 function musicBrainzRecordingUrl(mbTrackId?: string): string {
-  return mbTrackId ? `https://musicbrainz.org/recording/${mbTrackId}` : '';
+  return isValidMbid(mbTrackId) ? `https://musicbrainz.org/recording/${mbTrackId.trim().toLowerCase()}` : '';
 }
 
 function pathFilename(path?: string): string {
@@ -2174,7 +2176,7 @@ function CandidateCarousel({
 
   const mbid = current.mb_albumid ?? '';
   const rgid = current.mb_releasegroupid || trackData?.mb_releasegroupid || '';
-  const rgUrl = current.mb_releasegroupurl ?? (rgid ? `https://musicbrainz.org/release-group/${rgid}` : '');
+  const rgUrl = current.mb_releasegroupurl ?? musicBrainzReleaseGroupUrl(rgid);
   const mbUrl = current.mb_url || musicBrainzUrl(mbid);
   const score = scoreValue(current);
   const normalizedScore = normalizedScoreValue(score);
@@ -2861,7 +2863,16 @@ export function ReviewCard({
                 <MbidLink
                   entity="release-group"
                   id={itemReleaseGroupId}
-                  status={item.mb_valid ? 'verified' : 'suggested'}
+                  // `item.mb_valid` is UUID-syntax validity only (backend
+                  // ai_service), NOT a confirmed match — so it must never
+                  // promote the chip to "Verified". A valid UUID still links
+                  // + is copyable (MbidLink decides that from the id itself);
+                  // validity governs linking, not verification. No genuine
+                  // "verified" signal exists on this item today, so this stays
+                  // neutral "Suggested". (Follow-up for music-identity: if
+                  // mb_valid should ever carry a real verified signal, surface
+                  // that as a separate field and map it here.)
+                  status="suggested"
                   label="MusicBrainz Release Group ID"
                 />
               </div>
@@ -3147,7 +3158,7 @@ export function ReviewCard({
   );
 }
 
-function ConfirmDialog({
+export function ConfirmDialog({
   intent,
   onClose,
   onConfirm,
@@ -3205,7 +3216,14 @@ function ConfirmDialog({
             <div className="mt-4 rounded border border-graphite-200 bg-graphite-50 p-3">
               <div className="truncate text-sm font-semibold text-zinc-900">{itemTitle(item)}</div>
               {intent?.kind === 'apply' ? (
-                <div className="mt-1 truncate font-mono text-xs text-zinc-600">{intent.mbid}</div>
+                <div className="mt-2">
+                  <MbidLink
+                    entity={item.target_kind === 'item' ? 'recording' : 'release'}
+                    id={intent.mbid}
+                    status="suggested"
+                    label={item.target_kind === 'item' ? 'Recording ID' : 'Release ID'}
+                  />
+                </div>
               ) : null}
               {intent?.kind === 'delete_folder' && item.path ? (
                 <div className="mt-2 space-y-2">
