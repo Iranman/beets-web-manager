@@ -319,26 +319,81 @@ def _recovery_precheck(carrier: Dict[str, Any], existing_album_id: int, log: lis
                    f"({labels}); carrier {cid} routed to Review to avoid a duplicate import")
 
 
+def _recovery_intended_tracks(carrier: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The tracks this recovery is responsible for -- expected (missing) tracks
+    PLUS any wanted tracks -- normalised to the {recording_id, disc, track}
+    shape ``_recovery_slot_present`` matches. This is the SAME set the
+    acquisition resume short-circuit treats as 'covered'
+    (expected_tracks ∪ wanted_tracks), so a carrier reaches IMPORTED only when
+    every track that set would report covered is actually on the album.
+
+    Entries with neither a recording id nor a positive track number are
+    dropped: they are unidentifiable and the coverage signature ignores them
+    too, so they must not make a full delivery look partial."""
+    out: List[Dict[str, Any]] = []
+    for t in (list(carrier.get("expected_tracks") or [])
+              + list(carrier.get("wanted_tracks") or [])):
+        if not isinstance(t, dict):
+            continue
+        rid = _s(t.get("recording_id") or t.get("mb_trackid")).strip()
+        try:
+            track = int(t.get("track") or 0)
+        except (TypeError, ValueError):
+            track = 0
+        if not rid and track <= 0:
+            continue
+        out.append({"recording_id": rid, "disc": t.get("disc"), "track": track})
+    return out
+
+
+def _recovery_fully_delivered(carrier: Dict[str, Any],
+                              present_items: Iterable[Dict[str, Any]], log: list) -> bool:
+    """True only when EVERY intended track of this recovery is present in the
+    album as it stands after this merge (``present_items`` = the existing
+    album's rows plus the imported rows this merge moves onto it). A strict
+    subset -- some intended tracks still undelivered -- returns False so the
+    carrier is NOT marked IMPORTED (QA-2-r / Finding F-2): a partial recovery
+    stays recoverable and a later resubmission of an undelivered track is not
+    short-circuited as already-imported and stranded.
+
+    An empty intended set means there is nothing to prove partial, so the prior
+    'a move happened' outcome stands (tolerant, mirrors the coverage check)."""
+    intended = _recovery_intended_tracks(carrier)
+    if not intended:
+        return True
+    rows = list(present_items or [])
+    undelivered = [t for t in intended if not _recovery_slot_present(rows, t)]
+    if undelivered:
+        log.append(f"  [merge] partial recovery: {len(undelivered)}/{len(intended)} expected/wanted "
+                   f"track(s) not delivered; carrier NOT marked IMPORTED.")
+        return False
+    return True
+
+
 def _recovery_mark_outcome(carrier: Dict[str, Any], result: int, existing_album_id: int,
+                           present_items: Iterable[Dict[str, Any]],
                            recon_op_id: str, log: list) -> None:
     """Drive the carrier to its terminal state once the merge body returned.
-    ``result == existing_album_id`` means the verified track landed on the
-    existing album -> ``imported`` + checkpoint ``IMPORTED``; anything else
-    means nothing merged (different identity / held for review) ->
-    ``review_required`` so the operator decides, never a false 'imported'.
+    IMPORTED is reached ONLY when the merge landed on the existing album
+    (``result == existing_album_id``) AND every expected/wanted track of this
+    recovery is actually delivered (``_recovery_fully_delivered``). Anything
+    else -- a different identity, nothing merged, or a PARTIAL delivery where
+    only some intended tracks landed -- goes to ``review_required`` so the
+    operator decides and an undelivered track is never falsely reported
+    'imported' nor stranded (QA-2-r / F-2).
 
     The reconcile transaction id is only logged: it is already a durable,
     independently recoverable record (transaction_recovery), and writing it as
     carrier ``evidence`` would clobber music-identity's verification_evidence."""
     cid = _s(carrier.get("carrier_id"))
     try:
-        if int(result) == int(existing_album_id):
+        if int(result) == int(existing_album_id) and _recovery_fully_delivered(carrier, present_items, log):
             recovery_carrier.advance_state(cid, "imported", checkpoint="IMPORTED")
             log.append(f"  [merge] Recovery carrier {cid}: state 'imported', checkpoint IMPORTED "
                        f"(reconcile tx {recon_op_id or 'n/a'}).")
         else:
             recovery_carrier.advance_state(cid, "review_required")
-            log.append(f"  [merge] Recovery carrier {cid}: nothing merged onto album_id "
+            log.append(f"  [merge] Recovery carrier {cid}: not fully delivered onto album_id "
                        f"{existing_album_id}; state 'review_required'.")
     except Exception as ex:
         log.append(f"  [merge] WARN carrier {cid} outcome state not recorded: {ex}")
@@ -522,7 +577,7 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
             log.append(f"  [merge] {len(reviews)} item(s) kept on both sides and queued for reconciliation review.")
         if not plan.album.same_album:
             if carrier is not None:
-                _recovery_mark_outcome(carrier, imported_album_id, existing_album_id, recon_op_id, log)
+                _recovery_mark_outcome(carrier, imported_album_id, existing_album_id, [], recon_op_id, log)
             return imported_album_id
 
         reconcile_ok = True
@@ -590,7 +645,14 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         attempted = bool(plan.move_ids or plan.duplicate_rows)
         result = existing_album_id if attempted else imported_album_id
         if carrier is not None:
-            _recovery_mark_outcome(carrier, result, existing_album_id, recon_op_id, log)
+            # Delivery is proven from the plan, not a post-apply DB re-read:
+            # present_after = the existing album's rows plus the imported rows
+            # this merge moves onto it. A recovery track counts as delivered
+            # only if it lands in that set; a strict subset => partial (F-2).
+            moved_ids = {int(i) for i in (plan.move_ids or [])}
+            moved_rows = [r for r in imported_items if int(r.get("id") or 0) in moved_ids]
+            present_after = list(existing_items) + moved_rows
+            _recovery_mark_outcome(carrier, result, existing_album_id, present_after, recon_op_id, log)
         return result
     except _ExistingAlbumMergeFailed:
         _recovery_mark_failed(carrier, log)
