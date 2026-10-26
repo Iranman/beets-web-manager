@@ -373,6 +373,13 @@ def start_dedup_scan(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         state["log"].append(f"Comparing against library items in beets database …")
         try:
             _dedup_raise_if_cancelled(cancel, state)
+            # ponytail: ARCH-031 keeps the stock full read here. The scan reads
+            # media-quality fields (length, bitrate, format via
+            # _playlist_quality_for_item) that the fields route's item allowlist
+            # does not expose, and it already stat()s and MediaFile-reads every
+            # file, so it is I/O-bound off the request path -- a field-scoped
+            # read would not help. Widen READ_FIELDS + migrate only if it shows
+            # up slow.
             all_items = list(lib.items([]))
             if tracked_only:
                 scan_root = scan_path.resolve(strict=False)
