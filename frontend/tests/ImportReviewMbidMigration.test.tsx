@@ -27,7 +27,8 @@ vi.mock('../src/lib/api', async (importOriginal) => {
 });
 
 import * as client from '../src/api/client';
-import { applyMbidEntity, ConfirmDialog, ImportReviewPage } from '../src/features/importReview/ImportReviewPage';
+import { applyMbidEntity, ConfirmDialog, ImportReviewPage, reviewItemStateKey } from '../src/features/importReview/ImportReviewPage';
+import type { SelectedMatch } from '../src/features/importReview/importReviewDecision';
 
 const RG = '11111111-2222-3333-4444-555555555555';
 const mocked = vi.mocked(client);
@@ -253,6 +254,68 @@ describe('applyMbidEntity derives the id\'s actual MB entity (not guessed from t
   });
   it('a per-item target is always recording', () => {
     expect(applyMbidEntity(album({ target_kind: 'item' }), '99999999-8888-7777-6666-555555555555')).toBe('recording');
+  });
+
+  // NF-4: with a selected match present, item.mb_albumid must still be consulted.
+  const sm = (o: Partial<SelectedMatch>) => o as unknown as SelectedMatch;
+  const OTHER_REL = '77777777-8888-9999-aaaa-bbbbbbbbbbbb';
+
+  it('labels an applied id equal to item.mb_albumid as a release even when the selected match carries a DIFFERENT representative release', () => {
+    // Before NF-4: `sm.representative_release_id || item.mb_albumid` short-circuited
+    // on the match's id, so an applied id equal to item.mb_albumid (but != the
+    // match release) fell through to the release-group default. It is a release.
+    expect(
+      applyMbidEntity(
+        album({ mb_albumid: REL }),
+        REL,
+        sm({ representative_release_id: OTHER_REL, release_group_id: RG }),
+      ),
+    ).toBe('release');
+  });
+
+  it('labels the selected match representative release id as a release', () => {
+    expect(
+      applyMbidEntity(
+        album({ mb_albumid: OTHER_REL }),
+        REL,
+        sm({ representative_release_id: REL, release_group_id: RG }),
+      ),
+    ).toBe('release');
+  });
+
+  it('keeps the ADR-0002-safe release-group default for the release-group id even with a contradictory selected match', () => {
+    expect(
+      applyMbidEntity(
+        album({ mb_releasegroupid: RG, mb_albumid: REL }),
+        RG,
+        sm({ representative_release_id: OTHER_REL, release_group_id: RG }),
+      ),
+    ).toBe('release-group');
+  });
+});
+
+describe('reviewItemStateKey includes the live recovery stage (so the queue poll surfaces transitions)', () => {
+  const recoveryItem = (stage: string, stageIndex: number): ReviewItem =>
+    ({
+      id: 'rec:1',
+      type: 'pending_ai',
+      evidence: {
+        recovery_carrier: {
+          recovery: true,
+          recovery_stage: { stage, stage_index: stageIndex, label: stage, terminal: false, note: '' },
+        },
+      },
+    }) as unknown as ReviewItem;
+
+  it('produces a different key when only the recovery stage advances', () => {
+    const searching = reviewItemStateKey(recoveryItem('searching', 1));
+    const downloading = reviewItemStateKey(recoveryItem('downloading', 2));
+    expect(searching).not.toBe(downloading);
+  });
+
+  it('is stable for a non-recovery item (no stage appended changes)', () => {
+    const base = { id: 'x', type: 'library_no_mb' } as unknown as ReviewItem;
+    expect(reviewItemStateKey(base)).toBe(reviewItemStateKey({ ...base }));
   });
 });
 
