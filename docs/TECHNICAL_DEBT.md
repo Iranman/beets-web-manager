@@ -316,7 +316,7 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Evidence: the Missing IDs batch fills `mb_releasegroupid` on an album that has a Release ID but no Release Group through a Metadata Update with tag writes. Rolling that update back restores the album's captured value (empty) and rewrites tags, so an item whose file tag already carried the same Release Group loses it.
 - Current risk: low. The fill is refused when any item carries a different Release Group, so only an identical embedded value can be blanked, and only by an explicit rollback.
 - Desired state: rollback restores each item's own captured value instead of the album's.
-- Priority: P3. Status: Open.
+- Priority: P3. Status: Resolved (Unreleased). `plan_album_metadata` now captures each album item's own value of every album-written field in the before-state (not only items named in an explicit per-item update), so `rollback_album_metadata`/`_restore_rows` restores the album's value to the album and each item's own value to that item — the item keeps the Release Group its file tag already carried. The apply/audit/recovery contract is unchanged (apply still writes only the album and any explicit per-item updates); the fix is the root cause for the whole class (any album-level metadata write now rolls back to each item's own prior value). Regression: `tests/test_arch032_release_group_fill_rollback.py` (fails before, passes after).
 
 ## ARCH-033 Review Queue Follow-ups (0.7.1, QA #410 N1-N3)
 
