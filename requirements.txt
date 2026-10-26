@@ -8,7 +8,7 @@ pylast==7.2.0
 typing_extensions==4.16.0
 deezer-python==7.4.0
 pylistenbrainz==0.5.1
-Pillow==12.3.0
+Pillow==13.0.0
 beautifulsoup4==4.15.0
 requests==2.34.2
 
