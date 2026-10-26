@@ -158,7 +158,10 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('REV-02: no import is ever started by viewing or selecting an item', page)
     def test_frontend_import_runs_only_through_explicit_confirmation(self):
         start_apply = section(REVIEW_PAGE, 'const startApply = useCallback', 'const runApply = useCallback')
-        self.assertIn("setConfirmIntent({ kind: 'apply', item, mbid })", start_apply)
+        # startApply must still route only through an explicit apply confirm intent
+        # carrying item + mbid (the entity arg added for the correct-MB-entity link is
+        # appended after mbid; assert the stable prefix so the guarantee is preserved).
+        self.assertIn("setConfirmIntent({ kind: 'apply', item, mbid", start_apply)
         self.assertNotIn('importWithId(', start_apply)
         confirm = section(REVIEW_PAGE, 'const confirm = useCallback', 'const selectFilter = useCallback')
         self.assertIn("if (intent.kind === 'apply') void runApply(intent.item, intent.mbid)", confirm)
