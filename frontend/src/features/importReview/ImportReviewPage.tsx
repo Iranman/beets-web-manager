@@ -48,6 +48,7 @@ import {
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
 import { MbidLink, RecoveryIdentityPanel, RecoveryStageIndicator, getRecoveryIdentity, isValidMbid } from './MbidLink';
+import type { MbEntity } from './MbidLink';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -128,7 +129,7 @@ type ManualValidationState = {
 
 
 type ConfirmIntent =
-  | { kind: 'apply'; item: ReviewItem; mbid: string }
+  | { kind: 'apply'; item: ReviewItem; mbid: string; entity: MbEntity }
   | { kind: 'dismiss'; item: ReviewItem }
   | { kind: 'delete_folder'; item: ReviewItem; folderStats?: FolderStatsResponse }
   | { kind: 'cleanup_files'; item: ReviewItem; files: string[]; wrongAudio: boolean }
@@ -1185,6 +1186,29 @@ function initialMbid(item: ReviewItem): string {
   if (item.target_kind === 'item') return item.mb_trackid || '';
   return item.mb_releasegroupid || item.mb_albumid || '';
 }
+
+// The ACTUAL MB entity of the id being applied, so the confirm dialog links and
+// labels it truthfully instead of guessing from target_kind. A per-item target
+// carries a recording id; an album target carries the canonical release-GROUP id
+// (ADR-0002) — it is only a release (edition) id when it specifically matches the
+// known release id and differs from the release-group id (e.g. the mb_albumid
+// fallback when no release-group id exists). Never relabel a release-group id as a
+// release.
+export function applyMbidEntity(item: ReviewItem, mbid: string, sm?: SelectedMatch): MbEntity {
+  if (item.target_kind === 'item') return 'recording';
+  const id = (mbid || '').trim().toLowerCase();
+  const rgid = (sm?.release_group_id || item.mb_releasegroupid || '').trim().toLowerCase();
+  const releaseId = (sm?.representative_release_id || item.mb_albumid || '').trim().toLowerCase();
+  if (id && id === releaseId && id !== rgid) return 'release';
+  return 'release-group';
+}
+
+const APPLY_ENTITY_LABEL: Record<MbEntity, string> = {
+  'release-group': 'Release Group ID',
+  release: 'Release ID',
+  recording: 'Recording ID',
+  artist: 'Artist ID',
+};
 
 function selectedReleaseGroupId(item: ReviewItem, mbid: string, response?: AiSuggestResponse): string {
   const suggestion = response?.suggestion;
@@ -3216,14 +3240,22 @@ export function ConfirmDialog({
             <div className="mt-4 rounded border border-graphite-200 bg-graphite-50 p-3">
               <div className="truncate text-sm font-semibold text-zinc-900">{itemTitle(item)}</div>
               {intent?.kind === 'apply' ? (
-                <div className="mt-2">
-                  <MbidLink
-                    entity={item.target_kind === 'item' ? 'recording' : 'release'}
-                    id={intent.mbid}
-                    status="suggested"
-                    label={item.target_kind === 'item' ? 'Recording ID' : 'Release ID'}
-                  />
-                </div>
+                (() => {
+                  // Truthful entity carried on the intent (ADR-0002): an album's
+                  // canonical id is a release GROUP, not a release. Default only
+                  // guards a malformed intent; it never guesses 'release'.
+                  const entity = intent.entity ?? (item.target_kind === 'item' ? 'recording' : 'release-group');
+                  return (
+                    <div className="mt-2">
+                      <MbidLink
+                        entity={entity}
+                        id={intent.mbid}
+                        status="suggested"
+                        label={APPLY_ENTITY_LABEL[entity]}
+                      />
+                    </div>
+                  );
+                })()
               ) : null}
               {intent?.kind === 'delete_folder' && item.path ? (
                 <div className="mt-2 space-y-2">
@@ -4322,7 +4354,7 @@ export function ImportReviewPage({
     const previewState = currentTargetPreviewState(item, sm, targetPreviews);
     const blockReason = applyBlockReason(item, mbid, sm, previewState);
     if (blockReason) { setAction(item.id, { status: 'error', message: blockReason }); return; }
-    setConfirmIntent({ kind: 'apply', item, mbid });
+    setConfirmIntent({ kind: 'apply', item, mbid, entity: applyMbidEntity(item, mbid, sm) });
   }, [mbids, selectedMatches, setAction, targetPreviews]);
 
   // Non-blocking: submit job, remove from queue immediately, poll in background
