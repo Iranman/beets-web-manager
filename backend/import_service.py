@@ -1088,6 +1088,17 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             ),
                         )
                         if staged_dir != aldir:
+                            # F5/F6 auto path (QA F1): the recovery carrier was
+                            # bound to this pre-restage folder at acquisition.
+                            # The subset-narrowing restage creates a NEW staged
+                            # path, and the merge/Plex-leg carrier lookups below
+                            # are keyed on the reassigned aldir -- rebind the
+                            # carrier to the new path FIRST (same album-equality
+                            # gate the helper enforces) so the merge runs under
+                            # carrier ownership/audit instead of degrading to a
+                            # carrier-less merge that leaves the carrier orphaned
+                            # at STAGED.
+                            _recovery_rebind_restaged(aldir, staged_dir, existing_album_id, log)
                             aldir = staged_dir
                             source_is_music_library = False
                         staged_missing_import_ok = True
