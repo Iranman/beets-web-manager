@@ -373,15 +373,78 @@ def _save_pending_reviews(items: list) -> None:
     _atomic_write_text(_AI_PENDING_FILE, json.dumps(items, indent=2))
 
 
+def _read_pending_snapshot() -> list:
+    """Best-effort read of the queue file for the lock-free resolution pass
+    (ARCH-033 N3). Errors become an empty snapshot; the authoritative read and
+    its strict error handling happen under the lock in the locked loader."""
+    try:
+        items = json.loads(_AI_PENDING_FILE.read_text())
+    except Exception:
+        return []
+    return items if isinstance(items, list) else []
+
+
+def _review_resolution_sig(item: Dict[str, Any]) -> tuple:
+    """The row fields the resolved/not-resolved decision depends on, so the
+    locked pass can tell whether a row still matches the snapshot the decision
+    was computed from and never drop a row a concurrent writer changed under it
+    (ARCH-033 N3)."""
+    suggestion = (item or {}).get("suggestion") or {}
+    evidence = (item or {}).get("evidence") or {}
+    return (
+        bool(suggestion.get("allow_existing_review")),
+        tuple(suggestion.get("existing_album_ids") or []),
+        _s(evidence.get("conflict")),
+    )
+
+
+def _compute_prune_resolutions(snapshot: list) -> Dict[str, tuple]:
+    """ARCH-033 N3: the Beets-backed "is this row resolved?" checks, computed
+    WITHOUT the queue lock. Returns ``{path: (resolved, signature)}``. A row the
+    checks could not evaluate (Beets unavailable) is simply absent, so the
+    locked pass keeps it unpruned rather than waiting out Beets per row
+    (SEC-006). No Beets HTTP call happens while ``_ai_pending_lock`` is held on
+    the list-only load path, because this runs before the lock is taken."""
+    resolutions: Dict[str, tuple] = {}
+    for item in snapshot:
+        item = item if isinstance(item, dict) else {}
+        path = _s(item.get("path", ""))
+        if not path:
+            continue
+        suggestion = item.get("suggestion") or {}
+        try:
+            resolved = bool(
+                (_library_album_ids_for_folder(path)
+                 and not suggestion.get("allow_existing_review"))
+                or _pending_review_item_is_resolved(item))
+        except BeetsUnavailableError:
+            # Unknown is not resolved: stop here so every still-unchecked row
+            # is kept unpruned by the locked pass (SEC-006).
+            break
+        resolutions[path] = (resolved, _review_resolution_sig(item))
+    return resolutions
+
+
 def _load_pending_reviews(*, prune_resolved: bool = True, strict: bool = False) -> list:
+    # ARCH-033 N3: the Beets-backed resolution checks run BEFORE the lock, so a
+    # slow Beets never serializes queue readers/writers and no Beets HTTP call
+    # happens while _ai_pending_lock is held on this path. The locked pass
+    # re-reads the queue and applies the precomputed decisions.
+    resolutions: Dict[str, tuple] = {}
+    if prune_resolved:
+        resolutions = _compute_prune_resolutions(_read_pending_snapshot())
     with _ai_pending_lock:
-        return _load_pending_reviews_locked(prune_resolved=prune_resolved, strict=strict)
+        return _load_pending_reviews_locked(
+            resolutions=resolutions, prune_resolved=prune_resolved, strict=strict)
 
 
-def _load_pending_reviews_locked(*, prune_resolved: bool, strict: bool) -> list:
+def _load_pending_reviews_locked(*, resolutions: Dict[str, tuple], prune_resolved: bool, strict: bool) -> list:
     """The queue, pruned of resolved rows. A failed read returns [] for
     list-only callers; ``strict=True`` raises PendingReviewLoadError instead,
-    so a caller that saves never writes a failed load over the queue."""
+    so a caller that saves never writes a failed load over the queue.
+
+    ``resolutions`` carries the Beets-backed resolution decisions computed
+    outside the lock (ARCH-033 N3); this pass makes no Beets call itself."""
     try:
         try:
             items = json.loads(_AI_PENDING_FILE.read_text())
@@ -394,7 +457,6 @@ def _load_pending_reviews_locked(*, prune_resolved: bool, strict: bool) -> list:
         filtered = []
         resolved_items = []
         changed = False
-        beets_down = False
         for item in items:
             item = item if isinstance(item, dict) else {}
             reconciled_item, reconcile_changed = _reconcile_pending_review_enqueue_item(item)
@@ -425,18 +487,13 @@ def _load_pending_reviews_locked(*, prune_resolved: bool, strict: bool) -> list:
                 changed = True
                 resolved_items.append(item)
                 continue
-            if prune_resolved and not beets_down:
-                try:
-                    resolved = bool(
-                        (path and _library_album_ids_for_folder(path)
-                         and not suggestion.get("allow_existing_review"))
-                        or _pending_review_item_is_resolved(item or {}))
-                except BeetsUnavailableError:
-                    # Unknown is not resolved: keep this row and every later
-                    # one unpruned rather than wait out Beets per row (SEC-006).
-                    beets_down = True
-                    resolved = False
-                if resolved:
+            if prune_resolved:
+                # ARCH-033 N3: apply the decision computed outside the lock.
+                # Only drop a row whose resolution-relevant fields still match
+                # the snapshot the decision was made from, so a row a writer
+                # changed in the window is kept (re-checked on the next load).
+                decision = resolutions.get(path)
+                if decision is not None and decision[0] and decision[1] == _review_resolution_sig(item):
                     changed = True
                     resolved_items.append(item)
                     continue
@@ -479,7 +536,11 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
     if evidence:
         suggestion["review_evidence"] = evidence
     with _ai_pending_lock:
-        items = _load_pending_reviews(strict=True)
+        # ARCH-033 N3: no Beets call while the queue lock is held. This writer
+        # already made its own library check above (outside the lock); pruning
+        # other rows here would reintroduce a Beets call under the lock, and
+        # the next list-only load prunes them anyway.
+        items = _load_pending_reviews(prune_resolved=False, strict=True)
         updated = False
         for item in items:
             try:

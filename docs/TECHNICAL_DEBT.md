@@ -325,7 +325,11 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - N1: a partial-import batch folder whose review enqueue fails is marked `import_failed`, and a retry re-runs its Stage 1 import.
 - N2: the final-pass `_queue` review drops the original evidence (`conflict`, `skipped_paths`, `kept_album_ids`, `deterministic_decision`).
 - Current risk: low. No queue item is lost; the cost is latency (N3), a repeated import attempt (N1) and less evidence on the review row (N2).
-- Priority: P3. Status: Open.
+- Priority: P3. Status: Closed in 0.7.1.
+  - N3: `_load_pending_reviews` now computes the Beets-backed resolution checks in `_compute_prune_resolutions(_read_pending_snapshot())` BEFORE taking `_ai_pending_lock`; the locked pass re-reads the queue and drops only rows whose resolution-relevant fields still match the snapshot (`_review_resolution_sig`), so no Beets HTTP call happens while the lock is held and a slow Beets never serializes queue readers/writers. `_add_to_pending` loads with `prune_resolved=False` (it already does its own library check outside the lock), keeping its locked section Beets-free.
+  - N1: when the inline batch Review enqueue raises `PendingReviewLoadError` after Beets already imported album(s), the folder records `imported_album_ids` and stashes the full Review payload. On retry, `_ai_batch_process_folder` re-creates the Review row from the stash and never re-runs Stage 1 against an already-imported folder (`_ai_batch_albums_present`).
+  - N2: the inline failure stashes the computed `suggestion`+`evidence`; the final-pass `_queue` (and the N1 retry) re-use that stash, so `conflict` / `skipped_paths` / `kept_album_ids` / `deterministic_decision` survive on the Review row instead of a minimal one.
+  - Regression tests: `tests/test_arch033_review_followups.py`.
 
 ## ARCH-034 AI Suggest In The Review Queue
 
