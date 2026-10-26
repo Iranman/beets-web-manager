@@ -210,7 +210,11 @@ def _restore_embedded(lib, album_id: int, saved: Dict[str, List[Dict[str, Any]]]
 
 def _write_manifest(folder: str, manifest: Dict[str, Any]) -> None:
     tmp = os.path.join(folder, MANIFEST_NAME + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
+    # O_NOFOLLOW: reject a symlink planted at the .tmp name so the write cannot
+    # be redirected outside the engine's own quarantine folder (SEC-007).
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh)
     os.replace(tmp, os.path.join(folder, MANIFEST_NAME))
 
