@@ -181,6 +181,98 @@ class ResumeCoverageIntegrityTests(_AcqHarness):
         self.assertEqual(sibling["checkpoint"], "STAGED")
         self.assertEqual(sibling["verification_evidence"], {"acoustid": "proven"})
 
+    # ───────── NF-1: conflicting recording id at same position not covered ───
+    def test_conflicting_recording_id_at_same_position_not_covered(self):
+        """NF-1: a completed carrier that recovered recording ``rec-6`` at
+        position (disc 1, track 6) must NOT report a request for a DIFFERENT
+        recording at the SAME position as already-imported. When both sides
+        carry a recording id the ids are decisive; (disc,track) position is only
+        a fallback when one side lacks a rid. Conflicting-rid-same-slot is a real
+        recovery -> no false already-done; the request proceeds and the sibling's
+        durable state is untouched."""
+        cid = "abcdef0123456789abcdef0123456789"
+        self._setup()
+        rc.create_carrier(carrier_id=cid, existing_album_id=42, mb_releasegroupid=RGID,
+                          wanted_tracks=[{"track": 6}],
+                          expected_tracks=[{"recording_id": "rec-6", "track": 6, "disc": 1}],
+                          staged_folder_path="", state="verifying")
+        rc.advance_state(cid, "imported", checkpoint="IMPORTED")
+        result, _log = self._run({
+            "artist": "Artist", "album": "Album", "year": "2024",
+            "method": "ytdlp", "auto_import": True,
+            "existing_album_id": 42, "mb_releasegroupid": RGID,
+            "recovery_carrier_id": cid,
+            # SAME (disc 1, track 6) slot, but a DIFFERENT recording id.
+            "missing_tracks": [{"track": 6, "disc": 1, "title": "Last",
+                                "recording_id": "rec-6-different"}],
+        })
+        self.assertFalse(result.get("resumed"))   # not a false already-done
+        self.ytdlp.assert_called()                 # proceeded as a real recovery
+        minted = self.jobs.start_python.call_args.kwargs["metadata"]["recovery_carrier_id"]
+        self.assertNotEqual(minted, cid)           # conflicting rid -> not covered -> fresh
+        self.assertEqual(rc.get_carrier(cid)["checkpoint"], "IMPORTED")  # sibling untouched
+
+    def test_same_recording_id_at_different_position_still_covered(self):
+        """NF-1 guard: the fix must only TIGHTEN. A request for the SAME
+        recording id the carrier imported, even at a different reported position,
+        is still covered (rid is decisive) -> the completed carrier short-circuits
+        as already-done. (Protects against over-tightening into a false re-run.)"""
+        cid = "abcdef0123456789abcdef0123456789"
+        self._setup()
+        rc.create_carrier(carrier_id=cid, existing_album_id=42, mb_releasegroupid=RGID,
+                          wanted_tracks=[{"track": 6}],
+                          expected_tracks=[{"recording_id": "rec-6", "track": 6, "disc": 1}],
+                          staged_folder_path="", state="verifying")
+        rc.advance_state(cid, "imported", checkpoint="IMPORTED")
+        result, _log = self._run({
+            "artist": "Artist", "album": "Album", "year": "2024",
+            "method": "ytdlp", "auto_import": True,
+            "existing_album_id": 42, "mb_releasegroupid": RGID,
+            "recovery_carrier_id": cid,
+            # SAME recording id, DIFFERENT reported position (track 9) -> rid wins.
+            "missing_tracks": [{"track": 9, "disc": 1, "title": "Last",
+                                "recording_id": "rec-6"}],
+        })
+        self.assertTrue(result.get("resumed"))     # rid match -> still already-done
+        self.ytdlp.assert_not_called()
+
+    # ───────── NF-4: crafted mb_albumid never yields a release-group id ──────
+    def test_crafted_release_reference_not_extracted_as_rgid(self):
+        """NF-4: a crafted mb_albumid that embeds a RELEASE uuid in a
+        ``/release/<uuid>`` reference (even decorated with the text
+        ``release-group``) must NOT be parsed into the canonical Release Group.
+        Only an anchored ``/release-group/<uuid>`` path segment counts. The RG is
+        supplied ONLY through mb_albumid (no mb_releasegroupid field) so the
+        parser must act on the crafted value: pre-fix the loose
+        ``"release-group" in ...`` substring test + first-UUID regex extracted the
+        RELEASE uuid (RGID2), which mismatched the carrier's true RG (RGID) and
+        wrongly REJECTED the resume (fresh carrier minted). Post-fix the crafted
+        ``/release/<uuid>#release-group`` yields no release-group id, identity
+        falls back to album-only, the covered recording honors the resume, and no
+        release id is ever substituted for the canonical RG (ADR-0002)."""
+        cid = "abcdef0123456789abcdef0123456789"
+        self._setup()
+        rc.create_carrier(carrier_id=cid, existing_album_id=42, mb_releasegroupid=RGID,
+                          wanted_tracks=[{"track": 6}],
+                          expected_tracks=[{"recording_id": "rec-6", "track": 6, "disc": 1}],
+                          staged_folder_path="", state="verifying")
+        rc.advance_state(cid, "imported", checkpoint="IMPORTED")
+        result, _log = self._run({
+            "artist": "Artist", "album": "Album", "year": "2024",
+            "method": "ytdlp", "auto_import": True,
+            "existing_album_id": 42,
+            # Crafted: a /release/<uuid> (edition) reference, NOT a release-group,
+            # and RG supplied ONLY here (no mb_releasegroupid short-circuit).
+            "mb_albumid": f"https://musicbrainz.org/release/{RGID2}#release-group",
+            "recovery_carrier_id": cid,
+            "missing_tracks": [{"track": 6, "disc": 1, "title": "Last",
+                                "recording_id": "rec-6"}],
+        })
+        minted = self.jobs.start_python.call_args.kwargs["metadata"]["recovery_carrier_id"]
+        # Release uuid NOT extracted -> no RG mismatch -> album identity honors resume.
+        self.assertEqual(minted, cid)
+        self.assertTrue(result.get("resumed"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -199,16 +199,24 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # field(s) the rest of the handler already accepts so the identity
     # cross-check is never silently downgraded to album-only. Only a
     # release-GROUP reference contributes -- never a release id (ADR-0002).
-    _requested_rgid = ""
+    # NF-4: resolve the canonical RG from a bare mb_releasegroupid UUID, or from
+    # a release-group reference folded into mb_albumid -- but ONLY from an
+    # anchored ``/release-group/<uuid>`` path segment, never a loose substring
+    # and never a ``/release/<uuid>`` (edition) reference. A crafted mb_albumid
+    # (e.g. ``/release/<uuid>#release-group``) must not yield a release id as the
+    # canonical Release Group (ADR-0002). Worst case on no match is a lost resume
+    # optimisation (the consumer is fail-closed); this hardens the producer.
     _rg_uuid_re = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    _rg_sources = [_s(data.get("mb_releasegroupid"))]
-    if "release-group" in _s(mb_albumid).casefold():
-        _rg_sources.append(_s(mb_albumid))
-    for _rg_src in _rg_sources:
-        _rg_match = re.search(_rg_uuid_re, _rg_src, re.I)
-        if _rg_match:
-            _requested_rgid = _rg_match.group(0).lower()
-            break
+    _rg_path_re = re.compile(r"/release-group/(" + _rg_uuid_re + r")", re.I)
+
+    def _canonical_rgid(value: Any) -> str:
+        v = _s(value).strip()
+        if re.fullmatch(_rg_uuid_re, v, re.I):      # a bare canonical RG UUID
+            return v.lower()
+        m = _rg_path_re.search(v)                    # a /release-group/<uuid> path
+        return m.group(1).lower() if m else ""
+
+    _requested_rgid = _canonical_rgid(data.get("mb_releasegroupid")) or _canonical_rgid(mb_albumid)
 
     def _carrier_identity_matches(carrier: Optional[Dict[str, Any]]) -> bool:
         """Finding A / QA-2: a client-supplied recovery_carrier_id may only be
@@ -233,39 +241,61 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         track 3 as covered and strand it. Used by the IMPORTED/PLEX short-circuit
         and (F1) the sibling-carrier reuse decision.
 
-        A track matches by MB recording id OR by (disc, track position); a track
-        carries both signatures when it has both, so a request identified by rid
-        still matches a carrier row identified only by position and vice versa.
-        F5: a track with neither a recording id nor a KNOWN position (title-only
-        / unknown position) is UNPROVEN -- it must never compare as COVERED, so a
-        request containing one is never reported already-done. Tolerant only for
-        a genuinely empty/opaque request (identity has already gated it)."""
-        def _sigs(t) -> frozenset:
+        A track matches by MB recording id OR by (disc, track position), so a
+        request identified by rid still matches a carrier identified only by
+        position and vice versa. NF-1: when the carrier has an IDENTIFIED
+        recording at a (disc,track) slot, a request for a DIFFERENT recording at
+        that same slot must NOT read as covered -- a bare position fallback may
+        not override a known-conflicting recording id. Position is a fallback
+        only when the carrier carries no conflicting identified recording at the
+        slot. F5: a track with neither a recording id nor a KNOWN position
+        (title-only / unknown position) is UNPROVEN -- it must never compare as
+        COVERED, so a request containing one is never reported already-done.
+        Tolerant only for a genuinely empty/opaque request (identity gated)."""
+        def _ident(t):
+            """(rid, (disc,track)|None) for a track dict; rid '' when absent,
+            position None when unknown (F5: unknown position is not a signature)."""
             if not isinstance(t, dict):
-                return frozenset()
-            out = set()
+                return "", None
             rid = _s(t.get("mb_trackid") or t.get("recording_id")).strip().lower()
-            if rid:
-                out.add(("rid", rid))
             try:
                 trk = int(t.get("track") or 0)
                 disc = int(t.get("disc") or 1)
             except Exception:
                 trk, disc = 0, 1
-            if trk > 0:  # F5: position 0/unknown is NOT a signature (unproven)
-                out.add(("dt", disc, trk))
-            return frozenset(out)
+            return rid, ((disc, trk) if trk > 0 else None)
+
         carrier = carrier or {}
         wanted = wanted_tracks or []
         if not wanted:
             return True
-        cov: set = set()
+        cov_rids: set = set()                 # every recording id the carrier carries
+        cov_pos: set = set()                  # every KNOWN (disc,track) slot it carries
+        pos_rids: Dict[tuple, set] = {}        # identified recording ids per slot
         for t in (list(carrier.get("expected_tracks") or [])
                   + list(carrier.get("wanted_tracks") or [])):
-            cov |= _sigs(t)
+            rid, pos = _ident(t)
+            if rid:
+                cov_rids.add(rid)
+            if pos is not None:
+                cov_pos.add(pos)
+                if rid:
+                    pos_rids.setdefault(pos, set()).add(rid)
         for t in wanted:
-            sig = _sigs(t)
-            if not sig or not (sig & cov):
+            w_rid, w_pos = _ident(t)
+            if not w_rid and w_pos is None:    # F5: no rid, no known position -> UNPROVEN
+                return False
+            if w_rid:
+                if w_rid in cov_rids:          # rid match anywhere -> covered
+                    continue
+                # NF-1: no rid match. A (disc,track) fallback is allowed only when
+                # the carrier has NO different identified recording at that slot.
+                if w_pos is not None and w_pos in cov_pos and not pos_rids.get(w_pos):
+                    continue
+                return False
+            else:                              # request carries no rid -> position only
+                if w_pos is not None and w_pos in cov_pos:
+                    continue
                 return False
         return True
 
