@@ -27,7 +27,7 @@ vi.mock('../src/lib/api', async (importOriginal) => {
 });
 
 import * as client from '../src/api/client';
-import { ConfirmDialog, ImportReviewPage } from '../src/features/importReview/ImportReviewPage';
+import { applyMbidEntity, ConfirmDialog, ImportReviewPage } from '../src/features/importReview/ImportReviewPage';
 
 const RG = '11111111-2222-3333-4444-555555555555';
 const mocked = vi.mocked(client);
@@ -170,28 +170,49 @@ describe('apply-confirm dialog routes its MBID through MbidLink', () => {
       ...overrides,
     }) as unknown as ReviewItem;
 
-  it('renders a valid apply MBID as a validated, copyable, linked MbidLink (not a bare truncated id)', () => {
+  it('links an album release-GROUP apply id to /release-group/, labelled "Release Group ID" (never relabelled a release)', () => {
+    // ADR-0002: mb_releasegroupid is the canonical album identity. The apply id
+    // for an album target is a release-GROUP id — it must link to
+    // /release-group/{id}, not the dead /release/{rgid}.
     render(
       <ConfirmDialog
-        intent={{ kind: 'apply', item: applyItem({}), mbid: RG } as never}
+        intent={{ kind: 'apply', item: applyItem({}), mbid: RG, entity: 'release-group' } as never}
         onClose={() => undefined}
         onConfirm={() => undefined}
       />,
     );
     const link = screen.getByRole('link', { name: /on MusicBrainz in a new tab/i });
-    expect(link.getAttribute('href')).toBe(`https://musicbrainz.org/release/${RG}`);
+    expect(link.getAttribute('href')).toBe(`https://musicbrainz.org/release-group/${RG}`);
     expect(link.textContent).toContain(RG); // full UUID, not truncated
-    const row = link.closest('[data-mbid-entity="release"]') as HTMLElement;
+    const row = link.closest('[data-mbid-entity="release-group"]') as HTMLElement;
     expect(row).toBeTruthy();
+    expect(row.textContent).toContain('Release Group ID');
     expect(within(row).getByRole('button', { name: /Copy/i })).toBeTruthy();
     expect(row.textContent).toContain('Suggested');
     expect(row.textContent).not.toContain('Verified');
   });
 
+  it('links a genuine release (edition) apply id to /release/, labelled "Release ID"', () => {
+    const REL = '22222222-3333-4444-5555-666666666666';
+    render(
+      <ConfirmDialog
+        intent={{ kind: 'apply', item: applyItem({}), mbid: REL, entity: 'release' } as never}
+        onClose={() => undefined}
+        onConfirm={() => undefined}
+      />,
+    );
+    const link = screen.getByRole('link', { name: /on MusicBrainz in a new tab/i });
+    expect(link.getAttribute('href')).toBe(`https://musicbrainz.org/release/${REL}`);
+    const row = link.closest('[data-mbid-entity="release"]') as HTMLElement;
+    expect(row).toBeTruthy();
+    expect(row.textContent).toContain('Release ID');
+    expect(row.textContent).not.toContain('Release Group ID');
+  });
+
   it('shows the invalid-not-linked marker for a malformed apply MBID', () => {
     render(
       <ConfirmDialog
-        intent={{ kind: 'apply', item: applyItem({}), mbid: 'not-a-real-mbid' } as never}
+        intent={{ kind: 'apply', item: applyItem({}), mbid: 'not-a-real-mbid', entity: 'release-group' } as never}
         onClose={() => undefined}
         onConfirm={() => undefined}
       />,
@@ -206,7 +227,7 @@ describe('apply-confirm dialog routes its MBID through MbidLink', () => {
     const REC = '99999999-8888-7777-6666-555555555555';
     render(
       <ConfirmDialog
-        intent={{ kind: 'apply', item: applyItem({ target_kind: 'item', item_id: 3 }), mbid: REC } as never}
+        intent={{ kind: 'apply', item: applyItem({ target_kind: 'item', item_id: 3 }), mbid: REC, entity: 'recording' } as never}
         onClose={() => undefined}
         onConfirm={() => undefined}
       />,
@@ -214,6 +235,24 @@ describe('apply-confirm dialog routes its MBID through MbidLink', () => {
     const link = screen.getByRole('link', { name: /on MusicBrainz in a new tab/i });
     expect(link.getAttribute('href')).toBe(`https://musicbrainz.org/recording/${REC}`);
     expect(link.closest('[data-mbid-entity="recording"]')).toBeTruthy();
+  });
+});
+
+describe('applyMbidEntity derives the id\'s actual MB entity (not guessed from target_kind)', () => {
+  const REL = '22222222-3333-4444-5555-666666666666';
+  const album = (o: Partial<ReviewItem>) => ({ id: 'x', type: 'library_no_mb', target_kind: 'album', ...o }) as unknown as ReviewItem;
+
+  it('an album target with a release-group id is release-group (ADR-0002 canonical identity)', () => {
+    expect(applyMbidEntity(album({ mb_releasegroupid: RG }), RG)).toBe('release-group');
+  });
+  it('an album target whose id matches the release id (mb_albumid fallback, no rgid) is release', () => {
+    expect(applyMbidEntity(album({ mb_albumid: REL }), REL)).toBe('release');
+  });
+  it('an album target with both ids present still labels the release-group id as release-group', () => {
+    expect(applyMbidEntity(album({ mb_releasegroupid: RG, mb_albumid: REL }), RG)).toBe('release-group');
+  });
+  it('a per-item target is always recording', () => {
+    expect(applyMbidEntity(album({ target_kind: 'item' }), '99999999-8888-7777-6666-555555555555')).toBe('recording');
   });
 });
 
