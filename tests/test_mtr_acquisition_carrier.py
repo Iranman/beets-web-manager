@@ -26,6 +26,7 @@ import backend.recovery_carrier as recovery_carrier
 
 
 RGID = "17a64abf-6d31-473f-a740-38ffa548f225"
+RGID2 = "99999999-6d31-473f-a740-38ffa548f225"
 RELEASE = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
@@ -51,7 +52,7 @@ class _RunResult:
 
 
 class AcquisitionCarrierTests(unittest.TestCase):
-    def _run(self, payload, wanted_from_mb):
+    def _run(self, payload, wanted_from_mb, seed=None):
         # ignore_cleanup_errors: the carrier SQLite store keeps its WAL handle
         # open, which blocks rmtree on Windows (teardown-only artifact).
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -98,6 +99,11 @@ class AcquisitionCarrierTests(unittest.TestCase):
         # The two wraps-spies, by identity rather than brittle list indices.
         guarded = acq.job_contract.guarded
         advance = acq.recovery_carrier.advance_state
+
+        # Seed runs with the env patch (RECOVERY_CARRIER_STATE_DIR) active so a
+        # pre-existing carrier lands in the same store the request will use.
+        if seed is not None:
+            seed()
 
         body, status = acq.start_album_download(payload)
         self.assertEqual(status, 200)
@@ -155,6 +161,101 @@ class AcquisitionCarrierTests(unittest.TestCase):
         # (2) checkpoints advanced in order; STAGED is the last this layer owns.
         self.assertEqual(res.checkpoints, ["DOWNLOADED", "STAGED"])
         self.assertEqual(carrier["checkpoint"], "STAGED")
+
+    def _seed_victim(self, carrier_id, *, album_id, rgid):
+        """A victim recovery already in flight: mid-workflow (STAGED) with
+        durable verification evidence that a clobber would destroy."""
+        def _seed():
+            recovery_carrier.create_carrier(
+                carrier_id=carrier_id, existing_album_id=album_id,
+                mb_releasegroupid=rgid, release_id=RELEASE,
+                wanted_tracks=[{"track": 6}],
+            )
+            recovery_carrier.advance_state(
+                carrier_id, "verifying", checkpoint="STAGED",
+                evidence={"acoustid": "proven"})
+        return _seed
+
+    def _assert_victim_intact(self, carrier_id, *, album_id, rgid):
+        victim = recovery_carrier.get_carrier(carrier_id)
+        self.assertIsNotNone(victim)
+        self.assertEqual(victim["existing_album_id"], album_id)
+        self.assertEqual(victim["mb_releasegroupid"], rgid)
+        self.assertEqual(victim["checkpoint"], "STAGED")  # not reset to CREATED
+        self.assertEqual(victim["verification_evidence"], {"acoustid": "proven"})
+
+    def test_forged_carrier_id_wrong_album_does_not_clobber(self):
+        # Finding A: a crafted request for a DIFFERENT album (99) carries the
+        # victim's (album 42) carrier id. It must not clobber/reset the victim;
+        # a fresh carrier is minted for the attacker's own recovery instead.
+        victim_id = "a" * 32
+        res = self._run(
+            {
+                "artist": "Attacker", "album": "Other", "year": "2024",
+                "method": "ytdlp", "auto_import": True,
+                "existing_album_id": 99,
+                "mb_releasegroupid": RGID,
+                "missing_tracks": [{"track": 3, "recording_id": "rec-3"}],
+                "recovery_carrier_id": victim_id,
+            },
+            wanted_from_mb=[{"disc": 1, "track": 3, "title": "X",
+                             "mb_trackid": "rec-3", "duration_ms": 1000}],
+            seed=self._seed_victim(victim_id, album_id=42, rgid=RGID),
+        )
+        self._assert_victim_intact(victim_id, album_id=42, rgid=RGID)
+        cid = res.metadata["recovery_carrier_id"]
+        self.assertTrue(cid)
+        self.assertNotEqual(cid, victim_id)  # fresh id, not the stolen one
+        self.assertEqual(recovery_carrier.get_carrier(cid)["existing_album_id"], 99)
+
+    def test_forged_carrier_id_wrong_release_group_does_not_clobber(self):
+        # Finding A: same existing album (42) but a different requested Release
+        # Group than the stored carrier -> still a mismatch, id is ignored.
+        victim_id = "c" * 32
+        res = self._run(
+            {
+                "artist": "Attacker", "album": "Other", "year": "2024",
+                "method": "ytdlp", "auto_import": True,
+                "existing_album_id": 42,
+                "mb_releasegroupid": RGID2,
+                "missing_tracks": [{"track": 3, "recording_id": "rec-3"}],
+                "recovery_carrier_id": victim_id,
+            },
+            wanted_from_mb=[{"disc": 1, "track": 3, "title": "X",
+                             "mb_trackid": "rec-3", "duration_ms": 1000}],
+            seed=self._seed_victim(victim_id, album_id=42, rgid=RGID),
+        )
+        self._assert_victim_intact(victim_id, album_id=42, rgid=RGID)
+        cid = res.metadata["recovery_carrier_id"]
+        self.assertTrue(cid)
+        self.assertNotEqual(cid, victim_id)
+
+    def test_legitimate_resume_preserves_checkpoint_and_evidence(self):
+        # Finding A: a genuine resume (same album + same Release Group, matching
+        # the stored carrier) reuses the carrier WITHOUT the resetting upsert, so
+        # its durable verification evidence survives. The id is honored.
+        carrier_id = "b" * 32
+        res = self._run(
+            {
+                "artist": "Artist", "album": "Album", "year": "2024",
+                "method": "ytdlp", "auto_import": True,
+                "existing_album_id": 42,
+                "mb_releasegroupid": RGID,
+                "missing_tracks": [{"track": 6, "title": "Last Song",
+                                    "recording_id": "rec-6"}],
+                "recovery_carrier_id": carrier_id,
+            },
+            wanted_from_mb=[{"disc": 1, "track": 6, "title": "Last Song",
+                             "mb_trackid": "rec-6", "duration_ms": 190000}],
+            seed=self._seed_victim(carrier_id, album_id=42, rgid=RGID),
+        )
+        # The same carrier is reused, not a fresh one.
+        self.assertEqual(res.metadata["recovery_carrier_id"], carrier_id)
+        carrier = recovery_carrier.get_carrier(carrier_id)
+        self.assertEqual(carrier["existing_album_id"], 42)
+        self.assertEqual(carrier["mb_releasegroupid"], RGID)
+        # Evidence from before the resume is preserved (NOT reset to {}).
+        self.assertEqual(carrier["verification_evidence"], {"acoustid": "proven"})
 
     def test_full_album_download_is_not_a_recovery(self):
         res = self._run(

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -49,6 +50,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from backend.app_runtime import WEB_MANAGER_DATA_DIR, _s
+
+logger = logging.getLogger(__name__)
 
 CURRENT_SCHEMA_VERSION = 1
 SUPPORTED_SCHEMA_VERSIONS = {1}
@@ -528,6 +531,21 @@ def advance_state(carrier_id: str, state: str, *, checkpoint: str = "",
         raise ValueError(f"unknown recovery state {state!r} (known: {CARRIER_STATES})")
     payload: Dict[str, Any] = {}
     if payload_extra:
+        # Finding B (defense-in-depth): ``checkpoint``/``verification_evidence``/
+        # ``recovery_workflow_id`` may ONLY be set through this function's
+        # dedicated, validated kwargs (the checkpoint allow-list, the evidence
+        # slot, the deterministic workflow id). A caller that smuggled one of
+        # them through the free-form ``payload_extra`` would write it unchecked,
+        # bypassing that validation -- so we drop the reserved keys (with a
+        # warning) rather than merge them.
+        _reserved = {"checkpoint", "verification_evidence", "recovery_workflow_id"}
+        _bad = _reserved.intersection(payload_extra)
+        if _bad:
+            logger.warning(
+                "advance_state: ignoring reserved payload_extra key(s) %s for "
+                "carrier %r; use the dedicated checkpoint/evidence kwargs",
+                sorted(_bad), _s(carrier_id))
+            payload_extra = {k: v for k, v in payload_extra.items() if k not in _reserved}
         payload.update(payload_extra)
     if checkpoint:
         if checkpoint not in CHECKPOINTS:
