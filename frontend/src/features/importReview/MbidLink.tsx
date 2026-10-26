@@ -7,7 +7,7 @@
 // (UUID + entity) before a link is built, and an UNVERIFIED id is NEVER
 // labelled as a confirmed match.
 import { useState } from 'react';
-import type { ReviewItem, RecoveryCarrierIdentity, RecoveryExpectedTrack } from '../../api/types';
+import type { ReviewItem, RecoveryCarrierIdentity, RecoveryExpectedTrack, RecoveryStage } from '../../api/types';
 
 export type MbEntity = 'release-group' | 'release' | 'recording' | 'artist';
 export type MbidStatus = 'verified' | 'suggested' | 'conflicting';
@@ -275,6 +275,129 @@ export function RecoveryIdentityPanel({ item }: { item: ReviewItem }) {
             ))}
           </ul>
         </div>
+      ) : null}
+    </section>
+  );
+}
+
+// ───────────────────────── recovery status (Phase-6) ─────────────────────────
+
+// The 7 linear Download-Missing stages, in order. The scaffold (keys + labels)
+// is the documented contract (backend/recovery_carrier.py STAGE_ORDER /
+// STAGE_LABELS); position comes from the backend's `stage_index`, never guessed.
+const LINEAR_RECOVERY_STAGES: { key: string; label: string }[] = [
+  { key: 'missing', label: 'Missing' },
+  { key: 'searching', label: 'Searching' },
+  { key: 'downloading', label: 'Downloading' },
+  { key: 'verifying', label: 'Verifying' },
+  { key: 'importing', label: 'Importing' },
+  { key: 'plex_sync', label: 'Plex Sync' },
+  { key: 'complete', label: 'Complete' },
+];
+
+/** The recovery workflow stage a carrier-backed Review item carries, or null
+ * when there is none (an ordinary import, or an older carrier). Read-only;
+ * resilient to a missing/partial object so the UI never crashes. */
+export function getRecoveryStage(item: ReviewItem): RecoveryStage | null {
+  const s = item.evidence?.recovery_carrier?.recovery_stage;
+  if (!s || typeof s.stage !== 'string' || typeof s.stage_index !== 'number') return null;
+  return s;
+}
+
+/**
+ * The 7-stage Download-Missing progress indicator for a carrier-backed recovery
+ * item. Linear stages render as an ordered list (prior = done, current =
+ * in-progress, later = upcoming) positioned by `stage_index`; the two off-path
+ * terminals (`needs_review`/`failed`) render as a distinct attention/error
+ * badge, never a linear step. It never looks falsely "successful"/green until
+ * the workflow is genuinely Complete — a best-effort Plex failure stays at the
+ * Plex Sync step as an in-progress/attention state, not a red error. Color is
+ * always paired with a text label + marker (not color-only), and the current
+ * step is announced as "step N of 7: <label>". Renders nothing without a valid
+ * stage.
+ */
+export function RecoveryStageIndicator({ item }: { item: ReviewItem }) {
+  const stage = getRecoveryStage(item);
+  if (!stage) return null;
+  const note = (stage.note || '').trim();
+
+  // Off-path error terminals: a distinct attention/error badge, not a step.
+  if (stage.stage === 'needs_review' || stage.stage === 'failed') {
+    const failed = stage.stage === 'failed';
+    const tone = failed
+      ? 'border-rose-300 bg-rose-50 text-rose-800'
+      : 'border-amber-300 bg-amber-50 text-amber-900';
+    return (
+      <section className="mt-3" aria-label="Recovery progress" data-recovery-stage={stage.stage}>
+        <p
+          role="status"
+          className={`inline-flex items-center gap-2 rounded border px-2 py-1 text-xs font-semibold ${tone}`}
+        >
+          <span aria-hidden="true">{failed ? '✕' : '⚠'}</span>
+          <span>Recovery {failed ? 'failed' : 'needs review'}: {stage.label}</span>
+        </p>
+        {note ? (
+          <p className="mt-1 text-xs text-zinc-600" title={note} data-recovery-note="true">
+            {note}
+          </p>
+        ) : null}
+      </section>
+    );
+  }
+
+  const total = LINEAR_RECOVERY_STAGES.length; // 7
+  // Clamp to the linear range so a partial/odd index can never crash the map.
+  const current = Math.min(Math.max(stage.stage_index, 0), total - 1);
+  const isComplete = stage.stage === 'complete';
+  const summary = `Recovery step ${current + 1} of ${total}: ${stage.label}`;
+
+  return (
+    <section
+      className="mt-3 rounded border border-violet-200 bg-violet-50/60 p-3"
+      aria-label="Recovery progress"
+      data-recovery-stage={stage.stage}
+    >
+      <p className="sr-only" role="status">
+        {summary}
+        {note ? ` (${note})` : ''}
+      </p>
+      <ol className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {LINEAR_RECOVERY_STAGES.map((s, i) => {
+          const position = i < current ? 'done' : i === current ? 'current' : 'upcoming';
+          const isCurrent = position === 'current';
+          // Only the genuine Complete terminal is green; every earlier state
+          // stays violet/sky/zinc so recovery never looks falsely successful.
+          const green = isCurrent && isComplete;
+          const marker = position === 'done' || green ? '✓' : isCurrent ? '●' : '○';
+          const tone = green
+            ? 'text-emerald-700 font-semibold'
+            : position === 'done'
+              ? 'text-violet-800'
+              : isCurrent && s.key === 'plex_sync'
+                ? 'text-sky-700 font-semibold'
+                : isCurrent
+                  ? 'text-violet-900 font-semibold'
+                  : 'text-zinc-400';
+          const announced = isCurrent ? (isComplete ? 'complete' : 'in progress') : position;
+          return (
+            <li
+              key={s.key}
+              className={`flex items-center gap-1 text-xs ${tone}`}
+              aria-current={isCurrent ? 'step' : undefined}
+              aria-label={`Step ${i + 1} of ${total}: ${s.label} (${announced})`}
+              data-step={s.key}
+              data-step-state={isCurrent ? (isComplete ? 'complete' : 'current') : position}
+            >
+              <span aria-hidden="true">{marker}</span>
+              <span>{s.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+      {note ? (
+        <p className="mt-2 text-xs text-zinc-600" title={note} data-recovery-note="true">
+          {note}
+        </p>
       ) : null}
     </section>
   );
