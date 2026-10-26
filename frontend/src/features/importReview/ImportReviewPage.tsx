@@ -47,7 +47,7 @@ import {
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
-import { MbidLink, RecoveryIdentityPanel, getRecoveryIdentity } from './MbidLink';
+import { MbidLink, RecoveryIdentityPanel, RecoveryStageIndicator, getRecoveryIdentity } from './MbidLink';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -2852,6 +2852,7 @@ export function ReviewCard({
             {meta.length ? <div className="mt-1 text-sm text-zinc-600">{meta.join(' / ')}</div> : null}
 
             <RecoveryIdentityPanel item={item} />
+            <RecoveryStageIndicator item={item} />
 
             {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
             {item.path ? <div className="mt-3 truncate font-mono text-xs text-zinc-500">{item.path}</div> : null}

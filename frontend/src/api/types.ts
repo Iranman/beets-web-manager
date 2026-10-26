@@ -2386,12 +2386,31 @@ export interface RecoveryExpectedTrack {
   title?: string;
 }
 
+/** The user-facing Download-Missing workflow stage of a recovery carrier.
+ * Mirrors backend/recovery_carrier.py `workflow_stage` exactly (field names
+ * unchanged). `stage_index` runs 0..6 along the 7-stage linear path
+ * (missing→searching→downloading→verifying→importing→plex_sync→complete) and is
+ * -1 for an off-path terminal (`needs_review`/`failed`). `terminal` marks a
+ * stage the workflow rests at; `note` is an optional qualifier (e.g. why Plex
+ * was skipped) and may be "". A best-effort Plex failure stays at `plex_sync`
+ * with `terminal=false` (the import is already durable) — NOT a workflow
+ * failure. Read-only; the frontend never constructs it. */
+export interface RecoveryStage {
+  stage: string;
+  stage_index: number;
+  label: string;
+  terminal: boolean;
+  note: string;
+}
+
 /** Structured missing-track recovery identity handed to the Review queue in
  * place of the old `allow_existing` boolean. Mirrors
  * backend/recovery_carrier.py `review_identity`. Surfaced both flattened on the
  * suggestion (`recovery_*`) and whole under `evidence.recovery_carrier`.
  * Read-only API shape; the frontend never constructs it. */
 export interface RecoveryCarrierIdentity {
+  /** User-facing Download-Missing workflow stage (ARCH-030 Phase-6). */
+  recovery_stage?: RecoveryStage;
   recovery?: boolean;
   recovery_carrier_id?: string;
   /** The existing library album this download is being recovered into. */
