@@ -1210,7 +1210,11 @@ def api_transaction_rollback(transaction_id):
         try:
             res = transactions.rollback(transaction_id)
         except (KeyError, ValueError) as exc:
-            return jsonify({"ok": False, "error": _s(exc), "mutated": False}), 409
+            # Don't echo raw exception text to the client (SEC-007); log the
+            # type and return a bounded message.
+            _app_logger.warning("recover-import rollback refused: %s", type(exc).__name__)
+            return jsonify({"ok": False, "error": "Rollback could not be performed for this transaction.",
+                            "mutated": False}), 409
         body = _rollback_dispatch_body(res)
         if res.get("ok"):
             return jsonify(body), 200

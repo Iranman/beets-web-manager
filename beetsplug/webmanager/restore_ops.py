@@ -72,7 +72,12 @@ def _write_manifest(folder: str, manifest: Dict[str, Any]) -> None:
     previous complete manifest or this one (H2)."""
     path = os.path.join(folder, MANIFEST_NAME)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    # O_NOFOLLOW: a symlink planted at the .tmp name (by something with write
+    # access to the engine's own quarantine dir) must not redirect this write
+    # outside the folder. O_TRUNC overwrites a stale tmp left by a prior crash.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh)
         fh.flush()
         os.fsync(fh.fileno())

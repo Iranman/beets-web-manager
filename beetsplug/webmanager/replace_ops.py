@@ -47,6 +47,7 @@ from .engine_common import (  # noqa: F401  (re-exported: other modules and test
     _error,
     _fspath,
     _inside_allowed,
+    _inside_folder,
     _jsonable,
     _manifest_dir,
     _quarantine_root,
@@ -254,6 +255,11 @@ def run_replace_item_file_rollback():
     for path in (old_target_path, old_source_path):
         if not path or not _inside_allowed(path):
             return _error("recorded path is outside allowed roots", "SNAPSHOT_PATH_INVALID")
+    # The quarantine source is engine-written inside ``folder``; validate it
+    # with resolved containment so a poisoned manifest cannot move an external
+    # file into the library (a ``..``/symlink escape fails closed).
+    if quarantine_path and not _inside_folder(quarantine_path, folder):
+        return _error("quarantine path is outside the engine folder", "SNAPSHOT_PATH_INVALID")
     current_path = _fspath(target.path)
     if os.path.exists(old_source_path) and os.path.abspath(old_source_path) != os.path.abspath(current_path):
         return _error("the source's old path is occupied", "SOURCE_PATH_OCCUPIED", 409)
@@ -276,7 +282,7 @@ def run_replace_item_file_rollback():
             # 2. a displaced occupant of the canonical destination comes back.
             displaced = _fspath(manifest.get("displaced_path"))
             displaced_q = _fspath(manifest.get("displaced_quarantine_path"))
-            if displaced and displaced_q.startswith(folder + os.sep) and os.path.exists(displaced_q)                     and not os.path.exists(displaced) and _inside_allowed(displaced):
+            if displaced and _inside_folder(displaced_q, folder) and os.path.exists(displaced_q)                     and not os.path.exists(displaced) and _inside_allowed(displaced):
                 shutil.move(displaced_q, displaced)
             # 3. the original target file comes back from quarantine.
             if quarantine_path and os.path.exists(quarantine_path):
