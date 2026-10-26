@@ -138,6 +138,30 @@ class RecoveryCarrierAccessorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             rc.advance_state(cid, "downloaded", checkpoint="NOPE")
 
+    def test_advance_state_ignores_reserved_payload_extra_keys(self):
+        # Finding B (defense-in-depth): checkpoint / verification_evidence /
+        # recovery_workflow_id may ONLY be set through advance_state's dedicated
+        # validated kwargs. A caller smuggling them through the free-form
+        # payload_extra bag must not bypass the checkpoint allow-list.
+        cid = rc.create_carrier(existing_album_id=7, mb_releasegroupid=RGID)["carrier_id"]
+        rc.advance_state(cid, "downloaded", checkpoint="DOWNLOADED")
+        rec = rc.advance_state(
+            cid, "importing",
+            payload_extra={
+                "checkpoint": "NOT_ALLOWLISTED",
+                "verification_evidence": {"forged": True},
+                "recovery_workflow_id": "attacker-workflow",
+                "plex_sync": {"status": "synced"},  # legitimate extra
+            },
+        )
+        # Reserved keys dropped: the durable checkpoint/evidence/workflow-id are
+        # exactly what the validated path set, never the payload_extra values.
+        self.assertEqual(rec["checkpoint"], "DOWNLOADED")
+        self.assertEqual(rec["verification_evidence"], {})
+        self.assertEqual(rec["recovery_workflow_id"], rc.recovery_workflow_id(cid))
+        # A non-reserved payload_extra key is still merged normally.
+        self.assertEqual(rec["plex_sync"], {"status": "synced"})
+
     def test_advance_state_missing_carrier_returns_none(self):
         self.assertIsNone(rc.advance_state("ghost", "downloaded"))
         self.assertIsNone(rc.bind_staged_folder("ghost", "/tmp/x"))

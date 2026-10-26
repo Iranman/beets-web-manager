@@ -127,6 +127,26 @@ class NonAutoHandoffTests(_AcqHarness):
         cid = self.jobs.start_python.call_args.kwargs["metadata"]["recovery_carrier_id"]
         self.assertEqual(rc.get_carrier(cid)["state"], "review_required")
 
+    def test_review_handoff_failure_fails_closed(self):
+        """QA-4: if the Review enqueue fails (returns falsy), the carrier-bound
+        folder -- excluded from the AI batch -- must not be stranded under a bare
+        success. The carrier goes to a recoverable failed state and the job
+        result is non-success / queued-for-review-failed."""
+        queue = mock.Mock(return_value=False)
+        self._setup([mock.patch.object(acq, "_queue_folder_for_manual_review", queue)])
+        result, _log = self._run({
+            "artist": "Artist", "album": "Album", "year": "2024",
+            "method": "ytdlp", "auto_import": False,
+            "existing_album_id": 42, "mb_releasegroupid": RGID,
+            "missing_tracks": [{"track": 6, "title": "Last", "recording_id": "rec-6"}],
+        })
+        queue.assert_called_once()
+        self.assertFalse(result.get("ok"))
+        self.assertFalse(result.get("queued_for_review"))
+        self.assertEqual(result.get("error"), "review_handoff_failed")
+        cid = self.jobs.start_python.call_args.kwargs["metadata"]["recovery_carrier_id"]
+        self.assertEqual(rc.get_carrier(cid)["state"], "failed")
+
 
 class ResumeNoDoubleImportTests(_AcqHarness):
     def test_resume_at_imported_does_not_redownload_or_reimport(self):
@@ -155,6 +175,84 @@ class ResumeNoDoubleImportTests(_AcqHarness):
         acq._start_reimport_disk_job_internal.assert_not_called()  # no re-import
         # The one guarded workflow is reused, not split.
         self.assertEqual(self.jobs.start_python.call_args.kwargs["metadata"]["recovery_carrier_id"], cid)
+
+    def test_resume_short_circuit_rejects_uncovered_tracks(self):
+        """QA-2: a completed carrier (recovered track 6) must NOT report a
+        DIFFERENT requested track (3) as already imported. Same album + Release
+        Group, but the requested track is not one this carrier recovered -> no
+        false already-done success; the request proceeds as a fresh recovery."""
+        cid = "abcdef0123456789abcdef0123456789"
+        self._setup()
+        rc.create_carrier(carrier_id=cid, existing_album_id=42, mb_releasegroupid=RGID,
+                          wanted_tracks=[{"track": 6}],
+                          expected_tracks=[{"recording_id": "rec-6", "track": 6, "disc": 1}],
+                          staged_folder_path="", state="verifying")
+        rc.advance_state(cid, "imported", checkpoint="IMPORTED")
+        result, _log = self._run({
+            "artist": "Artist", "album": "Album", "year": "2024",
+            "method": "ytdlp", "auto_import": True,
+            "existing_album_id": 42, "mb_releasegroupid": RGID,
+            "recovery_carrier_id": cid,
+            "missing_tracks": [{"track": 3, "title": "Third", "recording_id": "rec-3"}],
+        })
+        self.assertFalse(result.get("resumed"))   # not a false already-done
+        self.ytdlp.assert_called()                 # proceeded as a real recovery
+
+    def test_resume_short_circuit_rejects_mismatched_album(self):
+        """QA-2 / Finding A: a completed carrier for album 42 must not be
+        returned as a success for a request targeting a DIFFERENT album (99)."""
+        cid = "abcdef0123456789abcdef0123456789"
+        self._setup()
+        rc.create_carrier(carrier_id=cid, existing_album_id=42, mb_releasegroupid=RGID,
+                          wanted_tracks=[{"track": 6}],
+                          expected_tracks=[{"recording_id": "rec-6", "track": 6, "disc": 1}],
+                          staged_folder_path="", state="verifying")
+        rc.advance_state(cid, "imported", checkpoint="IMPORTED")
+        result, _log = self._run({
+            "artist": "Artist", "album": "Album", "year": "2024",
+            "method": "ytdlp", "auto_import": True,
+            "existing_album_id": 99, "mb_releasegroupid": RGID,
+            "recovery_carrier_id": cid,
+            "missing_tracks": [{"track": 6, "title": "Last", "recording_id": "rec-6"}],
+        })
+        self.assertFalse(result.get("resumed"))
+        # A fresh carrier is minted for the attacker's request; the victim's id
+        # is not reused and (seeded album 42) stays untouched.
+        minted = self.jobs.start_python.call_args.kwargs["metadata"]["recovery_carrier_id"]
+        self.assertNotEqual(minted, cid)
+        self.assertEqual(rc.get_carrier(cid)["existing_album_id"], 42)
+
+    def test_resume_carrier_read_error_surfaces_not_redownload(self):
+        """QA-3: when a legitimate resume's carrier read fails transiently in the
+        short-circuit, surface a retryable error instead of silently
+        re-downloading/re-importing a possibly-complete recovery."""
+        cid = "abcdef0123456789abcdef0123456789"
+        self._setup()
+        rc.create_carrier(carrier_id=cid, existing_album_id=42, mb_releasegroupid=RGID,
+                          wanted_tracks=[{"track": 6}],
+                          expected_tracks=[{"recording_id": "rec-6", "track": 6, "disc": 1}],
+                          staged_folder_path="", state="verifying")
+        rc.advance_state(cid, "imported", checkpoint="IMPORTED")
+        real_get = rc.get_carrier
+        calls = {"n": 0}
+
+        def _flaky(carrier_id):
+            calls["n"] += 1
+            if calls["n"] <= 1:
+                return real_get(carrier_id)   # request-handler identity guard read OK
+            raise RuntimeError("db locked")   # the short-circuit read then fails
+
+        with mock.patch.object(acq.recovery_carrier, "get_carrier", side_effect=_flaky):
+            result, _log = self._run({
+                "artist": "Artist", "album": "Album", "year": "2024",
+                "method": "ytdlp", "auto_import": True,
+                "existing_album_id": 42, "mb_releasegroupid": RGID,
+                "recovery_carrier_id": cid,
+                "missing_tracks": [{"track": 6, "title": "Last", "recording_id": "rec-6"}],
+            })
+        self.assertEqual(result.get("error"), "recovery_carrier_unreadable")
+        self.assertTrue(result.get("retryable"))
+        self.ytdlp.assert_not_called()   # did NOT silently re-download
 
 
 # ──────────────────────────── F9: the Plex leg ─────────────────────────────
