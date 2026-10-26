@@ -365,7 +365,12 @@ describe('Missing IDs: Release Group fill (#401)', () => {
     ], total: 2, offset: 0, limit: 100, counts: { all: 2, album: 2, item: 0 } } as never);
     render(<MemoryRouter><ImportReviewPage active mode="missing_ids" /></MemoryRouter>);
     expect(await screen.findByText('Needs release group')).toBeTruthy();
-    expect(screen.getByText(`Release ID: ${RELEASE}`)).toBeTruthy();
+    // The current Release ID now renders through MbidLink: a validated,
+    // clickable link to the correct MB release entity (not a bare text node).
+    const releaseRow = document.querySelector('[data-mbid-entity="release"]') as HTMLElement;
+    expect(releaseRow).toBeTruthy();
+    expect(releaseRow.textContent).toContain('Release ID');
+    expect(within(releaseRow).getByRole('link').getAttribute('href')).toBe(`https://musicbrainz.org/release/${RELEASE}`);
     expect(screen.getByText('Albums (no Release or Release Group ID) (2)')).toBeTruthy();
     // The server refuses delete/quarantine for these rows: no folder action, only the hint.
     expect(screen.queryByRole('button', { name: /Delete Folder|Delete Wrong Audio/ })).toBeNull();
