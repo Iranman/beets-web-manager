@@ -185,6 +185,81 @@ class RecoveryCarrierMergeTests(Wave20FixtureBase):
         self.assertEqual(rc.get_carrier(cid)["state"], "review_required")
 
 
+class RecoveryRestageRebindTests(Wave20FixtureBase):
+    """F5/F6: a recovery carrier is bound to the ORIGINAL review folder; when
+    the still-missing subset is restaged to a NEW path before the merge's
+    load_for_folder lookup, the merge must still run under carrier ownership."""
+
+    def setUp(self):
+        super().setUp()
+        rc_dir = self.tmp_path / "carriers"
+        env = mock.patch.dict(os.environ, {"RECOVERY_CARRIER_STATE_DIR": str(rc_dir)})
+        env.start()
+        rc._store_registry.clear()
+        self.addCleanup(rc._store_registry.clear)
+        self.addCleanup(env.stop)
+        self.original = str(self.tmp_path / "review_folder")
+        self.restaged = str(self.staging_root)  # where _stage_selected_audio_files put it
+
+    def _two_albums(self):
+        self._create_album(1, "Existing Album", rg_id=RG_A, rel_id=REL_A)
+        self._create_album(2, "Imported Temp Album", rg_id=RG_A, rel_id=REL_A)
+        self._create_item(10, 1, "Track 1", 1, 1, "t1_existing.wav", rec_id=REC_1, rg_id=RG_A)
+        self._create_item(20, 2, "Track 2", 1, 2, "t2_imported.wav", staging=True,
+                          rec_id=REC_2, rg_id=RG_A)
+
+    def _carrier_on_original(self):
+        return rc.create_carrier(
+            existing_album_id=1, mb_releasegroupid=RG_A,
+            expected_tracks=[{"recording_id": REC_2, "track": 2, "disc": 1, "title": "Track 2"}],
+            staged_folder_path=self.original, state="verifying")["carrier_id"]
+
+    def _reconcile_ok(self):
+        return (
+            mock.patch.object(cw, "plan_existing_album_reconcile",
+                              return_value={"ok": True, "operation_id": "op-rec"}),
+            mock.patch.object(cw, "apply_existing_album_reconcile",
+                              return_value={"ok": True}),
+        )
+
+    def test_restage_without_rebind_runs_carrier_less(self):
+        """Reproduce the gap: the merge keyed on the restaged path finds no
+        carrier (it is bound to the original folder) -> ordinary merge, the
+        carrier is never claimed/driven."""
+        self._two_albums()
+        cid = self._carrier_on_original()
+        plan, apply = self._reconcile_ok()
+        with plan, apply:
+            res = isvc._merge_imported_album_into_existing(2, 1, self.restaged, [], mb_albumid="")
+        self.assertEqual(res, 1)
+        # Carrier untouched: still 'verifying', never reached IMPORTED.
+        self.assertEqual(rc.get_carrier(cid)["state"], "verifying")
+
+    def test_rebind_then_merge_engages_carrier(self):
+        """Fix: rebinding the carrier to the restaged path lets the merge claim
+        and drive it to imported+IMPORTED under carrier ownership/audit."""
+        self._two_albums()
+        cid = self._carrier_on_original()
+        log = []
+        isvc._recovery_rebind_restaged(self.original, self.restaged, 1, log)
+        self.assertIsNotNone(rc.load_for_folder(self.restaged))
+        plan, apply = self._reconcile_ok()
+        with plan, apply:
+            res = isvc._merge_imported_album_into_existing(2, 1, self.restaged, log, mb_albumid="")
+        self.assertEqual(res, 1)
+        rec = rc.get_carrier(cid)
+        self.assertEqual(rec["state"], "imported")
+        self.assertEqual(rec["checkpoint"], "IMPORTED")
+
+    def test_rebind_ignores_a_carrier_for_a_different_album(self):
+        self._two_albums()
+        rc.create_carrier(existing_album_id=999, mb_releasegroupid=RG_A,
+                          staged_folder_path=self.original, state="verifying")
+        log = []
+        isvc._recovery_rebind_restaged(self.original, self.restaged, 1, log)
+        self.assertIsNone(rc.load_for_folder(self.restaged))  # not rebound
+
+
 class RecoveryMergeHelperUnitTests(unittest.TestCase):
     """Pure helpers, no store/engine."""
 

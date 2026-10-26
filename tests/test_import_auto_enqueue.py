@@ -106,7 +106,7 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('if trigger_plex_refresh_after:', body)
         self.assertIn('_trigger_plex_refresh(log, workflow=trigger_plex_context)', body)
         self.assertIn('Refresh skipped for Import Review; playlist/batch jobs trigger Plex separately.', body)
-        self.assertIn('_ALLOWED_PLEX_REFRESH_WORKFLOWS = {"batch", "playlist", "manual", "sync"}', APP)
+        self.assertIn('_ALLOWED_PLEX_REFRESH_WORKFLOWS = {"batch", "playlist", "manual", "sync", "recovery"}', APP)
         self.assertIn('workflow_key not in _ALLOWED_PLEX_REFRESH_WORKFLOWS', APP)
         self.assertIn('automatic scans run only for approved workflows (playlist, batch, sync)', APP)
 

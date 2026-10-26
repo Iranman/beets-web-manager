@@ -13,7 +13,7 @@ import backend.job_contract as job_contract
 from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
 from backend.ytdlp_service import _audio_files_in_dir, _direct_source_unavailable_reason, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
 from backend.ai_service import _ai_match_evidence_packet, _validate_import_source_audio
-from backend.import_service import _delete_staged_import_folder, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
+from backend.import_service import _delete_staged_import_folder, _recovery_plex_sync_leg, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
 from backend.library_service import _album_folder_for_album_id, _build_folder_evidence, _representative_tracktotal, _resolve_album_release_for_import, get_library_payload
 from backend.pending_review_store import _queue_folder_for_manual_review
 import backend.recovery_carrier as recovery_carrier
@@ -178,8 +178,20 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # AI-batch scan, pending-review and preflight. A plain full-album download
     # (no existing_album_id / no wanted tracks) is not a recovery and gets no
     # carrier. Canonical identity is the Release Group (ADR-0002).
-    _is_recovery = bool(existing_album_id and wanted_tracks)
-    _recovery_carrier_id = uuid.uuid4().hex if _is_recovery else ""
+    # F8: a format-replacement (replace_existing) downloads wanted_tracks for a
+    # track that is PRESENT, not missing. It is NOT a recovery -- misclassifying
+    # it would mint a carrier whose fail-closed precheck sees the slot already
+    # filled and mis-routes the replacement to Review. The replacement path
+    # (Preview-until-approved) owns it instead.
+    _is_recovery = bool(existing_album_id and wanted_tracks and not replace_existing)
+    # F7: a resume re-triggers the download with the SAME carrier id (so the one
+    # guarded workflow and its durable checkpoints are reused, not split); a
+    # fresh recovery mints a new id. A non-recovery never carries one.
+    _resume_carrier_id = ""
+    _incoming = _s(data.get("recovery_carrier_id")).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{32}", _incoming or ""):
+        _resume_carrier_id = _incoming
+    _recovery_carrier_id = (_resume_carrier_id or uuid.uuid4().hex) if _is_recovery else ""
     _recovery_box: Dict[str, str] = {"job_id": ""}
     _requested_rgid = ""
     _rg_match = re.search(
@@ -189,6 +201,41 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         _requested_rgid = _rg_match.group(0).lower()
 
     def _do(log, cancel_event=None):
+        def _recovery_resume_short_circuit():
+            """F7: resume the one guarded recovery workflow from its last durable
+            checkpoint instead of restarting from scratch or splitting jobs. When
+            the carrier already reached IMPORTED (the verified track is on the
+            album) a resume must NOT re-download or re-import -- the carrier CAS
+            claim + merge precheck would already refuse that, but here we skip it
+            entirely and only run the best-effort Plex tail (idempotent if it
+            already ran). Returns a terminal result dict to short-circuit ``_do``,
+            or None to run the normal download/import flow."""
+            if not (_is_recovery and _recovery_carrier_id):
+                return None
+            try:
+                resumed = (recovery_carrier.get_carrier(_recovery_carrier_id)
+                           or recovery_carrier.load_for_job(_recovery_box.get("job_id", "")))
+            except Exception:
+                resumed = None
+            cp = _s((resumed or {}).get("checkpoint"))
+            if not resumed or cp not in ("IMPORTED", "PLEX_SYNCED"):
+                return None
+            log.append(f"[recovery] Resuming workflow at checkpoint {cp}; the verified "
+                       "track is already imported -- not re-downloading or re-importing.")
+            if cp == "IMPORTED":
+                _recovery_plex_sync_leg(resumed, log)
+            return {
+                "imported": True,
+                "resumed": True,
+                "existing_album_id": existing_album_id,
+                "recovery_carrier_id": _recovery_carrier_id,
+                "checkpoint": _s((recovery_carrier.get_carrier(_recovery_carrier_id) or {}).get("checkpoint")) or cp,
+            }
+
+        _resume_result = _recovery_resume_short_circuit()
+        if _resume_result is not None:
+            return _resume_result
+
         def _recovery_bind_folder(folder_path: str) -> None:
             """Bind the staged download folder to the recovery carrier so
             load_for_folder() resolves the album identity (AI-batch scan,
@@ -907,7 +954,32 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # Spine: bind the folder left in /downloads so the AI-batch scan
             # and pending-review resolve the album identity instead of
             # re-deriving it from the folder name (Phase-1 root cause).
-            _recovery_bind_folder(_s(download_result.get("aldir")))
+            aldir_na = _s(download_result.get("aldir"))
+            _recovery_bind_folder(aldir_na)
+            # F3: a carrier-bound recovery folder is deliberately EXCLUDED from
+            # the generic new-album AI batch (ai_service._ai_batch_find_audio_dirs).
+            # With auto_import=false nothing else would ever import it, so it
+            # would be stranded in /downloads. Hand it to Review WITH its
+            # structured carrier identity (existing album + canonical Release
+            # Group + wanted/expected tracks) so the operator can complete the
+            # recovery, and record the carrier as review_required.
+            if _recovery_carrier_id and aldir_na:
+                carrier = None
+                try:
+                    carrier = recovery_carrier.get_carrier(_recovery_carrier_id)
+                except Exception:
+                    carrier = None
+                if carrier:
+                    reason = ("Downloaded for an existing album with auto-import off; "
+                              "confirm the missing-track recovery in Review.")
+                    if _queue_folder_for_manual_review(
+                            aldir_na, {"album": album, "albumartist": artist, "reason": reason},
+                            reason, log, allow_existing=True, carrier=carrier):
+                        try:
+                            recovery_carrier.advance_state(_recovery_carrier_id, "review_required")
+                        except Exception as ex:
+                            log.append(f"  [recovery] WARN carrier review_required not recorded: {type(ex).__name__}")
+                        download_result["queued_for_review"] = True
             return download_result
 
         aldir = download_result["aldir"]

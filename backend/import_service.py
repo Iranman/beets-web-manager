@@ -37,7 +37,8 @@ from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
 from backend.serializers import _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
-from backend.plex_service import _trigger_plex_refresh
+from backend.app_runtime import PLEX_SYNC_AUTO_REFRESH
+from backend.plex_service import _plex_configured, _trigger_plex_refresh
 
 # ── ARCH-001 extracted code ──
 
@@ -355,6 +356,83 @@ def _recovery_mark_failed(carrier: Optional[Dict[str, Any]], log: list) -> None:
         log.append(f"  [merge] Recovery carrier {cid}: state 'failed' (recoverable; imported row kept).")
     except Exception as ex:
         log.append(f"  [merge] WARN carrier {cid} failed-state not recorded: {ex}")
+
+
+def _recovery_rebind_restaged(original_folder: str, staged_folder: str,
+                              existing_album_id: int, log: list) -> None:
+    """F5/F6: a recovery carrier is bound to the ORIGINAL review folder. When
+    the still-missing subset is restaged to a NEW path (``_stage_selected_audio_files``)
+    before the merge's ``load_for_folder`` lookup, rebind the carrier to the
+    staged path so the merge still runs under carrier ownership/audit instead
+    of degrading to an ordinary carrier-less merge. Best-effort: a rebind
+    failure simply falls back to that ordinary merge, never breaks the import."""
+    if not _s(staged_folder).strip() or staged_folder == original_folder:
+        return
+    try:
+        carrier = recovery_carrier.load_for_folder(original_folder)
+    except Exception as ex:
+        log.append(f"  [recovery] rebind lookup skipped ({type(ex).__name__}); ordinary merge.")
+        return
+    if not carrier or int(carrier.get("existing_album_id") or 0) != int(existing_album_id or 0):
+        return
+    cid = _s(carrier.get("carrier_id"))
+    try:
+        recovery_carrier.bind_staged_folder(cid, staged_folder)
+        log.append(f"  [recovery] Carrier {cid} rebound to the restaged path for merge ownership/audit.")
+    except Exception as ex:
+        log.append(f"  [recovery] WARN carrier {cid} rebind skipped ({type(ex).__name__}); ordinary merge.")
+
+
+def _recovery_plex_sync_leg(carrier: Optional[Dict[str, Any]], log: list) -> None:
+    """F9: the Plex-sync tail of the recovery workflow. Once the verified track
+    reached the existing album (carrier ``imported`` + checkpoint ``IMPORTED``),
+    trigger ONE best-effort Plex library refresh and advance the carrier to
+    ``PLEX_SYNCED``. Best-effort and auditable:
+
+    * the import is already COMPLETE and durable -- a Plex failure never fails
+      or rolls it back; it is recorded on the carrier and the row stays intact;
+    * the operator's opt-in config is respected: with ``PLEX_SYNC_AUTO_REFRESH``
+      off (or Plex not configured) no refresh is forced -- the carrier records a
+      skip and stays terminal ``imported`` (checkpoint ``IMPORTED``);
+    * idempotent: a carrier already ``PLEX_SYNCED`` (resume/replay) is a no-op."""
+    if not carrier:
+        return
+    cid = _s(carrier.get("carrier_id"))
+    if _s(carrier.get("checkpoint")) == "PLEX_SYNCED":
+        return
+    if _s(carrier.get("state")) != "imported":
+        # Only a confirmed imported+IMPORTED outcome gets the Plex tail; a merge
+        # that went to review_required/failed is handled by its own owner.
+        return
+
+    def _record(payload_extra: Dict[str, Any], *, checkpoint: str = "") -> None:
+        try:
+            recovery_carrier.advance_state(cid, "imported", checkpoint=checkpoint or "",
+                                           payload_extra={"plex_sync": payload_extra})
+        except Exception as ex:
+            log.append(f"  [merge] WARN carrier {cid} Plex outcome not recorded: {ex}")
+
+    if not PLEX_SYNC_AUTO_REFRESH:
+        _record({"status": "skipped", "reason": "auto_refresh_disabled"})
+        log.append(f"  [merge] Recovery carrier {cid}: Plex refresh skipped "
+                   "(PLEX_SYNC_AUTO_REFRESH off); terminal 'imported'.")
+        return
+    if not _plex_configured():
+        _record({"status": "skipped", "reason": "plex_not_configured"})
+        log.append(f"  [merge] Recovery carrier {cid}: Plex not configured; terminal 'imported'.")
+        return
+    try:
+        synced = bool(_trigger_plex_refresh(log, workflow="recovery"))
+    except Exception as ex:  # a provider error is best-effort, import intact
+        log.append(f"  [plex] Recovery Plex refresh raised (import intact): {type(ex).__name__}")
+        synced = False
+    if synced:
+        _record({"status": "synced"}, checkpoint="PLEX_SYNCED")
+        log.append(f"  [merge] Recovery carrier {cid}: Plex refresh dispatched, checkpoint PLEX_SYNCED.")
+    else:
+        _record({"status": "failed", "reason": "refresh_not_confirmed"})
+        log.append(f"  [merge] Recovery carrier {cid}: Plex refresh not confirmed; "
+                   "import intact, remains at checkpoint IMPORTED (retriable).")
 
 
 def _merge_imported_album_into_existing(imported_album_id: int, existing_album_id: int,
@@ -1528,6 +1606,18 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
         _remove_pending_review_for_path(aldir, log)
         _invalidate_lib_cache()
+        # F9: the Plex-sync tail of a missing-track recovery. The merge above
+        # drove the carrier to imported+IMPORTED; trigger its best-effort Plex
+        # refresh and advance to PLEX_SYNCED. A carrier-less reimport is a no-op
+        # and still takes the generic (workflow-gated) refresh below. The carrier
+        # lookup is best-effort: an unavailable/unwritable carrier store must
+        # never fail a completed import (as the merge lookup already tolerates).
+        try:
+            _recovery_leg_carrier = recovery_carrier.load_for_folder(aldir)
+        except Exception as _rc_ex:
+            _recovery_leg_carrier = None
+            log.append(f"  [recovery] Plex-leg carrier lookup skipped ({type(_rc_ex).__name__}).")
+        _recovery_plex_sync_leg(_recovery_leg_carrier, log)
         _trigger_plex_refresh(log)
         log.append(f"✓ Done — '{Path(aldir).name}' imported by Beets"
                    + (" in place." if source_is_music_library else " into the library structure."))
@@ -2736,6 +2826,22 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 existing_album_id = int(existing_ids[0])
         except Exception:
             existing_album_id = 0
+    # F4: a recovery re-entering from Review recovers its STRUCTURED identity
+    # from the carrier bound to this folder (never re-derived from the folder
+    # name): the existing album and the still-missing tracks, so the single
+    # verified track routes through the existing-album missing-track merge
+    # instead of importing a second album row. A staged downloads folder lives
+    # outside MUSIC_ROOT, so _library_album_ids_for_folder cannot recover this.
+    if not existing_album_id or not wanted_tracks:
+        try:
+            _reentry_carrier = recovery_carrier.load_for_folder(folder_path)
+        except Exception:
+            _reentry_carrier = None
+        if _reentry_carrier and int(_reentry_carrier.get("existing_album_id") or 0):
+            if not existing_album_id:
+                existing_album_id = int(_reentry_carrier.get("existing_album_id") or 0)
+            if not wanted_tracks:
+                wanted_tracks = _normalise_wanted_tracks(_reentry_carrier.get("wanted_tracks") or [])
 
     def _do(log, cancel_event=None):
         nonlocal mb_albumid, selected_releasegroupid
@@ -2879,6 +2985,11 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         "refusing to import the existing library folder."
                     )
                 handoff_tracks = _normalise_wanted_tracks(scan.get("wanted_tracks") or wanted_tracks)
+                # F5/F6: the still-missing subset was restaged to a new path; a
+                # recovery carrier bound to the original review folder is rebound
+                # to it so the merge below (load_for_folder on staged_dir) runs
+                # under carrier ownership/audit and reaches IMPORTED/PLEX_SYNCED.
+                _recovery_rebind_restaged(folder_path, staged_dir, target_album_id, log)
                 log.append(
                     f"[import] Existing album detected; importing {len(useful_files)} "
                     f"still-missing track(s) into album_id {target_album_id}"
@@ -2964,6 +3075,22 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         "Selected MusicBrainz release does not match this library folder; "
                         "refusing to run beet import against existing library files."
                     )
+
+        # F4/F5: a recovery re-entering from Review is a staged downloads folder
+        # (not a library folder, so the source_is_library handoff above does not
+        # fire) that carries a carrier naming the existing album. Route it through
+        # the existing-album missing-track merge so the verified track is MERGED
+        # onto that album under carrier ownership/audit, instead of importing a
+        # second album row via the generic confirmed-import path below.
+        if existing_album_id and not source_is_library:
+            try:
+                _reentry = recovery_carrier.load_for_folder(folder_path)
+            except Exception:
+                _reentry = None
+            if _reentry and int(_reentry.get("existing_album_id") or 0) == int(existing_album_id):
+                if _handoff_existing_album_import([int(existing_album_id)]):
+                    _invalidate_lib_cache()
+                    return
 
         # ── Step 1: import with specific MB release ID + permissive threshold ──────────
 

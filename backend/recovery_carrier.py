@@ -513,14 +513,22 @@ def bind_staged_folder(carrier_id: str, folder_path: str, *,
 
 def advance_state(carrier_id: str, state: str, *, checkpoint: str = "",
                   evidence: Optional[Dict[str, Any]] = None,
+                  payload_extra: Optional[Dict[str, Any]] = None,
                   expected_revision: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Transition the carrier's recovery state and (optionally) record a
     durable checkpoint and verification evidence. Used by the single guarded
     recovery workflow (stage 16) so a restart resumes from the last
-    checkpoint. Returns the updated record, or None if it does not exist."""
+    checkpoint. Returns the updated record, or None if it does not exist.
+
+    ``payload_extra`` merges extra workflow-owned fields (e.g. the best-effort
+    Plex-sync outcome) into the carrier payload without a dedicated column,
+    leaving ``checkpoint`` and the music-identity ``verification_evidence``
+    untouched when they are not supplied here."""
     if state not in CARRIER_STATES:
         raise ValueError(f"unknown recovery state {state!r} (known: {CARRIER_STATES})")
     payload: Dict[str, Any] = {}
+    if payload_extra:
+        payload.update(payload_extra)
     if checkpoint:
         if checkpoint not in CHECKPOINTS:
             raise ValueError(f"unknown checkpoint {checkpoint!r} (known: {CHECKPOINTS})")
@@ -540,6 +548,73 @@ def advance_state(carrier_id: str, state: str, *, checkpoint: str = "",
         raise
 
 
+# ──────────────────────── user-facing workflow stage ──────────────────────
+# A stable mapping from the internal carrier state + checkpoint onto the 7
+# stages the Download-Missing status UI shows (Phase-6, frontend). This is a
+# PURE derivation (no store/provider access) and carries NO secret or provider
+# token: the staged-folder path, release ids and track identity live elsewhere
+# on the carrier, never here. The frontend reads ``stage`` (the stable key),
+# ``stage_index`` (0..6 along the linear path, -1 for an off-path terminal),
+# ``label``, ``terminal`` and an optional ``note`` (e.g. why Plex was skipped).
+STAGE_LABELS = {
+    "missing": "Missing",
+    "searching": "Searching",
+    "downloading": "Downloading",
+    "verifying": "Verifying",
+    "importing": "Importing",
+    "plex_sync": "Plex Sync",
+    "complete": "Complete",
+    "needs_review": "Needs Review",
+    "failed": "Failed",
+}
+STAGE_ORDER = ("missing", "searching", "downloading", "verifying",
+               "importing", "plex_sync", "complete")
+
+
+def _stage(key: str, *, terminal: bool = False, note: str = "") -> Dict[str, Any]:
+    return {
+        "stage": key,
+        "stage_index": STAGE_ORDER.index(key) if key in STAGE_ORDER else -1,
+        "label": STAGE_LABELS.get(key, key),
+        "terminal": terminal,
+        "note": note,
+    }
+
+
+def workflow_stage(carrier: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Map a carrier's durable state + checkpoint onto the user-facing stage.
+    Safe on None (returns the 'missing' stage: no carrier yet). Checkpoint
+    (the durable position) wins over the transient state where both are set."""
+    if not carrier:
+        return _stage("missing")
+    state = _s(carrier.get("state"))
+    checkpoint = _s(carrier.get("checkpoint"))
+    plex = carrier.get("plex_sync") if isinstance(carrier.get("plex_sync"), dict) else {}
+    plex_status = _s(plex.get("status"))
+    if state == "review_required":
+        return _stage("needs_review", terminal=True)
+    if state in ("failed", "rolled_back"):
+        return _stage("failed", terminal=True)
+    if checkpoint == "PLEX_SYNCED":
+        return _stage("complete", terminal=True, note=plex_status or "synced")
+    if state == "imported" or checkpoint == "IMPORTED":
+        # The verified track landed on the album (the import IS complete). The
+        # Plex refresh is a best-effort tail: when it synced, or was skipped by
+        # config / not configured, the workflow is Complete; while it is still
+        # pending or failed (import intact, retriable) we show the Plex stage.
+        if plex_status in ("synced", "skipped"):
+            return _stage("complete", terminal=True,
+                          note=_s(plex.get("reason")) or plex_status)
+        return _stage("plex_sync", note=plex_status)
+    if state == "importing" or checkpoint == "VERIFIED":
+        return _stage("importing")
+    if state == "verifying" or checkpoint == "STAGED":
+        return _stage("verifying")
+    if state in ("downloading", "downloaded") or checkpoint == "DOWNLOADED":
+        return _stage("downloading")
+    return _stage("searching")
+
+
 def review_identity(carrier: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Flatten a carrier into the STRUCTURED identity the Review hand-off
     stores in place of the old `allow_existing` boolean + free-text suggestion.
@@ -556,4 +631,5 @@ def review_identity(carrier: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "destination_album_path": _s(carrier.get("destination_album_path")),
         "wanted_tracks": list(carrier.get("wanted_tracks") or []),
         "expected_tracks": list(carrier.get("expected_tracks") or []),
+        "recovery_stage": workflow_stage(carrier),
     }
