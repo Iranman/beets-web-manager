@@ -47,7 +47,7 @@ import {
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
-import { MbidLink, RecoveryIdentityPanel, RecoveryStageIndicator, getRecoveryIdentity, isValidMbid } from './MbidLink';
+import { MbidLink, RecoveryIdentityPanel, RecoveryStageIndicator, getRecoveryIdentity, getRecoveryStage, isValidMbid } from './MbidLink';
 import type { MbEntity } from './MbidLink';
 import {
   sameMbid,
@@ -395,8 +395,13 @@ function itemTitle(item: ReviewItem): string {
   return item.title || item.album || item.folder_name || '(unknown)';
 }
 
-function reviewItemStateKey(item: ReviewItem): string {
+export function reviewItemStateKey(item: ReviewItem): string {
   const preflight = item.evidence?.preflight;
+  // The recovery stage is recomputed live on the server (_refresh_recovery_stage),
+  // so include it here: otherwise a Download-Missing stage transition
+  // (searching -> downloading -> ...) is invisible to the queue poll and the
+  // "updates available" banner never fires for a recovery in progress.
+  const stage = getRecoveryStage(item);
   return [
     item.id,
     item.path || '',
@@ -406,6 +411,7 @@ function reviewItemStateKey(item: ReviewItem): string {
     item.reason || '',
     item.sort_ts ?? '',
     preflight ? [preflight.ok, preflight.matches, preflight.expected, preflight.release_group, preflight.error].join(':') : '',
+    stage ? `${stage.stage}:${stage.stage_index}` : '',
   ].join('::');
 }
 
@@ -1198,8 +1204,18 @@ export function applyMbidEntity(item: ReviewItem, mbid: string, sm?: SelectedMat
   if (item.target_kind === 'item') return 'recording';
   const id = (mbid || '').trim().toLowerCase();
   const rgid = (sm?.release_group_id || item.mb_releasegroupid || '').trim().toLowerCase();
-  const releaseId = (sm?.representative_release_id || item.mb_albumid || '').trim().toLowerCase();
-  if (id && id === releaseId && id !== rgid) return 'release';
+  // NF-4: a known release (edition) id can come from the selected match OR the
+  // item's own mb_albumid — consult BOTH, not just the first truthy one. With a
+  // selected match present, `sm.representative_release_id || item.mb_albumid`
+  // short-circuits on the former, so an applied id equal to item.mb_albumid
+  // (but differing from the match's representative release) was wrongly left at
+  // the release-group default. Default stays release-group (ADR-0002-safe):
+  // only an id that matches a known release id and differs from the rgid is a
+  // release.
+  const releaseIds = [sm?.representative_release_id, item.mb_albumid]
+    .map((value) => (value || '').trim().toLowerCase())
+    .filter(Boolean);
+  if (id && id !== rgid && releaseIds.includes(id)) return 'release';
   return 'release-group';
 }
 
@@ -3063,8 +3079,11 @@ export function ReviewCard({
 
             {item.target_kind !== 'item' && representativeRelease ? (
               <div className="rounded border border-graphite-200 bg-graphite-50 px-2 py-1.5 text-xs text-zinc-500">
-                <div className="font-medium text-zinc-600">Representative Release ID</div>
-                <div className="font-mono truncate">{representativeRelease}</div>
+                {/* A representative release id is, by construction, a release
+                    (edition) id distinct from the release-group id, so it links
+                    to /release/ via MbidLink — full UUID, validated, copyable,
+                    status — never a bare mono string. */}
+                <MbidLink entity="release" id={representativeRelease} status="suggested" label="Representative Release ID" />
                 <div className="mt-0.5 text-zinc-400">Used only for tracklist comparison or beets compatibility.</div>
               </div>
             ) : null}
