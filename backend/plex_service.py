@@ -575,7 +575,7 @@ def _plex_section_locations(section_key: Any) -> List[str]:
     return locations
 
 
-_ALLOWED_PLEX_REFRESH_WORKFLOWS = {"batch", "playlist", "manual", "sync"}
+_ALLOWED_PLEX_REFRESH_WORKFLOWS = {"batch", "playlist", "manual", "sync", "recovery"}
 
 
 def _trigger_plex_refresh(log: list, *, workflow: str = "") -> bool:
