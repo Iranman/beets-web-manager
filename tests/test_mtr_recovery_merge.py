@@ -26,7 +26,7 @@ from unittest import mock
 import backend.import_service as isvc
 import backend.recovery_carrier as rc
 from tests.test_sec002_wave20_existing_album_reconcile import (
-    Wave20FixtureBase, RG_A, RG_B, REL_A, REC_1, REC_2,
+    Wave20FixtureBase, RG_A, RG_B, REL_A, REC_1, REC_2, REC_3,
 )
 
 cw = isvc.composite_workflows
@@ -98,6 +98,54 @@ class RecoveryCarrierMergeTests(Wave20FixtureBase):
         self.assertEqual(res, 1)
         plan_m.assert_called_once()
         apply_m.assert_called_once_with("op-rec")
+        rec = rc.get_carrier(cid)
+        self.assertEqual(rec["state"], "imported")
+        self.assertEqual(rec["checkpoint"], "IMPORTED")
+
+    # --- partial vs full delivery (QA-2-r / Finding F-2) -----------------
+    def _multi_track_albums(self, imported_tracks):
+        """Existing album 1 holds (1,1); imported album 2 holds the given
+        (track#, recording_id) tuples as staged items."""
+        self._create_album(1, "Existing Album", rg_id=RG_A, rel_id=REL_A)
+        self._create_album(2, "Imported Temp Album", rg_id=RG_A, rel_id=REL_A)
+        self._create_item(10, 1, "Track 1", 1, 1, "t1_existing.wav", rec_id=REC_1, rg_id=RG_A)
+        for tno, rec_id in imported_tracks:
+            self._create_item(10 + tno, 2, f"Track {tno}", 1, tno,
+                              f"t{tno}_imported.wav", staging=True, rec_id=rec_id, rg_id=RG_A)
+
+    def test_partial_delivery_is_not_marked_imported(self):
+        """Reproduce F-2: the recovery wants tracks 2 AND 3 but only track 2
+        was actually delivered. The merge moves track 2, but the carrier must
+        NOT reach 'imported'/IMPORTED -- otherwise a resubmission of the
+        undelivered track 3 is short-circuited as already-imported and
+        stranded. It stays recoverable (review_required)."""
+        self._multi_track_albums([(2, REC_2)])  # track 3 never arrived
+        cid = self._carrier(expected=[
+            {"recording_id": REC_2, "track": 2, "disc": 1, "title": "Track 2"},
+            {"recording_id": REC_3, "track": 3, "disc": 1, "title": "Track 3"},
+        ])["carrier_id"]
+        plan, apply = self._reconcile_ok()
+        with plan, apply:
+            res = isvc._merge_imported_album_into_existing(2, 1, self.staged, [], mb_albumid="")
+        self.assertEqual(res, 1)  # track 2 was moved onto the existing album
+        rec = rc.get_carrier(cid)
+        self.assertEqual(rec["state"], "review_required")
+        # The acquisition resume short-circuit fires ONLY on IMPORTED/PLEX_SYNCED
+        # (acquisition_service ~L295); a partial delivery must not reach it.
+        self.assertNotEqual(rec["checkpoint"], "IMPORTED")
+
+    def test_full_multi_track_delivery_reaches_imported(self):
+        """Control: when every wanted track (2 AND 3) is actually delivered,
+        the carrier still reaches 'imported' + checkpoint IMPORTED."""
+        self._multi_track_albums([(2, REC_2), (3, REC_3)])
+        cid = self._carrier(expected=[
+            {"recording_id": REC_2, "track": 2, "disc": 1, "title": "Track 2"},
+            {"recording_id": REC_3, "track": 3, "disc": 1, "title": "Track 3"},
+        ])["carrier_id"]
+        plan, apply = self._reconcile_ok()
+        with plan, apply:
+            res = isvc._merge_imported_album_into_existing(2, 1, self.staged, [], mb_albumid="")
+        self.assertEqual(res, 1)
         rec = rc.get_carrier(cid)
         self.assertEqual(rec["state"], "imported")
         self.assertEqual(rec["checkpoint"], "IMPORTED")
