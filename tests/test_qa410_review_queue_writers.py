@@ -95,7 +95,11 @@ class Qa410WriterTests(unittest.TestCase):
         self.assertEqual(self.store.read_text(), self.original)
 
     def test_add_refuses_when_prune_save_fails(self):
-        # A is resolved, so the load prunes and saves; that save fails.
+        # ARCH-033 N3: _add_to_pending no longer prunes under the lock, so the
+        # failing write is its own append save (a raw OSError, like SEC-006's
+        # overwrite test). A failed write must still refuse (raise) and never
+        # corrupt the queue; a later list-only read still prunes the resolved
+        # row (its own failed prune save is non-fatal).
         self._patches(library_ids={"side_effect": lambda p: [7] if p == self.a else []})
         real_save = prs._save_pending_reviews
         calls = {"n": 0}
@@ -106,7 +110,7 @@ class Qa410WriterTests(unittest.TestCase):
                 raise OSError(28, "No space left on device")
             real_save(items)
         with mock.patch.object(prs, "_save_pending_reviews", side_effect=save):
-            with self.assertRaises(prs.PendingReviewLoadError):
+            with self.assertRaises(OSError):
                 prs._add_to_pending(self.c, {"album": "X"})
             self.assertEqual(self.store.read_text(), self.original)
             # A list-only reader still gets the pruned view.
