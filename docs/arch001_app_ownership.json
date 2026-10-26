@@ -525,7 +525,7 @@
     "_ai_batch_json_safe",
     "_ai_batch_load_state"
    ],
-   "caller_count": 668,
+   "caller_count": 670,
    "dependencies": []
   },
   {
@@ -20865,7 +20865,7 @@
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
     "_add_to_pending",
-    "_load_pending_reviews_locked",
+    "_compute_prune_resolutions",
     "_queue_folder_for_manual_review",
     "_review_path_is_resolved",
     "start_folder_import_with_id",
@@ -20961,7 +20961,7 @@
    "desired_owner": "backend/import_review_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_load_pending_reviews_locked",
+    "_compute_prune_resolutions",
     "import_cleanup_stale"
    ],
    "caller_count": 2,
@@ -21072,14 +21072,84 @@
    ]
   },
   {
-   "name": "_load_pending_reviews",
+   "name": "_read_pending_snapshot",
    "module": "backend/pending_review_store.py",
    "lines": [
     376,
-    378
+    384
    ],
-   "size": 3,
-   "body_lines": 2,
+   "size": 9,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_load_pending_reviews"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "items"
+   ]
+  },
+  {
+   "name": "_review_resolution_sig",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    387,
+    398
+   ],
+   "size": 12,
+   "body_lines": 7,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_compute_prune_resolutions",
+    "_load_pending_reviews_locked"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_compute_prune_resolutions",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    401,
+    425
+   ],
+   "size": 25,
+   "body_lines": 18,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CLEANUP",
+   "desired_owner": "backend/cleanup_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_load_pending_reviews"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_library_album_ids_for_folder",
+    "_pending_review_item_is_resolved",
+    "_review_resolution_sig",
+    "_s"
+   ]
+  },
+  {
+   "name": "_load_pending_reviews",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    428,
+    438
+   ],
+   "size": 11,
+   "body_lines": 6,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT_REVIEW",
@@ -21102,18 +21172,20 @@
    ],
    "caller_count": 13,
    "dependencies": [
-    "_load_pending_reviews_locked"
+    "_compute_prune_resolutions",
+    "_load_pending_reviews_locked",
+    "_read_pending_snapshot"
    ]
   },
   {
    "name": "_load_pending_reviews_locked",
    "module": "backend/pending_review_store.py",
    "lines": [
-    381,
-    468
+    441,
+    525
    ],
-   "size": 88,
-   "body_lines": 84,
+   "size": 85,
+   "body_lines": 78,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT_REVIEW",
@@ -21125,12 +21197,11 @@
    "caller_count": 1,
    "dependencies": [
     "_apply_review_origin",
-    "_library_album_ids_for_folder",
-    "_pending_review_item_is_resolved",
     "_reconcile_pending_review_enqueue_item",
     "_record_ai_review_decision",
     "_review_download_folder_is_gone",
     "_review_origin_payload",
+    "_review_resolution_sig",
     "_review_status_key",
     "_s",
     "_save_pending_reviews",
@@ -21141,11 +21212,11 @@
    "name": "_add_to_pending",
    "module": "backend/pending_review_store.py",
    "lines": [
-    470,
-    533
+    527,
+    594
    ],
-   "size": 64,
-   "body_lines": 61,
+   "size": 68,
+   "body_lines": 65,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT_REVIEW",
@@ -21173,8 +21244,8 @@
    "name": "_load_recorded_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    546,
-    553
+    607,
+    614
    ],
    "size": 8,
    "body_lines": 7,
@@ -21195,8 +21266,8 @@
    "name": "_write_recorded_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    556,
-    561
+    617,
+    622
    ],
    "size": 6,
    "body_lines": 4,
@@ -21216,8 +21287,8 @@
    "name": "_record_import_skips",
    "module": "backend/pending_review_store.py",
    "lines": [
-    564,
-    582
+    625,
+    643
    ],
    "size": 19,
    "body_lines": 15,
@@ -21240,8 +21311,8 @@
    "name": "_forget_import_skip",
    "module": "backend/pending_review_store.py",
    "lines": [
-    585,
-    603
+    646,
+    664
    ],
    "size": 19,
    "body_lines": 15,
@@ -21264,8 +21335,8 @@
    "name": "_remove_pending_review_for_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    606,
-    658
+    667,
+    719
    ],
    "size": 53,
    "body_lines": 50,
@@ -21296,8 +21367,8 @@
    "name": "_pending_review_has_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    661,
-    673
+    722,
+    734
    ],
    "size": 13,
    "body_lines": 9,
@@ -21322,8 +21393,8 @@
    "name": "_pending_review_path_key",
    "module": "backend/pending_review_store.py",
    "lines": [
-    676,
-    683
+    737,
+    744
    ],
    "size": 8,
    "body_lines": 7,
@@ -21346,8 +21417,8 @@
    "name": "_pending_review_path_set",
    "module": "backend/pending_review_store.py",
    "lines": [
-    686,
-    692
+    747,
+    753
    ],
    "size": 7,
    "body_lines": 6,
@@ -21372,8 +21443,8 @@
    "name": "_import_review_folder_signature",
    "module": "backend/pending_review_store.py",
    "lines": [
-    695,
-    713
+    756,
+    774
    ],
    "size": 19,
    "body_lines": 15,
@@ -21396,8 +21467,8 @@
    "name": "_review_id_matches_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    716,
-    725
+    777,
+    786
    ],
    "size": 10,
    "body_lines": 9,
@@ -21419,8 +21490,8 @@
    "name": "_trusted_stored_review_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    728,
-    760
+    789,
+    821
    ],
    "size": 33,
    "body_lines": 24,
@@ -21442,8 +21513,8 @@
    "name": "_pending_review_matches",
    "module": "backend/pending_review_store.py",
    "lines": [
-    763,
-    777
+    824,
+    838
    ],
    "size": 15,
    "body_lines": 14,
@@ -21470,8 +21541,8 @@
    "name": "_finalize_pending_review_format_policy_rejection",
    "module": "backend/pending_review_store.py",
    "lines": [
-    780,
-    813
+    841,
+    874
    ],
    "size": 34,
    "body_lines": 30,
@@ -21499,8 +21570,8 @@
    "name": "_mark_pending_review_status",
    "module": "backend/pending_review_store.py",
    "lines": [
-    816,
-    860
+    877,
+    921
    ],
    "size": 45,
    "body_lines": 43,
@@ -25502,11 +25573,31 @@
    "dependencies": []
   },
   {
-   "name": "_ai_batch_folder_state",
+   "name": "_ai_batch_albums_present",
    "module": "backend/ai_service.py",
    "lines": [
     1972,
-    1989
+    1986
+   ],
+   "size": 15,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_ai_batch_folder_state",
+   "module": "backend/ai_service.py",
+   "lines": [
+    1989,
+    2006
    ],
    "size": 18,
    "body_lines": 17,
@@ -25527,8 +25618,8 @@
    "name": "_ai_batch_queue_pending_review",
    "module": "backend/ai_service.py",
    "lines": [
-    1992,
-    2004
+    2009,
+    2021
    ],
    "size": 13,
    "body_lines": 12,
@@ -25552,8 +25643,8 @@
    "name": "_ai_batch_evidence_capabilities",
    "module": "backend/ai_service.py",
    "lines": [
-    2012,
-    2024
+    2029,
+    2041
    ],
    "size": 13,
    "body_lines": 7,
@@ -25574,8 +25665,8 @@
    "name": "_ai_batch_capability_warnings",
    "module": "backend/ai_service.py",
    "lines": [
-    2027,
-    2035
+    2044,
+    2052
    ],
    "size": 9,
    "body_lines": 8,
@@ -25594,8 +25685,8 @@
    "name": "_ai_batch_skip_reason",
    "module": "backend/ai_service.py",
    "lines": [
-    2038,
-    2040
+    2055,
+    2057
    ],
    "size": 3,
    "body_lines": 2,
@@ -25616,8 +25707,8 @@
    "name": "_ai_batch_albums_missing_release_group",
    "module": "backend/ai_service.py",
    "lines": [
-    2043,
-    2054
+    2060,
+    2071
    ],
    "size": 12,
    "body_lines": 9,
@@ -25638,8 +25729,8 @@
    "name": "_ai_batch_review_suggestion",
    "module": "backend/ai_service.py",
    "lines": [
-    2057,
-    2073
+    2074,
+    2090
    ],
    "size": 17,
    "body_lines": 14,
@@ -25660,8 +25751,8 @@
    "name": "_ai_batch_preimport_check",
    "module": "backend/ai_service.py",
    "lines": [
-    2076,
-    2118
+    2093,
+    2135
    ],
    "size": 43,
    "body_lines": 32,
@@ -25682,8 +25773,8 @@
    "name": "_has_hardlinked_file",
    "module": "backend/ai_service.py",
    "lines": [
-    2121,
-    2135
+    2138,
+    2152
    ],
    "size": 15,
    "body_lines": 10,
@@ -25703,11 +25794,11 @@
    "name": "_ai_batch_process_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2138,
-    2339
+    2155,
+    2392
    ],
-   "size": 202,
-   "body_lines": 195,
+   "size": 238,
+   "body_lines": 231,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -25719,6 +25810,7 @@
    "caller_count": 1,
    "dependencies": [
     "_ai_batch_albums_missing_release_group",
+    "_ai_batch_albums_present",
     "_ai_batch_already_in_library",
     "_ai_batch_commit",
     "_ai_batch_control",
@@ -25743,8 +25835,8 @@
    "name": "_ai_batch_run_folders",
    "module": "backend/ai_service.py",
    "lines": [
-    2342,
-    2386
+    2395,
+    2439
    ],
    "size": 45,
    "body_lines": 41,
@@ -25769,8 +25861,8 @@
    "name": "_ai_batch_import_failure_outcome",
    "module": "backend/ai_service.py",
    "lines": [
-    2389,
-    2401
+    2442,
+    2454
    ],
    "size": 13,
    "body_lines": 12,
@@ -25793,11 +25885,11 @@
    "name": "_ai_batch_process_decisions",
    "module": "backend/ai_service.py",
    "lines": [
-    2404,
-    2467
+    2457,
+    2531
    ],
-   "size": 64,
-   "body_lines": 60,
+   "size": 75,
+   "body_lines": 71,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -25819,8 +25911,8 @@
    "name": "_run_ai_batch_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2470,
-    2619
+    2534,
+    2683
    ],
    "size": 150,
    "body_lines": 137,
@@ -25859,8 +25951,8 @@
    "name": "_record_recent_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2632,
-    2650
+    2696,
+    2714
    ],
    "size": 19,
    "body_lines": 16,
@@ -25879,8 +25971,8 @@
    "name": "_record_recent_import_for_album",
    "module": "backend/ai_service.py",
    "lines": [
-    2653,
-    2675
+    2717,
+    2739
    ],
    "size": 23,
    "body_lines": 19,
@@ -25907,8 +25999,8 @@
    "name": "_ai_import_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2678,
-    2811
+    2742,
+    2875
    ],
    "size": 134,
    "body_lines": 126,
@@ -25940,8 +26032,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2814,
-    2848
+    2878,
+    2912
    ],
    "size": 35,
    "body_lines": 25,
@@ -32755,7 +32847,7 @@
     "_mark_pending_review_status",
     "_match_album_run"
    ],
-   "caller_count": 49,
+   "caller_count": 50,
    "dependencies": [
     "item_dict"
    ]
