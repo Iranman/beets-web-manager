@@ -14,7 +14,7 @@ import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
 import backend.import_review_decision as _import_review_decision
 from backend.ai_batch_state_service import _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _ai_batch_commit, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_worker_registered, _ai_batch_write_state, _is_music_format_policy_handled_error
-from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _RECENT_IMPORTS_FILE, _record_recent_import_for_album, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio
+from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI_REVIEW_DECISIONS_FILE, _RECENT_IMPORTS_FILE, _record_recent_import_for_album, _ai_batch_active_worker_job_id, _ai_batch_control, _ai_batch_find_state, _ai_batch_latest_state, _ai_suggest_folder_internal, _run_ai_release_preflight, _validate_import_source_audio, find_match_slot
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _path_is_under, _redact_security_text, _s, jobs
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
@@ -23,8 +23,8 @@ from backend.import_service import _cached_import_target_preview, _import_review
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _remove_pending_review_for_path, _save_pending_reviews
-from backend.serializers import _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
+from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
+from backend.serializers import REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
 from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
@@ -497,7 +497,10 @@ def import_review_queue():
                 "existing_album_id": int((s.get("existing_album_ids") or [0])[0] or 0),
                 "tracks": 0,
                 "sort_ts": float(item.get("added_at") or 0),
-                "evidence": item.get("evidence") or {},
+                # Recompute the carrier-backed recovery stage FRESH at read time
+                # so the queue reflects the carrier's current state, not the
+                # snapshot captured when the item was queued (QA Finding 7).
+                "evidence": _refresh_recovery_stage(item.get("evidence") or {}),
                 **origin_info,
             })
     except Exception:
@@ -1011,20 +1014,23 @@ def import_review_revalidate():
 
 
 @app.post("/api/folders/ai-suggest")
+@find_match_slot
 def ai_suggest_folder():
     """Identify an unimported folder using AI + MusicBrainz.
     Body: { "path": "/downloads/Artist/Album (Year)" }
     Returns: { ok, suggestion: { mb_albumid, album, albumartist, year, label, country, confidence, reason, mb_valid, mb_url } }
     """
-    payload = request.get_json(silent=True) or {}
-    folder_path = payload.get("path", "").strip()
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    folder_path = _s(payload.get("path")).strip()
     return jsonify(_ai_suggest_folder_internal(folder_path))
 
 
 @app.post("/api/folders/import-with-id")
 def import_folder_with_id():
     """Two-step import for a skipped folder:"""
-    body, status = start_folder_import_with_id(request.get_json(silent=True) or {})
+    payload = request.get_json(silent=True)
+    body, status = start_folder_import_with_id(payload if isinstance(payload, dict) else {})
     return json_route_result(body, status)
 
 
@@ -1053,16 +1059,6 @@ def get_ai_review_decisions():
     return jsonify({"ok": True, "items": data[:limit]})
 
 
-# F16: a client may propose an identity, never evidence. Everything the
-# server computes (mb_valid, confidence, preflight, track_mapping, status,
-# review_evidence, ...) is dropped; revalidation recomputes it.
-_PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS = (
-    "mb_albumid", "mb_releasegroupid", "representative_mb_albumid", "album", "albumartist",
-    "artist", "year", "label", "country", "reason",
-)
-_PENDING_REVIEW_CLIENT_TEXT_MAX = 500  # per client-supplied string (suggestion and origin)
-
-
 # SEC-006: fixed text, never the exception's.
 _REVIEW_QUEUE_UNREADABLE = ({"ok": False, "error": "Review Queue could not be read; nothing was changed."}, 503)
 
@@ -1079,18 +1075,14 @@ def add_ai_pending_review():
     if path_error or folder is None:
         return jsonify({"ok": False, "error": path_error or "Source path is not allowed."}), 400
     folder_path = str(folder)
-    raw_suggestion = payload.get("suggestion") if isinstance(payload.get("suggestion"), dict) else {}
-    suggestion = {k: (v[:_PENDING_REVIEW_CLIENT_TEXT_MAX] if isinstance(v, str) else v)
-                  for k in _PENDING_REVIEW_CLIENT_SUGGESTION_FIELDS
-                  for v in (raw_suggestion.get(k),)
-                  if isinstance(v, (str, int)) and not isinstance(v, bool)}
+    suggestion = _client_review_suggestion(payload.get("suggestion"))
     allow_existing = payload.get("allow_existing") is True
     origin = _review_origin_payload(folder_path, suggestion, origin=payload)
     if _normalize_review_origin_type(origin.get("origin_type")) == "unknown":
         origin = {**origin, "origin_type": "manual_import", "origin_label": "Manual", "created_by_workflow": "manual_import"}
     # Origin is display-only client text: plain strings, bounded, and the
     # folder is always the validated one (security LOW-1).
-    origin = {k: _s(v)[:_PENDING_REVIEW_CLIENT_TEXT_MAX] for k, v in origin.items()}
+    origin = {k: _s(v)[:REVIEW_CLIENT_TEXT_MAX] for k, v in origin.items()}
     origin["source_folder"] = folder_path
     try:
         added = _add_to_pending(folder_path, suggestion, allow_existing=allow_existing, origin=origin)

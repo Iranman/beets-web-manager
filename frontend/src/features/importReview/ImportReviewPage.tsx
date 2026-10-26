@@ -47,6 +47,8 @@ import {
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
+import { MbidLink, RecoveryIdentityPanel, RecoveryStageIndicator, getRecoveryIdentity, isValidMbid } from './MbidLink';
+import type { MbEntity } from './MbidLink';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -127,7 +129,7 @@ type ManualValidationState = {
 
 
 type ConfirmIntent =
-  | { kind: 'apply'; item: ReviewItem; mbid: string }
+  | { kind: 'apply'; item: ReviewItem; mbid: string; entity: MbEntity }
   | { kind: 'dismiss'; item: ReviewItem }
   | { kind: 'delete_folder'; item: ReviewItem; folderStats?: FolderStatsResponse }
   | { kind: 'cleanup_files'; item: ReviewItem; files: string[]; wrongAudio: boolean }
@@ -653,16 +655,18 @@ function candidateMeta(candidate: ReviewCandidate): string[] {
 }
 
 
+// A malformed id must never yield a dead outbound link: validate the UUID
+// (reusing MbidLink's isValidMbid) before building any musicbrainz.org URL.
 function musicBrainzUrl(mbAlbumId?: string): string {
-  return mbAlbumId ? `https://musicbrainz.org/release/${mbAlbumId}` : '';
+  return isValidMbid(mbAlbumId) ? `https://musicbrainz.org/release/${mbAlbumId.trim().toLowerCase()}` : '';
 }
 
 function musicBrainzReleaseGroupUrl(mbReleaseGroupId?: string): string {
-  return mbReleaseGroupId ? `https://musicbrainz.org/release-group/${mbReleaseGroupId}` : '';
+  return isValidMbid(mbReleaseGroupId) ? `https://musicbrainz.org/release-group/${mbReleaseGroupId.trim().toLowerCase()}` : '';
 }
 
 function musicBrainzRecordingUrl(mbTrackId?: string): string {
-  return mbTrackId ? `https://musicbrainz.org/recording/${mbTrackId}` : '';
+  return isValidMbid(mbTrackId) ? `https://musicbrainz.org/recording/${mbTrackId.trim().toLowerCase()}` : '';
 }
 
 function pathFilename(path?: string): string {
@@ -1036,9 +1040,6 @@ function RecordingIdEvidencePanel({
   const localYear = evidenceYear(local.year);
   const suggestedYear = evidenceYear(displayCandidate?.release_year ?? displayCandidate?.year ?? displayCandidate?.selected_release?.year ?? displayCandidate?.release_date);
   const linkedReleases = displayCandidate?.linked_releases ?? [];
-  const recordingUrl = displayCandidate?.musicbrainz_url || displayCandidate?.mb_url || musicBrainzRecordingUrl(displayCandidate?.mb_trackid || mbid);
-  const releaseUrl = musicBrainzUrl(displayCandidate?.mb_albumid || displayCandidate?.selected_release?.mb_albumid);
-  const rgUrl = displayCandidate?.mb_releasegroupurl || musicBrainzReleaseGroupUrl(displayCandidate?.mb_releasegroupid || displayCandidate?.selected_release?.mb_releasegroupid);
 
   return (
     <div className="mt-3 rounded border border-cyan-200 bg-cyan-50 p-3 text-xs text-zinc-700">
@@ -1073,11 +1074,23 @@ function RecordingIdEvidencePanel({
             <div className="mt-2 grid grid-cols-2 gap-2">
               <DetailRow label="Displayed candidate" value={displayReason} />
               {displayMetric ? <DetailRow label={displayMetric.label} value={displayMetric.value} /> : null}
-              <DetailRow label="Suggested Recording ID" value={displayCandidate.mb_trackid} href={recordingUrl} mono />
+              {displayCandidate.mb_trackid ? (
+                <div><MbidLink entity="recording" id={displayCandidate.mb_trackid} status="suggested" label="Suggested Recording ID" /></div>
+              ) : (
+                <DetailRow label="Suggested Recording ID" value={displayCandidate.mb_trackid} mono />
+              )}
               <DetailRow label="Recording title" value={displayCandidate.recording_title || displayCandidate.title} />
               <DetailRow label="Recording artist credit" value={displayCandidate.recording_artist || displayCandidate.artist} />
-              <DetailRow label="Release ID" value={displayCandidate.mb_albumid || displayCandidate.selected_release?.mb_albumid} href={releaseUrl} mono />
-              <DetailRow label="Release Group ID" value={displayCandidate.mb_releasegroupid || displayCandidate.selected_release?.mb_releasegroupid} href={rgUrl} mono />
+              {(displayCandidate.mb_albumid || displayCandidate.selected_release?.mb_albumid) ? (
+                <div><MbidLink entity="release" id={displayCandidate.mb_albumid || displayCandidate.selected_release?.mb_albumid} status="suggested" label="Release ID" /></div>
+              ) : (
+                <DetailRow label="Release ID" value="-" mono />
+              )}
+              {(displayCandidate.mb_releasegroupid || displayCandidate.selected_release?.mb_releasegroupid) ? (
+                <div><MbidLink entity="release-group" id={displayCandidate.mb_releasegroupid || displayCandidate.selected_release?.mb_releasegroupid} status="suggested" label="Release Group ID" /></div>
+              ) : (
+                <DetailRow label="Release Group ID" value="-" mono />
+              )}
               <DetailRow label="Release title" value={displayCandidate.release_title || displayCandidate.album || displayCandidate.selected_release?.album} />
               <DetailRow label="Release year/date" value={displayCandidate.release_year || displayCandidate.year || displayCandidate.release_date || displayCandidate.selected_release?.year || displayCandidate.selected_release?.date} />
               <DetailRow label="Backend status" value={displayCandidate.safety_result || displayCandidate.safety_key} />
@@ -1135,12 +1148,11 @@ function RecordingIdEvidencePanel({
           </div>
           <div className="mt-2 grid gap-2 md:grid-cols-2">
             {linkedReleases.slice(0, 4).map((release, index) => {
-              const releaseHref = musicBrainzUrl(release.mb_albumid);
               return (
                 <div key={`${release.mb_albumid || index}`} className="rounded border border-graphite-200 bg-white px-2 py-1.5">
                   <div className="truncate font-medium text-zinc-800">{release.album || '(unknown release)'}</div>
                   <div className="truncate text-zinc-500">{[release.artist, release.year || release.date, release.country, release.medium_format || release.media_format].filter(Boolean).join(' / ')}</div>
-                  {releaseHref ? <a className="font-mono text-[0.7rem] text-sky-700 underline" href={releaseHref} target="_blank" rel="noreferrer">{release.mb_albumid}</a> : null}
+                  {release.mb_albumid ? <MbidLink entity="release" id={release.mb_albumid} status="suggested" label="Release" /> : null}
                 </div>
               );
             })}
@@ -1174,6 +1186,29 @@ function initialMbid(item: ReviewItem): string {
   if (item.target_kind === 'item') return item.mb_trackid || '';
   return item.mb_releasegroupid || item.mb_albumid || '';
 }
+
+// The ACTUAL MB entity of the id being applied, so the confirm dialog links and
+// labels it truthfully instead of guessing from target_kind. A per-item target
+// carries a recording id; an album target carries the canonical release-GROUP id
+// (ADR-0002) — it is only a release (edition) id when it specifically matches the
+// known release id and differs from the release-group id (e.g. the mb_albumid
+// fallback when no release-group id exists). Never relabel a release-group id as a
+// release.
+export function applyMbidEntity(item: ReviewItem, mbid: string, sm?: SelectedMatch): MbEntity {
+  if (item.target_kind === 'item') return 'recording';
+  const id = (mbid || '').trim().toLowerCase();
+  const rgid = (sm?.release_group_id || item.mb_releasegroupid || '').trim().toLowerCase();
+  const releaseId = (sm?.representative_release_id || item.mb_albumid || '').trim().toLowerCase();
+  if (id && id === releaseId && id !== rgid) return 'release';
+  return 'release-group';
+}
+
+const APPLY_ENTITY_LABEL: Record<MbEntity, string> = {
+  'release-group': 'Release Group ID',
+  release: 'Release ID',
+  recording: 'Recording ID',
+  artist: 'Artist ID',
+};
 
 function selectedReleaseGroupId(item: ReviewItem, mbid: string, response?: AiSuggestResponse): string {
   const suggestion = response?.suggestion;
@@ -1695,6 +1730,15 @@ function optionalAiWarning(message: string): string {
     ? 'AI ranking was skipped because no provider is configured.'
     : '';
 }
+
+/** The server refused this Find Match because others are running (503
+ * suggest_busy): retryable, not a failure. */
+function findMatchBusyMessage(err: unknown): string {
+  const body = apiErrorBody(err);
+  return body?.code === 'suggest_busy'
+    ? body.error || 'Find Match is already running for other items; try again in a moment.'
+    : '';
+}
 export function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?: SelectedMatch): { rows: MatchingSafetyRow[]; warnings: string[] } {
   const suggestion = response?.suggestion ?? response?.suggestions;
   const contract = isRecordValue(selectedMatch?.matching_contract)
@@ -2156,7 +2200,7 @@ function CandidateCarousel({
 
   const mbid = current.mb_albumid ?? '';
   const rgid = current.mb_releasegroupid || trackData?.mb_releasegroupid || '';
-  const rgUrl = current.mb_releasegroupurl ?? (rgid ? `https://musicbrainz.org/release-group/${rgid}` : '');
+  const rgUrl = current.mb_releasegroupurl ?? musicBrainzReleaseGroupUrl(rgid);
   const mbUrl = current.mb_url || musicBrainzUrl(mbid);
   const score = scoreValue(current);
   const normalizedScore = normalizedScoreValue(score);
@@ -2233,21 +2277,16 @@ function CandidateCarousel({
               ))}
             </div>
             {rgid ? (
-              <div className="mt-1.5 text-xs text-zinc-500">
-                <span className="font-medium">Release group:</span>{' '}
-                {rgUrl ? (
-                  <a className="font-mono underline decoration-zinc-400 hover:text-zinc-700" href={rgUrl} target="_blank" rel="noreferrer">
-                    {rgid}
-                  </a>
-                ) : (
-                  <span className="font-mono">{rgid}</span>
-                )}
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                <MbidLink entity="release-group" id={rgid} status="suggested" label="Release group" />
                 {current.release_group_primary_type ? (
-                  <span className="ml-2 rounded bg-graphite-100 px-1 py-0.5 text-zinc-500">{current.release_group_primary_type}</span>
+                  <span className="rounded bg-graphite-100 px-1 py-0.5 text-xs text-zinc-500">{current.release_group_primary_type}</span>
                 ) : null}
               </div>
             ) : mbid ? (
-              <div className="mt-1 truncate font-mono text-xs text-zinc-500">{mbid}</div>
+              <div className="mt-1.5">
+                <MbidLink entity="release" id={mbid} status="suggested" label="Release" />
+              </div>
             ) : null}
             {matchSummary ? (
               <div className="mt-1 text-xs font-medium text-zinc-600">{matchSummary}</div>
@@ -2688,7 +2727,6 @@ export function ReviewCard({
     ? item.mb_url || musicBrainzRecordingUrl(mbid || item.mb_trackid)
     : item.mb_url || musicBrainzUrl(item.mb_albumid);
   const itemReleaseGroupId = item.mb_releasegroupid || item.evidence?.preflight?.release_group || '';
-  const itemReleaseGroupUrl = item.mb_releasegroupurl || musicBrainzReleaseGroupUrl(itemReleaseGroupId);
   const busy = actionState?.status === 'running';
   const [mbsubmitOpen, setMbsubmitOpen] = useState(false);
   const [addMbidsOpen, setAddMbidsOpen] = useState(false);
@@ -2720,7 +2758,14 @@ export function ReviewCard({
     ? blockedActionHint(applyBlockedReason)
     : storedBlockedNextAction(item) || (visibleBlockReason ? blockedActionHint(visibleBlockReason) : '');
   const queueingImport = actionState?.status === 'running' && /queueing/i.test(actionState.message || '');
-  const lifecycleLabel = queueingImport
+  // Missing-track recovery (ARCH-030): a carrier-backed item is a recovery INTO
+  // an existing album, not a new-album import. It reaches Review unverified
+  // (mb_valid=false), so its lifecycle must read as "needs verification", never
+  // as a green success/ready state.
+  const recoveryIdentity = getRecoveryIdentity(item);
+  const lifecycleLabel = recoveryIdentity
+    ? 'Recovery · needs verification'
+    : queueingImport
     ? 'Import enqueueing'
     : item.status === 'format_policy_rejected'
       ? 'Format policy rejected'
@@ -2729,7 +2774,9 @@ export function ReviewCard({
         : item.status && item.status !== 'Pending AI'
           ? item.status.replace(/_/g, ' ')
           : typeLabels[item.type];
-  const lifecycleTone = queueingImport
+  const lifecycleTone = recoveryIdentity
+    ? 'border-violet-300 bg-violet-50 text-violet-900'
+    : queueingImport
     ? 'border-sky-200 bg-sky-50 text-sky-800'
     : item.status === 'format_policy_rejected'
       ? 'border-amber-300 bg-amber-50 text-amber-900'
@@ -2789,7 +2836,7 @@ export function ReviewCard({
                 {lifecycleLabel}
               </span>
               {item.missing_reason === 'missing_release_group' && item.current_mb_albumid ? (
-                <span className="break-all font-mono text-xs text-zinc-600">Release ID: {item.current_mb_albumid}</span>
+                <MbidLink entity="release" id={item.current_mb_albumid} status="suggested" label="Release ID" />
               ) : null}
               <span className={`rounded border px-2 py-1 text-xs font-semibold ${matchTones[visibleMatchBucket]}`}>
                 {matchLabels[visibleMatchBucket]}
@@ -2830,18 +2877,28 @@ export function ReviewCard({
             <h2 className="mt-3 truncate text-lg font-semibold text-zinc-950">{itemTitle(item)}</h2>
             {meta.length ? <div className="mt-1 text-sm text-zinc-600">{meta.join(' / ')}</div> : null}
 
+            <RecoveryIdentityPanel item={item} />
+            <RecoveryStageIndicator item={item} />
+
             {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
             {item.path ? <div className="mt-3 truncate font-mono text-xs text-zinc-500">{item.path}</div> : null}
             {itemReleaseGroupId ? (
-              <div className="mt-2 text-xs text-zinc-500">
-                <span className="font-medium">MusicBrainz Release Group ID:</span>{' '}
-                {itemReleaseGroupUrl ? (
-                  <a className="font-mono underline decoration-zinc-400 hover:text-zinc-700" href={itemReleaseGroupUrl} target="_blank" rel="noreferrer">
-                    {itemReleaseGroupId}
-                  </a>
-                ) : (
-                  <span className="font-mono">{itemReleaseGroupId}</span>
-                )}
+              <div className="mt-2">
+                <MbidLink
+                  entity="release-group"
+                  id={itemReleaseGroupId}
+                  // `item.mb_valid` is UUID-syntax validity only (backend
+                  // ai_service), NOT a confirmed match — so it must never
+                  // promote the chip to "Verified". A valid UUID still links
+                  // + is copyable (MbidLink decides that from the id itself);
+                  // validity governs linking, not verification. No genuine
+                  // "verified" signal exists on this item today, so this stays
+                  // neutral "Suggested". (Follow-up for music-identity: if
+                  // mb_valid should ever carry a real verified signal, surface
+                  // that as a separate field and map it here.)
+                  status="suggested"
+                  label="MusicBrainz Release Group ID"
+                />
               </div>
             ) : null}
             {visibleMatchNote ? (
@@ -3061,16 +3118,21 @@ export function ReviewCard({
               Submit Metadata
             </Button>
             {canDeleteFolder(item) ? (
-              <Button
-                size="small"
-                variant="outlined"
-                color="error"
-                onClick={onDeleteFolder}
-                disabled={busy || Boolean(importJobActive)}
-                title={importJobActive ? 'Import job is active for this folder — wait for it to finish before deleting' : wrongSourceNote || undefined}
-              >
-                {deleteFolderActionLabel(item)}
-              </Button>
+              <div className="mt-2 rounded border border-rose-200 bg-rose-50/60 p-2" aria-label="Destructive actions">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-700">Destructive</div>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="error"
+                  fullWidth
+                  onClick={onDeleteFolder}
+                  disabled={busy || Boolean(importJobActive)}
+                  title={importJobActive ? 'Import job is active for this folder — wait for it to finish before deleting' : wrongSourceNote || undefined}
+                >
+                  {deleteFolderActionLabel(item)}
+                </Button>
+                <div className="mt-1 text-xs text-rose-700">Permanent. Asks for confirmation first.</div>
+              </div>
             ) : needsOnlyReleaseGroup(item) ? (
               <span className="self-center text-xs text-zinc-600">Use Fix proven matches to add the release group.</span>
             ) : null}
@@ -3120,7 +3182,7 @@ export function ReviewCard({
   );
 }
 
-function ConfirmDialog({
+export function ConfirmDialog({
   intent,
   onClose,
   onConfirm,
@@ -3178,7 +3240,22 @@ function ConfirmDialog({
             <div className="mt-4 rounded border border-graphite-200 bg-graphite-50 p-3">
               <div className="truncate text-sm font-semibold text-zinc-900">{itemTitle(item)}</div>
               {intent?.kind === 'apply' ? (
-                <div className="mt-1 truncate font-mono text-xs text-zinc-600">{intent.mbid}</div>
+                (() => {
+                  // Truthful entity carried on the intent (ADR-0002): an album's
+                  // canonical id is a release GROUP, not a release. Default only
+                  // guards a malformed intent; it never guesses 'release'.
+                  const entity = intent.entity ?? (item.target_kind === 'item' ? 'recording' : 'release-group');
+                  return (
+                    <div className="mt-2">
+                      <MbidLink
+                        entity={entity}
+                        id={intent.mbid}
+                        status="suggested"
+                        label={APPLY_ENTITY_LABEL[entity]}
+                      />
+                    </div>
+                  );
+                })()
               ) : null}
               {intent?.kind === 'delete_folder' && item.path ? (
                 <div className="mt-2 space-y-2">
@@ -3211,7 +3288,12 @@ function ConfirmDialog({
               ) : null}
               {intent?.kind === 'attach_recording_confirm' ? (
                 <div className="mt-2 space-y-2 text-xs text-zinc-600">
-                  <div className="truncate font-mono">{intent.candidate.mb_trackid}</div>
+                  <MbidLink
+                    entity="recording"
+                    id={intent.candidate.mb_trackid}
+                    status={(intent.candidate.conflicts || []).length ? 'conflicting' : 'suggested'}
+                    label="Recording ID"
+                  />
                   {(intent.candidate.conflicts || []).length ? (
                     <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-rose-800">
                       <div className="font-semibold">Conflicts</div>
@@ -3421,6 +3503,9 @@ export function ImportReviewPage({
   const targetPreviewKeysRef = useRef<Record<string, string>>({});
   const queueSnapshotRef = useRef('');
   const reviewItemStateKeysRef = useRef<Record<string, string>>({});
+  const autoSuggestInFlightRef = useRef('');
+  const autoSuggestTriedRef = useRef('');
+  const [autoSuggestSettled, setAutoSuggestSettled] = useState(0);
   const [confirmIntent, setConfirmIntent] = useState<ConfirmIntent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -3885,8 +3970,11 @@ export function ImportReviewPage({
   }, [activeItem, selectedMatches]);
 
   // Auto-start Find Match only while the Review tab is active and the item needs identification.
-  // Fires only when the cursor moves to a new item; checks current state synchronously
-  // so it won't re-fire after the suggestion arrives.
+  // One runs at a time: each holds a server worker for seconds (fingerprints, rate-limited
+  // MusicBrainz, AI), so stepping through items must not start one per item. When it settles,
+  // the item now under the cursor gets its turn. Each item is tried once per visit, so a
+  // refusal or failure is never retried in a loop.
+  useEffect(() => { autoSuggestTriedRef.current = ''; }, [activeItem?.id]);
   useEffect(() => {
     if (!active) return;
     if (!activeItem) return;
@@ -3896,9 +3984,15 @@ export function ImportReviewPage({
     if (mbids[item.id]) return;
     if (actions[item.id]?.status === 'running') return;
     if (submittedItemIdsRef.current.has(item.id)) return;
-    void handleSuggest(item);
+    if (autoSuggestTriedRef.current === item.id || autoSuggestInFlightRef.current) return;
+    autoSuggestTriedRef.current = item.id;
+    autoSuggestInFlightRef.current = item.id;
+    void handleSuggest(item).finally(() => {
+      autoSuggestInFlightRef.current = '';
+      setAutoSuggestSettled((count) => count + 1);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, activeItem?.id]);
+  }, [active, activeItem?.id, autoSuggestSettled]);
 
   const handleCleanupStale = useCallback(async () => {
     setCleanupBusy(true);
@@ -4185,8 +4279,9 @@ export function ImportReviewPage({
         const aiAvailable = s?.ai_available ?? response.ai_available;
         const aiReason = s?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
         const notChecked = notCheckedReason(response);
+        // Truthful status: a 200 with no recording candidate is NOT a success.
         setAction(item.id, {
-          status: notChecked ? 'warning' : aiAvailable === false ? 'warning' : 'success',
+          status: notChecked ? 'warning' : !mbTrackId ? 'warning' : aiAvailable === false ? 'warning' : 'success',
           message: s?.reason || backendCandidate?.reason || (mbTrackId
             ? aiAvailable === false
               ? `Recording evidence ready. ${aiReason}`
@@ -4199,8 +4294,8 @@ export function ImportReviewPage({
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        const aiWarning = optionalAiWarning(message);
-        setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
+        const warning = findMatchBusyMessage(err) || optionalAiWarning(message);
+        setAction(item.id, { status: warning ? 'warning' : 'error', message: warning || message });
       }
       return;
     }
@@ -4229,8 +4324,13 @@ export function ImportReviewPage({
       const aiAvailable = suggestion?.ai_available ?? response.ai_available;
       const aiReason = suggestion?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
       const notChecked = notCheckedReason(response);
+      // Truthful status: a 200 with no selected match / no valid MB id is NOT a
+      // success (it is "no candidate" / "manual review required"), so it must
+      // not render a green success banner.
+      const matched = Boolean(backendSelectedMatch?.release_group_id)
+        || Boolean(suggestion?.mb_valid && suggestion.mb_albumid);
       setAction(item.id, {
-        status: notChecked ? 'warning' : aiAvailable === false ? 'warning' : 'success',
+        status: notChecked ? 'warning' : !matched ? 'warning' : aiAvailable === false ? 'warning' : 'success',
         message: suggestion?.reason || (backendSelectedMatch
           ? aiAvailable === false
             ? `Matched using MusicBrainz and AcoustID. ${aiReason}`
@@ -4243,8 +4343,8 @@ export function ImportReviewPage({
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const aiWarning = optionalAiWarning(message);
-      setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
+      const warning = findMatchBusyMessage(err) || optionalAiWarning(message);
+      setAction(item.id, { status: warning ? 'warning' : 'error', message: warning || message });
     }
   }, [setAction]);
 
@@ -4254,7 +4354,7 @@ export function ImportReviewPage({
     const previewState = currentTargetPreviewState(item, sm, targetPreviews);
     const blockReason = applyBlockReason(item, mbid, sm, previewState);
     if (blockReason) { setAction(item.id, { status: 'error', message: blockReason }); return; }
-    setConfirmIntent({ kind: 'apply', item, mbid });
+    setConfirmIntent({ kind: 'apply', item, mbid, entity: applyMbidEntity(item, mbid, sm) });
   }, [mbids, selectedMatches, setAction, targetPreviews]);
 
   // Non-blocking: submit job, remove from queue immediately, poll in background

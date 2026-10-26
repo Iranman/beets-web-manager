@@ -106,7 +106,7 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('if trigger_plex_refresh_after:', body)
         self.assertIn('_trigger_plex_refresh(log, workflow=trigger_plex_context)', body)
         self.assertIn('Refresh skipped for Import Review; playlist/batch jobs trigger Plex separately.', body)
-        self.assertIn('_ALLOWED_PLEX_REFRESH_WORKFLOWS = {"batch", "playlist", "manual", "sync"}', APP)
+        self.assertIn('_ALLOWED_PLEX_REFRESH_WORKFLOWS = {"batch", "playlist", "manual", "sync", "recovery"}', APP)
         self.assertIn('workflow_key not in _ALLOWED_PLEX_REFRESH_WORKFLOWS', APP)
         self.assertIn('automatic scans run only for approved workflows (playlist, batch, sync)', APP)
 
@@ -158,7 +158,10 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('REV-02: no import is ever started by viewing or selecting an item', page)
     def test_frontend_import_runs_only_through_explicit_confirmation(self):
         start_apply = section(REVIEW_PAGE, 'const startApply = useCallback', 'const runApply = useCallback')
-        self.assertIn("setConfirmIntent({ kind: 'apply', item, mbid })", start_apply)
+        # startApply must still route only through an explicit apply confirm intent
+        # carrying item + mbid (the entity arg added for the correct-MB-entity link is
+        # appended after mbid; assert the stable prefix so the guarantee is preserved).
+        self.assertIn("setConfirmIntent({ kind: 'apply', item, mbid", start_apply)
         self.assertNotIn('importWithId(', start_apply)
         confirm = section(REVIEW_PAGE, 'const confirm = useCallback', 'const selectFilter = useCallback')
         self.assertIn("if (intent.kind === 'apply') void runApply(intent.item, intent.mbid)", confirm)

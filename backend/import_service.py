@@ -9,10 +9,11 @@ from backend.matching import verify_audio_against_request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _pending_review_has_path, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
+import backend.recovery_carrier as recovery_carrier
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
@@ -34,9 +35,10 @@ from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED_MESSAGE, _album
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
-from backend.serializers import _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
+from backend.serializers import _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
-from backend.plex_service import _trigger_plex_refresh
+from backend.app_runtime import PLEX_SYNC_AUTO_REFRESH
+from backend.plex_service import _plex_configured, _trigger_plex_refresh
 
 # ── ARCH-001 extracted code ──
 
@@ -206,6 +208,288 @@ class _ExistingAlbumMergeFailed(RuntimeError):
     is left as it is; the caller routes the folder to Review."""
 
 
+# ── HOOK(library-transaction): missing-track recovery carrier wiring ─────────
+# These helpers consume backend.recovery_carrier READ-ONLY via its published
+# API (load_for_folder / advance_state) and NEVER touch the carrier spine or
+# add a mutation path. They only gate and state-drive the existing, already
+# transaction-backed merge below, so a verified single-track recovery reuses
+# the same preview/apply/audit/recovery + durable rollback every merge gets.
+
+
+def _recovery_carrier_for_merge(source_folder: str, existing_album_id: int,
+                                log: list) -> Optional[Dict[str, Any]]:
+    """Return the recovery carrier importing a verified track into THIS
+    existing album, or None for an ordinary (carrier-less) merge.
+
+    The carrier is looked up by the staged folder PATH (never parsed from its
+    name) and engages only when it names this exact existing_album_id. Any
+    lookup failure is swallowed: a missing or broken carrier simply means the
+    ordinary merge runs unchanged, so this is a strict no-op off the recovery
+    path."""
+    if not _s(source_folder).strip():
+        return None
+    try:
+        carrier = recovery_carrier.load_for_folder(source_folder)
+    except Exception as ex:
+        log.append(f"  [merge] recovery carrier lookup skipped ({ex}); ordinary merge.")
+        return None
+    if not carrier:
+        return None
+    if int(carrier.get("existing_album_id") or 0) != int(existing_album_id):
+        # A carrier bound for a different album must never steer this merge.
+        return None
+    return carrier
+
+
+def _recovery_slot_present(existing_items: Iterable[Dict[str, Any]],
+                           expected: Dict[str, Any]) -> bool:
+    """True when the existing album already holds the expected (missing) track
+    -- matched by recording id or by (disc, track) slot. Proves the track is
+    NOT missing, so re-importing it would duplicate audio."""
+    rid = _s(expected.get("recording_id")).strip().lower()
+    try:
+        exp_disc, exp_track = int(expected.get("disc") or 1), int(expected.get("track") or 0)
+    except (TypeError, ValueError):
+        exp_disc, exp_track = 1, 0
+    for row in existing_items or []:
+        if rid and _s(row.get("mb_trackid")).strip().lower() == rid:
+            return True
+        if exp_track and (int(row.get("disc") or 1), int(row.get("track") or 0)) == (exp_disc, exp_track):
+            return True
+    return False
+
+
+def _recovery_claim_importing(carrier: Dict[str, Any], log: list) -> None:
+    """Claim the carrier for this import with a compare-and-swap into
+    ``importing``. A carrier already in ``importing``/``imported``, or a lost
+    CAS, means another recovery job owns this track: refuse WITHOUT touching
+    the carrier (its owner drives it) so two jobs never import the same track.
+
+    The CAS on the carrier plus the album resource locks the reconcile apply
+    already takes together serialise concurrent recoveries -- no new lock."""
+    cid = _s(carrier.get("carrier_id"))
+    state = _s(carrier.get("state"))
+    if state in ("importing", "imported"):
+        raise _ExistingAlbumMergeFailed(
+            f"a concurrent recovery job already holds carrier {cid} (state {state!r}); "
+            "nothing was imported")
+    try:
+        updated = recovery_carrier.advance_state(
+            cid, "importing", expected_revision=int(carrier.get("revision") or 0))
+    except recovery_carrier.RecoveryCarrierConflictError:
+        raise _ExistingAlbumMergeFailed(
+            f"a concurrent recovery job is already importing carrier {cid}; nothing was imported")
+    if updated is None:
+        raise _ExistingAlbumMergeFailed(f"recovery carrier {cid} vanished before import")
+    log.append(f"  [merge] Recovery carrier {cid}: claimed state 'importing'.")
+
+
+def _recovery_precheck(carrier: Dict[str, Any], existing_album_id: int, log: list) -> None:
+    """Fail-closed preconditions for a verified single-track recovery, run
+    after the ``importing`` claim and BEFORE any library change: the target
+    album still exists and every expected (missing) track is still absent. A
+    failed precheck advances the carrier to ``review_required`` (the folder is
+    routed to Review WITH its structured identity) and raises -- no duplicate
+    is imported and nothing is deleted."""
+    cid = _s(carrier.get("carrier_id"))
+
+    def _to_review(reason: str) -> None:
+        try:
+            recovery_carrier.advance_state(cid, "review_required")
+        except Exception as ex:  # state driving must never mask the real reason
+            log.append(f"  [merge] WARN carrier {cid} review_required not recorded: {ex}")
+        raise _ExistingAlbumMergeFailed(reason)
+
+    try:
+        album = composite_workflows.get_album(int(existing_album_id))
+    except BeetsUnavailableError:
+        raise
+    if not album:
+        _to_review(f"the target album_id {existing_album_id} no longer exists; "
+                   f"recovery carrier {cid} routed to Review")
+    try:
+        existing_items = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
+    except BeetsUnavailableError:
+        raise
+    present = [t for t in (carrier.get("expected_tracks") or [])
+               if _recovery_slot_present(existing_items, t)]
+    if present:
+        labels = ", ".join(_wanted_track_label(t) for t in present[:5])
+        _to_review(f"the expected track(s) are already on album_id {existing_album_id} "
+                   f"({labels}); carrier {cid} routed to Review to avoid a duplicate import")
+
+
+def _recovery_intended_tracks(carrier: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The tracks this recovery is responsible for -- expected (missing) tracks
+    PLUS any wanted tracks -- normalised to the {recording_id, disc, track}
+    shape ``_recovery_slot_present`` matches. This is the SAME set the
+    acquisition resume short-circuit treats as 'covered'
+    (expected_tracks ∪ wanted_tracks), so a carrier reaches IMPORTED only when
+    every track that set would report covered is actually on the album.
+
+    Entries with neither a recording id nor a positive track number are
+    dropped: they are unidentifiable and the coverage signature ignores them
+    too, so they must not make a full delivery look partial."""
+    out: List[Dict[str, Any]] = []
+    for t in (list(carrier.get("expected_tracks") or [])
+              + list(carrier.get("wanted_tracks") or [])):
+        if not isinstance(t, dict):
+            continue
+        rid = _s(t.get("recording_id") or t.get("mb_trackid")).strip()
+        try:
+            track = int(t.get("track") or 0)
+        except (TypeError, ValueError):
+            track = 0
+        if not rid and track <= 0:
+            continue
+        out.append({"recording_id": rid, "disc": t.get("disc"), "track": track})
+    return out
+
+
+def _recovery_fully_delivered(carrier: Dict[str, Any],
+                              present_items: Iterable[Dict[str, Any]], log: list) -> bool:
+    """True only when EVERY intended track of this recovery is present in the
+    album as it stands after this merge (``present_items`` = the existing
+    album's rows plus the imported rows this merge moves onto it). A strict
+    subset -- some intended tracks still undelivered -- returns False so the
+    carrier is NOT marked IMPORTED (QA-2-r / Finding F-2): a partial recovery
+    stays recoverable and a later resubmission of an undelivered track is not
+    short-circuited as already-imported and stranded.
+
+    An empty intended set means there is nothing to prove partial, so the prior
+    'a move happened' outcome stands (tolerant, mirrors the coverage check)."""
+    intended = _recovery_intended_tracks(carrier)
+    if not intended:
+        return True
+    rows = list(present_items or [])
+    undelivered = [t for t in intended if not _recovery_slot_present(rows, t)]
+    if undelivered:
+        log.append(f"  [merge] partial recovery: {len(undelivered)}/{len(intended)} expected/wanted "
+                   f"track(s) not delivered; carrier NOT marked IMPORTED.")
+        return False
+    return True
+
+
+def _recovery_mark_outcome(carrier: Dict[str, Any], result: int, existing_album_id: int,
+                           present_items: Iterable[Dict[str, Any]],
+                           recon_op_id: str, log: list) -> None:
+    """Drive the carrier to its terminal state once the merge body returned.
+    IMPORTED is reached ONLY when the merge landed on the existing album
+    (``result == existing_album_id``) AND every expected/wanted track of this
+    recovery is actually delivered (``_recovery_fully_delivered``). Anything
+    else -- a different identity, nothing merged, or a PARTIAL delivery where
+    only some intended tracks landed -- goes to ``review_required`` so the
+    operator decides and an undelivered track is never falsely reported
+    'imported' nor stranded (QA-2-r / F-2).
+
+    The reconcile transaction id is only logged: it is already a durable,
+    independently recoverable record (transaction_recovery), and writing it as
+    carrier ``evidence`` would clobber music-identity's verification_evidence."""
+    cid = _s(carrier.get("carrier_id"))
+    try:
+        if int(result) == int(existing_album_id) and _recovery_fully_delivered(carrier, present_items, log):
+            recovery_carrier.advance_state(cid, "imported", checkpoint="IMPORTED")
+            log.append(f"  [merge] Recovery carrier {cid}: state 'imported', checkpoint IMPORTED "
+                       f"(reconcile tx {recon_op_id or 'n/a'}).")
+        else:
+            recovery_carrier.advance_state(cid, "review_required")
+            log.append(f"  [merge] Recovery carrier {cid}: not fully delivered onto album_id "
+                       f"{existing_album_id}; state 'review_required'.")
+    except Exception as ex:
+        log.append(f"  [merge] WARN carrier {cid} outcome state not recorded: {ex}")
+
+
+def _recovery_mark_failed(carrier: Optional[Dict[str, Any]], log: list) -> None:
+    """A merge that raised leaves a recoverable transaction state and the
+    imported row untouched; mark the carrier ``failed`` (resumable) so the
+    workflow does not look mid-import after a crash. Never raises."""
+    if not carrier:
+        return
+    cid = _s(carrier.get("carrier_id"))
+    try:
+        recovery_carrier.advance_state(cid, "failed")
+        log.append(f"  [merge] Recovery carrier {cid}: state 'failed' (recoverable; imported row kept).")
+    except Exception as ex:
+        log.append(f"  [merge] WARN carrier {cid} failed-state not recorded: {ex}")
+
+
+def _recovery_rebind_restaged(original_folder: str, staged_folder: str,
+                              existing_album_id: int, log: list) -> None:
+    """F5/F6: a recovery carrier is bound to the ORIGINAL review folder. When
+    the still-missing subset is restaged to a NEW path (``_stage_selected_audio_files``)
+    before the merge's ``load_for_folder`` lookup, rebind the carrier to the
+    staged path so the merge still runs under carrier ownership/audit instead
+    of degrading to an ordinary carrier-less merge. Best-effort: a rebind
+    failure simply falls back to that ordinary merge, never breaks the import."""
+    if not _s(staged_folder).strip() or staged_folder == original_folder:
+        return
+    try:
+        carrier = recovery_carrier.load_for_folder(original_folder)
+    except Exception as ex:
+        log.append(f"  [recovery] rebind lookup skipped ({type(ex).__name__}); ordinary merge.")
+        return
+    if not carrier or int(carrier.get("existing_album_id") or 0) != int(existing_album_id or 0):
+        return
+    cid = _s(carrier.get("carrier_id"))
+    try:
+        recovery_carrier.bind_staged_folder(cid, staged_folder)
+        log.append(f"  [recovery] Carrier {cid} rebound to the restaged path for merge ownership/audit.")
+    except Exception as ex:
+        log.append(f"  [recovery] WARN carrier {cid} rebind skipped ({type(ex).__name__}); ordinary merge.")
+
+
+def _recovery_plex_sync_leg(carrier: Optional[Dict[str, Any]], log: list) -> None:
+    """F9: the Plex-sync tail of the recovery workflow. Once the verified track
+    reached the existing album (carrier ``imported`` + checkpoint ``IMPORTED``),
+    trigger ONE best-effort Plex library refresh and advance the carrier to
+    ``PLEX_SYNCED``. Best-effort and auditable:
+
+    * the import is already COMPLETE and durable -- a Plex failure never fails
+      or rolls it back; it is recorded on the carrier and the row stays intact;
+    * the operator's opt-in config is respected: with ``PLEX_SYNC_AUTO_REFRESH``
+      off (or Plex not configured) no refresh is forced -- the carrier records a
+      skip and stays terminal ``imported`` (checkpoint ``IMPORTED``);
+    * idempotent: a carrier already ``PLEX_SYNCED`` (resume/replay) is a no-op."""
+    if not carrier:
+        return
+    cid = _s(carrier.get("carrier_id"))
+    if _s(carrier.get("checkpoint")) == "PLEX_SYNCED":
+        return
+    if _s(carrier.get("state")) != "imported":
+        # Only a confirmed imported+IMPORTED outcome gets the Plex tail; a merge
+        # that went to review_required/failed is handled by its own owner.
+        return
+
+    def _record(payload_extra: Dict[str, Any], *, checkpoint: str = "") -> None:
+        try:
+            recovery_carrier.advance_state(cid, "imported", checkpoint=checkpoint or "",
+                                           payload_extra={"plex_sync": payload_extra})
+        except Exception as ex:
+            log.append(f"  [merge] WARN carrier {cid} Plex outcome not recorded: {ex}")
+
+    if not PLEX_SYNC_AUTO_REFRESH:
+        _record({"status": "skipped", "reason": "auto_refresh_disabled"})
+        log.append(f"  [merge] Recovery carrier {cid}: Plex refresh skipped "
+                   "(PLEX_SYNC_AUTO_REFRESH off); terminal 'imported'.")
+        return
+    if not _plex_configured():
+        _record({"status": "skipped", "reason": "plex_not_configured"})
+        log.append(f"  [merge] Recovery carrier {cid}: Plex not configured; terminal 'imported'.")
+        return
+    try:
+        synced = bool(_trigger_plex_refresh(log, workflow="recovery"))
+    except Exception as ex:  # a provider error is best-effort, import intact
+        log.append(f"  [plex] Recovery Plex refresh raised (import intact): {type(ex).__name__}")
+        synced = False
+    if synced:
+        _record({"status": "synced"}, checkpoint="PLEX_SYNCED")
+        log.append(f"  [merge] Recovery carrier {cid}: Plex refresh dispatched, checkpoint PLEX_SYNCED.")
+    else:
+        _record({"status": "failed", "reason": "refresh_not_confirmed"})
+        log.append(f"  [merge] Recovery carrier {cid}: Plex refresh not confirmed; "
+                   "import intact, remains at checkpoint IMPORTED (retriable).")
+
+
 def _merge_imported_album_into_existing(imported_album_id: int, existing_album_id: int,
                                         source_folder: str, log: list,
                                         mb_albumid: str = "",
@@ -219,6 +503,13 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
     This function only gathers inputs and applies the planned engine
     transactions.
 
+    HOOK(library-transaction): the verified single-track insertion/merge for a
+    recovery carrier (backend.recovery_carrier) targets this existing album via
+    the controlled transaction workflow. The carrier names existing_album_id,
+    canonical mb_releasegroupid and expected track#/disc#, and carries a
+    recovery/rollback state (advance_state) to reuse the merged durable
+    rollback (transaction_recovery/rollback_guard) — not a new mutation path.
+
     Returns existing_album_id when the planned moves were applied, and
     imported_album_id when nothing was moved (different album identity,
     replacements left in Preview). Raises _ExistingAlbumMergeFailed when the
@@ -226,6 +517,15 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
     """
     if not imported_album_id or not existing_album_id or imported_album_id == existing_album_id:
         return imported_album_id
+    # HOOK(library-transaction): a recovery carrier for this staged folder and
+    # this existing album turns the merge below into a verified single-track
+    # insertion. Claim it (concurrency guard) and run fail-closed preconditions
+    # BEFORE any library change; a carrier-less merge is unaffected.
+    carrier = _recovery_carrier_for_merge(source_folder, existing_album_id, log)
+    if carrier is not None:
+        _recovery_claim_importing(carrier, log)   # raises if another job owns it
+        _recovery_precheck(carrier, existing_album_id, log)  # raises -> review, no dup import
+    recon_op_id = ""
     try:
         target_by_slot: Dict[tuple, Dict[str, Any]] = {}
         target_rgid = ""
@@ -276,6 +576,8 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         if reviews:
             log.append(f"  [merge] {len(reviews)} item(s) kept on both sides and queued for reconciliation review.")
         if not plan.album.same_album:
+            if carrier is not None:
+                _recovery_mark_outcome(carrier, imported_album_id, existing_album_id, [], recon_op_id, log)
             return imported_album_id
 
         reconcile_ok = True
@@ -315,6 +617,7 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 })
                 if plan_res.get("ok"):
                     op_id = plan_res.get("operation_id")
+                    recon_op_id = _s(op_id)
                     apply_res = composite_workflows.apply_existing_album_reconcile(op_id)
                     if apply_res.get("ok"):
                         log.append(f"  [merge] Moved {len(plan.move_ids)} imported item(s) into the existing "
@@ -340,11 +643,23 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         # Rows held for review stay untouched in the imported album row; the
         # caller then validates the existing album and never the held rows.
         attempted = bool(plan.move_ids or plan.duplicate_rows)
-        return existing_album_id if attempted else imported_album_id
+        result = existing_album_id if attempted else imported_album_id
+        if carrier is not None:
+            # Delivery is proven from the plan, not a post-apply DB re-read:
+            # present_after = the existing album's rows plus the imported rows
+            # this merge moves onto it. A recovery track counts as delivered
+            # only if it lands in that set; a strict subset => partial (F-2).
+            moved_ids = {int(i) for i in (plan.move_ids or [])}
+            moved_rows = [r for r in imported_items if int(r.get("id") or 0) in moved_ids]
+            present_after = list(existing_items) + moved_rows
+            _recovery_mark_outcome(carrier, result, existing_album_id, present_after, recon_op_id, log)
+        return result
     except _ExistingAlbumMergeFailed:
+        _recovery_mark_failed(carrier, log)
         raise
     except Exception as ex:
         log.append(f"  [merge] FAILED: {ex}")
+        _recovery_mark_failed(carrier, log)
         raise _ExistingAlbumMergeFailed(f"merge raised: {ex}") from ex
 
 
@@ -561,9 +876,19 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                                 reason: str, *, allow_existing: bool = False,
                                 evidence: Optional[Dict[str, Any]] = None) -> bool:
             if queue_review_on_uncertain or light_confirm:
+                # Phase-2 spine: if a recovery carrier was created for this
+                # staged folder at download time, the Review row keeps its
+                # structured album identity instead of the `allow_existing`
+                # boolean + free-text suggestion that Phase-1 proved lossy.
+                carrier = None
+                try:
+                    carrier = recovery_carrier.load_for_folder(folder_path)
+                except Exception:
+                    carrier = None
                 return _queue_folder_for_manual_review(
                     folder_path, suggestion, reason, log,
-                    allow_existing=allow_existing, evidence=evidence)
+                    allow_existing=allow_existing, evidence=evidence,
+                    carrier=carrier)
             mode = "light-confirm" if light_confirm else "no-review"
             log.append(
                 f"  Skipped Pending Review ({mode}): {reason} "
@@ -825,6 +1150,17 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                             ),
                         )
                         if staged_dir != aldir:
+                            # F5/F6 auto path (QA F1): the recovery carrier was
+                            # bound to this pre-restage folder at acquisition.
+                            # The subset-narrowing restage creates a NEW staged
+                            # path, and the merge/Plex-leg carrier lookups below
+                            # are keyed on the reassigned aldir -- rebind the
+                            # carrier to the new path FIRST (same album-equality
+                            # gate the helper enforces) so the merge runs under
+                            # carrier ownership/audit instead of degrading to a
+                            # carrier-less merge that leaves the carrier orphaned
+                            # at STAGED.
+                            _recovery_rebind_restaged(aldir, staged_dir, existing_album_id, log)
                             aldir = staged_dir
                             source_is_music_library = False
                         staged_missing_import_ok = True
@@ -1343,6 +1679,18 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
         _remove_pending_review_for_path(aldir, log)
         _invalidate_lib_cache()
+        # F9: the Plex-sync tail of a missing-track recovery. The merge above
+        # drove the carrier to imported+IMPORTED; trigger its best-effort Plex
+        # refresh and advance to PLEX_SYNCED. A carrier-less reimport is a no-op
+        # and still takes the generic (workflow-gated) refresh below. The carrier
+        # lookup is best-effort: an unavailable/unwritable carrier store must
+        # never fail a completed import (as the merge lookup already tolerates).
+        try:
+            _recovery_leg_carrier = recovery_carrier.load_for_folder(aldir)
+        except Exception as _rc_ex:
+            _recovery_leg_carrier = None
+            log.append(f"  [recovery] Plex-leg carrier lookup skipped ({type(_rc_ex).__name__}).")
+        _recovery_plex_sync_leg(_recovery_leg_carrier, log)
         _trigger_plex_refresh(log)
         log.append(f"✓ Done — '{Path(aldir).name}' imported by Beets"
                    + (" in place." if source_is_music_library else " into the library structure."))
@@ -2422,8 +2770,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
       "mb_releasegroupid": "canonical-release-group-uuid"
     }
     """
-    payload    = payload_in
-    folder_path   = payload.get("path",  "").strip()
+    payload    = payload_in if isinstance(payload_in, dict) else {}
+    folder_path   = _s(payload.get("path")).strip()
     raw_mb_albumid = _s(payload.get("mb_albumid") or payload.get("mbid")).strip()
     raw_mb_releasegroupid = _s(
         payload.get("mb_releasegroupid")
@@ -2450,7 +2798,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     input_looks_like_release_group = (
         bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid
     )
-    ai_suggestion = payload.get("ai_suggestion")   # optional — records in AI match history
+    raw_ai_suggestion = payload.get("ai_suggestion")   # optional: a proposed identity and its origin
     use_move      = bool(payload.get("move", False))
     # Wave 25 Round 4: test-only pass-through for the dedicated Docker
     # acceptance crash/resume scenario. Inert in every real deployment --
@@ -2511,6 +2859,14 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if folder_error or trusted_folder is None:
         return {"ok": False, "error": folder_error or "Source path is not allowed."}, 400
     folder_path = str(trusted_folder)
+    # F16: the caller (the Review page, or the auto-import replaying a stored
+    # suggestion) proposes an identity; its evidence is never kept. The review
+    # paths below queue only this, and revalidation recomputes the evidence.
+    ai_suggestion = {**_client_review_suggestion(raw_ai_suggestion),
+                     **_client_review_origin(raw_ai_suggestion, folder_path)}
+    raw_confidence = _s(raw_ai_suggestion.get("confidence")).strip().lower() \
+        if isinstance(raw_ai_suggestion, dict) else ""
+    ai_confidence_label = raw_confidence if raw_confidence in {"high", "medium", "low"} else ""
     if not raw_mb_input:
         return {
             "ok": False,
@@ -2543,6 +2899,22 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 existing_album_id = int(existing_ids[0])
         except Exception:
             existing_album_id = 0
+    # F4: a recovery re-entering from Review recovers its STRUCTURED identity
+    # from the carrier bound to this folder (never re-derived from the folder
+    # name): the existing album and the still-missing tracks, so the single
+    # verified track routes through the existing-album missing-track merge
+    # instead of importing a second album row. A staged downloads folder lives
+    # outside MUSIC_ROOT, so _library_album_ids_for_folder cannot recover this.
+    if not existing_album_id or not wanted_tracks:
+        try:
+            _reentry_carrier = recovery_carrier.load_for_folder(folder_path)
+        except Exception:
+            _reentry_carrier = None
+        if _reentry_carrier and int(_reentry_carrier.get("existing_album_id") or 0):
+            if not existing_album_id:
+                existing_album_id = int(_reentry_carrier.get("existing_album_id") or 0)
+            if not wanted_tracks:
+                wanted_tracks = _normalise_wanted_tracks(_reentry_carrier.get("wanted_tracks") or [])
 
     def _do(log, cancel_event=None):
         nonlocal mb_albumid, selected_releasegroupid
@@ -2686,6 +3058,11 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         "refusing to import the existing library folder."
                     )
                 handoff_tracks = _normalise_wanted_tracks(scan.get("wanted_tracks") or wanted_tracks)
+                # F5/F6: the still-missing subset was restaged to a new path; a
+                # recovery carrier bound to the original review folder is rebound
+                # to it so the merge below (load_for_folder on staged_dir) runs
+                # under carrier ownership/audit and reaches IMPORTED/PLEX_SYNCED.
+                _recovery_rebind_restaged(folder_path, staged_dir, target_album_id, log)
                 log.append(
                     f"[import] Existing album detected; importing {len(useful_files)} "
                     f"still-missing track(s) into album_id {target_album_id}"
@@ -2771,6 +3148,22 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         "Selected MusicBrainz release does not match this library folder; "
                         "refusing to run beet import against existing library files."
                     )
+
+        # F4/F5: a recovery re-entering from Review is a staged downloads folder
+        # (not a library folder, so the source_is_library handoff above does not
+        # fire) that carries a carrier naming the existing album. Route it through
+        # the existing-album missing-track merge so the verified track is MERGED
+        # onto that album under carrier ownership/audit, instead of importing a
+        # second album row via the generic confirmed-import path below.
+        if existing_album_id and not source_is_library:
+            try:
+                _reentry = recovery_carrier.load_for_folder(folder_path)
+            except Exception:
+                _reentry = None
+            if _reentry and int(_reentry.get("existing_album_id") or 0) == int(existing_album_id):
+                if _handoff_existing_album_import([int(existing_album_id)]):
+                    _invalidate_lib_cache()
+                    return
 
         # ── Step 1: import with specific MB release ID + permissive threshold ──────────
 
@@ -3004,12 +3397,19 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         else:
             log.append("  [plex] Refresh skipped for Import Review; playlist/batch jobs trigger Plex separately.")
         log.append(f"Done — '{Path(folder_path).name}' imported and tagged.")
-        # Record AI suggestion in history if this came from an AI-suggested match
-        if ai_suggestion and isinstance(ai_suggestion, dict):
+        # History records a suggestion only when it named what Beets imported
+        # (verified above): an operator's override or a bare origin is not a match.
+        if _ai_suggestion_names_import(ai_suggestion, mb_albumid, selected_releasegroupid):
             try:
-                _record_ai_match(folder_path, ai_suggestion)
-            except Exception:
-                pass
+                _record_ai_match(folder_path, {
+                    **ai_suggestion,
+                    "mb_albumid": mb_albumid,
+                    "mb_releasegroupid": selected_releasegroupid,
+                    "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+                    "confidence": ai_confidence_label,
+                })
+            except Exception as ex:
+                log.append(f"  [history] AI match history was not updated ({type(ex).__name__}).")
 
     def _do_locked(log, cancel_event=None):
         log.append("[import] Queued — waiting for import worker slot…")

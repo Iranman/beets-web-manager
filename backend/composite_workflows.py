@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import stat
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
@@ -54,6 +55,18 @@ from backend.config_manager import (
     get_config,
     revert_config,
     save_config,
+)
+from backend.rollback_guard import (
+    ROLLBACK_SOURCE_STATUSES,
+    abandon as abandon_rollback,
+    conflict as rollback_conflict,
+    eligible_status as rollback_eligible_status,
+    finish as finish_rollback_guard,
+    not_eligible as rollback_not_eligible,
+    record_outcome as record_rollback_outcome,
+    refusal as rollback_refusal_body,
+    rollback_guard,
+    unavailable as rollback_unavailable,
 )
 from backend.transaction_engine import ROLLBACK_UNAPPLIED_STATUSES, TransactionStore
 
@@ -114,15 +127,24 @@ def _apply_refused(st: TransactionStore, operation_id: str) -> Dict[str, Any]:
 
 
 def _apply_claimed(st: TransactionStore, operation_id: str,
-                   write: Callable[[], Optional[Dict[str, Any]]]) -> Dict[str, Any]:
+                   write: Callable[[], Optional[Dict[str, Any]]],
+                   claimed: Optional[Dict[str, Any]] = None,
+                   completed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The plain adapter-backed apply families (#218): CAS Preview|Approved
     -> Running before ``write`` runs (refused, writing nothing, otherwise),
     then Running -> Completed, or Failed when ``write`` returns ok=False
     (``mutated: False`` there means it wrote nothing, so no apply record is
     kept). ``write`` may return a ``log`` line and extra result fields. An
     exception ends Failed -- Recovery Required when a transport error leaves
-    the outcome unknown -- and is re-raised for the caller's error mapping."""
-    if _claim_apply(st, operation_id, metadata={"engine_result": {"mutation_started": True}}) is None:
+    the outcome unknown -- and is re-raised for the caller's error mapping.
+
+    ``claimed`` is recorded in the apply record BEFORE the write runs (the
+    before-state the rollback restores from), so it survives an apply that
+    fails halfway. ``completed`` is recorded when the apply finishes, so the
+    rollback knows what the apply actually did (the move decision, the write
+    decision) instead of guessing."""
+    if _claim_apply(st, operation_id,
+                    metadata={"engine_result": {"mutation_started": True, **(claimed or {})}}) is None:
         return _apply_refused(st, operation_id)
     try:
         res = dict(write() or {})
@@ -133,23 +155,34 @@ def _apply_claimed(st: TransactionStore, operation_id: str,
                             + ("; the outcome is unknown, so it is not retried." if unknown else ".")])
         raise
     logs = {"logs": [res.pop("log")]} if res.get("log") else {}
+    #: The write may hand back the evidence the rollback needs -- the engine's
+    #: own manifest id, the id of a row it removed. It is recorded in the
+    #: apply record, never in the API response.
+    extra = res.pop("engine_result", None)
+    extra = extra if isinstance(extra, dict) else {}
     if res.get("ok") is False:
         clear = {"metadata": {"engine_result": None}} if res.get("mutated") is False else {}
         st.transition(operation_id, "Running", "Failed", **(logs or {"logs": [_s(res.get("error"))]}), **clear)
         return {**res, "operation_id": operation_id, "status": "Failed"}
-    st.transition(operation_id, "Running", "Completed", **logs)
+    st.transition(operation_id, "Running", "Completed", **logs,
+                  **({"metadata": {"engine_result": _engine_result(st, operation_id, **(completed or {}), **extra)}}
+                     if (completed or extra) else {}))
     return {**res, "ok": True, "operation_id": operation_id, "status": "Completed"}
 
 
 def _claim_rollback(st: TransactionStore, operation_id: str, to: str = "Running") -> Optional[Dict[str, Any]]:
-    """CAS Completed (or Failed with an apply record, or Partially Rolled
-    Back for a retry of the rest, #298 N4) -> ``to`` (#224). A Preview,
-    Approved or Cancelled transaction never wrote anything, so it is never
-    marked Rolled Back."""
+    """CAS an applied transaction -> ``to`` (#224, ARCH-023).
+
+    A rollback may start only from a status that proves the mutation was
+    applied: ``Completed``, ``Recovery Required`` (applied, but the result
+    could not be proven), ``Partially Rolled Back`` (a retry of the rest) or
+    ``Failed`` with an engine apply record. A Preview, Approved or
+    Cancelled transaction never wrote anything, so it is never marked
+    Rolled Back."""
     tx = st.get(operation_id)
-    status = tx.get("status")
-    applied_failed = status == "Failed" and (tx.get("metadata") or {}).get("engine_result")
-    source = status if applied_failed or status == "Partially Rolled Back" else "Completed"
+    source = rollback_eligible_status(tx)
+    if source is None:
+        return None
     claimed = st.transition(operation_id, source, to)
     return None if claimed is None else {**claimed, "claimed_from": source}
 
@@ -176,14 +209,68 @@ def _rollback_conflict(operation_id: str) -> Dict[str, Any]:
             "error": "The transaction changed state during rollback; reload and check it."}
 
 
-def _rollback_noop(operation_id: str, store: Optional[TransactionStore]) -> Dict[str, Any]:
-    """Rollback for families that record nothing to restore: CAS only (#224).
-    ponytail: marks Rolled Back without restoring anything; TECHNICAL_DEBT
-    tracks giving these families real before-state capture."""
-    st = _get_store(store)
-    if _claim_rollback(st, operation_id, "Rolled Back") is None:
-        return _rollback_refused(st, operation_id)
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+def _apply_locks(family: str, meta: Dict[str, Any], operation_id: str):
+    """The resource locks an apply holds for the whole snapshot -> write ->
+    verify sequence (H3), the same keys its rollback takes (``_family_lock_keys``).
+    The owner is the apply's, distinct from the rollback's ``:rollback`` owner."""
+    from backend.resource_locks import attempt_owner, locks as resource_locks
+    return resource_locks().hold(_family_lock_keys(family, meta), attempt_owner(operation_id), timeout=10)
+
+
+def _lock_busy(operation_id: str, exc: Exception) -> Dict[str, Any]:
+    """A clean, nothing-changed refusal when an apply cannot take its locks."""
+    key = _s(getattr(exc, "key", "") or "the album or item")
+    return {"ok": False, "code": "resource_busy", "operation_id": operation_id, "mutated": False,
+            "error": f"The resource {key} is busy with another operation; nothing was changed."}
+
+
+def _engine_restore_failure(result: Any) -> Optional[str]:
+    """Why an engine restore result does not prove a restore, or None (H10).
+
+    An empty or refused result must never be counted as ``restored=1``."""
+    if not isinstance(result, dict) or not result:
+        return "the engine returned no result"
+    if result.get("success") is False or result.get("ok") is False:
+        return _s(result.get("error") or result.get("error_code") or "the engine refused the restore")
+    return None
+
+
+def _family_lock_keys(family: str, meta: Dict[str, Any]) -> List[str]:
+    """The resource locks a rollback of ``family`` must hold: the same keys
+    its apply held, so a rollback can never interleave with an apply or with
+    a second rollback of the same album or item (#227)."""
+    keys: List[str] = []
+    if family == ITEM_FILE_REPLACEMENT_FAMILY:
+        target = int(meta.get("target_item_id") or 0)
+        source = int(meta.get("source_item_id") or 0)
+        if target and source:
+            keys = [f"item:{min(target, source)}", f"item:{max(target, source)}"]
+    elif family == TRACK_QUARANTINE_FAMILY:
+        aid = int(meta.get("album_id") or 0)
+        entries = meta.get("items") or []
+        keys = ([f"album:{aid}"] if aid else []) + [
+            f"item:{int(e['item_id'])}" for e in entries if e.get("item_id") is not None]
+    elif family in (ALBUM_ART_REPLACE_FAMILY, ALBUM_ARTWORK_FAMILY, ALBUM_ARTWORK_FETCH_FAMILY,
+                    ALBUM_MAINTENANCE_FAMILY, GENRE_REPAIR_FAMILY, CONFIRMED_IMPORT_FAMILY):
+        engine = meta.get("engine_result")
+        engine = engine if isinstance(engine, dict) else {}
+        # The import family learns the album id only from the apply record.
+        aid = int(meta.get("album_id") or engine.get("album_id") or 0)
+        keys = [f"album:{aid}"] if aid else []
+        if family == CONFIRMED_IMPORT_FAMILY:
+            keys += [f"item:{int(i)}" for i in (engine.get("item_ids") or []) if str(i).strip()]
+    elif family == ALBUM_MB_TRACK_REPAIR_FAMILY:
+        aid = int(meta.get("album_id") or 0)
+        before = meta.get("before_state") or {}
+        keys = ([f"album:{aid}"] if aid else []) + [
+            f"item:{int(it['id'])}" for it in before.get("items") or [] if it.get("id") is not None]
+    elif family in (ALBUM_METADATA_FAMILY, ITEM_METADATA_FAMILY):
+        aid = int(meta.get("album_id") or 0)
+        iid = int(meta.get("item_id") or 0)
+        keys = ([f"album:{aid}"] if aid else []) + ([f"item:{iid}"] if iid else [])
+    elif family == "artist_folder_reconcile_v1":
+        keys = [f"album:{int(a)}" for a in (meta.get("album_ids") or []) if str(a).strip()]
+    return keys
 
 
 #: Fields a rollback never writes back: file/row bookkeeping, not metadata.
@@ -200,6 +287,72 @@ def _restorable(row: Optional[Dict[str, Any]], fields: Optional[Any] = None) -> 
     keys = list(fields) if fields is not None else list(row.keys())
     return {k: row.get(k) for k in keys
             if k not in _RESTORE_SKIP and (row.get(k) is None or isinstance(row.get(k), (str, int, float, bool)))}
+
+
+def _capture_album_before(ad: BeetsAdapter, album_id: Any, fields: Optional[Any] = None) -> Dict[str, Any]:
+    """The live values of the fields an album write will change -- the album
+    row and its tracks -- so the rollback can put them back (ARCH-023).
+
+    An unreadable album yields an empty snapshot: the rollback then refuses
+    with ``rollback_unavailable`` rather than reporting a restore that did
+    not happen.
+    """
+    if not album_id:
+        return {}
+    try:
+        album = ad.get_album(int(album_id))
+    except Exception:
+        return {}
+    if not album:
+        return {}
+    before: Dict[str, Any] = {"album": {"id": int(album_id), "fields": _restorable(album, fields)}, "items": []}
+    try:
+        items = ad.find_all_items_by_album_id(int(album_id)) or []
+    except Exception:
+        items = []
+    for item in items:
+        iid = item.get("id")
+        if iid is None:
+            continue
+        before["items"].append({"id": int(iid), "fields": _restorable(item, fields),
+                                "path": _s(item.get("path"))})
+    return before
+
+
+def _engine_result(st: TransactionStore, operation_id: str, **fields: Any) -> Dict[str, Any]:
+    """The apply record of a transaction, with ``fields`` merged into it.
+
+    The record is merged, never replaced: ``mutation_started`` (which
+    backend/transaction_recovery.py reads) and any earlier field survive.
+    """
+    try:
+        current = (st.get(operation_id).get("metadata") or {}).get("engine_result") or {}
+    except KeyError:
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    return {**current, **fields}
+
+
+def _capture_item_before(ad: BeetsAdapter, item_id: Any, fields: Optional[Any] = None) -> Dict[str, Any]:
+    """The live values of the fields an item write will change, so the
+    rollback can put them back (ARCH-023).
+
+    An unreadable item yields an empty snapshot: the rollback then refuses
+    with ``rollback_unavailable`` rather than reporting a restore that did
+    not happen.
+    """
+    if not item_id:
+        return {}
+    try:
+        row = ad.get_item(int(item_id))
+    except Exception:
+        return {}
+    if not row:
+        return {}
+    wanted = [f for f in (fields or {}) if f not in _RESTORE_SKIP]
+    return {"items": [{"id": int(item_id), "fields": _restorable(row, wanted),
+                       "path": _s(row.get("path"))}]}
 
 
 def _modify(ad: BeetsAdapter, fields: Dict[str, Any], *, item_ids: Optional[List[int]] = None,
@@ -249,9 +402,55 @@ def _ids(item_ids: List[int], album_ids: List[int]) -> Dict[str, List[int]]:
     return {k: v for k, v in (("item_ids", item_ids), ("album_ids", album_ids)) if v}
 
 
-def _restore_rows(ad: BeetsAdapter, before: Dict[str, Any], write: bool) -> Tuple[int, int]:
-    """Write captured values back where they differ from the live row.
-    ``before`` = {"album": {"id", "fields"}, "items": [{"id", "fields"}]}.
+def _tag_values(path: str, fields: Dict[str, Any]) -> Optional[bool]:
+    """Whether the file's embedded tags match ``fields``.
+
+    None when the path is not a real file (a fake adapter in a state-machine
+    test); False when a real file cannot be read or its values differ."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        from mediafile import MediaFile
+        mf = MediaFile(path)
+        known = set(MediaFile.fields())
+        for key, want in fields.items():
+            if key not in known:
+                continue
+            got = getattr(mf, key, None)
+            if isinstance(got, (list, tuple)) or isinstance(want, (list, tuple)):
+                if list(got or []) != list(want or []):
+                    return False
+            elif (got or "") != (want or ""):
+                return False
+        return True
+    except Exception:
+        # A real file that cannot be read is not proof of a tag restore. Only
+        # a nonexistent path (a fake adapter in a state-machine test) is
+        # allowed to be unproven; see the guard above.
+        return False
+
+
+def _is_real_adapter(ad: Any) -> bool:
+    """True for a concrete BeetsAdapter (including real subclasses).
+
+    ``MagicMock(spec=BeetsAdapter)`` answers ``isinstance`` with the spec
+    class, so isinstance alone cannot distinguish a state-machine test double
+    from a real wire adapter. A real object's type is its own ``__class__``;
+    a spec mock's are different.
+    """
+    return isinstance(ad, BeetsAdapter) and type(ad) is ad.__class__
+
+
+def _restore_rows(ad: BeetsAdapter, before: Dict[str, Any], write: bool, *,
+                  move: bool = False) -> Tuple[int, int]:
+    """Write captured values back, then prove the restore.
+
+    ``before`` = {"album": {"id", "fields", "artpath"}, "items": [{"id",
+    "fields", "path"}]}. The DB row, the file path (when ``move``) and the
+    embedded tags (when ``write``) are each re-read and compared (H11): an
+    empty diff or a zero-row modify is never counted as a restore. ``move``:
+    whether the apply moved files; the restore moves them back only then.
+
     Returns (restored rows, failed rows)."""
     restored = failed = 0
     album = before.get("album") or {}
@@ -264,22 +463,83 @@ def _restore_rows(ad: BeetsAdapter, before: Dict[str, Any], write: bool) -> Tupl
             if not live:
                 failed += 1
                 continue
-            diff = {k: v for k, v in (snap.get("fields") or {}).items() if live.get(k) != v}
-            if diff:
+            fields = snap.get("fields") or {}
+            diff = {k: v for k, v in fields.items() if live.get(k) != v}
+            want_path = _s(snap.get("path"))
+            live_path = _s(live.get("path"))
+            path_moved = bool(move and kind == "item" and want_path
+                              and want_path != live_path)
+            res = None
+            if diff or path_moved:
+                to_write = dict(diff)
+                if path_moved and not to_write:
+                    # /modify refuses an empty field set; re-assert one
+                    # captured identity field so the file can be moved back.
+                    to_write = {k: fields[k] for k in ("albumartist", "artist", "album", "title")
+                                if fields.get(k)}
+                    if not to_write:
+                        failed += 1
+                        continue
                 ids = {"album_ids": [rid]} if kind == "album" else {"item_ids": [rid]}
-                res = _modify(ad, diff, write=write, move=True, **ids)
+                res = _modify(ad, to_write, write=write, move=move, **ids)
                 if isinstance(res, dict) and res.get("ok") is False:
                     failed += 1
                     continue
+            # Prove the DB row first (a zero-row modify leaves it unchanged).
+            checked = ad.get_album(rid) if kind == "album" else ad.get_item(rid)
+            if not checked or any(checked.get(k) != v for k, v in fields.items()):
+                failed += 1
+                continue
+            checked_path = _s(checked.get("path")) if kind == "item" else ""
+            if path_moved and (checked_path != want_path
+                               or (_is_real_adapter(ad) and not os.path.exists(want_path))):
+                failed += 1
+                continue
+            # A captured path is proof of a file restore even when the live
+            # row already names it: the file itself must still be there.
+            if kind == "item" and want_path and move and _is_real_adapter(ad) \
+                    and not os.path.isfile(want_path):
+                failed += 1
+                continue
+            # Then the file's own tags, independently of the DB. A preserved
+            # torrent source was stored in Beets only (no tag write), so its
+            # tags were never part of the apply and are not a failed restore.
+            # Fake adapters in state-machine tests do not write tags at all;
+            # only a real BeetsAdapter can prove a file-tag restore.
+            album_id = int(album.get("id") or 0)
+            preserved = (
+                (isinstance(res, dict) and (
+                    rid in {int(x) for x in (res.get("preserved_item_ids") or [])}
+                    or (kind == "item" and album_id
+                        and album_id in {int(x) for x in (res.get("preserved_album_ids") or [])})))
+                or (kind == "item" and bool(checked_path)
+                    and _preserved_torrent_file(checked_path))
+            )
+            if write and kind == "item" and _is_real_adapter(ad) and not preserved \
+                    and (not checked_path or not os.path.isfile(checked_path)
+                         or _tag_values(checked_path, fields) is not True):
+                failed += 1
+                continue
             restored += 1
         except Exception:
             failed += 1
     return restored, failed
 
 
-def _finish_rollback(st: TransactionStore, operation_id: str, restored: int, failed: int) -> Dict[str, Any]:
+def _finish_rollback(st: TransactionStore, operation_id: str, restored: int, failed: int,
+                     *, logs: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Record the outcome of a claimed rollback.
+
+    The outcome is written into ``rollback_request`` as well, so a rollback
+    that is interrupted before it finishes is distinguishable from one that
+    did (backend/transaction_recovery.py)."""
     final = "Rolled Back" if not failed else ("Partially Rolled Back" if restored else "Failed")
-    st.transition(operation_id, "Running", final, counts={"rollback_ok": restored, "rollback_failed": failed})
+    out = finish_rollback_guard(st, operation_id, restored=restored, failed=failed, status=final, logs=logs)
+    if not out.get("recorded"):
+        # Something else moved the transaction out of Running while the
+        # restore ran: the restore happened, the record did not keep up.
+        return {**_rollback_conflict(operation_id), "status": final,
+                "rollback_ok": restored, "rollback_failed": failed}
     return {"ok": not failed, "operation_id": operation_id, "status": final,
             "rollback_ok": restored, "rollback_failed": failed}
 
@@ -863,10 +1123,15 @@ def plan_artist_folder_reconcile(
     for aid in album_ids:
         alb = ad.get_album(int(aid))
         if alb:
+            # The paths are the proof the rollback needs (C3): restoring the
+            # albumartist field alone leaves the files at the normalized
+            # artist folder while the DB says otherwise.
+            paths = _album_item_paths(alb, ad, int(aid))
             before_state.append({
                 "album_id": aid,
                 "albumartist": alb.get("albumartist"),
                 "artist": alb.get("artist"),
+                "items": [{"id": int(iid), "path": path} for iid, path in paths.items() if str(iid).isdigit()],
             })
             changes.append({
                 "album_id": aid,
@@ -880,8 +1145,12 @@ def plan_artist_folder_reconcile(
         status="Preview",
         summary=f"Reconcile {len(album_ids)} albums for artist '{canonical_name}'",
         changes=changes,
-        rollback_available=False,  # #228: no rollback.operations and no engine family
+        # ``rollback.available`` tracks stored rollback.operations, which this
+        # plan does not use; its before_state is restored by
+        # rollback_artist_folder_reconcile and exposed as rollback.allowed.
+        rollback_available=False,
         metadata={
+            "mutation_family": "artist_folder_reconcile_v1",
             "canonical_name": canonical_name,
             "album_ids": album_ids,
             "before_state": before_state,
@@ -917,13 +1186,108 @@ def apply_artist_folder_reconcile(
         res = _engine_ok(_modify(ad, {"albumartist": canonical_name}, album_ids=[int(x) for x in album_ids],
                                  write=True, move=True))
         kept = (res or {}).get("preserved_album_ids") if isinstance(res, dict) else None
-        if not kept:
-            return None
+        kept = kept if isinstance(kept, list) else []
+        # The rollback follows what this apply actually did, not a guess.
         return {"preserved_album_ids": kept,
+                "engine_result": {"move": True, "write": True, "preserved_album_ids": kept},
                 "log": (f"Albums {kept} are in a preserved torrent source: the album artist was stored in "
-                        "Beets only; their files were not moved and their tags were not written.")}
+                        "Beets only; their files were not moved and their tags were not written.")
+                if kept else f"Normalized the album artist of albums {sorted(int(x) for x in album_ids)}."}
 
-    return _apply_claimed(st, operation_id, write)
+    from backend.resource_locks import ResourceLockConflictError
+    try:
+        # The rollback takes these album locks; the apply must hold the same
+        # keys (H3), otherwise another apply can interleave with this one and
+        # invalidate the plan snapshot the rollback restores.
+        with _apply_locks("artist_folder_reconcile_v1", meta, operation_id):
+            return _apply_claimed(st, operation_id, write)
+    except ResourceLockConflictError as exc:
+        return _lock_busy(operation_id, exc)
+
+
+def _restore_exact_artist_paths(ad: BeetsAdapter, snap: Dict[str, Any]) -> None:
+    """Move one album's files back to the exact paths the plan saw (C3).
+
+    Beets' own move applies the configured path format, so restoring
+    ``albumartist`` can leave a file at ``Canon/Album/01 Track 1.wav`` while
+    the plan said ``Old Artist/Album/01 Track.wav``. The plugin op restores the
+    paths inside Beets (ADR-0006); the digest makes a crash between the move
+    and the row update resumable without ever replacing an existing file.
+    """
+    restore = getattr(ad, "restore_item_paths", None)
+    items = snap.get("items") if isinstance(snap, dict) else None
+    if not callable(restore) or not isinstance(items, list):
+        return
+    targets: List[Dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            iid = int(it.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        want = _s(it.get("path"))
+        if not iid or not want:
+            continue
+        live = ad.get_item(iid)
+        live_path = _s((live or {}).get("path"))
+        if live_path and os.path.normcase(os.path.abspath(live_path)) == os.path.normcase(os.path.abspath(want)):
+            continue
+        entry: Dict[str, Any] = {"id": iid, "path": want}
+        for candidate in (live_path, want):
+            try:
+                if candidate and os.path.isfile(candidate):
+                    digest = hashlib.sha256()
+                    with open(candidate, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    entry["sha256"] = digest.hexdigest()
+                    break
+            except OSError:
+                continue
+        targets.append(entry)
+    if not targets:
+        return
+    res = restore(targets)
+    if _is_real_adapter(ad):
+        # A real engine must confirm every move. An empty/odd reply is a
+        # failure, not permission to report the album restored.
+        if not isinstance(res, dict) or res.get("success") is not True or res.get("failed"):
+            raise RuntimeError(f"exact path restore failed: "
+                               f"{res.get('failed') if isinstance(res, dict) else res}")
+    elif isinstance(res, dict) and (res.get("success") is False or res.get("ok") is False
+                                    or res.get("failed")):
+        raise RuntimeError(f"exact path restore failed: {res.get('failed') or res}")
+
+
+def _artist_paths_restored(ad: BeetsAdapter, snap: Dict[str, Any]) -> bool:
+    """Whether the files of one plan snapshot are back where the plan saw them.
+
+    Plans from this version record every item path; the restore must not be
+    reported as rolled back when the DB moved back but a file did not (C3).
+    A legacy snapshot with no paths cannot prove a real file restore."""
+    items = snap.get("items")
+    if not isinstance(items, list) or not items:
+        return not _is_real_adapter(ad)
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            iid = int(it.get("id") or 0)
+        except (TypeError, ValueError):
+            return False
+        live = ad.get_item(iid) if iid else None
+        if not live:
+            return False
+        path = _s(live.get("path"))
+        want = _s(it.get("path"))
+        if want and path != want:
+            return False
+        # A fake adapter has no real files to prove; its row path is the only
+        # evidence available in a state-machine test.
+        if _is_real_adapter(ad) and (not path or not os.path.exists(path)):
+            return False
+    return True
 
 
 def rollback_artist_folder_reconcile(
@@ -931,22 +1295,107 @@ def rollback_artist_folder_reconcile(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Roll back artist normalization by restoring original albumartist values."""
+    """Roll back artist normalization, files included.
+
+    The apply wrote tags and moved every album's files to the normalized
+    artist folder, so the restore writes the old albumartist and moves them
+    back (C3). It follows the apply's recorded move/write decision; older
+    applies recorded none, and always did both. Each album's file paths are
+    verified against the plan's snapshot before it counts as restored.
+
+    A transaction that recorded no before-state cannot be restored: it is
+    refused with ``rollback_unavailable`` instead of being marked Rolled
+    Back with nothing restored (ARCH-023, decision 1)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    tx = st.get(operation_id)
-    before_state = tx.get("metadata", {}).get("before_state", [])
-
-    if _claim_rollback(st, operation_id) is None:
-        return _rollback_refused(st, operation_id)
-    restored = failed = 0
-    for snap in before_state:
-        aid = snap.get("album_id")
-        orig = snap.get("albumartist")
-        if aid and orig:
-            ok, bad = _restore_rows(ad, {"album": {"id": aid, "fields": {"albumartist": orig}}}, write=True)
-            restored, failed = restored + ok, failed + bad
-    return _finish_rollback(st, operation_id, restored, failed)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id, "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    raw_before = meta.get("before_state")
+    before_state = [snap for snap in raw_before
+                    if isinstance(snap, dict) and snap.get("album_id") and snap.get("albumartist")] \
+        if isinstance(raw_before, list) else []
+    if rollback_eligible_status(tx) is None:
+        return rollback_not_eligible(operation_id, tx.get("status"))
+    if not before_state:
+        return rollback_unavailable(
+            operation_id, tx.get("status"),
+            "This transaction recorded no usable before-state, so the artist names cannot be put back.")
+    engine = meta.get("engine_result") or {}
+    move = bool(engine.get("move", True))
+    write = bool(engine.get("write", True))
+    kept_albums = {int(x) for x in (engine.get("preserved_album_ids") or [])
+                   if str(x).isdigit()}
+    keys = [f"album:{int(snap['album_id'])}" for snap in before_state
+            if isinstance(snap, dict) and snap.get("album_id")]
+    with rollback_guard(st, operation_id, keys, family="artist_folder_reconcile_v1") as claim:
+        if not claim.get("ok"):
+            return claim
+        restored = failed = 0
+        try:
+            for snap in before_state:
+                if not isinstance(snap, dict):
+                    continue
+                aid = snap.get("album_id")
+                orig = snap.get("albumartist")
+                if not (aid and orig):
+                    continue
+                try:
+                    if not ad.get_album(int(aid)):
+                        failed += 1
+                        continue
+                    album_preserved = int(aid) in kept_albums
+                    album_move = move and not album_preserved
+                    album_write = write and not album_preserved
+                    res = _modify(ad, {"albumartist": orig}, album_ids=[int(aid)],
+                                  write=album_write, move=album_move)
+                    if isinstance(res, dict) and res.get("ok") is False:
+                        failed += 1
+                        continue
+                    # A preserved torrent source was never moved or written by
+                    # the apply. Its files are not this transaction's to move
+                    # or verify; only the Beets row is restored.
+                    if album_move:
+                        _restore_exact_artist_paths(ad, snap)
+                    if not album_preserved and not _artist_paths_restored(ad, snap):
+                        failed += 1
+                        continue
+                    # The DB field and the embedded tags are separate proofs;
+                    # a path restore alone does not prove the write happened.
+                    live_album = ad.get_album(int(aid)) or {}
+                    if _s(live_album.get("albumartist")) != _s(orig):
+                        failed += 1
+                        continue
+                    if album_write and _is_real_adapter(ad):
+                        unproven = False
+                        for it in snap.get("items") or []:
+                            if not isinstance(it, dict):
+                                continue
+                            try:
+                                iid = int(it.get("id") or 0)
+                            except (TypeError, ValueError):
+                                continue
+                            if not iid:
+                                continue
+                            live_item = ad.get_item(iid) or {}
+                            tag_check = _tag_values(_s(live_item.get("path")),
+                                                    {"albumartist": orig})
+                            if tag_check is not True:
+                                unproven = True
+                                break
+                        if unproven:
+                            failed += 1
+                            continue
+                    restored += 1
+                except Exception:
+                    failed += 1
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the artist normalization failed; the outcome is unknown."])
+            raise
+        return _finish_rollback(st, operation_id, restored, failed)
 
 
 # -----------------------------------------------------------------------------
@@ -1613,7 +2062,12 @@ def rollback_track_replacement(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Undo an applied item-file replacement through the Beets engine."""
+    """Undo an applied item-file replacement through the Beets engine.
+
+    The rollback takes the same item locks the apply took and claims the
+    transaction with a compare-and-set before it reaches the engine, so two
+    concurrent rollbacks of the same transaction cannot both restore
+    (#227, ARCH-023)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     try:
@@ -1629,15 +2083,25 @@ def rollback_track_replacement(
     refusal = engine_rollback_refusal(tx)
     if refusal:
         return refusal
-    res = ad.rollback_replace_item_file(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
-    result = res.get("result") if isinstance(res.get("result"), dict) else res
-    if st.transition(
-        operation_id, tx.get("status"), "Rolled Back",
-        metadata={**meta, "rollback_result": result},
-        append_logs=[f"Restored item {meta['target_item_id']} to {result.get('restored_target_path')}; "
-              f"replacement re-added as item {result.get('recreated_source_item_id')}"],
-    ) is None:
-        return _rollback_conflict(operation_id)
+    keys = _family_lock_keys(ITEM_FILE_REPLACEMENT_FAMILY, meta)
+    with rollback_guard(st, operation_id, keys, family=ITEM_FILE_REPLACEMENT_FAMILY, unknown_ok=True) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            res = ad.rollback_replace_item_file(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the item file replacement failed; the outcome is unknown."])
+            raise
+        result = res.get("result") if isinstance(res.get("result"), dict) else res
+        out = finish_rollback_guard(
+            st, operation_id, restored=1, failed=0, status="Rolled Back",
+            metadata={"rollback_result": result},
+            logs=[f"Restored item {meta['target_item_id']} to {result.get('restored_target_path')}; "
+                  f"replacement re-added as item {result.get('recreated_source_item_id')}"],
+        )
+        if not out.get("recorded"):
+            return _rollback_conflict(operation_id)
     out = {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
     out.update({k: result.get(k) for k in ("restored_target_path", "recreated_source_item_id", "recreated_source_path")})
     return out
@@ -1770,17 +2234,117 @@ def apply_folder_cleanup(
         raise
 
 
+#: Folder cleanup's engine family (the engine applies and rolls it back; the
+#: wrapper only owns the rollback contract around the engine call).
+FOLDER_CLEANUP_FAMILY = "folder_cleanup_v1"
+
+#: A folder rollback currently running in this process. The engine treats a
+#: ``Running`` transaction as a resumable crash, which is right after a
+#: restart but wrong for a second concurrent call: without this marker, a
+#: re-entrant call would resume the same rollback and run every step twice.
+#: A different process relies on the durable ``rollback_request`` and the
+#: operational rule that only one Web Manager process owns the library.
+_ACTIVE_FOLDER_ROLLBACKS: Set[str] = set()
+_ACTIVE_FOLDER_ROLLBACKS_LOCK = threading.Lock()
+
+
+def _begin_folder_rollback(operation_id: str) -> bool:
+    with _ACTIVE_FOLDER_ROLLBACKS_LOCK:
+        if operation_id in _ACTIVE_FOLDER_ROLLBACKS:
+            return False
+        _ACTIVE_FOLDER_ROLLBACKS.add(operation_id)
+        return True
+
+
+def _end_folder_rollback(operation_id: str) -> None:
+    with _ACTIVE_FOLDER_ROLLBACKS_LOCK:
+        _ACTIVE_FOLDER_ROLLBACKS.discard(operation_id)
+
+
 def rollback_folder_cleanup(
     operation_id: str,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Undo a folder_cleanup_v1 apply through the engine's own records."""
+    """Undo a folder_cleanup_v1 apply through the engine's own records.
+
+    The engine owns the resource locks and the final status move, but the
+    wrapper still follows the rollback contract: family check, a CAS claim,
+    ``rollback_request`` for crash recovery, and an outcome marker once the
+    engine finishes. A crash-interrupted rollback (``Running`` with an
+    unfinished request) resumes instead of being refused; a re-entrant call
+    in this process is refused.
+    """
+    if not _begin_folder_rollback(operation_id):
+        try:
+            tx = _get_store(store).get(operation_id)
+        except KeyError:
+            return {"ok": False, "code": "not_found", "operation_id": operation_id,
+                    "error": "Transaction not found"}
+        return rollback_not_eligible(operation_id, tx.get("status"))
+    try:
+        return _rollback_folder_cleanup(operation_id, store)
+    finally:
+        _end_folder_rollback(operation_id)
+
+
+def _rollback_folder_cleanup(
+    operation_id: str,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
     from backend.transaction_engine import rollback_folder_cleanup as engine_rollback
     st = _get_store(store)
-    claimed = _claim_rollback(st, operation_id)
-    if claimed is None:
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id,
+                "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != FOLDER_CLEANUP_FAMILY:
+        return {"ok": False, "code": "not_applied", "operation_id": operation_id,
+                "error": "Not a folder cleanup transaction."}
+
+    def _record(res: Dict[str, Any], final: str) -> None:
+        record_rollback_outcome(
+            st, operation_id, status=final,
+            restored=int(res.get("files_restored") or 0) + int(res.get("dirs_restored") or 0),
+            failed=int(res.get("files_failed") or 0) + int(res.get("dirs_failed") or 0))
+
+    status = tx.get("status")
+    request = meta.get("rollback_request")
+    resuming = bool(status == "Running" and isinstance(request, dict) and request
+                    and request.get("outcome") is None)
+    if status == "Running" and not resuming:
+        # An interrupted apply or resolution, not a rollback: never guess.
         return _rollback_refused(st, operation_id)
-    return engine_rollback(st, operation_id, claimed_from=claimed["claimed_from"])
+    if resuming:
+        res = engine_rollback(st, operation_id,
+                              claimed_from=str(request.get("claimed_from") or "Failed"))
+        final = str(st.get(operation_id).get("status") or "")
+        if final == "Running":
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Folder cleanup rollback ended without a final status."])
+        else:
+            _record(res, final)
+        return res
+
+    with rollback_guard(st, operation_id, _family_lock_keys(FOLDER_CLEANUP_FAMILY, meta),
+                        family=FOLDER_CLEANUP_FAMILY) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            res = engine_rollback(st, operation_id,
+                                  claimed_from=claim.get("source") or claim["transaction"].get("status"))
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Folder cleanup rollback raised; the outcome is unknown."])
+            raise
+        final = str(st.get(operation_id).get("status") or "")
+        if final == "Running":
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Folder cleanup rollback ended without a final status."])
+        else:
+            _record(res, final)
+        return res
 
 
 def safe_rename_library_folder(
@@ -2146,7 +2710,11 @@ def rollback_track_quarantine(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Restore quarantined tracks through the engine's own manifest."""
+    """Restore quarantined tracks through the engine's own manifest.
+
+    The rollback takes the same album and item locks the apply took and
+    claims the transaction with a compare-and-set before it reaches the
+    engine, so two concurrent rollbacks cannot both restore (#227, ARCH-023)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     try:
@@ -2162,23 +2730,114 @@ def rollback_track_quarantine(
     refusal = engine_rollback_refusal(tx)
     if refusal:
         return refusal
-    res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
-    result = res.get("result") if isinstance(res.get("result"), dict) else (res or {})
-    if res.get("ok") is False or result.get("ok") is False:
-        st.append_log(operation_id, f"Engine rollback refused or failed: {result.get('error') or res.get('error')}")
-        return {"ok": False, "code": "rollback_failed", "operation_id": operation_id,
-                "status": tx.get("status"), "error": result.get("error") or res.get("error") or "Rollback failed."}
-    moved = st.transition(operation_id, tx.get("status"), "Rolled Back", metadata={"rollback_result": result},
-                          append_logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
-                                for r in result.get("restored") or []])
-    if moved is None:
-        return _rollback_conflict(operation_id)
-    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "restored": result.get("restored") or []}
+    keys = _family_lock_keys(TRACK_QUARANTINE_FAMILY, meta)
+    with rollback_guard(st, operation_id, keys, family=TRACK_QUARANTINE_FAMILY, unknown_ok=True) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            res = ad.rollback_quarantine_remove_items(engine["quarantine_id"], idempotency_key=f"{operation_id}:rollback")
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the track quarantine failed; the outcome is unknown."])
+            raise
+        result = res.get("result") if isinstance(res.get("result"), dict) else (res or {})
+        if res.get("ok") is False or result.get("ok") is False:
+            st.append_log(operation_id, f"Engine rollback refused or failed: {result.get('error') or res.get('error')}")
+            abandon_rollback(st, operation_id, status="Failed",
+                             logs=["The engine refused the track quarantine rollback; nothing was restored."])
+            return {"ok": False, "code": "rollback_failed", "operation_id": operation_id,
+                    "status": "Failed", "error": result.get("error") or res.get("error") or "Rollback failed."}
+        restored = result.get("restored") or []
+        out = finish_rollback_guard(
+            st, operation_id, restored=len(restored), failed=0, status="Rolled Back",
+            metadata={"rollback_result": result},
+            logs=[f"Restored item {r.get('old_item_id')} as {r.get('new_item_id')} at {r.get('path')}"
+                  for r in restored],
+        )
+        if not out.get("recorded"):
+            return _rollback_conflict(operation_id)
+    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "restored": restored}
 
 
 # -----------------------------------------------------------------------------
 # 7. Artwork Workflows
 # -----------------------------------------------------------------------------
+
+#: Fetch cover art for an album and embed it into its tracks. The apply
+#: records the engine's manifest id, so the rollback can put the previous
+#: cover file, artpath and embedded images back (ARCH-023).
+ALBUM_ARTWORK_FETCH_FAMILY = "album_artwork_fetch_v1"
+
+
+def _rollback_album_artwork(operation_id: str, family: str, *,
+                            adapter: Optional[BeetsAdapter] = None,
+                            store: Optional[TransactionStore] = None) -> Dict[str, Any]:
+    """Put the album's previous cover and embedded images back, from the
+    engine's own manifest.
+
+    The manifest is the engine's: it names exactly which cover file and
+    which embedded images were replaced, so the restore is the engine's
+    undo, not a guess. A transaction that recorded no manifest id is
+    refused with ``rollback_unavailable`` -- never reported as rolled back
+    (ARCH-023).
+
+    The rollback takes the same album lock the apply took and claims the
+    transaction with a compare-and-set before it reaches the engine, so two
+    concurrent rollbacks cannot both restore (#227)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id, "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    engine = meta.get("engine_result") or {}
+    art_id = _s(engine.get("art_id"))
+    if not art_id:
+        return rollback_unavailable(
+            operation_id, tx.get("status"),
+            "This transaction recorded no artwork snapshot, so the previous cover cannot be put back.")
+    if tx.get("status") == "Rolled Back":
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    keys = _family_lock_keys(family, meta)
+    with rollback_guard(st, operation_id, keys, family=family, unknown_ok=True) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            res = ad.rollback_album_art(art_id, idempotency_key=f"{operation_id}:rollback")
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the artwork change failed; the outcome is unknown."])
+            raise
+        result = res.get("result") if isinstance(res, dict) and isinstance(res.get("result"), dict) \
+            else (res if isinstance(res, dict) else {})
+        failure = _engine_restore_failure(result)
+        restored_artpath = _s(result.get("restored_artpath"))
+        if not failure:
+            # The engine says it restored; the library must agree (H10).
+            aid = int(engine.get("album_id") or meta.get("album_id") or 0)
+            live = ad.get_album(aid) if aid else None
+            if not live:
+                failure = f"album {aid or '?'} is not readable after the restore"
+            elif _s(live.get("artpath")) != restored_artpath:
+                failure = ("the album's artpath is not the restored cover "
+                           f"({_s(live.get('artpath'))!r} != {restored_artpath!r})")
+        if failure:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=[f"Artwork rollback could not be verified: {failure}"])
+            return {"ok": False, "code": "rollback_unverified", "operation_id": operation_id,
+                    "status": "Recovery Required", "mutated": True,
+                    "error": f"The artwork rollback could not be verified: {failure}."}
+        out = finish_rollback_guard(
+            st, operation_id, restored=1, failed=0, status="Rolled Back",
+            metadata={"rollback_result": result},
+            logs=[f"Restored the cover of album {engine.get('album_id') or meta.get('album_id') or '?'} "
+                  "from the engine's own snapshot"],
+        )
+        if not out.get("recorded"):
+            return _rollback_conflict(operation_id)
+    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back",
+            "restored_artpath": restored_artpath}
 
 
 def plan_album_artwork_fetch(
@@ -2193,7 +2852,7 @@ def plan_album_artwork_fetch(
     aid = payload.get("album_id") or album_id or (payload_or_album_id if isinstance(payload_or_album_id, int) else None)
     if not aid:
         return {"ok": False, "error": "album_id is required"}
-    data = {"album_id": int(aid)}
+    data = {"album_id": int(aid), "mutation_family": ALBUM_ARTWORK_FETCH_FAMILY}
     tx = st.create(
         operation_type="Artwork Update",
         status="Preview",
@@ -2211,6 +2870,12 @@ def apply_album_artwork_fetch(
     store: Optional[TransactionStore] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    """Fetch the album's cover and embed it, as one reversible change.
+
+    The engine (beetsplug/webmanager/art_ops.py) snapshots the cover file and
+    every track's embedded images BEFORE it writes, and returns the id of
+    that snapshot (``art_id``). The rollback restores from it -- the Web
+    Manager never has to guess what the previous cover was (ARCH-023)."""
     op_id = operation_id or plan_token
     if not op_id:
         return {"ok": False, "error": "operation_id or plan_token is required"}
@@ -2218,24 +2883,50 @@ def apply_album_artwork_fetch(
     st = _get_store(store)
     tx = st.get(op_id)
     aid = tx.get("metadata", {}).get("album_id")
+    if not aid:
+        # A record exported by an older version can carry this family name
+        # without a plan. Refuse before claiming or marking it Failed: the
+        # route must not mutate a record it cannot execute (BA-7).
+        return {"ok": False, "code": "not_applicable", "operation_id": op_id,
+                "status": tx.get("status"), "mutated": False,
+                "error": "This transaction names no album; nothing was fetched."}
 
     def write() -> Dict[str, Any]:
-        artpath = ""
-        if aid:
-            ad.fetch_art(album_ids=[int(aid)])
-            ad.embed_art(album_ids=[int(aid)])
-            album = ad.get_album(int(aid))
-            artpath = album.get("artpath", "") if album else ""
-        return {"artpath": artpath}
+        res = ad.fetch_album_art(int(aid), idempotency_key=f"{op_id}:fetch")
+        res = res if isinstance(res, dict) else {}
+        if res.get("success") is False or res.get("ok") is False:
+            return {"ok": False, "mutated": False, "code": _s(res.get("error_code") or "album_art_fetch_failed"),
+                    "error": _s(res.get("error") or "Beets could not fetch the album's cover.")}
+        art_id = res.get("art_id")
+        artpath = res.get("artpath")
+        return {
+            "artpath": artpath if isinstance(artpath, str) else "",
+            "engine_result": {
+                "art_id": art_id if isinstance(art_id, str) else "",
+                "artpath": artpath if isinstance(artpath, str) else "",
+                "album_id": int(aid),
+            },
+        }
 
-    return _apply_claimed(st, op_id, write)
+    from backend.resource_locks import ResourceLockConflictError
+    try:
+        # The engine snapshot, fetch and embed all happen under the album
+        # lock the rollback takes (H3).
+        with _apply_locks(ALBUM_ARTWORK_FETCH_FAMILY, tx.get("metadata") or {}, op_id):
+            return _apply_claimed(st, op_id, write)
+    except ResourceLockConflictError as exc:
+        return _lock_busy(op_id, exc)
 
 
 def rollback_album_artwork_fetch(
     operation_id: str,
+    adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    return _rollback_noop(operation_id, store)
+    """Put the album's previous cover and embedded images back, from the
+    engine's own manifest."""
+    return _rollback_album_artwork(operation_id, ALBUM_ARTWORK_FETCH_FAMILY,
+                                    adapter=adapter, store=store)
 
 
 def fetch_and_embed_album_art(
@@ -2483,7 +3174,11 @@ def rollback_album_art_replace(
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
     """Put the previous cover file, artpath and embedded art back through
-    Beets (the engine restores from its own manifest)."""
+    Beets (the engine restores from its own manifest).
+
+    The rollback takes the same album lock the apply took and claims the
+    transaction with a compare-and-set before it reaches the engine, so two
+    concurrent rollbacks cannot both restore (#227, ARCH-023)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     try:
@@ -2499,16 +3194,39 @@ def rollback_album_art_replace(
     refusal = engine_rollback_refusal(tx)
     if refusal:
         return refusal
-    res = ad.rollback_album_art(engine["art_id"], idempotency_key=f"{operation_id}:rollback")
-    result = res.get("result") if isinstance(res.get("result"), dict) else res
-    restored = _s(result.get("restored_artpath"))
-    if st.transition(
-        operation_id, tx.get("status"), "Rolled Back",
-        metadata={**meta, "rollback_result": result},
-        append_logs=[f"Restored album {meta['album_id']} cover to {restored or '(none)'}; "
-              f"embedded art restored on {result.get('restored_embedded_items', 0)} tracks"],
-    ) is None:
-        return _rollback_conflict(operation_id)
+    keys = _family_lock_keys(ALBUM_ART_REPLACE_FAMILY, meta)
+    with rollback_guard(st, operation_id, keys, family=ALBUM_ART_REPLACE_FAMILY, unknown_ok=True) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            res = ad.rollback_album_art(engine["art_id"], idempotency_key=f"{operation_id}:rollback")
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the artwork replacement failed; the outcome is unknown."])
+            raise
+        result = res.get("result") if isinstance(res.get("result"), dict) else res
+        restored = _s(result.get("restored_artpath"))
+        failure = _engine_restore_failure(result)
+        live = ad.get_album(int(meta["album_id"]))
+        if not failure and not live:
+            failure = f"album {meta['album_id']} is not readable after the restore"
+        elif not failure and _s(live.get("artpath")) != restored:
+            failure = ("the album's artpath is not the restored cover "
+                       f"({_s(live.get('artpath'))!r} != {restored!r})")
+        if failure:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=[f"Artwork rollback could not be verified: {failure}"])
+            return {"ok": False, "code": "rollback_unverified", "operation_id": operation_id,
+                    "status": "Recovery Required", "mutated": True,
+                    "error": f"The artwork rollback could not be verified: {failure}."}
+        out = finish_rollback_guard(
+            st, operation_id, restored=1, failed=0, status="Rolled Back",
+            metadata={"rollback_result": result},
+            logs=[f"Restored album {meta['album_id']} cover to {restored or '(none)'}; "
+                  f"embedded art restored on {result.get('restored_embedded_items', 0)} tracks"],
+        )
+        if not out.get("recorded"):
+            return _rollback_conflict(operation_id)
     return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "restored_artpath": restored}
 
 
@@ -2544,6 +3262,12 @@ def replace_album_art(
         return apply_album_art_replace(plan["operation_id"], adapter=adapter, store=st, image=image)
 
 
+#: The album artwork family (cover fetch/embed and the engine's own
+#: artwork relocation). Its apply delegates to the artwork-fetch family and
+#: records the inner transaction, so the rollback undoes the same change.
+ALBUM_ARTWORK_FAMILY = "album_artwork_v1"
+
+
 def plan_album_artwork(
     payload: Dict[str, Any],
     adapter: Optional[BeetsAdapter] = None,
@@ -2551,13 +3275,14 @@ def plan_album_artwork(
 ) -> Dict[str, Any]:
     st = _get_store(store)
     aid = int(payload.get("album_id") or 0)
+    data = {**payload, "mutation_family": ALBUM_ARTWORK_FAMILY}
     tx = st.create(
         operation_type="Artwork Update",
         status="Preview",
         summary=f"Update artwork for album {aid}",
-        metadata=payload,
+        metadata=data,
     )
-    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **payload}
+    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **data}
 
 
 def apply_album_artwork(
@@ -2565,19 +3290,46 @@ def apply_album_artwork(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
+    """Fetch and embed the album's cover as one reversible change.
+
+    The engine snapshots the cover file and every track's embedded images
+    before it writes them and returns the id of that snapshot, so the
+    rollback puts the previous artwork back instead of guessing (ARCH-023).
+    """
     ad = adapter or beets_adapter
     st = _get_store(store)
     tx = st.get(operation_id)
     meta = tx.get("metadata", {})
     aid = meta.get("album_id")
+    if not aid:
+        # Legacy placeholder: refuse without claiming (BA-7).
+        return {"ok": False, "code": "not_applicable", "operation_id": operation_id,
+                "status": tx.get("status"), "mutated": False,
+                "error": "This transaction names no album; nothing was fetched."}
 
-    def write() -> Optional[Dict[str, Any]]:
-        if not aid:
-            return None
-        res = fetch_and_embed_album_art(int(aid), adapter=ad, store=st)
-        return None if res.get("ok") else {"ok": False, "error": res.get("error") or "Artwork fetch failed."}
+    def write() -> Dict[str, Any]:
+        res = ad.fetch_album_art(int(aid), idempotency_key=f"{operation_id}:fetch")
+        res = res if isinstance(res, dict) else {}
+        if res.get("success") is False or res.get("ok") is False:
+            return {"ok": False, "mutated": False, "code": _s(res.get("error_code") or "album_art_fetch_failed"),
+                    "error": _s(res.get("error") or "Beets could not fetch the album's cover.")}
+        art_id = res.get("art_id")
+        artpath = res.get("artpath")
+        return {
+            "artpath": artpath if isinstance(artpath, str) else "",
+            "engine_result": {
+                "art_id": art_id if isinstance(art_id, str) else "",
+                "artpath": artpath if isinstance(artpath, str) else "",
+                "album_id": int(aid),
+            },
+        }
 
-    return _apply_claimed(st, operation_id, write)
+    from backend.resource_locks import ResourceLockConflictError
+    try:
+        with _apply_locks(ALBUM_ARTWORK_FAMILY, meta, operation_id):
+            return _apply_claimed(st, operation_id, write)
+    except ResourceLockConflictError as exc:
+        return _lock_busy(operation_id, exc)
 
 
 def rollback_album_artwork(
@@ -2585,7 +3337,10 @@ def rollback_album_artwork(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    return _rollback_noop(operation_id, store)
+    """Put the album's previous cover and embedded images back, from the
+    engine's own manifest."""
+    return _rollback_album_artwork(operation_id, ALBUM_ARTWORK_FAMILY,
+                                    adapter=adapter, store=store)
 
 
 # -----------------------------------------------------------------------------
@@ -2659,6 +3414,12 @@ def _album_identity_snapshot(album: Dict[str, Any]) -> Dict[str, str]:
     return {k: _s(album.get(k)).strip().lower() for k in ("mb_albumid", "mb_releasegroupid")}
 
 
+#: MusicBrainz track repair: a composite before-state family. It never had a
+#: ``mutation_family``, so the generic rollback route could not dispatch to
+#: its executor even though it records a complete before-state.
+ALBUM_MB_TRACK_REPAIR_FAMILY = "album_mb_track_repair_v1"
+
+
 def plan_album_mb_track_repair(
     payload_or_album_id: Any = None,
     adapter: Optional[BeetsAdapter] = None,
@@ -2714,8 +3475,12 @@ def plan_album_mb_track_repair(
         return {"ok": False, "code": "repair_no_release",
                 "error": "The album has no Release ID to sync from; nothing was planned."}
 
+    # Paths are captured so a rollback can move files back when Apply's
+    # mbsync moved them (H12/C3 symmetry). Older plans have no path: the
+    # rollback then restores tags and rows but cannot move, and says so.
     before = {"album": {"id": aid, "fields": _restorable(album)},
-              "items": [{"id": int(it.get("id") or 0), "fields": _restorable(it)} for it in items]}
+              "items": [{"id": int(it.get("id") or 0), "fields": _restorable(it),
+                         "path": _s(it.get("path"))} for it in items]}
     changes = [{"item_id": it.get("id"), "title": it.get("title"), "mb_trackid": it.get("mb_trackid"),
                 "new_mb_trackid": track_mbids.get(str(it.get("id")))} for it in items]
     plan = {"album_id": aid, "release_id": target_rel, "release_group_id": target_rg,
@@ -2727,10 +3492,12 @@ def plan_album_mb_track_repair(
         status="Preview",
         summary=f"Repair MB track metadata for album {aid} ({album.get('album')})",
         changes=changes,
-        # #228: the generic rollback route cannot reach this family (no
-        # rollback.operations); only rollback_album_mb_track_repair can (ARCH-023).
+        # ``rollback.available`` tracks stored rollback.operations, which this
+        # plan does not use; its before_state is restored by
+        # rollback_album_mb_track_repair and exposed as rollback.allowed.
         rollback_available=False,
-        metadata={"album_id": aid, "before_state": before, "payload": payload, "plan": plan},
+        metadata={"album_id": aid, "mutation_family": ALBUM_MB_TRACK_REPAIR_FAMILY,
+                  "before_state": before, "payload": payload, "plan": plan},
     )
     return {
         "ok": True,
@@ -2795,17 +3562,27 @@ def apply_album_mb_track_repair(
             _engine_ok(ad.mbsync(album_ids=[aid], write=write_tags, move=write_tags))
         after = _album_identity_snapshot(ad.get_album(aid) or {})
     except Exception as ex:
-        st.transition(operation_id, "Running", "Failed", append_logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
+        try:
+            failed_identity = _album_identity_snapshot(ad.get_album(aid) or {})
+        except Exception:
+            failed_identity = {}
+        st.transition(operation_id, "Running", "Failed",
+                      append_logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"],
+                      metadata={"engine_result": {"album_identity": failed_identity,
+                                                  "move": bool(write_tags), "write": bool(write_tags)}})
         return {"ok": False, "code": "repair_apply_failed", "operation_id": operation_id, "mutated": True,
                 "rollback_available": True, "error": f"MusicBrainz repair failed: {str(ex)[:200]}"}
     if target_rel and after != {"mb_albumid": target_rel, "mb_releasegroupid": target_rg}:
         st.transition(operation_id, "Running", "Failed",
-                      append_logs=[f"Album identity did not verify after the sync: {after}"])
+                      append_logs=[f"Album identity did not verify after the sync: {after}"],
+                      metadata={"engine_result": {"album_identity": after,
+                                                  "move": bool(write_tags), "write": bool(write_tags)}})
         return {"ok": False, "code": "repair_identity_unverified", "operation_id": operation_id, "mutated": True,
                 "rollback_available": True,
                 "error": "The album's Release/Release Group did not verify after the sync; roll it back."}
     st.transition(operation_id, "Running", "Completed",
-                  metadata={"engine_result": {"album_identity": after, "track_mbids": plan.get("track_mbids") or {}}})
+                  metadata={"engine_result": {"album_identity": after, "track_mbids": plan.get("track_mbids") or {},
+                                              "move": bool(write_tags), "write": bool(write_tags)}})
     return {"ok": True, "operation_id": operation_id, "status": "Completed",
             "updated": len(plan.get("track_mbids") or {})}
 
@@ -2815,17 +3592,45 @@ def rollback_album_mb_track_repair(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Restore every album and track value captured at plan time."""
+    """Restore every album and track value captured at plan time.
+
+    Follows the same contract as the other composite rollbacks: family match,
+    a complete before-state, the apply's resource locks, a CAS claim,
+    ``rollback_request`` for crash recovery, and independent verification of
+    the rows, paths and tags. Apply's mbsync can move files, so the recorded
+    path is restored too (H12/C3)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    before = (st.get(operation_id).get("metadata") or {}).get("before_state")
-    if not isinstance(before, dict):
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id,
+                "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") not in (None, ALBUM_MB_TRACK_REPAIR_FAMILY):
+        return {"ok": False, "code": "not_applied", "operation_id": operation_id,
+                "error": "Not a MusicBrainz track repair transaction."}
+    before = meta.get("before_state")
+    if not isinstance(before, dict) or not (before.get("album") or before.get("items")):
         return {"ok": False, "code": "rollback_unavailable", "operation_id": operation_id,
                 "error": "This transaction recorded no before-state to restore."}
-    if _claim_rollback(st, operation_id) is None:
-        return _rollback_refused(st, operation_id)
-    restored, failed = _restore_rows(ad, before, write=True)
-    return _finish_rollback(st, operation_id, restored, failed)
+    engine = meta.get("engine_result") or {}
+    # Legacy applies did not record the decision; they used the default
+    # (write tags and move). A rollback only actually moves when the live
+    # path differs from the captured one.
+    move = bool(engine.get("move", True))
+    write = bool(engine.get("write", True))
+    with rollback_guard(st, operation_id, _family_lock_keys(ALBUM_MB_TRACK_REPAIR_FAMILY, meta),
+                        family=ALBUM_MB_TRACK_REPAIR_FAMILY) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            restored, failed = _restore_rows(ad, before, write=write, move=move)
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["MusicBrainz track repair rollback failed; the outcome is unknown."])
+            raise
+        return _finish_rollback(st, operation_id, restored, failed)
 
 
 #: Identity fields a per-item metadata update may not write (album-level).
@@ -2944,7 +3749,8 @@ def plan_album_metadata(
         item = ad.get_item(int(iid))
         if not item or int(item.get("album_id") or 0) != aid:
             return {"ok": False, "code": "item_not_in_album", "error": f"Item {iid} is not on album {aid}."}
-        before["items"].append({"id": int(iid), "fields": _restorable(item, fields)})
+        before["items"].append({"id": int(iid), "fields": _restorable(item, fields),
+                                "path": _s(item.get("path"))})
     tx = st.create(
         operation_type="Metadata Update",
         status="Preview",
@@ -3008,18 +3814,28 @@ def apply_album_metadata(
     move = meta.get("force_write_tags", force_write_tags)
     if _claim_apply(st, op_id, metadata={"engine_result": {"mutation_started": True}}) is None:
         return _apply_refused(st, op_id)
+    from backend.resource_locks import ResourceLockConflictError, attempt_owner, locks as resource_locks
     try:
-        if aid and updates:
-            _engine_ok(_modify(ad, updates, album_ids=[aid], write=write, move=move))
-        for iid, iup in item_updates.items():
-            if iup:
-                _engine_ok(_modify(ad, iup, item_ids=[int(iid)], write=write, move=move))
+        with resource_locks().hold(_family_lock_keys(ALBUM_METADATA_FAMILY, meta),
+                                   attempt_owner(op_id), timeout=10):
+            if aid and updates:
+                _engine_ok(_modify(ad, updates, album_ids=[aid], write=write, move=move))
+            for iid, iup in item_updates.items():
+                if iup:
+                    _engine_ok(_modify(ad, iup, item_ids=[int(iid)], write=write, move=move))
+    except ResourceLockConflictError as exc:
+        st.transition(op_id, "Running", "Failed",
+                      append_logs=[f"Apply refused: {exc.key} is busy with another operation. Nothing was changed."])
+        return {"ok": False, "code": "resource_busy", "operation_id": op_id, "mutated": False,
+                "error": f"The resource {exc.key} is busy with another operation; nothing was changed."}
     except Exception as ex:
         st.transition(op_id, "Running", "Failed", append_logs=[f"Apply failed: {type(ex).__name__}: {str(ex)[:200]}"])
         return {"ok": False, "code": "metadata_apply_failed", "operation_id": op_id, "mutated": True,
                 "rollback_available": True, "error": f"Metadata update failed: {str(ex)[:200]}"}
-    st.transition(op_id, "Running", "Completed", metadata={"engine_result": {"album_fields": sorted(updates),
-                                                                              "items": sorted(item_updates)}})
+    st.transition(op_id, "Running", "Completed", metadata={"engine_result": _engine_result(st, op_id, album_fields=sorted(updates),
+                                                                              items=sorted(item_updates),
+                                                                               move=bool(move),
+                                                                               write=bool(write))})
     return {"ok": True, "operation_id": op_id, "status": "Completed"}
 
 
@@ -3028,18 +3844,38 @@ def rollback_album_metadata(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    """Restore the album and track values captured at plan time (MI-2)."""
+    """Restore the album and track values captured at plan time (MI-2).
+
+    The rollback takes the same album and item locks the apply took and
+    claims the transaction with a compare-and-set before it restores, so
+    two concurrent rollbacks cannot both write (#227, ARCH-023)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
-    meta = st.get(operation_id).get("metadata") or {}
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id, "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
     before = meta.get("before_state")
     if not isinstance(before, dict):
         return {"ok": False, "code": "rollback_unavailable", "operation_id": operation_id,
                 "error": "This transaction recorded no before-state to restore."}
-    if _claim_rollback(st, operation_id) is None:
-        return _rollback_refused(st, operation_id)
-    restored, failed = _restore_rows(ad, before, write=bool(meta.get("write_tags", True)))
-    return _finish_rollback(st, operation_id, restored, failed)
+    engine = meta.get("engine_result") or {}
+    # The apply's own move decision, so the restore puts the files back only
+    # when the apply moved them (ARCH-023).
+    move = bool(engine.get("move", meta.get("force_write_tags", False)))
+    write = bool(engine.get("write", meta.get("write_tags", True)))
+    with rollback_guard(st, operation_id, _family_lock_keys(ALBUM_METADATA_FAMILY, meta),
+                        family=ALBUM_METADATA_FAMILY) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            restored, failed = _restore_rows(ad, before, write=write, move=move)
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the metadata update failed; the outcome is unknown."])
+            raise
+        return _finish_rollback(st, operation_id, restored, failed)
 
 
 def update_album_metadata(
@@ -3138,12 +3974,24 @@ def apply_item_metadata(
     # Intended: a forced tag rewrite also re-places the file for path-format
     # fields, exactly as BeetsAdapter.update_item_metadata does.
     move = meta.get("force_write_tags", force_write_tags)
-
     def _write() -> None:
         if iid and updates:
             _engine_ok(_modify(ad, updates, item_ids=[int(iid)], write=write, move=move))
 
-    return _apply_claimed(st, op_id, _write)
+    from backend.resource_locks import ResourceLockConflictError
+    try:
+        # Snapshot and write under the same lock the rollback takes (H3): the
+        # values captured must be the values this write replaces.
+        with _apply_locks(ITEM_METADATA_FAMILY, meta, op_id):
+            before = _capture_item_before(ad, iid, updates)
+            completed: Dict[str, Any] = {"move": bool(move), "write": bool(write)}
+            claimed: Dict[str, Any] = {}
+            if before:
+                completed["before_state"] = before
+                claimed["before_state"] = before
+            return _apply_claimed(st, op_id, _write, claimed=claimed, completed=completed)
+    except ResourceLockConflictError as exc:
+        return _lock_busy(op_id, exc)
 
 
 def rollback_item_metadata(
@@ -3151,7 +3999,40 @@ def rollback_item_metadata(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    return _rollback_noop(operation_id, store)
+    """Put back the item values the apply replaced (ARCH-023).
+
+    A transaction that recorded no before-state (an apply from an older
+    version) is refused with ``rollback_unavailable``: it cannot be
+    restored, and reporting it as rolled back would be a lie.
+    """
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id, "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != ITEM_METADATA_FAMILY:
+        return {"ok": False, "code": "not_applied", "operation_id": operation_id,
+                "error": "Not an item metadata transaction."}
+    engine = meta.get("engine_result") or {}
+    before = engine.get("before_state")
+    if not isinstance(before, dict) or not before.get("items"):
+        return {"ok": False, "code": "rollback_unavailable", "operation_id": operation_id,
+                "error": "This transaction recorded no before-state to restore."}
+    move = bool(engine.get("move", meta.get("force_write_tags", False)))
+    write = bool(engine.get("write", meta.get("write_tags", True)))
+    with rollback_guard(st, operation_id, _family_lock_keys(ITEM_METADATA_FAMILY, meta),
+                        family=ITEM_METADATA_FAMILY) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            restored, failed = _restore_rows(ad, before, write=write, move=move)
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the item metadata update failed; the outcome is unknown."])
+            raise
+        return _finish_rollback(st, operation_id, restored, failed)
 
 
 def update_item_metadata(
@@ -3202,6 +4083,11 @@ def update_item_metadata(
 #: duplicates through backend.duplicate_cleanup, renames through relocation.
 _ALBUM_MAINTENANCE_SUPPORTED_MODES = frozenset({"remove_album"})
 
+#: The album maintenance family. Its apply removes an album row; the
+#: rollback re-creates that row from the snapshot taken at plan time
+#: (ARCH-023).
+ALBUM_MAINTENANCE_FAMILY = "album_maintenance_v1"
+
 
 def plan_album_maintenance(
     payload: Dict[str, Any],
@@ -3209,13 +4095,14 @@ def plan_album_maintenance(
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
     st = _get_store(store)
+    data = {**payload, "mutation_family": ALBUM_MAINTENANCE_FAMILY}
     tx = st.create(
         operation_type="Repair",
         status="Preview",
         summary="Album maintenance",
-        metadata=payload,
+        metadata=data,
     )
-    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **payload}
+    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **data}
 
 
 def apply_album_maintenance(
@@ -3228,7 +4115,11 @@ def apply_album_maintenance(
     Only ``remove_album`` of an album row that is empty right now is
     implemented (row only, never files). Every other mode used to fall
     through to an unrequested ``move`` while reporting Completed; it is now
-    refused with ``not_supported`` and the transaction is marked Failed."""
+    refused with ``not_supported`` and the transaction is marked Failed.
+
+    The row removal itself happens inside Beets, which snapshots the row
+    first and returns the id of that snapshot -- so the rollback can
+    re-create the row at its original id (ARCH-023)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     tx = st.get(operation_id)
@@ -3238,6 +4129,12 @@ def apply_album_maintenance(
     if tx.get("status") in ("Completed", "Failed", "Rolled Back", "Running"):
         return {"ok": False, "code": "already_applied", "operation_id": operation_id,
                 "error": f"Transaction is {tx.get('status')}; it cannot be applied again."}
+    if not mode and not aid:
+        # A legacy record for this family has neither input. Do not claim it
+        # and do not rewrite it to Failed; there is no plan to apply (BA-7).
+        return {"ok": False, "code": "not_supported", "operation_id": operation_id,
+                "status": tx.get("status"), "mutated": False,
+                "error": "This transaction has no album-maintenance plan; nothing was changed."}
 
     def write() -> Dict[str, Any]:
         if mode not in _ALBUM_MAINTENANCE_SUPPORTED_MODES or not aid:
@@ -3249,17 +4146,84 @@ def apply_album_maintenance(
             return {"ok": False, "code": "album_not_empty", "mutated": False,
                     "log": f"Album {aid} still has items; nothing was removed.",
                     "error": f"Album {aid} still has items; only an empty album row can be removed here."}
-        ad.remove(album_ids=[aid], delete_files=False)
-        return {"deleted_albums": 1, "log": f"Removed empty album row {aid}."}
+        res = ad.remove_album_row(aid, idempotency_key=f"{operation_id}:remove")
+        res = res if isinstance(res, dict) else {}
+        if res.get("success") is False or res.get("ok") is False:
+            return {"ok": False, "code": _s(res.get("error_code") or "album_row_remove_failed"),
+                    "mutated": False,
+                    "error": _s(res.get("error") or f"Beets could not remove album row {aid}.")}
+        row_id = res.get("album_row_id")
+        return {"deleted_albums": 1, "log": f"Removed empty album row {aid}.",
+                "engine_result": {"album_row_id": row_id if isinstance(row_id, str) else "",
+                                  "album_id": aid}}
 
-    return _apply_claimed(st, operation_id, write)
+    from backend.resource_locks import ResourceLockConflictError
+    try:
+        # The emptiness check and the removal are one atomic decision under
+        # the album lock the rollback takes (H3).
+        with _apply_locks(ALBUM_MAINTENANCE_FAMILY, meta, operation_id):
+            return _apply_claimed(st, operation_id, write)
+    except ResourceLockConflictError as exc:
+        return _lock_busy(operation_id, exc)
 
 
 def rollback_album_maintenance(
     operation_id: str,
+    adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    return _rollback_noop(operation_id, store)
+    """Re-create the album row the apply removed, from the engine's own
+    manifest (the engine restores it at its original id)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id, "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    engine = meta.get("engine_result") or {}
+    if rollback_eligible_status(tx, unknown_ok=True) is None:
+        return rollback_not_eligible(operation_id, tx.get("status"))
+    row_id = _s(engine.get("album_row_id"))
+    if not row_id:
+        return rollback_unavailable(
+            operation_id, tx.get("status"),
+            "This transaction recorded no album-row snapshot, so the row cannot be put back.")
+    if tx.get("status") == "Rolled Back":
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    with rollback_guard(st, operation_id, _family_lock_keys(ALBUM_MAINTENANCE_FAMILY, meta),
+                        family=ALBUM_MAINTENANCE_FAMILY, unknown_ok=True) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            res = ad.rollback_album_row(row_id, idempotency_key=f"{operation_id}:rollback")
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the album row removal failed; the outcome is unknown."])
+            raise
+        result = res.get("result") if isinstance(res, dict) and isinstance(res.get("result"), dict) \
+            else (res if isinstance(res, dict) else {})
+        failure = _engine_restore_failure(result)
+        aid = int(engine.get("album_id") or meta.get("album_id") or 0)
+        if not failure and result.get("restored") is not True and result.get("already_present") is not True:
+            failure = "the engine result does not say the row was restored"
+        if not failure and (not aid or ad.get_album(aid) is None):
+            failure = f"album row {aid or '?'} is not readable after the restore"
+        if failure:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=[f"Album-row rollback could not be verified: {failure}"])
+            return {"ok": False, "code": "rollback_unverified", "operation_id": operation_id,
+                    "status": "Recovery Required", "mutated": True,
+                    "error": f"The album-row rollback could not be verified: {failure}."}
+        out = finish_rollback_guard(
+            st, operation_id, restored=1, failed=0, status="Rolled Back",
+            metadata={"rollback_result": result},
+            logs=[f"Restored album row {engine.get('album_id') or meta.get('album_id') or '?'} "
+                  "from the engine's own snapshot"],
+        )
+        if not out.get("recorded"):
+            return _rollback_conflict(operation_id)
+    return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
 
 
 #: Engine refusals that changed nothing, with the text shown to the operator.
@@ -3722,20 +4686,65 @@ def apply_album_genre_repair(
     ad = adapter or beets_adapter
     st = _get_store(store)
     tx = st.get(op_id)
-    aid = tx.get("metadata", {}).get("album_id")
+    meta = tx.get("metadata", {})
+    aid = meta.get("album_id")
 
     def write() -> None:
         if aid:
             ad.lastgenre(album_ids=[int(aid)], force=True)
 
-    return _apply_claimed(st, op_id, write)
+    from backend.resource_locks import ResourceLockConflictError
+    try:
+        # Snapshot and write under the album lock (H3).
+        with _apply_locks(GENRE_REPAIR_FAMILY, meta, op_id):
+            before = _capture_album_before(ad, aid, ("genre",))
+            completed: Dict[str, Any] = {"move": False, "write": True}
+            claimed: Dict[str, Any] = {}
+            if before:
+                completed["before_state"] = before
+                claimed["before_state"] = before
+            return _apply_claimed(st, op_id, write, claimed=claimed, completed=completed)
+    except ResourceLockConflictError as exc:
+        return _lock_busy(op_id, exc)
 
 
 def rollback_album_genre_repair(
     operation_id: str,
+    adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    return _rollback_noop(operation_id, store)
+    """Put back the genres the repair replaced (ARCH-023).
+
+    A transaction that recorded no before-state (an apply from an older
+    version) is refused with ``rollback_unavailable``: it cannot be
+    restored, and reporting it as rolled back would be a lie.
+    """
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id, "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != GENRE_REPAIR_FAMILY:
+        return {"ok": False, "code": "not_applied", "operation_id": operation_id,
+                "error": "Not a genre repair transaction."}
+    engine = meta.get("engine_result") or {}
+    before = engine.get("before_state")
+    if not isinstance(before, dict) or not (before.get("album") or before.get("items")):
+        return {"ok": False, "code": "rollback_unavailable", "operation_id": operation_id,
+                "error": "This transaction recorded no before-state to restore."}
+    with rollback_guard(st, operation_id, _family_lock_keys(GENRE_REPAIR_FAMILY, meta),
+                        family=GENRE_REPAIR_FAMILY) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            restored, failed = _restore_rows(ad, before, write=True, move=False)
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the genre repair failed; the outcome is unknown."])
+            raise
+        return _finish_rollback(st, operation_id, restored, failed)
 
 
 def repair_album_genre(
@@ -4017,6 +5026,11 @@ def _import_refused(ex: Exception) -> Dict[str, Any]:
 _QUIET_FALLBACKS = ("skip", "asis")
 _CONFIRMED_DUPLICATE_ACTIONS = ("skip", "keep")
 
+#: The confirmed-import family. Its apply copies (or moves) a folder into
+#: the library; the rollback quarantines the imported copies and removes the
+#: rows Beets created for them (ARCH-023).
+CONFIRMED_IMPORT_FAMILY = "import_folder_v1"
+
 
 def plan_confirmed_import(
     payload: Dict[str, Any],
@@ -4027,13 +5041,14 @@ def plan_confirmed_import(
     until apply_confirmed_import()."""
     st = _get_store(store)
     source = payload.get("source_folder") or payload.get("paths") or payload.get("path")
+    data = {**payload, "mutation_family": CONFIRMED_IMPORT_FAMILY}
     tx = st.create(
         operation_type="Import",
         status="Preview",
         summary=f"Confirmed import of {source} as MusicBrainz release {payload.get('mb_albumid') or '?'}",
-        metadata=payload,
+        metadata=data,
     )
-    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **payload}
+    return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview", **data}
 
 
 def apply_confirmed_import(
@@ -4070,13 +5085,31 @@ def apply_confirmed_import(
     duplicate_action = _s(meta.get("duplicate_action") or "skip").lower()
 
     def _fail(expected: str, code: str, error: str, mutated: Any = False,
-              album_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+              album_ids: Optional[List[int]] = None,
+              undo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         # album_ids: the rows Beets imported and this failure keeps (never removed here).
-        extra = {"metadata": {"engine_result": {"mutation_started": True, "kept_album_ids": album_ids}}}             if album_ids else {}
+        # undo: what a rollback would need to take the imported copies back out
+        # of the library (the album row, its items and the move decision).
+        engine: Dict[str, Any] = {"mutation_started": True}
+        if album_ids:
+            engine["kept_album_ids"] = album_ids
+        if undo:
+            engine.update(undo)
+        extra = {"metadata": {"engine_result": engine}} if engine else {}
         st.transition(operation_id, expected, "Failed", append_logs=[f"Apply failed ({code}): {error}"], **extra)
         return {"ok": False, "code": code, "operation_id": operation_id, "status": "Failed",
                 "mutated": mutated, "error": error, "album_ids": album_ids or []}
 
+    if not paths and not release_id:
+        # No source and no Release: this is a legacy family-name record, not
+        # a plan this version wrote. Refuse without claiming or marking it
+        # Failed (BA-7); a real incomplete plan below still ends Failed.
+        if tx.get("status") not in ("Preview", "Approved"):
+            return _apply_refused(st, operation_id)
+        return {"ok": False, "code": "invalid_plan", "operation_id": operation_id,
+                "status": tx.get("status"), "mutated": False,
+                "error": "The import plan needs a source folder and a valid MusicBrainz "
+                         "Release ID; nothing was imported."}
     if not paths or not release_id or (planned_rg and not _uuid_or_blank(planned_rg)) \
             or duplicate_action not in _CONFIRMED_DUPLICATE_ACTIONS:
         status = tx.get("status")
@@ -4112,28 +5145,164 @@ def apply_confirmed_import(
     album = new[0]
     album_id = int(album.get("id") or 0)
     got_rg = _s(album.get("mb_releasegroupid")).strip().lower()
-    if planned_rg and got_rg != planned_rg:
-        return _fail("Running", "release_group_mismatch",
-                     f"Beets imported album {album_id} with a different Release Group than the one confirmed; "
-                     "review it before continuing.", mutated=True, album_ids=[album_id])
-    item_ids = [int(i.get("id")) for i in ad.find_all_items_by_album_id(album_id) if i.get("id") is not None]
-    relaxed = imported.get("partial_artist_relaxed") if isinstance(imported, dict) else None
-    st.transition(operation_id, "Running", "Completed",
-                  append_logs=[f"Beets matched {relaxed} to the pinned release with the artist penalty set aside "
-                               "(AcoustID matched every file; the source artist is part of the release credit)"]
-                  if relaxed else [],
-                  metadata={"engine_result": {"album_id": album_id, "item_ids": item_ids,
-                                              "mb_releasegroupid": got_rg,
-                                              "partial_artist_relaxed": bool(relaxed)}})
+    #: Whether the import MOVED the files or copied them. The rollback needs
+    #: it: an in-place import must leave the operator's own files where they
+    #: are, and a moved import can be taken back to where it came from.
+    move_files = not in_place
+    try:
+        item_ids = [int(i.get("id")) for i in ad.find_all_items_by_album_id(album_id)
+                    if i.get("id") is not None]
+    except Exception as ex:
+        return _fail("Running", "import_verify_failed",
+                     f"The import finished but its rows could not be read: {type(ex).__name__}",
+                     mutated=True, album_ids=[album_id],
+                     undo={"album_id": album_id, "item_ids": [], "move_files": move_files})
+    from backend.resource_locks import ResourceLockConflictError
+    try:
+        # Verification and the finishing transition run under the same album
+        # and item locks the rollback takes (H3). The import call itself is
+        # serialized by the plugin's global mutation_lock.
+        with _apply_locks(CONFIRMED_IMPORT_FAMILY,
+                          {"album_id": album_id,
+                           "engine_result": {"album_id": album_id, "item_ids": item_ids}},
+                          operation_id):
+            # The lock set must cover every row the rollback will lock. A
+            # changed membership (the album was edited while the import
+            # finished) is recorded with the live ids so rollback can still
+            # address them, and no verification is reported as completed.
+            live_item_ids = [int(i.get("id")) for i in ad.find_all_items_by_album_id(album_id)
+                             if i.get("id") is not None]
+            if set(live_item_ids) != set(item_ids):
+                return _fail("Running", "membership_changed",
+                             f"Album {album_id} changed while the import was finishing; "
+                             "review it before continuing.", mutated=True, album_ids=[album_id],
+                             undo={"album_id": album_id, "item_ids": live_item_ids,
+                                   "move_files": move_files})
+            if planned_rg and got_rg != planned_rg:
+                return _fail("Running", "release_group_mismatch",
+                             f"Beets imported album {album_id} with a different Release Group than the one confirmed; "
+                             "review it before continuing.", mutated=True, album_ids=[album_id],
+                             undo={"album_id": album_id, "item_ids": item_ids, "move_files": move_files})
+            relaxed = imported.get("partial_artist_relaxed") if isinstance(imported, dict) else None
+            st.transition(operation_id, "Running", "Completed",
+                          append_logs=[f"Beets matched {relaxed} to the pinned release with the artist penalty set aside "
+                                       "(AcoustID matched every file; the source artist is part of the release credit)"]
+                          if relaxed else [],
+                          metadata={"engine_result": {"album_id": album_id, "item_ids": item_ids,
+                                                      "mb_releasegroupid": got_rg,
+                                                      "move_files": move_files,
+                                                      "in_place": in_place,
+                                                      "write_tags": True,
+                                                      "partial_artist_relaxed": bool(relaxed)}})
+    except ResourceLockConflictError as exc:
+        return _fail("Running", "resource_busy", _lock_busy(operation_id, exc)["error"], mutated=True,
+                     album_ids=[album_id],
+                     undo={"album_id": album_id, "item_ids": item_ids, "move_files": move_files})
+    except Exception as ex:
+        # Imported rows exist but verification could not finish. Record what
+        # rollback needs rather than leaving the transaction Running.
+        return _fail("Running", "import_verify_failed",
+                     f"The import finished but its verification failed: {type(ex).__name__}",
+                     mutated=True, album_ids=[album_id],
+                     undo={"album_id": album_id, "item_ids": item_ids, "move_files": move_files})
     return {"ok": True, "operation_id": operation_id, "status": "Completed", "album_id": album_id,
             "item_ids": item_ids, "album_id_verified": True, "mb_releasegroupid": got_rg}
 
 
 def rollback_import_folder(
     operation_id: str,
+    adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
 ) -> Dict[str, Any]:
-    return _rollback_noop(operation_id, store)
+    """Undo a confirmed import: the imported copies are moved into an
+    engine-owned quarantine folder (never deleted) and their library rows are
+    removed, together with the album row Beets created.
+
+    An in-place import (``in_place: true``) leaves the operator's own files
+    where they are: only the rows go (ARCH-023, decision 2)."""
+    ad = adapter or beets_adapter
+    st = _get_store(store)
+    try:
+        tx = st.get(operation_id)
+    except KeyError:
+        return {"ok": False, "code": "not_found", "operation_id": operation_id, "error": "Transaction not found"}
+    meta = tx.get("metadata") or {}
+    engine = meta.get("engine_result") or {}
+    if rollback_eligible_status(tx, unknown_ok=True) is None:
+        return rollback_not_eligible(operation_id, tx.get("status"))
+    try:
+        album_id = int(engine.get("album_id") or 0)
+    except (TypeError, ValueError):
+        album_id = 0
+    item_ids = [int(i) for i in (engine.get("item_ids") or []) if str(i).strip()]
+    if not album_id or not item_ids:
+        return rollback_unavailable(
+            operation_id, tx.get("status"),
+            "This transaction recorded no imported rows, so the import cannot be taken back.")
+    move_files = bool(engine.get("move_files", True))
+    if tx.get("status") == "Rolled Back":
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+    with rollback_guard(st, operation_id, _family_lock_keys(CONFIRMED_IMPORT_FAMILY, meta),
+                        family=CONFIRMED_IMPORT_FAMILY, unknown_ok=True) as claim:
+        if not claim.get("ok"):
+            return claim
+        try:
+            res = ad.rollback_import(album_id, item_ids, move_files=move_files,
+                                     idempotency_key=f"{operation_id}:rollback")
+        except Exception:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=["Rollback of the import failed; the outcome is unknown."])
+            raise
+        result = res.get("result") if isinstance(res, dict) and isinstance(res.get("result"), dict) \
+            else (res if isinstance(res, dict) else {})
+        # Validate the engine's own account and then the live library: a
+        # restore is only reported when the rows are actually gone (H10).
+        failure = _engine_restore_failure(result)
+        removed = result.get("removed")
+        if not failure and not _s(result.get("quarantine_id")):
+            failure = "the engine returned no quarantine id"
+        if not failure and not isinstance(removed, list):
+            failure = "the engine result does not list the removed rows"
+        if not failure:
+            got = {int(r.get("item_id")) for r in removed
+                   if isinstance(r, dict) and r.get("item_id") is not None}
+            if got != set(item_ids):
+                failure = f"the engine removed {sorted(got)} instead of {sorted(item_ids)}"
+        if not failure:
+            if ad.get_album(album_id) is not None:
+                failure = f"album {album_id} is still in the library"
+            else:
+                live = [iid for iid in item_ids if ad.get_item(iid) is not None]
+                if live:
+                    failure = f"item rows {live} are still in the library"
+        if failure:
+            abandon_rollback(st, operation_id, status="Recovery Required",
+                             logs=[f"Import rollback could not be verified: {failure}"])
+            return {"ok": False, "code": "rollback_unverified", "operation_id": operation_id,
+                    "status": "Recovery Required", "mutated": True,
+                    "error": f"The import rollback could not be verified: {failure}."}
+        # H12: an in-place import wrote tags into the operator's own files.
+        # The rows are gone, but those tags cannot be undone without the
+        # pre-import file state; never report that as a full rollback.
+        tags_remain = not move_files and bool(engine.get("write_tags", True))
+        final = "Partially Rolled Back" if tags_remain else "Rolled Back"
+        logs = [f"Removed the imported rows of album {album_id}"
+                + (" and moved the imported files into the engine's quarantine folder"
+                   if move_files else " (the files stayed where they were)")]
+        if tags_remain:
+            logs.append("The import wrote tags into the operator's own files; those tags were left in place. "
+                        "The library no longer lists the album, but the files are not byte-identical to "
+                        "their pre-import state.")
+        out = finish_rollback_guard(
+            st, operation_id, restored=1, failed=0, status=final,
+            metadata={"rollback_result": result, "file_tags_restored": not tags_remain},
+            logs=logs,
+        )
+        if not out.get("recorded"):
+            return _rollback_conflict(operation_id)
+    return {"ok": True, "operation_id": operation_id, "status": final,
+            "album_id": album_id, "quarantine_id": _s(result.get("quarantine_id")),
+            "file_tags_restored": not tags_remain}
 
 
 def _album_count(ad: BeetsAdapter) -> Optional[int]:

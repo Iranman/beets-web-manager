@@ -45,6 +45,12 @@ def _jsonable(value: Any) -> Any:
         return os.fsdecode(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
+    # Multi-valued flex fields are lists/dicts. ``str(repr)`` wrote them back
+    # as one literal string, so a restore could not round-trip them (#486).
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(v) for v in value]
     return str(value)
 
 
@@ -82,9 +88,15 @@ def _manifest_dir(quarantine_id: str) -> Optional[str]:
     """The engine's folder for one replacement, or None for a malformed id."""
     if not isinstance(quarantine_id, str) or not _QUARANTINE_ID.fullmatch(quarantine_id):
         return None
-    root = _quarantine_root()
-    folder = os.path.normpath(os.path.join(root, quarantine_id))
-    if not folder.startswith(root + os.sep):
+    # Resolve both sides: the id is already fixed-length hex, but a symlinked
+    # quarantine root must not make a lexical prefix check pass for a path
+    # that really points elsewhere.
+    root = os.path.realpath(_quarantine_root())
+    folder = os.path.realpath(os.path.join(root, quarantine_id))
+    try:
+        if folder == root or os.path.commonpath([folder, root]) != root:
+            return None
+    except ValueError:
         return None
     return folder
 

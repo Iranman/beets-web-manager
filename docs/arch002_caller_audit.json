@@ -9,6 +9,14 @@
       "SAFE_SPECIALIZED_EVIDENCE",
       "AcoustID evidence helper (ordered fingerprint recording IDs); produces evidence, decides nothing."
     ],
+    "backend/recovery_carrier.py::advance_state": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Missing-track recovery-carrier state-store setter: records a durable recovery state/checkpoint and an opaque verification_evidence slot produced elsewhere. The 'confidence'/'threshold' pattern hit is only in a HOOK comment stating the spine lowers no threshold; this function computes no similarity/confidence and makes no identity decision."
+    ],
+    "backend/matching_service.py::_record_carrier_preflight_evidence": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Recovery-carrier evidence recorder for the single-track-recovery preflight: flattens the already-computed preflight result/proof into an evidence dict and calls recovery_carrier.advance_state (verifying+VERIFIED when the deterministic proof already passed, else review_required). It reads decisions made upstream and records them; it computes no similarity/confidence and makes no identity decision. The 'threshold'/'confidence' pattern hit is only in its docstring stating it never lowers a threshold. Best-effort; a carrier write never changes the preflight outcome."
+    ],
     "backend/acoustid_service.py::_acoustid_verify_match": [
       "SAFE_SPECIALIZED_EVIDENCE",
       "Playlist fingerprint status label (confirmed/mismatch/unverified) from the canonical AcoustID top tier (ACOUSTID_MIN_SCORE floor, 3-point window); non-destructive, authorizes nothing (MI-13)."
@@ -605,9 +613,9 @@
       "DISPLAY_ONLY",
       "Revalidation loop moved from the route (F10); eligibility is evaluate_import_eligibility."
     ],
-    "routes_import.py::<module>": [
+    "backend/serializers.py::<module>": [
       "DISPLAY_ONLY",
-      "Allowlist of client identity fields for POST /api/ai-pending-review (F16); trust fields are dropped, not decided."
+      "Allowlist of client identity fields for POST /api/ai-pending-review and the import-with-id ai_suggestion (F16); trust fields are dropped, not decided."
     ],
     "routes_import.py::_review_row_search_text": [
       "DISPLAY_ONLY",

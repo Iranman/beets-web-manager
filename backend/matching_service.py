@@ -106,6 +106,7 @@ IMPORT_REFUSAL_REASONS: Dict[str, bool] = {
     "track_not_requested": True,         # a file maps to a release track that was not requested
     "duplicate_track": True,             # two files, or a file and the album, hold the same recording
     "identity_conflict": True,           # the canonical evaluator found a conflict or refused the proof
+    "duration_conflict": True,           # an AcoustID-proven file's length disagrees with the expected recording (likely a truncated/wrong copy; another peer's may match)
 }
 #: A missing-track fill imported but its merge into the existing album did not
 #: complete. Terminal for the whole acquisition: every further peer or direct
@@ -364,6 +365,172 @@ def _is_configured_root(path: Path) -> bool:
     return any(here == os.path.realpath(str(root)) for root in roots)
 
 
+def _load_recovery_carrier_for_folder(folder_path: str) -> Optional[Dict[str, Any]]:
+    """The recovery carrier bound to this exact staged folder, or None.
+
+    Identity comes from the carrier store (written at download time), never
+    parsed from the folder name (ADR-0002). Best-effort: a store/lookup
+    failure simply means "no carrier" and the normal preflight runs."""
+    if not _s(folder_path).strip():
+        return None
+    try:
+        from backend import recovery_carrier
+        carrier = recovery_carrier.load_for_folder(folder_path)
+    except Exception:
+        return None
+    # A carrier is only usable as recovery identity with a canonical Release
+    # Group (ADR-0002); without it this is not a recovery.
+    if carrier and _s(carrier.get("mb_releasegroupid")).strip():
+        return carrier
+    return None
+
+
+def _carrier_expected_as_wanted(carrier: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The carrier's expected (missing) tracks in the shape the deterministic
+    per-recording proof consumes. ``recording_id`` maps to ``mb_trackid``
+    because ``_fetch_mb_release_tracklist`` stores the MB recording id there;
+    ``_wanted_track_key`` keys on it (or on disc/track position)."""
+    out: List[Dict[str, Any]] = []
+    source = carrier.get("expected_tracks") or carrier.get("wanted_tracks") or []
+    for t in source:
+        if not isinstance(t, dict):
+            continue
+        out.append({
+            "mb_trackid": _s(t.get("recording_id") or t.get("mb_trackid") or t.get("mb_recordingid")).strip().lower(),
+            "track": t.get("track") or t.get("track_no") or t.get("position"),
+            "disc": t.get("disc") or t.get("disc_no") or t.get("medium"),
+            "title": _s(t.get("title")),
+        })
+    return out
+
+
+def _recovery_duration_tolerance_ok(expected_duration_ms: Any,
+                                    measured_length_seconds: Any) -> bool:
+    """Supplemental duration agreement for a proven single-track-recovery file.
+
+    The carrier/MB expected duration is MILLISECONDS (``expected_tracks[].
+    duration``, sourced from MB ``duration_ms``); the measured audio length is
+    SECONDS. They are CONVERTED before comparison -- never compared raw -- and
+    judged with the canonical duration tolerance (backend.matching). Unknown
+    (<=0) on either side yields no opinion (True): duration is tier-4
+    supplemental evidence and must never override the AcoustID recording proof
+    or manufacture a mismatch from missing data (ADR-0003)."""
+    from backend.matching.recording import DURATION_TOLERANCE_SECONDS
+    try:
+        expected_s = float(expected_duration_ms or 0) / 1000.0
+        measured_s = float(measured_length_seconds or 0)
+    except (TypeError, ValueError):
+        return True
+    if expected_s <= 0 or measured_s <= 0:
+        return True
+    return abs(expected_s - measured_s) <= max(float(DURATION_TOLERANCE_SECONDS), expected_s * 0.05)
+
+
+def _recovery_duration_conflicts(proof_files: List[Dict[str, Any]],
+                                 proof_file_hits: List[Tuple[str, Optional[List[Dict[str, Any]]]]],
+                                 candidates: List[Dict[str, Any]],
+                                 carrier: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Duration mismatches among the AcoustID-proven recovery files.
+
+    Expected per-recording duration comes from the carrier's ``expected_tracks``
+    (MILLISECONDS). The measured length (SECONDS) comes from an independently
+    trustworthy source only -- the matched AcoustID hit's duration, else the
+    engine-reported file length -- never a local media-tag read (SEC-002
+    engine ownership). A file with no measured length is skipped (no opinion).
+    """
+    expected_ms: Dict[str, Any] = {}
+    for t in carrier.get("expected_tracks") or []:
+        if not isinstance(t, dict):
+            continue
+        rid = _s(t.get("recording_id") or t.get("mb_trackid") or t.get("mb_recordingid")).strip().lower()
+        dur = t.get("duration") if t.get("duration") is not None else t.get("duration_ms")
+        if rid and dur:
+            expected_ms[rid] = dur
+    hits_by_path = {_s(p): (h or []) for p, h in proof_file_hits}
+    length_by_path = {_s(c.get("path")): c.get("length") for c in candidates if float(c.get("length") or 0) > 0}
+    conflicts: List[Dict[str, Any]] = []
+    for f in proof_files:
+        rid = _s(f.get("recording_id")).strip().lower()
+        exp = expected_ms.get(rid)
+        if not exp:
+            continue
+        path = _s(f.get("path"))
+        measured = None
+        for hit in hits_by_path.get(path, []):
+            if _s(hit.get("mb_trackid")).strip().lower() == rid and hit.get("duration"):
+                measured = hit.get("duration")
+                break
+        if measured is None:
+            measured = length_by_path.get(path)
+        if measured is None or float(measured or 0) <= 0:
+            continue
+        if not _recovery_duration_tolerance_ok(exp, measured):
+            conflicts.append({"path": path, "recording_id": rid,
+                              "expected_duration_ms": exp, "measured_length_seconds": measured})
+    return conflicts
+
+
+# Carrier states a best-effort preflight evidence write must never clobber: a
+# claimed ('importing') or completed/terminal carrier is owned by its recovery
+# job, not by a late folder re-scan.
+_CARRIER_PREFLIGHT_NO_DOWNGRADE = frozenset(
+    {"importing", "imported", "rolled_back", "failed"})
+
+
+def _record_carrier_preflight_evidence(carrier: Dict[str, Any],
+                                       result: Dict[str, Any]) -> None:
+    """Record what this single-track-recovery preflight proved into the carrier
+    (HOOK contract). Verified -> state 'verifying' (+VERIFIED checkpoint);
+    anything uncertain keeps the file staged for review -> 'review_required'.
+    Evidence only records what was proven; it never lowers a threshold. Purely
+    best-effort: a carrier write race/failure must never change the preflight
+    outcome. Only fires when audio files were actually evaluated."""
+    if int(result.get("audio_count") or 0) <= 0:
+        return
+    carrier_id = _s(carrier.get("carrier_id"))
+    if not carrier_id:
+        return
+    proof = result.get("missing_track_proof") or {}
+    decision = result.get("matching_decision") or {}
+    verified = bool(result.get("ok") and proof.get("ok"))
+    evidence = {
+        "stage": "folder_release_preflight",
+        "verified": verified,
+        "matches": int(result.get("matches") or 0),
+        "expected": int(result.get("expected") or 0),
+        "audio_count": int(result.get("audio_count") or 0),
+        "release_group_id": _s(result.get("release_group_id") or decision.get("release_group_id")),
+        "proof_reason_code": _s(proof.get("reason_code")),
+        "proof_files": list(proof.get("files") or []),
+        "acoustid_mismatch": bool(result.get("acoustid_mismatch")),
+        "rejection_reason": "" if verified else _preflight_rejection_reason(result),
+    }
+    try:
+        from backend import recovery_carrier
+        current = recovery_carrier.get_carrier(carrier_id)
+        if not current:
+            return
+        # No-downgrade guard: a delayed/concurrent preflight on the same staged
+        # folder must never move a carrier that has already been CLAIMED for
+        # import or reached a terminal state back to 'verifying'/'review_required'
+        # -- doing so would reopen the _recovery_claim_importing state gate for a
+        # second claimer (duplicate import). CAS on the just-read revision also
+        # closes the read->write window if a claim lands concurrently.
+        if _s(current.get("state")) in _CARRIER_PREFLIGHT_NO_DOWNGRADE:
+            return
+        recovery_carrier.advance_state(
+            carrier_id,
+            "verifying" if verified else "review_required",
+            checkpoint="VERIFIED" if verified else "",
+            evidence=evidence,
+            expected_revision=int(current.get("revision") or 0),
+        )
+    except Exception:
+        # Best-effort only (ADR-0003 safety): never fail the preflight on a
+        # carrier write (including a lost CAS against a concurrent claim).
+        pass
+
+
 def _folder_release_preflight(folder_path: str, mb_albumid: str,
                               existing_album_id: int = 0,
                               log: Optional[list] = None, *,
@@ -378,7 +545,15 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     `fingerprint_evidence` (I-8, opt-in): give each locally scanned file's
     answered AcoustID hits to the canonical evaluator. Only the deterministic
     folder identification sets it; every other caller keeps the earlier
-    behavior, so fingerprints do not widen AI or repair gates."""
+    behavior, so fingerprints do not widen AI or repair gates.
+
+    HOOK(music-identity): a single-track recovery must not be judged against
+    the full release tracklist. When a recovery carrier exists for this folder
+    (backend.recovery_carrier.load_for_folder), make this a first-class
+    single-track-recovery preflight mode keyed off the carrier's existing
+    album + canonical RG + expected tracks, rather than relying on the
+    `existing_album_id`-only subset relaxation below (the Phase-1 gap). Do NOT
+    lower the AcoustID/confidence/identity-proof thresholds."""
     result: Dict[str, Any] = {
         "ok": False,
         "matches": 0,
@@ -409,6 +584,35 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         # path at all.
         "scan_unavailable": False,
     }
+
+    # HOOK(music-identity): first-class single-track-recovery preflight mode.
+    # When a durable recovery carrier is bound to this exact staged folder, the
+    # canonical identity (existing album + canonical Release Group + the
+    # expected missing track(s)) comes from the carrier store -- never
+    # re-derived from the folder name (ADR-0002, Phase-1 root cause). This
+    # routes verification through the deterministic per-recording proof
+    # (_missing_track_recording_proof) keyed off the carrier, rather than the
+    # existing_album_id-only tracklist-ratio relaxation below. Thresholds are
+    # NOT lowered (ADR-0003): a single-track download is verified against the
+    # intended existing album, and simply not rejected for lacking all album
+    # tracks.
+    recovery_carrier_rec = _load_recovery_carrier_for_folder(folder_path)
+    if recovery_carrier_rec:
+        existing_album_id = int(recovery_carrier_rec.get("existing_album_id") or existing_album_id or 0)
+        carrier_release = _s(recovery_carrier_rec.get("release_id")).strip().lower()
+        if _is_valid_mb_uuid(carrier_release):
+            # Verify against the existing album's own release (edition the
+            # expected tracks were derived from); the canonical RG stays the
+            # album identity and is re-checked by the matching decision.
+            mb_albumid = carrier_release
+        if not wanted_tracks:
+            wanted_tracks = _carrier_expected_as_wanted(recovery_carrier_rec)
+        # Give the canonical evaluator each file's AcoustID evidence; the
+        # proof below requires it and never widens any other gate.
+        fingerprint_evidence = True
+        result["recovery_mode"] = True
+        result["recovery_carrier_id"] = _s(recovery_carrier_rec.get("carrier_id"))
+
     mb = _fetch_mb_release_tracklist(mb_albumid, log)
     if not mb.get("ok"):
         result["error"] = mb.get("error") or "MusicBrainz release lookup failed"
@@ -765,14 +969,25 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     # `matching_decision`) but `ok` reflects automatic-action authority
     # only.
     tracklist_ok = gate_ok
-    if not decision_dict.get("action_allowed"):
-        gate_ok = False
+    recovery_mode = bool(result.get("recovery_mode"))
+    # In recovery mode the deterministic per-recording proof is the SOLE
+    # authority (ADR-0003): a single-track recovery is authorized only when
+    # every staged file is proven to be a requested missing recording of the
+    # existing album's own release -- never by the tracklist-ratio heuristic
+    # or the whole-album decision alone. Outside recovery mode the proof stays
+    # a fallback the whole-album decision falls through to (unchanged).
+    if recovery_mode or not decision_dict.get("action_allowed"):
+        if not decision_dict.get("action_allowed"):
+            gate_ok = False
         if existing_album_id and wanted_tracks and decision_dict.get("conflicts"):
             # A conflict in the whole-album decision is evidence; never proven past.
             result["missing_track_proof"] = {"ok": False, "reason_code": "identity_conflict", "files": []}
+            if recovery_mode:
+                gate_ok = False
         elif existing_album_id and wanted_tracks:
+            proof_file_hits = [(str(p), _file_acoustid_hits(p)) for p in audio_files]
             proof = _missing_track_recording_proof(
-                [(str(p), _file_acoustid_hits(p)) for p in audio_files],
+                proof_file_hits,
                 mb_tracks=mb_tracks,
                 wanted_tracks=wanted_tracks,
                 existing_recordings=existing_recordings,
@@ -787,6 +1002,24 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             if proof["ok"]:
                 gate_ok = True
                 decision_dict = proof["matching_decision"]
+                if recovery_mode and recovery_carrier_rec:
+                    # Supplemental duration tolerance (carrier expected ms vs
+                    # measured seconds). An AcoustID-proven recording whose
+                    # file length disagrees is likely a truncated/wrong copy;
+                    # keep it for review rather than merge it.
+                    dur_conflicts = _recovery_duration_conflicts(
+                        proof.get("files") or [], proof_file_hits, candidates, recovery_carrier_rec)
+                    if dur_conflicts:
+                        gate_ok = False
+                        result["missing_track_proof"]["ok"] = False
+                        result["missing_track_proof"]["reason_code"] = "duration_conflict"
+                        result["missing_track_proof"]["duration_conflicts"] = dur_conflicts
+            elif recovery_mode:
+                gate_ok = False
+        elif recovery_mode:
+            # Carrier-bound folder with no provable scope (no expected tracks
+            # or no existing album): cannot auto-verify -> keep for review.
+            gate_ok = False
 
     result.update({
         "ok": gate_ok,
@@ -802,6 +1035,11 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         "release_group_id": decision_dict.get("release_group_id", ""),
         "matching_decision": decision_dict,
     })
+    if recovery_mode and recovery_carrier_rec:
+        # Record what was proven into the carrier (HOOK contract): verified
+        # files advance to 'verifying'; anything uncertain stays staged for
+        # review. Best-effort -- never changes the preflight outcome.
+        _record_carrier_preflight_evidence(recovery_carrier_rec, result)
     return result
 
 

@@ -74,13 +74,34 @@ def _registry_status(ad: BeetsAdapter, op: str) -> Optional[Dict[str, Any]]:
 
 
 def resolve_transaction(tx: Dict[str, Any], *, adapter: Optional[BeetsAdapter] = None,
-                        store: Optional[TransactionStore] = None) -> Dict[str, Any]:
-    """Resolve one Running engine-backed transaction from engine evidence."""
+                        store: Optional[TransactionStore] = None,
+                        before: Optional[float] = None) -> Dict[str, Any]:
+    """Resolve one Running engine-backed transaction from engine evidence.
+
+    ``before`` is the process start when called from the restart sweep: a
+    rollback request recorded at or after it may still be live in this
+    process and is left alone. Without it (a direct recovery check), an
+    outcome-less rollback request is treated as interrupted."""
     from backend.composite_workflows import _get_store
     ad = adapter or beets_adapter
     st = _get_store(store)
     op = tx["id"]
     meta = tx.get("metadata") or {}
+    # An in-flight rollback has no engine_request to recover from, and it is
+    # checked BEFORE the family dispatch: a registered engine family's apply
+    # evidence must never re-finish a rollback as Completed (C4). A request
+    # without an outcome means some part of the restore may already have run.
+    rollback_req = (meta.get("rollback_request") or {})
+    if (tx.get("status") == "Running" and isinstance(rollback_req, dict) and rollback_req
+            and not rollback_req.get("outcome")):
+        started = rollback_req.get("started_at") or rollback_req.get("requested_at") or 0
+        if before is not None and started and started >= before:
+            return {"operation_id": op, "action": "still_running"}
+        st.update(op, status="Recovery Required",
+                  append_logs=["Recovered after restart: a rollback was in progress; "
+                               "whether it changed the library cannot be proven; "
+                               "check the library before retrying."])
+        return {"operation_id": op, "action": "recovery_required_interrupted_rollback"}
     fam = _families().get(meta.get("mutation_family"))
     if fam is None or tx.get("status") != "Running":
         return {"operation_id": op, "action": "skipped"}
@@ -186,6 +207,18 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
     rows, _total = st.list(status="Running", limit=1000)
     for tx in rows:
         meta = tx.get("metadata") or {}
+        # Folder cleanup's engine rollback is resumable: it records every
+        # applied step and its wrapper accepts Running with an outcome-less
+        # rollback_request. Leave that record Running so the operator can
+        # retry it; the generic "interrupted apply" rule below would close
+        # the only path that can finish the restore (#486 C4).
+        folder_rollback = (meta.get("mutation_family") == "folder_cleanup_v1"
+                           and isinstance(meta.get("rollback_request"), dict)
+                           and meta.get("rollback_request")
+                           and not meta["rollback_request"].get("outcome"))
+        if folder_rollback and before is not None and (tx.get("updated_at") or 0) < before:
+            results.append({"operation_id": tx["id"], "action": "rollback_resumable"})
+            continue
         if (meta.get("mutation_family") not in families and before is not None
                 and (tx.get("updated_at") or 0) < before):
             # Only with evidence (QA #306 N1): a claimed composite apply, or a
@@ -204,7 +237,8 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
                 results.append(_unknown_family(st, tx))
         elif meta.get("mutation_family") in families:
             try:
-                results.append(resolve_transaction(st.get(tx["id"]), adapter=adapter, store=st))
+                results.append(resolve_transaction(st.get(tx["id"]), adapter=adapter, store=st,
+                                                   before=before))
             except BeetsError as exc:
                 results.append({"operation_id": tx["id"], "action": "engine_unavailable", "error": exc.error_code})
     if before is not None:

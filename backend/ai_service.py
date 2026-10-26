@@ -4,19 +4,19 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import hashlib, json, os, re, stat, threading, time, uuid
+import functools, hashlib, json, os, re, stat, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _s
+from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _env_int, _s
 from backend.library_service import _app_managed_download_path, _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_QUEUED_FOLDER_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE
-from backend.app_runtime import _path_is_under
+from backend.app_runtime import _extract_mb_uuid, _path_is_under
 from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid_api_key
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
@@ -755,6 +755,20 @@ _AI_MATCH_HISTORY_FILE = Path("/config/ai_match_history.json")
 _ai_match_history_lock = threading.Lock()
 
 
+def _ai_suggestion_names_import(suggestion: Optional[Dict[str, Any]], release_id: str,
+                                release_group_id: str) -> bool:
+    """True when a suggestion proposed what was imported: the same Release
+    Group (the canonical identity) or, if it named none, the same Release.
+    An import of anything else was the operator's choice, not a suggested match."""
+    suggestion = suggestion or {}
+    proposed_rg = _extract_mb_uuid(_s(suggestion.get("mb_releasegroupid")))
+    if proposed_rg:
+        return proposed_rg == _extract_mb_uuid(release_group_id)
+    imported = _extract_mb_uuid(release_id)
+    proposed = {_extract_mb_uuid(_s(suggestion.get(k))) for k in ("mb_albumid", "representative_mb_albumid")}
+    return bool(imported) and imported in proposed
+
+
 def _record_ai_match(original_path: str, suggestion: dict):
     """Persist a successful AI-matched import to the history file."""
     entry = {
@@ -765,6 +779,7 @@ def _record_ai_match(original_path: str, suggestion: dict):
         "album":           suggestion.get("album", ""),
         "year":            suggestion.get("year", ""),
         "mb_albumid":      suggestion.get("mb_albumid", ""),
+        "mb_releasegroupid": suggestion.get("mb_releasegroupid", ""),
         "mb_url":          suggestion.get("mb_url", "") or (
             f"https://musicbrainz.org/release/{suggestion['mb_albumid']}"
             if suggestion.get("mb_albumid") else ""),
@@ -778,8 +793,13 @@ def _record_ai_match(original_path: str, suggestion: dict):
                        if _AI_MATCH_HISTORY_FILE.exists() else []
         except Exception:
             existing = []
+        if not isinstance(existing, list):
+            existing = []
         existing.insert(0, entry)
-        _AI_MATCH_HISTORY_FILE.write_text(json.dumps(existing[:200], indent=2))
+        # A crash mid-write must not leave a torn file the next read discards.
+        tmp = _AI_MATCH_HISTORY_FILE.with_name(_AI_MATCH_HISTORY_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(existing[:200], indent=2))
+        os.replace(tmp, _AI_MATCH_HISTORY_FILE)
 
 
 _CANDIDATE_COUNTRY_RANK = {"US": 0, "XW": 1, "GB": 2, "CA": 3, "AU": 4}
@@ -978,6 +998,35 @@ def _apply_ai_preflight_to_suggestion(suggestion: Dict[str, Any],
         suggestion["reason"] = f"{note} {reason}".strip()
 
 
+# Find Match (the folder, album and item AI-suggest routes) runs synchronously
+# in a Waitress worker for seconds: fingerprints, rate-limited MusicBrainz, the
+# AI call. Unbounded, a Review page stepping through items or a second tab can
+# hold every worker (WEBCONTROL_THREADS, default 8) and stall the whole UI.
+_FIND_MATCH_MAX_CONCURRENT = max(1, min(2, _env_int("WEBCONTROL_THREADS", 8, minimum=1, maximum=64) // 4))
+_FIND_MATCH_WAIT_SECONDS = 0.5
+_find_match_slots = threading.BoundedSemaphore(_FIND_MATCH_MAX_CONCURRENT)
+FIND_MATCH_BUSY = {
+    "ok": False,
+    "code": "suggest_busy",
+    "retryable": True,
+    "error": "Find Match is already running for other items; try again in a moment.",
+}
+
+
+def find_match_slot(view):
+    """Route decorator: run a Find Match only when a slot is free; otherwise
+    answer 503 ``suggest_busy`` at once, having started nothing."""
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if not _find_match_slots.acquire(timeout=_FIND_MATCH_WAIT_SECONDS):
+            return dict(FIND_MATCH_BUSY), 503, {"Retry-After": "5"}
+        try:
+            return view(*args, **kwargs)
+        finally:
+            _find_match_slots.release()
+    return wrapped
+
+
 def _ai_suggest_folder_internal(folder_path: str) -> dict:
     """Identify an unimported folder using AI + MusicBrainz.
     Returns: { ok, suggestion: { mb_albumid, album, albumartist, year, label, country, confidence, reason, mb_valid, mb_url }, mb_candidates }
@@ -992,6 +1041,9 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         return {"ok": False, "error": "path required"}
     api_key = _ai_api_key()
     ai_available = bool(api_key)
+    # Taken before the evidence: a folder that changes while it is being
+    # fingerprinted then reads as stale, never as matching the new contents.
+    folder_signature = _import_review_folder_signature(folder_path)
 
     # ── gather folder evidence ────────────────────────────────────────────────
     ev = _build_folder_evidence(folder_path)
@@ -1153,7 +1205,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                     candidates=mb_candidates,
                     preflight=_pf,
                 )
-                sug["folder_signature"] = _import_review_folder_signature(folder_path)
+                sug["folder_signature"] = folder_signature
                 sug["review_evidence"] = evidence
                 return {
                     "ok": True,
@@ -1205,7 +1257,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             folder_evidence=ev,
             candidates=[],
         )
-        sug["folder_signature"] = _import_review_folder_signature(folder_path)
+        sug["folder_signature"] = folder_signature
         sug["review_evidence"] = evidence
         return {
             "ok": True,
@@ -1458,7 +1510,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             candidates=mb_candidates,
             preflight=selected_preflight,
         )
-        sug["folder_signature"] = _import_review_folder_signature(folder_path)
+        sug["folder_signature"] = folder_signature
         sug["review_evidence"] = evidence
         return {
             "ok": True,
@@ -1878,6 +1930,30 @@ def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None,
         if err:
             if log is not None:
                 log.append(f"folder left in place (not importable as a folder: {err}): {folder}")
+            continue
+        # HOOK(music-identity): a discovered folder with a recovery carrier
+        # (backend.recovery_carrier.load_for_folder) is a single-track recovery
+        # for a KNOWN album, not an unknown new-album. Its canonical identity
+        # (existing album + canonical mb_releasegroupid) comes from the carrier
+        # store, never re-derived from the folder name (ADR-0002, Phase-1 root
+        # cause). The generic new-album batch must not import it as a new
+        # album; its own guarded recovery workflow owns it (carrier-driven),
+        # so it is consumed here and left out of the new-album scan.
+        carrier = None
+        try:
+            from backend import recovery_carrier
+            carrier = recovery_carrier.load_for_folder(folder)
+        except Exception:
+            carrier = None
+        if carrier and _s(carrier.get("mb_releasegroupid")).strip():
+            if log is not None:
+                log.append(
+                    "recovery carrier folder skipped (single-track recovery for "
+                    f"album_id {int(carrier.get('existing_album_id') or 0)}, "
+                    f"Release Group {_s(carrier.get('mb_releasegroupid'))}); "
+                    f"handled by the missing-track recovery workflow, not re-imported "
+                    f"as a new album: {folder}"
+                )
             continue
         result.append(folder)
     return result

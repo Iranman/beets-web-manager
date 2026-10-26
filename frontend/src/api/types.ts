@@ -243,6 +243,9 @@ export interface ReviewEvidence {
     mb_releasegroupid?: string;
   };
   preflight?: ReviewPreflight | null;
+  /** Missing-track recovery (ARCH-030): structured identity of the existing
+   * album this staged download is being recovered into. Read-only. */
+  recovery_carrier?: RecoveryCarrierIdentity;
   folder?: {
     path?: string;
     guessed_artist?: string;
@@ -2371,9 +2374,70 @@ export interface PluginInstallLogResponse extends ApiOkResponse {
   log: string[];
 }
 
+/** One expected (missing) track on a missing-track recovery carrier. Canonical
+ * album identity is the carrier's Release Group; each entry carries the
+ * recording-level identity the verifier needs. See
+ * backend/recovery_carrier.py `_normalise_expected_tracks`. Read-only. */
+export interface RecoveryExpectedTrack {
+  recording_id?: string;
+  track?: number | string | null;
+  disc?: number | string | null;
+  duration?: number | string | null;
+  title?: string;
+}
+
+/** The user-facing Download-Missing workflow stage of a recovery carrier.
+ * Mirrors backend/recovery_carrier.py `workflow_stage` exactly (field names
+ * unchanged). `stage_index` runs 0..6 along the 7-stage linear path
+ * (missing→searching→downloading→verifying→importing→plex_sync→complete) and is
+ * -1 for an off-path terminal (`needs_review`/`failed`). `terminal` marks a
+ * stage the workflow rests at; `note` is an optional qualifier (e.g. why Plex
+ * was skipped) and may be "". A best-effort Plex failure stays at `plex_sync`
+ * with `terminal=false` (the import is already durable) — NOT a workflow
+ * failure. Read-only; the frontend never constructs it. */
+export interface RecoveryStage {
+  stage: string;
+  stage_index: number;
+  label: string;
+  terminal: boolean;
+  note: string;
+}
+
+/** Structured missing-track recovery identity handed to the Review queue in
+ * place of the old `allow_existing` boolean. Mirrors
+ * backend/recovery_carrier.py `review_identity`. Surfaced both flattened on the
+ * suggestion (`recovery_*`) and whole under `evidence.recovery_carrier`.
+ * Read-only API shape; the frontend never constructs it. */
+export interface RecoveryCarrierIdentity {
+  /** User-facing Download-Missing workflow stage (ARCH-030 Phase-6). */
+  recovery_stage?: RecoveryStage;
+  recovery?: boolean;
+  recovery_carrier_id?: string;
+  /** The existing library album this download is being recovered into. */
+  existing_album_id?: number;
+  /** Canonical album identity (ADR-0002). */
+  mb_releasegroupid?: string;
+  /** Supporting edition-level Release ID (may be empty). */
+  release_id?: string;
+  destination_album_path?: string;
+  wanted_tracks?: unknown[];
+  expected_tracks?: RecoveryExpectedTrack[];
+}
+
 export interface AiSuggestion {
   candidate_index?: number;
   candidate_type?: 'recording' | 'release' | 'release_group';
+  /** Missing-track recovery (ARCH-030): the suggestion carries the structured
+   * recovery identity flattened as `recovery_*`. `evidence.recovery_carrier`
+   * holds the same identity whole. Read-only. */
+  recovery?: boolean;
+  recovery_carrier_id?: string;
+  recovery_existing_album_id?: number;
+  recovery_mb_releasegroupid?: string;
+  recovery_release_id?: string;
+  recovery_destination_path?: string;
+  recovery_wanted_tracks?: unknown[];
+  recovery_expected_tracks?: RecoveryExpectedTrack[];
   mb_trackid?: string;
   match_method?: string;
   candidate_evidence?: ReviewRecordingCandidate;

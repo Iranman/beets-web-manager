@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from flask import jsonify, request, send_file, redirect
 from backend.matching_contract import AiState
 from backend.transaction_engine import metadata_diff
-from job_engine import TERMINAL_STATUSES
+from job_engine import DuplicateJobError, TERMINAL_STATUSES
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_mb_release_id
 from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsAdapterNotFoundError, BeetsAdapterConnectionError, BeetsAdapterTimeoutError
 import backend.composite_workflows as composite_workflows
@@ -24,7 +24,7 @@ from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_look
 import backend.duplicate_cleanup as _duplicate_cleanup
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.ai_evidence_service import _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
-from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _classify_openai_error, _compact_track_ai_candidate, _track_ai_evidence_packet
+from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _classify_openai_error, _compact_track_ai_candidate, _track_ai_evidence_packet, find_match_slot
 from backend.app_runtime import ARTIST_IMAGE_CACHE_DIR, AUDIO_EXT, DOWNLOADS_ROOT, EDITABLE_FIELDS, METADATA_CACHE_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, UNMATCHED_DRAFT_ROOT, _ANSI_RE, _DISC_CACHE_TTL, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _app_logger, _path_is_under, _redact_security_text, _s, _safe_path_component, jobs, transactions
 from backend.artwork_service import AlbumArtRequestError, _ALBUM_ART_UPLOAD_MAX_BYTES, _RELEASE_ART_MBID_RE, _album_art_cache, _album_art_cache_lock, _album_art_expected_release_group, _album_art_repair_entry, _album_art_status, _album_dir_for_art, _art_repair_attach_last_run, _art_repair_build_report, _art_repair_save_last, _artist_image_cache_url, _artist_local_art_url, _cache_artist_image, _fetch_album_art, _fetch_artist_image, _repair_album_art, _replace_album_art_bytes, _replace_album_art_from_url, _resolve_album_art_request_album, _save_art_to_disk, _usable_album_art_file, _validate_album_art_bytes
 from backend.auth_service import _sanitize_confirmation_reason
@@ -866,6 +866,7 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
 
 
 @app.post("/api/items/<int:iid>/ai-suggest")
+@find_match_slot
 def ai_suggest(iid):
     item = lib.get_item(iid)
     if not item:
@@ -1284,9 +1285,17 @@ def artist_discography():
             result_holder["error"] = str(exc)
             log.append(f"error:{exc}")
 
-    job = jobs.start_python(_run, label=f"Discography: {artist_name}")
+    try:
+        job = jobs.start_python(_run, label=f"Discography: {artist_name}",
+                                metadata={"mutating": False, "type": "artist-discography",
+                                          "dedupe_key": f"artist-discography:{artist_name.lower()}"})
+    except DuplicateJobError as exc:
+        # A concurrent same-artist request already started the lookup. This
+        # route's contract is "job_id while running", so follow that job
+        # instead of raising 409 at the caller (the UI already polls it).
+        job = exc.job
     return jsonify({"ok": True, "status": "running", "job_id": job.job_id,
-                    "artist": artist_name})
+                    "artist": artist_name, "type": "artist-discography", "mutating": False})
 
 
 @app.get("/api/artist-discography/discogs")
@@ -1321,9 +1330,15 @@ def artist_discography_discogs():
         except Exception as exc:
             log.append(f"error:{exc}")
 
-    job = jobs.start_python(_run, label=f"Discogs discography: {artist_name}")
+    try:
+        job = jobs.start_python(_run, label=f"Discogs discography: {artist_name}",
+                                metadata={"mutating": False, "type": "artist-discography-discogs",
+                                          "dedupe_key": f"artist-discography-discogs:{artist_name.lower()}"})
+    except DuplicateJobError as exc:
+        job = exc.job
     return jsonify({"ok": True, "status": "running", "job_id": job.job_id,
-                    "artist": artist_name, "source": "discogs"})
+                    "artist": artist_name, "source": "discogs", "type": "artist-discography-discogs",
+                    "mutating": False})
 
 
 _artist_img_cache: Dict[str, str] = {}
@@ -2785,6 +2800,7 @@ def library_full():
 
 
 @app.post("/api/albums/<int:aid>/ai-suggest")
+@find_match_slot
 def ai_suggest_album(aid):
     album = lib.get_album(aid)
     if not album:

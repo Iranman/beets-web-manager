@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
 from backend import config_layers
-import copy, difflib, json, math, os, re, threading, time
+import copy, difflib, json, math, os, re, threading, time, uuid
 import urllib.error
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -13,9 +13,10 @@ import backend.job_contract as job_contract
 from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
 from backend.ytdlp_service import _audio_files_in_dir, _direct_source_unavailable_reason, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
 from backend.ai_service import _ai_match_evidence_packet, _validate_import_source_audio
-from backend.import_service import _delete_staged_import_folder, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
+from backend.import_service import _delete_staged_import_folder, _recovery_plex_sync_leg, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
 from backend.library_service import _album_folder_for_album_id, _build_folder_evidence, _representative_tracktotal, _resolve_album_release_for_import, get_library_payload
 from backend.pending_review_store import _queue_folder_for_manual_review
+import backend.recovery_carrier as recovery_carrier
 from backend.playlist_service import _playlist_download_audio_allowed, _playlist_download_match, _playlist_filter_preview_downloads, _playlist_identity_log, _playlist_stamp_download_tags
 from backend.app_runtime import _path_under, _redact_security_text, validated_downloads_root
 from helpers_mb import _resolve_release_group_to_release
@@ -170,7 +171,269 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if method == "slskd" and not slskd_configured() and not try_source_fallback:
         return {"ok": False, "error": SLSKD_NOT_CONFIGURED}, 200
 
+    # ── Phase-2 missing-track recovery carrier (identity SPINE) ──
+    # A download that targets a known existing album for specific missing
+    # track(s) IS a recovery. We mint a durable carrier id up front so the
+    # staged folder can be bound to the album identity and found later by the
+    # AI-batch scan, pending-review and preflight. A plain full-album download
+    # (no existing_album_id / no wanted tracks) is not a recovery and gets no
+    # carrier. Canonical identity is the Release Group (ADR-0002).
+    # F8: a format-replacement (replace_existing) downloads wanted_tracks for a
+    # track that is PRESENT, not missing. It is NOT a recovery -- misclassifying
+    # it would mint a carrier whose fail-closed precheck sees the slot already
+    # filled and mis-routes the replacement to Review. The replacement path
+    # (Preview-until-approved) owns it instead.
+    _is_recovery = bool(existing_album_id and wanted_tracks and not replace_existing)
+    # F7: a resume re-triggers the download with the SAME carrier id (so the one
+    # guarded workflow and its durable checkpoints are reused, not split); a
+    # fresh recovery mints a new id. A non-recovery never carries one.
+    _resume_carrier_id = ""
+    _incoming = _s(data.get("recovery_carrier_id")).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{32}", _incoming or ""):
+        _resume_carrier_id = _incoming
+    _recovery_box: Dict[str, str] = {"job_id": ""}
+    # F7: the canonical Release Group may arrive either as mb_releasegroupid or
+    # folded into mb_albumid as a release-GROUP reference (the handler builds
+    # mb_albumid from mb_releasegroupid, and callers may pass a release-group
+    # URL directly as mb_albumid). Resolve the requested RG from the same
+    # field(s) the rest of the handler already accepts so the identity
+    # cross-check is never silently downgraded to album-only. Only a
+    # release-GROUP reference contributes -- never a release id (ADR-0002).
+    _requested_rgid = ""
+    _rg_uuid_re = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    _rg_sources = [_s(data.get("mb_releasegroupid"))]
+    if "release-group" in _s(mb_albumid).casefold():
+        _rg_sources.append(_s(mb_albumid))
+    for _rg_src in _rg_sources:
+        _rg_match = re.search(_rg_uuid_re, _rg_src, re.I)
+        if _rg_match:
+            _requested_rgid = _rg_match.group(0).lower()
+            break
+
+    def _carrier_identity_matches(carrier: Optional[Dict[str, Any]]) -> bool:
+        """Finding A / QA-2: a client-supplied recovery_carrier_id may only be
+        honored when the STORED carrier is the SAME recovery as THIS request --
+        same existing album, and same canonical Release Group when the request
+        names one (ADR-0002). Used by BOTH the create-path reuse guard and the
+        IMPORTED/PLEX_SYNCED resume short-circuit, so a stolen/stale id can
+        neither clobber another recovery's row nor have its completed state
+        returned as a false success for a different requested recovery."""
+        if not carrier:
+            return False
+        if int(carrier.get("existing_album_id") or 0) != int(existing_album_id or 0):
+            return False
+        if _requested_rgid and _s(carrier.get("mb_releasegroupid")).strip().lower() != _requested_rgid:
+            return False
+        return True
+
+    def _requested_tracks_covered(carrier: Optional[Dict[str, Any]]) -> bool:
+        """QA-2: only treat a carrier as covering THIS request's track(s) when
+        every requested track is provably present in the carrier's track scope
+        -- otherwise a recovery of track 6 would falsely report a requested
+        track 3 as covered and strand it. Used by the IMPORTED/PLEX short-circuit
+        and (F1) the sibling-carrier reuse decision.
+
+        A track matches by MB recording id OR by (disc, track position); a track
+        carries both signatures when it has both, so a request identified by rid
+        still matches a carrier row identified only by position and vice versa.
+        F5: a track with neither a recording id nor a KNOWN position (title-only
+        / unknown position) is UNPROVEN -- it must never compare as COVERED, so a
+        request containing one is never reported already-done. Tolerant only for
+        a genuinely empty/opaque request (identity has already gated it)."""
+        def _sigs(t) -> frozenset:
+            if not isinstance(t, dict):
+                return frozenset()
+            out = set()
+            rid = _s(t.get("mb_trackid") or t.get("recording_id")).strip().lower()
+            if rid:
+                out.add(("rid", rid))
+            try:
+                trk = int(t.get("track") or 0)
+                disc = int(t.get("disc") or 1)
+            except Exception:
+                trk, disc = 0, 1
+            if trk > 0:  # F5: position 0/unknown is NOT a signature (unproven)
+                out.add(("dt", disc, trk))
+            return frozenset(out)
+        carrier = carrier or {}
+        wanted = wanted_tracks or []
+        if not wanted:
+            return True
+        cov: set = set()
+        for t in (list(carrier.get("expected_tracks") or [])
+                  + list(carrier.get("wanted_tracks") or [])):
+            cov |= _sigs(t)
+        for t in wanted:
+            sig = _sigs(t)
+            if not sig or not (sig & cov):
+                return False
+        return True
+
+    # Finding A (security / integrity): recovery_carrier_id is client-supplied.
+    # Only honor an incoming id as a resume of an EXISTING carrier that is the
+    # SAME recovery (identity cross-checked above). A mismatch (a forged/stolen
+    # id that belongs to another in-flight recovery) or a carrier that cannot be
+    # loaded is IGNORED: we mint a fresh uuid instead, so create_carrier can
+    # never upsert over -- and reset the durable checkpoint/evidence of --
+    # another recovery's row, and the stolen id cannot drive the resume
+    # short-circuit or the victim's guarded workflow slug. A fresh recovery
+    # never supplies an id.
+    if _resume_carrier_id and _is_recovery:
+        try:
+            _existing = recovery_carrier.get_carrier(_resume_carrier_id)
+        except Exception:
+            _existing = None
+        # F1: identity (album + canonical RG) is necessary but not sufficient.
+        # A same-album+same-RG carrier for a DIFFERENT track set is a SIBLING,
+        # not this recovery: reusing it would bind the request to the sibling's
+        # stale expected_tracks. Apply the same track-scope check the resume
+        # short-circuit uses -- when the requested tracks are not covered by the
+        # stored carrier, mint a FRESH uuid instead of reusing the sibling.
+        if not (_carrier_identity_matches(_existing)
+                and _requested_tracks_covered(_existing)):
+            _resume_carrier_id = ""
+    _recovery_carrier_id = (_resume_carrier_id or uuid.uuid4().hex) if _is_recovery else ""
+
     def _do(log, cancel_event=None):
+        def _recovery_resume_short_circuit():
+            """F7: resume the one guarded recovery workflow from its last durable
+            checkpoint instead of restarting from scratch or splitting jobs. When
+            the carrier already reached IMPORTED (the verified track is on the
+            album) a resume must NOT re-download or re-import -- the carrier CAS
+            claim + merge precheck would already refuse that, but here we skip it
+            entirely and only run the best-effort Plex tail (idempotent if it
+            already ran). Returns a terminal result dict to short-circuit ``_do``,
+            or None to run the normal download/import flow."""
+            if not (_is_recovery and _recovery_carrier_id):
+                return None
+            try:
+                resumed = (recovery_carrier.get_carrier(_recovery_carrier_id)
+                           or recovery_carrier.load_for_job(_recovery_box.get("job_id", "")))
+            except Exception as ex:
+                # QA-3: a resume whose carrier read FAILED must not silently fall
+                # through to a full re-download/re-import of a recovery that may
+                # already be complete. Surface it as a retryable error instead of
+                # redoing/resetting -- but only for an actual resume (an honored
+                # incoming id); a fresh recovery has no prior state to protect.
+                if _resume_carrier_id:
+                    log.append("[recovery] Could not read carrier to resume "
+                               f"({type(ex).__name__}); not re-running -- retry later.")
+                    return {"ok": False, "error": "recovery_carrier_unreadable",
+                            "retryable": True,
+                            "existing_album_id": existing_album_id,
+                            "recovery_carrier_id": _recovery_carrier_id}
+                return None
+            # QA-2: only short-circuit as already-done when the stored carrier is
+            # THIS request's recovery (same album + Release Group) AND covers the
+            # requested track(s). A stale/mismatched completed carrier must not
+            # return a false "imported" success for a different recovery.
+            if not (_carrier_identity_matches(resumed) and _requested_tracks_covered(resumed)):
+                return None
+            cp = _s((resumed or {}).get("checkpoint"))
+            if not resumed or cp not in ("IMPORTED", "PLEX_SYNCED"):
+                return None
+            log.append(f"[recovery] Resuming workflow at checkpoint {cp}; the verified "
+                       "track is already imported -- not re-downloading or re-importing.")
+            if cp == "IMPORTED":
+                _recovery_plex_sync_leg(resumed, log)
+            return {
+                "imported": True,
+                "resumed": True,
+                "existing_album_id": existing_album_id,
+                "recovery_carrier_id": _recovery_carrier_id,
+                "checkpoint": _s((recovery_carrier.get_carrier(_recovery_carrier_id) or {}).get("checkpoint")) or cp,
+            }
+
+        _resume_result = _recovery_resume_short_circuit()
+        if _resume_result is not None:
+            return _resume_result
+
+        def _recovery_bind_folder(folder_path: str) -> None:
+            """Bind the staged download folder to the recovery carrier so
+            load_for_folder() resolves the album identity (AI-batch scan,
+            pending-review, preflight). Best-effort: a store failure never
+            breaks the download/import."""
+            if not _recovery_carrier_id or not _s(folder_path).strip():
+                return
+            try:
+                recovery_carrier.bind_staged_folder(_recovery_carrier_id, folder_path)
+            except Exception as ex:
+                log.append(f"  [recovery] WARN could not bind staged folder: {type(ex).__name__}")
+
+        def _recovery_advance(state: str, checkpoint: str) -> None:
+            """Advance the recovery carrier as the download progresses
+            (CREATED->DOWNLOADED->STAGED) so the single guarded recovery
+            workflow can resume from the last checkpoint. Best-effort: a store
+            failure never breaks the download/import."""
+            if not _recovery_carrier_id:
+                return
+            try:
+                recovery_carrier.advance_state(
+                    _recovery_carrier_id, state, checkpoint=checkpoint)
+            except Exception as ex:
+                log.append(
+                    f"  [recovery] WARN could not advance carrier to {checkpoint}: "
+                    f"{type(ex).__name__}")
+
+        def _recovery_create_carrier() -> None:
+            """Create the carrier once identity is resolved (stage 5). Canonical
+            mb_releasegroupid required; the Release is supporting. Best-effort.
+
+            Finding A: create_carrier is an unconditional upsert that RESETS an
+            existing row's checkpoint->CREATED and verification_evidence->{}. A
+            legitimately-resumed carrier already holds those durable values, so
+            never create OVER an existing carrier -- only mint a brand-new one.
+            A mismatching incoming id was already rejected upstream, so the id
+            here is either this recovery's own existing carrier (skip, resume via
+            the non-resetting advance_state CAS) or a fresh uuid (create)."""
+            if not _recovery_carrier_id:
+                return
+            rgid = _s(resolved_release_group_id or _requested_rgid).strip()
+            if not rgid or not job_wanted_tracks:
+                return
+            try:
+                if recovery_carrier.get_carrier(_recovery_carrier_id) is not None:
+                    return
+            except Exception as ex:
+                # F3: fail CLOSED. A transient carrier-read error must NOT fall
+                # through to create_carrier's unconditional upsert, which RESETS
+                # an existing row's checkpoint->CREATED and verification_evidence
+                # ->{} -- re-opening the Finding-A clobber under a read error.
+                # Skip creation this pass; advance_state (non-resetting CAS)
+                # resumes the row on a later leg.
+                log.append("  [recovery] WARN carrier read failed; not creating "
+                           f"over a possibly-existing row: {type(ex).__name__}")
+                return
+            try:
+                recovery_carrier.create_carrier(
+                    carrier_id=_recovery_carrier_id,
+                    existing_album_id=existing_album_id,
+                    mb_releasegroupid=rgid,
+                    release_id=_s(resolved_mbid),
+                    destination_album_path=_s(_album_folder_for_album_id(existing_album_id) or ""),
+                    wanted_tracks=job_wanted_tracks,
+                    # Recording-level evidence the verifier (music-identity) needs
+                    # to prove a downloaded file IS the expected track. Sourced
+                    # from the missing-track queue (already reconciled against MB
+                    # completeness by _wanted_tracks_not_in_album). mb_trackid is
+                    # the MB recording id; duration is the MB length in ms.
+                    expected_tracks=[
+                        {
+                            "recording_id": t.get("mb_trackid"),
+                            "track": t.get("track"),
+                            "disc": t.get("disc"),
+                            "duration": t.get("duration_ms"),
+                            "title": t.get("title"),
+                        }
+                        for t in job_wanted_tracks
+                    ],
+                    source={"method": method, "provenance": "download-import"},
+                    origin_job_id=_recovery_box.get("job_id", ""),
+                    state="downloading",
+                )
+            except Exception as ex:
+                log.append(f"  [recovery] WARN could not create recovery carrier: {type(ex).__name__}")
+
         download_result: Dict[str, Any]
         resolved_mbid = mb_albumid
         effective_track_count = track_count
@@ -216,6 +479,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     f"[import] Missing-track mode: {len(job_wanted_tracks)} track(s) "
                     f"will be downloaded for existing album_id {existing_album_id}"
                 )
+                _recovery_create_carrier()
             elif existing_album_id:
                 review_reason = (
                     "Requested missing track(s) are not missing for the selected "
@@ -348,6 +612,11 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         ) -> Dict[str, Any]:
             if not resolved_mbid:
                 raise RuntimeError("Could not resolve a MusicBrainz release ID for import")
+            # Spine: bind the staged folder so a Review hand-off from the
+            # reimport-disk child job carries the recovery identity, and record
+            # that the files landed in it (DOWNLOADED = folder bound).
+            _recovery_bind_folder(import_dir)
+            _recovery_advance("downloaded", "DOWNLOADED")
             active_wanted_tracks = (
                 _normalise_wanted_tracks(import_wanted_tracks)
                 if import_wanted_tracks is not None
@@ -363,6 +632,10 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     fallback_artist=forced_albumartist or artist,
                 )
             _validate_import_source_audio(import_dir, log, reject_downloads=True)
+            # Verified audio is staged and ready for Beets (STAGED). Later
+            # checkpoints (VERIFIED/IMPORTED/PLEX_SYNCED) are advanced by the
+            # downstream import/verify/Plex owners.
+            _recovery_advance("downloaded", "STAGED")
             log.append(f"[import] Starting Beets import/tag/move for {import_dir}")
             import_job_id = _start_reimport_disk_job_internal(
                 import_dir, resolved_mbid, albumartist=forced_albumartist,
@@ -810,6 +1083,67 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             download_result = _download_ytdlp_selection(direct_method=method)
 
         if not auto_import:
+            # Spine: bind the folder left in /downloads so the AI-batch scan
+            # and pending-review resolve the album identity instead of
+            # re-deriving it from the folder name (Phase-1 root cause).
+            aldir_na = _s(download_result.get("aldir"))
+            _recovery_bind_folder(aldir_na)
+            # F3: a carrier-bound recovery folder is deliberately EXCLUDED from
+            # the generic new-album AI batch (ai_service._ai_batch_find_audio_dirs).
+            # With auto_import=false nothing else would ever import it, so it
+            # would be stranded in /downloads. Hand it to Review WITH its
+            # structured carrier identity (existing album + canonical Release
+            # Group + wanted/expected tracks) so the operator can complete the
+            # recovery, and record the carrier as review_required.
+            if _recovery_carrier_id and aldir_na:
+                carrier = None
+                try:
+                    carrier = recovery_carrier.get_carrier(_recovery_carrier_id)
+                except Exception:
+                    carrier = None
+                _queued = False
+                if carrier:
+                    reason = ("Downloaded for an existing album with auto-import off; "
+                              "confirm the missing-track recovery in Review.")
+                    try:
+                        _queued = bool(_queue_folder_for_manual_review(
+                            aldir_na, {"album": album, "albumartist": artist, "reason": reason},
+                            reason, log, allow_existing=True, carrier=carrier))
+                    except Exception as ex:
+                        log.append(f"  [recovery] WARN review hand-off raised: {type(ex).__name__}")
+                        _queued = False
+                else:
+                    # F4: the carrier could not be reloaded (None/raised). The
+                    # folder is carrier-bound and therefore EXCLUDED from the AI
+                    # batch, so falling through to a bare success here would
+                    # strand it in /downloads with no Review entry. Without the
+                    # carrier we cannot hand the structured identity to Review;
+                    # fail closed via the same path as a failed enqueue below.
+                    log.append("  [recovery] WARN carrier could not be reloaded for "
+                               "review hand-off; failing closed to avoid stranding the folder.")
+                if _queued:
+                    try:
+                        recovery_carrier.advance_state(_recovery_carrier_id, "review_required")
+                    except Exception as ex:
+                        log.append(f"  [recovery] WARN carrier review_required not recorded: {type(ex).__name__}")
+                    download_result["queued_for_review"] = True
+                else:
+                    # QA-4 / F4: the enqueue failed OR the carrier could not be
+                    # reloaded. The carrier folder is excluded from the AI batch,
+                    # so a bare success would strand it in /downloads with no
+                    # Review entry and no retry. Fail closed: mark the carrier
+                    # recoverable-failed (so the status UI shows it, not a false
+                    # success) and return a non-success result the caller can
+                    # surface/retry. Nothing was imported on this path, so the
+                    # existing album is untouched.
+                    try:
+                        recovery_carrier.advance_state(_recovery_carrier_id, "failed")
+                    except Exception as ex:
+                        log.append(f"  [recovery] WARN carrier failed-state not recorded: {type(ex).__name__}")
+                    download_result["ok"] = False
+                    download_result["queued_for_review"] = False
+                    download_result["error"] = "review_handoff_failed"
+                    download_result["recovery_carrier_id"] = _recovery_carrier_id
             return download_result
 
         aldir = download_result["aldir"]
@@ -820,7 +1154,14 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     _do_and_patch = _mark_queue_done_after(_do, mbid=mb_albumid, album_id=existing_album_id)
     label = f"{_download_method_job_label(method)} Import: {artist} – {album}"
     # One download+import per album at a time, across processes and restarts.
-    workflow = "download-import-" + job_contract.slug(f"{artist}|{album}|{mb_albumid}")
+    # A missing-track recovery runs as ONE guarded, resumable workflow keyed on
+    # the carrier id, so a restart resumes the same recovery (its job record
+    # carries this slug) instead of splitting into decoupled jobs (ARCH-030).
+    # A plain full-album download keeps the per-album download-import workflow.
+    if _is_recovery and _recovery_carrier_id:
+        workflow = recovery_carrier.recovery_workflow_id(_recovery_carrier_id)
+    else:
+        workflow = "download-import-" + job_contract.slug(f"{artist}|{album}|{mb_albumid}")
     job = jobs.start_python(job_contract.guarded(_do_and_patch, workflow=workflow, fail_fast_in_process=True), label=label,
                             metadata={"type": "download-import", "mutating": True, "artist": artist,
                                       "album": album, "year": year,
@@ -831,7 +1172,12 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                                       "missing_track_count": len(wanted_tracks),
                                       "try_source_fallback": try_source_fallback,
                                       "try_ytdlp_fallback": try_source_fallback,
-                                      "fallback_methods": source_fallback_methods})
+                                      "fallback_methods": source_fallback_methods,
+                                      "recovery_carrier_id": _recovery_carrier_id})
+    # Thread the origin job id to the carrier (provenance + recovery-job
+    # resume via recovery_carrier.load_for_job). The carrier is created inside
+    # _do after the download, by which time this is set.
+    _recovery_box["job_id"] = job.job_id
     return {"ok": True, "job_id": job.job_id}, 200
 
 

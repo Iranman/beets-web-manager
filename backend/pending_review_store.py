@@ -21,16 +21,65 @@ from backend.serializers import _resolve_import_review_source_path
 import backend.serializers as _serializers
 from backend.ai_batch_state_service import _music_format_policy_review_note
 from backend.import_reconciliation_service import _MUSIC_FORMAT_POLICY_REVIEW_STATUS, _remaining_audio_files, _review_paths_equal, _review_status_key
+import backend.recovery_carrier as recovery_carrier
 
 # ── ARCH-001 extracted code ──
+
+
+def _recovery_carrier_review_identity(carrier: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Flatten a recovery carrier into the structured identity the Review row
+    keeps. Best-effort: a store/shape error never breaks queueing."""
+    try:
+        return recovery_carrier.review_identity(carrier)
+    except Exception:
+        return {}
+
+
+def _refresh_recovery_stage(evidence: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a copy of a Review item's evidence with ``recovery_carrier.
+    recovery_stage`` recomputed FRESH from the live carrier (QA Finding 7).
+
+    The stage stored at queue time is a snapshot (taken by the non-auto
+    hand-off BEFORE the carrier advances to review_required), so the queue can
+    show a stale stage. Recomputing on read reflects the carrier's current
+    state+checkpoint. A missing/unreadable carrier keeps the stored snapshot
+    unchanged -- never crash, never fabricate a stage."""
+    if not isinstance(evidence, dict):
+        return evidence or {}
+    rc = evidence.get("recovery_carrier")
+    carrier_id = _s(rc.get("recovery_carrier_id")).strip() if isinstance(rc, dict) else ""
+    if not carrier_id:
+        return evidence
+    try:
+        carrier = recovery_carrier.get_carrier(carrier_id)
+        if not carrier:
+            return evidence  # carrier gone: keep the stored snapshot
+        fresh = recovery_carrier.workflow_stage(carrier)
+    except Exception:
+        return evidence  # unreadable store: keep the stored snapshot
+    evidence = dict(evidence)
+    evidence["recovery_carrier"] = {**rc, "recovery_stage": fresh}
+    return evidence
 
 
 def _queue_folder_for_manual_review(folder_path: str, suggestion: Optional[dict],
                                     reason: str, log: Optional[list] = None,
                                     allow_existing: bool = False,
                                     evidence: Optional[Dict[str, Any]] = None,
-                                    origin: Optional[Any] = None) -> bool:
-    """Put a folder back in Import Review without failing the current job."""
+                                    origin: Optional[Any] = None,
+                                    carrier: Optional[Dict[str, Any]] = None) -> bool:
+    """Put a folder back in Import Review without failing the current job.
+
+    ``carrier`` (Phase-2 missing-track recovery spine): when a recovery carrier
+    exists for this folder, the Review row keeps the STRUCTURED album identity
+    (existing_album_id, canonical mb_releasegroupid, the wanted/expected tracks,
+    destination) instead of only the old `allow_existing` boolean + free-text
+    suggestion. A carrier that names an existing album implies allow_existing,
+    because the staged folder lives outside MUSIC_ROOT where
+    ``_library_album_ids_for_folder`` cannot recover the linkage."""
+    recovery = _recovery_carrier_review_identity(carrier)
+    if recovery.get("existing_album_id"):
+        allow_existing = True
     try:
         existing_ids = _library_album_ids_for_folder(folder_path)
     except Exception as ex:  # engine unavailable: never replace the caller's own error
@@ -47,9 +96,22 @@ def _queue_folder_for_manual_review(folder_path: str, suggestion: Optional[dict]
     sug = dict(suggestion or {})
     sug["confidence"] = "low"
     sug["reason"] = reason
+    if recovery:
+        # Structured recovery identity survives the hand-off; the Review UI
+        # (frontend) and preflight single-track mode (music-identity) read it.
+        sug["recovery"] = True
+        sug["recovery_carrier_id"] = recovery.get("recovery_carrier_id", "")
+        sug["recovery_existing_album_id"] = recovery.get("existing_album_id", 0)
+        sug["recovery_mb_releasegroupid"] = recovery.get("mb_releasegroupid", "")
+        sug["recovery_release_id"] = recovery.get("release_id", "")
+        sug["recovery_destination_path"] = recovery.get("destination_album_path", "")
+        sug["recovery_wanted_tracks"] = recovery.get("wanted_tracks", [])
+        sug["recovery_expected_tracks"] = recovery.get("expected_tracks", [])
     if allow_existing:
         sug["allow_existing_review"] = True
-        sug["existing_album_ids"] = existing_ids
+        sug["existing_album_ids"] = existing_ids or (
+            [recovery["existing_album_id"]] if recovery.get("existing_album_id") else []
+        )
     if sug.get("mb_albumid"):
         sug["rejected_mb_albumid"] = sug.get("mb_albumid")
     sug["mb_albumid"] = ""
@@ -57,6 +119,11 @@ def _queue_folder_for_manual_review(folder_path: str, suggestion: Optional[dict]
     # Force the user to verify the release instead of treating the bad match as importable.
     sug["mb_valid"] = False
     evidence = evidence or sug.get("review_evidence")
+    if recovery:
+        # Also surface the recovery identity inside the evidence packet so a
+        # consumer that reads evidence (not the suggestion) still sees it.
+        evidence = dict(evidence or {})
+        evidence["recovery_carrier"] = recovery
     if evidence:
         sug["review_evidence"] = evidence
     try:
