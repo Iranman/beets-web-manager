@@ -870,8 +870,14 @@ def acoustid_lookup_outcome(file_path: str):
                 raise ProviderError(ProviderOutcome.UNAVAILABLE, "AcoustID internal error")
             raise ProviderError(ProviderOutcome.TRANSIENT_ERROR, "AcoustID returned an error status")
         out = _acoustid_parse_candidates(data)
+        # fpcalc already measured the file's duration (SECONDS) to build the
+        # fingerprint. Surface it as evidence so the deterministic-metadata-slot
+        # tier (ADR-0007) has a measured duration for a NO_RESULT file, where
+        # there is no matched hit to carry one. Fingerprint-derived, never a
+        # local media-tag read.
         return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if out else ProviderOutcome.NO_RESULT,
-                              data=out, status_code=status_code)
+                              data=out, status_code=status_code,
+                              evidence={"duration": duration, "fingerprintable": True})
 
     result = call_with_retry("acoustid", _once, max_attempts=2, base_backoff=1.0)
     if result.data is None:

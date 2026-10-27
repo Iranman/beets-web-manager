@@ -147,14 +147,21 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
                                    release_group_id: str,
                                    release_title: str = "",
                                    release_artist: str = "",
-                                   unfingerprintable: Optional[set] = None) -> Dict[str, Any]:
+                                   unfingerprintable: Optional[set] = None,
+                                   file_durations: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """Full per-track proof for a missing-track fill of an existing album.
 
-    Accepts only when the release is the existing album's own release (same
-    Release Group), every file's AcoustID lookup confirms one recording of
-    that release (canonical classifier and floor), that track was requested,
-    no recording is held twice, and the canonical evaluator authorizes the
-    files (VERIFIED_SUBSET). Release-level AcoustID hits are not needed.
+    Accepts a file as proven either by a confirmed AcoustID recording of the
+    target release, OR -- for a genuine AcoustID NO_RESULT file -- as a
+    DETERMINISTIC_METADATA_SLOT (ADR-0007): the shared contract's alignment
+    proves it fills one requested missing slot on exact title + position +
+    duration (``file_durations`` supplies the measured seconds) with a
+    validated Release Group and matching artist. The slot criteria are NOT
+    re-decided here; the proof path agrees with the contract's
+    ``action_allowed`` (VERIFIED_SUBSET), never a second looser definition, and
+    never authorizes a FULL_RELEASE. UNAVAILABLE/CONFLICT/AMBIGUOUS files are
+    still refused. In every accepted case the track must have been requested,
+    held only once, and the canonical evaluator must authorize the files.
     Anything else returns ok=False with a code from IMPORT_REFUSAL_REASONS."""
     from backend.matching import AcoustIDStatus as _Status, acoustid_evidence_from_hits
     from backend.slskd_service import _wanted_track_key
@@ -182,13 +189,33 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         return _fail("file_unfingerprintable" if all(p in per_file for p in unanswered)
                      else "acoustid_unavailable")
 
+    file_durations = file_durations or {}
     wanted_keys = {_wanted_track_key(t) for t in wanted_tracks}
     used = set(existing_recordings)
     rows: List[Dict[str, Any]] = []
+    # NO_RESULT files whose slot is resolved by the shared contract's own
+    # alignment below (ADR-0007), not re-decided here: {row_index: path}.
+    slot_pending: Dict[int, str] = {}
     for path, hits in file_hits:
+        disc, num = _audio_position_from_path(path)
+        row: Dict[str, Any] = {"title": _slskd_title_guess_from_name(Path(path).name) or Path(path).stem,
+                               "path": path, "disc": disc, "track": num, "acoustid_hits": hits}
+        measured = float(file_durations.get(_s(path)) or 0.0)
+        if measured > 0:
+            row["length"] = measured
         statuses = [(t, acoustid_evidence_from_hits(hits, t.get("mb_trackid"))) for t in mb_tracks if t.get("mb_trackid")]
         confirmed = [t for t, ev in statuses if ev.confirmed]
         if not confirmed:
+            # A genuine answered-empty AcoustID lookup (NO_RESULT, hits == [])
+            # may still fill its slot on deterministic metadata; defer it to the
+            # contract's slot authority. A non-empty but unconfirmed answer is
+            # AMBIGUOUS or an off-release CONFLICT -- never a slot -- and is
+            # refused here exactly as before (and UNAVAILABLE never reaches this
+            # loop; it was failed above as unanswered).
+            if not hits:
+                rows.append(row)
+                slot_pending[len(rows) - 1] = path
+                continue
             off_release = (not any(ev.status == _Status.AMBIGUOUS for _t, ev in statuses)
                            and acoustid_evidence_from_hits(hits, "").status == _Status.CONFLICT)
             return _fail("recording_not_on_release" if off_release else "file_unverified")
@@ -203,9 +230,7 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         used.add(track["mb_trackid"])
         out["files"].append({"path": path, "recording_id": track["mb_trackid"],
                              "disc": int(track.get("disc") or 1), "track": int(track.get("track") or 0)})
-        disc, num = _audio_position_from_path(path)
-        rows.append({"title": _slskd_title_guess_from_name(Path(path).name) or Path(path).stem,
-                     "path": path, "disc": disc, "track": num, "acoustid_hits": hits})
+        rows.append(row)
 
     decision = build_album_matching_decision(
         current={"album": _s(album_row.get("album")), "albumartist": _s(album_row.get("albumartist")),
@@ -216,6 +241,33 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         mb_tracks=mb_tracks,
     ).to_dict()
     out["matching_decision"] = decision
+
+    # Resolve each deferred NO_RESULT file from the contract's OWN alignment --
+    # the single slot definition. It counts only when its assignment is a
+    # deterministic_metadata_slot (exact title + position + duration tolerance +
+    # NO_RESULT, enforced in backend.matching), maps to a requested missing
+    # track, and that recording is not already held.
+    assignments = (((decision.get("evidence") or {}).get("canonical_match") or {})
+                   .get("track_alignment") or {}).get("assignments") or []
+    for row_index, path in slot_pending.items():
+        assignment = next((a for a in assignments
+                           if isinstance(a, dict) and int(a.get("local_index", -1)) == row_index), None)
+        if not assignment or assignment.get("status") != "matched" or not assignment.get("deterministic_metadata_slot"):
+            return _fail("file_unverified")
+        try:
+            target = mb_tracks[int(assignment.get("target_index"))]
+        except (TypeError, ValueError, IndexError):
+            return _fail("file_unverified")
+        tid = _s(target.get("mb_trackid")).strip().lower()
+        if not (("mbid", tid) in wanted_keys
+                or ("pos", int(target.get("disc") or 1), int(target.get("track") or 0)) in wanted_keys):
+            return _fail("track_not_requested")
+        if tid in used:
+            return _fail("duplicate_track")
+        used.add(tid)
+        out["files"].append({"path": path, "recording_id": tid,
+                             "disc": int(target.get("disc") or 1), "track": int(target.get("track") or 0)})
+
     if not decision.get("action_allowed"):
         return _fail("identity_conflict")
     out["ok"] = True
@@ -768,9 +820,15 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         candidates.append(row)
 
     unfingerprintable: set = set()  # files fpcalc could not fingerprint (not an AcoustID failure)
+    # fpcalc-measured duration (SECONDS) per staged file, surfaced by the
+    # AcoustID answer. The only measured duration a genuine NO_RESULT file can
+    # offer the deterministic-metadata-slot tier (ADR-0007); fingerprint-
+    # derived, never a local media-tag read.
+    file_measured_durations: Dict[str, float] = {}
 
     def _file_acoustid_hits(path: Path) -> Optional[List[Dict[str, Any]]]:
         unfingerprintable.discard(str(path))  # only the latest outcome for a path counts
+        file_measured_durations.pop(str(path), None)
         try:
             outcome = _acoustid_lookup_cached_outcome(str(path))
         except Exception as ex:
@@ -778,6 +836,12 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 log.append(f"  [preflight] AcoustID lookup warning: {type(ex).__name__}")
             return None
         if outcome.answered:
+            try:
+                measured = float((outcome.evidence or {}).get("duration") or 0.0)
+            except (TypeError, ValueError):
+                measured = 0.0
+            if measured > 0:
+                file_measured_durations[str(path)] = measured
             return list(outcome.data or [])
         if (outcome.evidence or {}).get("fingerprintable") is False:
             unfingerprintable.add(str(path))
@@ -815,12 +879,16 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     else:
         for fpath in audio_files:
             disc, track = _audio_position_from_path(str(fpath))
+            # Fingerprint first so the fpcalc-measured duration is recorded
+            # before the candidate row is built (slot evidence, ADR-0007).
+            hits = _file_acoustid_hits(fpath) if fingerprint_evidence else None
             _add_candidate(
                 _slskd_title_guess_from_name(fpath.name) or fpath.stem,
                 str(fpath),
                 track=track,
                 disc=disc or 1,
-                acoustid_hits=_file_acoustid_hits(fpath) if fingerprint_evidence else None,
+                length=file_measured_durations.get(str(fpath), 0.0),
+                acoustid_hits=hits,
             )
 
     existing_recordings: set = set()
@@ -999,6 +1067,14 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 gate_ok = False
         elif existing_album_id and wanted_tracks:
             proof_file_hits = [(str(p), _file_acoustid_hits(p)) for p in audio_files]
+            # Measured per-file durations (SECONDS) for the deterministic-
+            # metadata-slot tier: engine/candidate length where present, else
+            # the fpcalc-measured duration captured during fingerprinting.
+            proof_durations: Dict[str, float] = {
+                _s(c.get("path")): float(c.get("length") or 0.0)
+                for c in candidates if float(c.get("length") or 0.0) > 0
+            }
+            proof_durations.update({p: d for p, d in file_measured_durations.items() if d > 0})
             proof = _missing_track_recording_proof(
                 proof_file_hits,
                 mb_tracks=mb_tracks,
@@ -1010,6 +1086,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 release_title=_s(result.get("release_title")),
                 release_artist=_s(result.get("release_artist")),
                 unfingerprintable=unfingerprintable,
+                file_durations=proof_durations,
             )
             result["missing_track_proof"] = {k: v for k, v in proof.items() if k != "matching_decision"}
             if proof["ok"]:

@@ -96,7 +96,13 @@ def _acoustid_lookup_cached_outcome(file_path: str) -> ProviderResult:
     if cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if isinstance(cached, list):
+            if isinstance(cached, dict):  # v2: {"data","duration"} (ADR-0007 slot tier)
+                data = cached.get("data") or []
+                ev = {"duration": cached["duration"]} if cached.get("duration") else {}
+                return ProviderResult("acoustid",
+                                      ProviderOutcome.CONFIRMED if data else ProviderOutcome.NO_RESULT,
+                                      data=data, from_cache=True, attempts=0, evidence=ev)
+            if isinstance(cached, list):  # legacy: bare list of hits
                 return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if cached else ProviderOutcome.NO_RESULT,
                                       data=cached, from_cache=True, attempts=0)
         except Exception:
@@ -106,7 +112,8 @@ def _acoustid_lookup_cached_outcome(file_path: str) -> ProviderResult:
     if result.outcome in (ProviderOutcome.CONFIRMED, ProviderOutcome.NO_RESULT):
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(result.data or []), encoding="utf-8")
+            payload = {"data": result.data or [], "duration": (result.evidence or {}).get("duration")}
+            cache_path.write_text(json.dumps(payload), encoding="utf-8")
         except Exception:
             pass
     return result
