@@ -265,5 +265,48 @@ class OrphanStagingReconcileTests(_CarrierStateMixin):
         self.assertTrue((music / "real_album.flac").exists())  # live-library file untouched
 
 
+class SymlinkedStagingRootTests(_CarrierStateMixin):
+    """SEC-007/#325 Finding B: a symlinked ``_beets_missing_import`` ROOT must
+    fail closed. Runs the real ``_staging_root`` (no mock) by driving
+    ``validated_downloads_root`` at a temp downloads tree."""
+
+    @unittest.skipUnless(_symlinks_work(), "symlinks unavailable on this host")
+    def test_symlinked_root_to_downloads_cleans_nothing(self):
+        import backend.app_runtime as app_runtime
+        downloads = Path(self.tmp) / "downloads"
+        downloads.mkdir(parents=True, exist_ok=True)
+        # A completed-but-not-yet-imported download sitting at the downloads root.
+        survivor = downloads / "completed-album"
+        survivor.mkdir()
+        (survivor / "01.flac").write_bytes(b"\x00" * 8)
+        t = time.time() - (recovery_service.ORPHAN_MIN_AGE_S + 3600)
+        os.utime(str(survivor), (t, t))
+        # _beets_missing_import is a symlink redirecting the staging root at the
+        # whole downloads root (the escape realpath would have followed).
+        link = downloads / "_beets_missing_import"
+        os.symlink(str(downloads), str(link), target_is_directory=True)
+
+        spy = mock.MagicMock()
+        with mock.patch.object(app_runtime, "validated_downloads_root", return_value=downloads), \
+                mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                mock.patch("backend.composite_workflows.delete_file", spy):
+            # Real _staging_root must refuse the symlinked root outright...
+            self.assertEqual(recovery_service._staging_root(), "")
+            summary = recovery_service.reconcile_orphan_staging_folders(log=[])
+        spy.assert_not_called()                     # ...so no delete is ever attempted
+        self.assertEqual(summary["removed"], 0, summary)
+        self.assertEqual(summary["scanned"], 0, summary)
+        self.assertTrue(survivor.exists())          # the unrelated download survives
+
+    def test_real_dir_root_still_resolves(self):
+        # Sanity: a genuine (non-symlink) staging dir still resolves normally.
+        import backend.app_runtime as app_runtime
+        downloads = Path(self.tmp) / "downloads2"
+        (downloads / "_beets_missing_import").mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(app_runtime, "validated_downloads_root", return_value=downloads):
+            root = recovery_service._staging_root()
+        self.assertEqual(root, os.path.realpath(str(downloads / "_beets_missing_import")))
+
+
 if __name__ == "__main__":
     unittest.main()
