@@ -198,6 +198,40 @@ class OrphanStagingReconcileTests(_CarrierStateMixin):
         self.assertEqual(calls, [os.path.realpath(orphan)])
         self.assertFalse(os.path.exists(orphan))
 
+    def test_per_folder_lookup_failure_fails_closed_no_delete(self):
+        # F8: a transient carrier-store error on the per-folder ownership lookup
+        # must NOT be read as "unowned". An aged folder that could belong to a
+        # LIVE carrier is skipped, never deleted, when the store read raises.
+        orphan = self._folder("rec-livecarrier-old-album", age_s=self.old)
+        spy = mock.MagicMock()
+        log = []
+        with mock.patch.object(rc, "load_for_folder", side_effect=RuntimeError("store down")), \
+                mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                mock.patch("backend.composite_workflows.delete_file", spy):
+            summary = recovery_service.reconcile_orphan_staging_folders(log=log)
+        spy.assert_not_called()                 # fail-closed: no deletion attempted
+        self.assertEqual(summary["removed"], 0, summary)
+        self.assertGreaterEqual(summary["skipped"], 1, summary)
+        self.assertTrue(os.path.exists(orphan))
+        self.assertTrue(any("carrier-store unavailable: RuntimeError" in m for m in log), log)
+
+    def test_prefix_store_read_failure_fails_closed_no_delete(self):
+        # F8: if the live-carrier prefix read itself fails, ownership is UNKNOWN
+        # for every folder this run (a folder could match an unread live-carrier
+        # prefix), so an aged unbound folder is skipped, never deleted.
+        orphan = self._folder("rec-wouldmatch-old-album", age_s=self.old)
+        spy = mock.MagicMock()
+        log = []
+        with mock.patch.object(recovery_service, "_live_carrier_prefixes",
+                               side_effect=RuntimeError("store down")), \
+                mock.patch("backend.composite_workflows.delete_file", spy):
+            summary = recovery_service.reconcile_orphan_staging_folders(log=log)
+        spy.assert_not_called()
+        self.assertEqual(summary["removed"], 0, summary)
+        self.assertGreaterEqual(summary["skipped"], 1, summary)
+        self.assertTrue(os.path.exists(orphan))
+        self.assertTrue(any("carrier-store unavailable: RuntimeError" in m for m in log), log)
+
     def test_bound_live_carrier_folder_is_kept(self):
         folder = self._folder("rec-bound-folder", age_s=self.old)
         rc.create_carrier(existing_album_id=42, mb_releasegroupid=RGID, release_id=RELEASE,
