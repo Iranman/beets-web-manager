@@ -72,16 +72,24 @@ def _write_manifest(folder: str, manifest: Dict[str, Any]) -> None:
     previous complete manifest or this one (H2)."""
     path = os.path.join(folder, MANIFEST_NAME)
     tmp = path + ".tmp"
+    # Containment barrier (SEC-007): callers already pass a server-minted
+    # uuid4 folder or a _manifest_dir()-validated id, but re-resolve and
+    # re-check here, inline before the sink, so the open fail-closes if the
+    # target ever resolves outside the engine's own quarantine root.
+    root = os.path.realpath(_quarantine_root())
+    resolved = os.path.realpath(tmp)
+    if not resolved.startswith(root + os.sep):
+        raise ValueError("manifest path escapes the quarantine root")
     # O_NOFOLLOW: a symlink planted at the .tmp name (by something with write
     # access to the engine's own quarantine dir) must not redirect this write
     # outside the folder. O_TRUNC overwrites a stale tmp left by a prior crash.
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(tmp, flags, 0o644)
+    fd = os.open(resolved, flags, 0o644)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh)
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    os.replace(resolved, path)
 
 
 def _sha256_file(path: str) -> str:
