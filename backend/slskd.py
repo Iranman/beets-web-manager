@@ -1,3 +1,4 @@
+import errno
 import os
 import re
 import shutil
@@ -417,6 +418,98 @@ def cleanup_failed_candidate_files(downloads_root: Path, username: str,
     return removed
 
 
+def _staging_fd_supported() -> bool:
+    """Whether this host can do the fd-relative, symlink-safe staging copy
+    (SEC-007 / #325). Staging fails closed where it cannot -- never a
+    path-based fallback -- matching the rest of the barrier
+    (``composite_workflows._require_dir_fd_support``, ``_unlink_proven_under``)."""
+    return (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+            and os.open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd
+            and os.stat in os.supports_dir_fd and os.rename in os.supports_dir_fd
+            and os.unlink in os.supports_dir_fd)
+
+
+def _staged_copy_nofollow(stage: Path, rel_parts: Sequence[str], src: Path,
+                          overwrite: bool) -> None:
+    """Copy ``src`` into ``stage``/``rel_parts`` fd-relative from the already
+    validated ``stage`` folder (SEC-007 / #325), mirroring the barrier discipline
+    in ``composite_workflows`` (``_staging_dir_fd`` / ``_copy_file_across_fs``).
+
+    Every directory below ``stage`` -- including each ``CD NN`` disc subdir -- is
+    opened, or created, one component at a time with O_DIRECTORY|O_NOFOLLOW, so a
+    component pre-planted as a symlink is refused, never followed out of the
+    staged folder. The bytes are written to an O_CREAT|O_EXCL|O_NOFOLLOW temp and
+    then atomically ``rename``d onto the final name: the rename replaces a dest
+    planted on a deterministic REUSE -- symlink or file -- WITHOUT following it,
+    so downloaded bytes can never land on the symlink's target (config, Beets DB,
+    media). The caller must already have verified ``stage`` itself is a
+    non-symlink directory contained under the downloads root."""
+    parts = [p for p in rel_parts]
+    if not parts or any(p in ("", ".", "..") for p in parts):
+        raise RuntimeError("refusing to stage a file with an unsafe relative path")
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fds = [os.open(str(stage), dir_flags)]
+    try:
+        for name in parts[:-1]:
+            try:
+                fd = os.open(name, dir_flags, dir_fd=fds[-1])
+            except FileNotFoundError:
+                try:
+                    os.mkdir(name, dir_fd=fds[-1])
+                except FileExistsError:  # a concurrent retry made it first
+                    pass
+                fd = os.open(name, dir_flags, dir_fd=fds[-1])
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise RuntimeError(
+                        "refusing to stage through a symlinked folder component") from exc
+                raise
+            fds.append(fd)
+        parent_fd = fds[-1]
+        leaf = parts[-1]
+        if not overwrite:
+            # Fresh (random-prefix) passes never share a folder, but keep the old
+            # de-dupe so a re-run into an existing folder does not clobber a
+            # distinct file: pick a free name by fd-relative lstat.
+            base, ext = os.path.splitext(leaf)
+            n = 1
+            while True:
+                try:
+                    os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    break
+                leaf = f"{base}.{n}{ext}"
+                n += 1
+        tmp = f".{uuid.uuid4().hex[:12]}.part"
+        dfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                      0o600, dir_fd=parent_fd)
+        try:
+            try:
+                with open(src, "rb") as fin, open(dfd, "wb", closefd=False) as fout:
+                    shutil.copyfileobj(fin, fout, 1 << 20)
+                try:  # best-effort copy2-style metadata preservation
+                    sst = os.stat(src)
+                    os.fchmod(dfd, stat.S_IMODE(sst.st_mode))
+                    os.utime(dfd, ns=(sst.st_atime_ns, sst.st_mtime_ns))
+                except OSError:
+                    pass
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+            # rename operates on the name itself: it REPLACES a pre-planted
+            # symlink at ``leaf`` with our regular file rather than following it.
+            os.rename(tmp, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
 def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
                                aldir: str, audio_files: Sequence[Path],
                                artist: str, album: str, log: list,
@@ -463,15 +556,25 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
     # SEC-007 / #325 containment: the staged-folder name is now PREDICTABLE when
     # a deterministic prefix is used, so verify the real path is a non-symlink
     # directory that still resolves under the downloads root before copying into
-    # it. This closes the predictable-path/symlink TOCTOU a random uuid name
-    # previously masked (a pre-planted symlink at the known name would otherwise
-    # redirect the copy out of the root). Enforced for BOTH callers (defence in
+    # it. This validates ONLY the top-level stage dir -- it does NOT by itself
+    # close the per-file TOCTOU, because each dest file and every ``CD NN`` disc
+    # subdir created below could still be pre-planted as a symlink (by a local
+    # writer to this app-private dir, or via a race between recovery retries).
+    # The per-file copy loop below (``_staged_copy_nofollow``) is what closes
+    # that: it traverses fd-relative with O_NOFOLLOW and writes each dest with
+    # O_CREAT|O_EXCL then atomic rename. Enforced for BOTH callers (defence in
     # depth); never trusts the name alone.
     root_resolved = Path(downloads_root).resolve(strict=False)
     stage_resolved = stage.resolve(strict=False)
     if (stage.is_symlink() or not stage_resolved.is_dir()
             or not stage_resolved.is_relative_to(root_resolved)):
         raise RuntimeError("staged import folder is not safely contained in the downloads root")
+    # Fail closed where the host cannot do the fd-relative symlink-safe copy,
+    # rather than fall back to a symlink-following path open (SEC-007 / #325).
+    if not _staging_fd_supported():
+        raise RuntimeError(
+            "refusing to stage recovery files: fd-relative, symlink-safe copy is "
+            "unavailable on this host (needs O_NOFOLLOW and os.supports_dir_fd)")
 
     def _target_dest(src: Path, target: Dict[str, Any]) -> Path:
         try:
@@ -493,27 +596,20 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
             continue
         target = targets[idx] if idx < len(targets) else None
         if target:
-            dest = stage / _target_dest(src, target)
+            rel = _target_dest(src, target)
         else:
             try:
                 rel = src.resolve(strict=False).relative_to(source.resolve(strict=False))
-                dest = stage / rel
             except Exception:
-                dest = stage / src.name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # On a deterministic REUSE of one recovery folder across retries, the
-        # same track re-downloaded maps to the same dest name and must REPLACE
-        # the prior attempt's copy (copy2 overwrites) rather than accumulate
-        # ``name.1``/``name.2`` siblings that would then collide at import. The
-        # random-prefix path keeps the de-dupe suffixing (distinct passes never
-        # share a folder there).
-        if dest.exists() and not reuse:
-            base, ext = dest.stem, dest.suffix
-            n = 1
-            while dest.exists():
-                dest = dest.parent / f"{base}.{n}{ext}"
-                n += 1
-        shutil.copy2(src, dest)
+                rel = Path(src.name)
+        # Copy fd-relative from the validated ``stage`` dir so no parent
+        # component (e.g. a planted ``CD NN`` symlink) and no pre-existing dest
+        # is followed out of the staged folder (SEC-007 / #325). On a
+        # deterministic REUSE across retries the same track maps to the same
+        # name and must REPLACE the prior copy (``overwrite``) rather than
+        # accumulate ``name.1``/``name.2`` siblings that would collide at import;
+        # a fresh random-prefix pass keeps the de-dupe suffixing.
+        _staged_copy_nofollow(stage, rel.parts, src, overwrite=reuse)
         copied += 1
 
     if copied:
