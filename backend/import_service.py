@@ -104,6 +104,48 @@ def _recovery_stage_prefix_for(source_folder: str) -> Optional[str]:
     return ("rec-" + key[:16]) if key else None
 
 
+def _recovery_auto_insert_authorized(folder_path: str, carrier_id: str,
+                                     log: Optional[list] = None) -> Dict[str, Any]:
+    """ARCH-030 Step 4 (library-transaction): the matching contract's
+    ``action_allowed=True`` is the ONLY authorization to auto-insert a staged
+    recovery's files into the library.
+
+    ``carrier_id`` (set by the recovery advancer; a human Review confirm never
+    sets it) marks an UNATTENDED auto-insert. The authorization consumed here is
+    the SERVER-side ``matching_decision`` the advancer already attached to the
+    carrier -- this reads that boolean, it NEVER recomputes a more permissive one
+    -- and the carrier is resolved from the FOLDER binding (not the client id) so
+    a client cannot aim an authorized carrier at an arbitrary folder. On refusal
+    the carrier is kept in manual review with the contract's reason, and no job
+    is started / no file is touched. Fail-closed: a missing/empty decision or an
+    unbound folder refuses. A VERIFIED_SUBSET authorization only ever reaches the
+    existing-album missing-track merge, which acts on the carrier's wanted subset
+    -- never the whole release."""
+    try:
+        carrier = recovery_carrier.load_for_folder(folder_path)
+    except Exception:
+        carrier = None
+    if not carrier or _s(carrier.get("carrier_id")) != _s(carrier_id).strip():
+        return {"ok": False,
+                "reason": "recovery carrier is not bound to this folder; auto-insert refused"}
+    decision = carrier.get("matching_decision") if isinstance(carrier.get("matching_decision"), dict) else {}
+    if decision.get("action_allowed") is True:
+        return {"ok": True}
+    reason = (_s(decision.get("reason")) or _s(decision.get("eligibility_reason"))
+              or _s(decision.get("explanation"))
+              or "matching contract did not authorize an auto-insert (identity not verified)")
+    try:
+        state = _s(carrier.get("state"))
+        if state not in recovery_carrier.TERMINAL_STATES and state not in ("importing", "review_required"):
+            recovery_carrier.advance_state(_s(carrier.get("carrier_id")), "review_required",
+                                           payload_extra={"advancer_reason": reason})
+    except Exception:
+        pass
+    if log is not None:
+        log.append(f"[recovery] auto-insert refused by matching contract: {reason}")
+    return {"ok": False, "reason": reason}
+
+
 def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
                                 artist: str, album: str, log: list,
                                 force_stage: bool = False,
@@ -2942,6 +2984,20 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if folder_error or trusted_folder is None:
         return {"ok": False, "error": folder_error or "Source path is not allowed."}, 400
     folder_path = str(trusted_folder)
+    # ARCH-030 Step 4: an UNATTENDED recovery auto-insert is marked by
+    # recovery_carrier_id (set by the advancer; a human Review confirm never
+    # sends it). The ONLY authorization to auto-insert the staged files is the
+    # matching contract's action_allowed=True, consumed from the carrier's
+    # server-side matching_decision -- never recomputed here. action_allowed!=True
+    # refuses synchronously, before any job starts or any file is touched, and
+    # keeps the carrier in manual review with the contract's reason.
+    _recovery_auto_insert_id = _s(payload.get("recovery_carrier_id")).strip()
+    if _recovery_auto_insert_id:
+        _gate = _recovery_auto_insert_authorized(folder_path, _recovery_auto_insert_id)
+        if not _gate.get("ok"):
+            return {"ok": False,
+                    "error": _gate.get("reason") or "recovery auto-insert not authorized",
+                    "code": "recovery_action_not_allowed"}, 409
     # F16: the caller (the Review page, or the auto-import replaying a stored
     # suggestion) proposes an identity; its evidence is never kept. The review
     # paths below queue only this, and revalidation recomputes the evidence.

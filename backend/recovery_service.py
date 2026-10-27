@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 import backend.job_contract as job_contract
@@ -197,13 +198,159 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
     return summary
 
 
+# A staging folder younger than this is never cleaned up: it may be the target
+# of an in-flight download whose carrier binding has not been written yet (the
+# bind happens once files land). A true old-scheme orphan is far older.
+ORPHAN_MIN_AGE_S = 3600
+
+
+def _staging_root() -> str:
+    """Realpath of the one validated recovery staging root
+    (``<downloads>/_beets_missing_import``), or "" if it cannot be resolved."""
+    try:
+        from backend.app_runtime import validated_downloads_root
+        return os.path.realpath(str(validated_downloads_root() / "_beets_missing_import"))
+    except Exception:
+        return ""
+
+
+def _live_carrier_prefixes(limit: int = 500) -> Dict[str, str]:
+    """``rec-<identity_key[:16]>`` -> carrier_id for every NON-terminal carrier,
+    so a Step-3-scheme orphan folder whose deterministic prefix matches a live
+    carrier can be ADOPTED (re-bound) instead of re-minted. The identity comes
+    from the carrier record; the folder name only carries a server-generated
+    token, never identity derived from the name."""
+    out: Dict[str, str] = {}
+    live_states = [s for s in recovery_carrier.CARRIER_STATES
+                   if s not in recovery_carrier.TERMINAL_STATES]
+    try:
+        for c in recovery_carrier.list_carriers_by_state(live_states, limit=limit):
+            key = _s(c.get("recovery_identity_key")).strip().lower()
+            if key:
+                out.setdefault("rec-" + key[:16], _s(c.get("carrier_id")))
+    except Exception:
+        pass
+    return out
+
+
+def _prefix_owner(folder_name: str, live_prefixes: Dict[str, str]) -> str:
+    for prefix, cid in live_prefixes.items():
+        if folder_name == prefix or folder_name.startswith(prefix + "-"):
+            return cid
+    return ""
+
+
+def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
+                                     log: Optional[List[str]] = None) -> Dict[str, Any]:
+    """ARCH-030 Step 4 (SEC-007/#325 containment): adopt or clean up orphaned
+    non-terminal staging folders under ``_beets_missing_import``.
+
+    Step 3 made staging deterministic (``rec-<16hex>`` reuse) but deliberately
+    left pre-existing per-attempt ``<uuid>-...`` folders behind. This bounded,
+    best-effort sweep:
+
+    * ADOPTS (re-binds, never re-mints) a folder still bound to a carrier, or one
+      whose deterministic ``rec-<16hex>`` prefix matches a LIVE carrier;
+    * CLEANS UP a folder that belongs to no carrier and is safely removable,
+      through the controlled staging-delete path (``composite_workflows.delete_file``),
+      which enforces the SEC-007/#325 model: realpath/commonpath containment inside
+      the validated staging root, no symlink escape, never a staging root itself,
+      NEVER MUSIC_ROOT or protected data, fd-relative, fail-closed.
+
+    Never touches the live music library and never deletes real media outside the
+    staging root. A folder younger than ``ORPHAN_MIN_AGE_S`` is left alone."""
+    import backend.composite_workflows as composite_workflows
+    log = log if log is not None else []
+    summary: Dict[str, Any] = {"scanned": 0, "adopted": 0, "removed": 0,
+                               "kept": 0, "skipped": 0}
+    root = _staging_root()
+    if not root or not os.path.isdir(root):
+        return summary
+    live_prefixes = _live_carrier_prefixes()
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError:
+        return summary
+    now = time.time()
+    cap = int(max(1, limit))
+    for entry in entries:
+        if summary["scanned"] >= cap:
+            break
+        # Immediate child directories only; a symlinked child is never followed.
+        try:
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        child = os.path.join(root, entry.name)
+        summary["scanned"] += 1
+        # Containment pre-check (fail-closed): the realpath must stay strictly
+        # inside the staging root. A component that resolves outside (symlink
+        # escape, mount) is skipped and never handed to the delete path.
+        try:
+            real = os.path.realpath(child)
+            if real == root or os.path.commonpath([real, root]) != root:
+                summary["skipped"] += 1
+                continue
+        except (OSError, ValueError):
+            summary["skipped"] += 1
+            continue
+        # ADOPT: a folder the carrier store still resolves (side table or legacy
+        # last-bound column) belongs to a carrier -- keep it, never delete.
+        try:
+            bound = recovery_carrier.load_for_folder(child)
+        except Exception:
+            bound = None
+        if bound:
+            summary["kept"] += 1
+            continue
+        # ADOPT by deterministic prefix: a Step-3-scheme folder whose rec-<hex>
+        # prefix matches a live carrier is re-bound instead of re-minted.
+        owner = _prefix_owner(entry.name, live_prefixes)
+        if owner:
+            try:
+                recovery_carrier.bind_staged_folder(owner, child)
+                summary["adopted"] += 1
+                log.append(f"[recovery-reconcile] adopted staging folder for carrier {owner}.")
+            except Exception:
+                summary["skipped"] += 1
+            continue
+        # CLEANUP: no carrier owns it. Age guard against an in-flight download.
+        try:
+            if now - os.stat(child).st_mtime < ORPHAN_MIN_AGE_S:
+                summary["skipped"] += 1
+                continue
+        except OSError:
+            summary["skipped"] += 1
+            continue
+        try:
+            res = composite_workflows.delete_file(child)
+            if res.get("deleted"):
+                summary["removed"] += 1
+                log.append(f"[recovery-reconcile] removed orphaned staging folder {entry.name}.")
+            else:
+                summary["skipped"] += 1
+        except (ValueError, OSError) as ex:
+            # delete_file fails closed on a refused/unsafe path or a platform
+            # without fd-relative ops; nothing is removed.
+            summary["skipped"] += 1
+            log.append(f"[recovery-reconcile] skipped {entry.name} ({type(ex).__name__}).")
+    if summary["adopted"] or summary["removed"]:
+        log.append(f"[recovery-reconcile] done: adopted {summary['adopted']}, "
+                   f"removed {summary['removed']}, kept {summary['kept']}, "
+                   f"skipped {summary['skipped']}.")
+    return summary
+
+
 def start_recovery_advance_job(limit: int = DEFAULT_ADVANCE_LIMIT):
     """Start the bounded advancer as ONE guarded, de-duplicated ``job_engine``
     job (the replacement advancer the AI-batch exclusion assumes exists). A
     second start while one runs is refused by the workflow lock / dedupe_key,
     so the sweep is never run concurrently with itself."""
     def _job(log: List[str]) -> Dict[str, Any]:
-        return advance_stuck_carriers(limit=limit, log=log)
+        summary = advance_stuck_carriers(limit=limit, log=log)
+        summary["orphan_reconcile"] = reconcile_orphan_staging_folders(limit=limit, log=log)
+        return summary
 
     guarded = job_contract.guarded(_job, workflow=ADVANCER_WORKFLOW, fail_fast_in_process=True)
     return jobs.start_python(
