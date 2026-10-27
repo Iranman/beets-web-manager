@@ -396,6 +396,8 @@ def _acoustid_cached_fingerprint_ids(file_path: str, limit: int = 5) -> Optional
         cands = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if isinstance(cands, dict):  # v2 cache: {"data","duration"} (ADR-0007 slot tier); legacy bare list still read
+        cands = cands.get("data") or []
     # MI-5: same confirmed-only rule as _acoustid_fingerprint_ids.
     from backend.acoustid_service import _confirmed_recording_ids  # self-import: tests AST-extract this function
     return _confirmed_recording_ids(cands)
