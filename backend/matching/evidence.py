@@ -288,6 +288,34 @@ def evaluate_release_group_candidate(
     if local_release_id and _release_id(candidate) and local_release_id == _release_id(candidate):
         positives.append("embedded_release_id_matches_candidate_release")
 
+    # F7 (ARCH-030): a downloaded file carrying its OWN embedded Release Group
+    # or artist identity that CONTRADICTS the target is a conflict, never a
+    # silent deterministic slot. The embedded tag is read ONLY to DETECT the
+    # contradiction and fail closed to review -- identity is never
+    # reconstructed from it, and a file with no embedded identity is left
+    # untouched (the common recovery case). A download must never silently
+    # change the destination Release Group (ADR-0002).
+    for track in local_tracks:
+        file_rgid = _id(
+            track.get("embedded_release_group_id")
+            or track.get("mb_releasegroupid")
+            or track.get("release_group_id")
+            or ""
+        )
+        if file_rgid and candidate_rgid and file_rgid != candidate_rgid:
+            conflicts.append("file_release_group_conflict")
+            review_reasons.append("file_release_group_conflict")
+        file_artist_id = _id(
+            track.get("embedded_artist_id")
+            or track.get("mb_albumartistid")
+            or track.get("mb_artistid")
+            or track.get("artist_id")
+            or ""
+        )
+        if file_artist_id and candidate_artist_id and file_artist_id != _id(candidate_artist_id):
+            conflicts.append("file_artist_conflict")
+            review_reasons.append("file_artist_conflict")
+
     local_album_title = _album_title(local_album)
     local_artist = _s(local_album.get("artist") or local_album.get("albumartist") or "")
     album_score = similarity(local_album_title, identity.get("release_group_title") or identity.get("release_title") or "")
