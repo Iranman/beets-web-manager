@@ -10,7 +10,9 @@ replaces the lossy allow_existing boolean).
 
 import os
 import shutil
+import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -228,6 +230,108 @@ class ReviewHandoffThreadingTests(unittest.TestCase):
         self.assertTrue(captured["allow_existing"])
         self.assertIn(42, sug["existing_album_ids"])
         self.assertEqual(captured["evidence"]["recovery_carrier"]["existing_album_id"], 42)
+
+
+class V1ToV2UpgradeTests(unittest.TestCase):
+    """F3 regression: opening a real v1 (base-schema) carrier DB must run the
+    v1->v2 migration (ALTER adds recovery_identity_key) BEFORE any index that
+    references that column, or _init_db raises
+    'OperationalError: no such column: recovery_identity_key'. Clean install and
+    v1->v2 upgrade must both succeed and be idempotent."""
+
+    # Exact v1 schema (commit e8ad22c): no recovery_identity_key column and no
+    # recovery_staged_folder side table.
+    V1_CREATE = """
+        CREATE TABLE recovery_carrier (
+            carrier_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            revision INTEGER NOT NULL DEFAULT 1,
+            state TEXT NOT NULL,
+            existing_album_id INTEGER NOT NULL DEFAULT 0,
+            mb_releasegroupid TEXT NOT NULL DEFAULT '',
+            release_id TEXT NOT NULL DEFAULT '',
+            destination_album_path TEXT NOT NULL DEFAULT '',
+            staged_folder_path TEXT NOT NULL DEFAULT '',
+            staged_folder_key TEXT NOT NULL DEFAULT '',
+            origin_job_id TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            writer_id TEXT
+        )
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db = Path(self.tmp) / "rc.db"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build_v1_db(self, staged_folder=""):
+        conn = sqlite3.connect(str(self.db))
+        try:
+            conn.execute(self.V1_CREATE)
+            conn.execute(
+                "CREATE INDEX idx_recovery_carrier_folder ON recovery_carrier(staged_folder_key)")
+            conn.execute(
+                "CREATE INDEX idx_recovery_carrier_job ON recovery_carrier(origin_job_id)")
+            now = time.time()
+            conn.execute(
+                "INSERT INTO recovery_carrier (carrier_id, schema_version, state, "
+                "existing_album_id, mb_releasegroupid, staged_folder_path, payload_json, "
+                "created_at, updated_at) VALUES (?,1,?,?,?,?,?,?,?)",
+                ("legacy-1", "downloading", 42, RGID, staged_folder,
+                 '{"wanted_tracks": [{"track": 6}]}', now, now))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _indexes(self):
+        conn = sqlite3.connect(str(self.db))
+        try:
+            return {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
+        finally:
+            conn.close()
+
+    def _columns(self):
+        conn = sqlite3.connect(str(self.db))
+        try:
+            return {r[1] for r in conn.execute("PRAGMA table_info(recovery_carrier)")}
+        finally:
+            conn.close()
+
+    def test_opening_real_v1_db_upgrades_without_operationalerror(self):
+        self._build_v1_db()
+        # Before the fix this raised OperationalError: no such column:
+        # recovery_identity_key (index created before the ALTER).
+        RecoveryCarrierStore(self.db)
+        self.assertIn("recovery_identity_key", self._columns())
+        self.assertIn("idx_recovery_carrier_identity", self._indexes())
+        # The legacy row is backfilled to v2 with a computed identity key.
+        rec = RecoveryCarrierStore(self.db).get("legacy-1")
+        self.assertEqual(rec["schema_version"], 2)
+        self.assertTrue(rec["recovery_identity_key"])
+
+    def test_v1_upgrade_is_idempotent(self):
+        self._build_v1_db()
+        RecoveryCarrierStore(self.db)   # first upgrade
+        RecoveryCarrierStore(self.db)   # re-open must be a no-op, not re-ALTER
+        self.assertIn("idx_recovery_carrier_identity", self._indexes())
+        self.assertEqual(RecoveryCarrierStore(self.db).get("legacy-1")["schema_version"], 2)
+
+    def test_v1_staged_folder_backfilled_into_side_table(self):
+        folder = os.path.join(self.tmp, "downloads", "legacy staged")
+        os.makedirs(folder, exist_ok=True)
+        self._build_v1_db(staged_folder=folder)
+        store = RecoveryCarrierStore(self.db)
+        self.assertEqual(store.get_by_folder(folder)["carrier_id"], "legacy-1")
+
+    def test_clean_install_creates_v2_schema(self):
+        RecoveryCarrierStore(self.db)
+        self.assertIn("recovery_identity_key", self._columns())
+        self.assertIn("idx_recovery_carrier_identity", self._indexes())
 
 
 if __name__ == "__main__":

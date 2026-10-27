@@ -656,6 +656,10 @@
     "backend/recovery_service.py::_attach_decision": [
       "DISPLAY_ONLY",
       "Records the canonical matching_decision onto the carrier for the Review packet; decides nothing."
+    ],
+    "backend/import_service.py::_recovery_auto_insert_authorized": [
+      "COMPATIBILITY_WRAPPER",
+      "Consume-only gate for the unattended recovery auto-insert (ARCH-030 Step 4): resolves the carrier from the folder binding and reads the canonical matching_decision.action_allowed the advancer already attached. Can only narrow (fail-closed on missing/false decision or unbound folder); never recomputes a decision, computes no similarity/confidence, and makes no identity decision. On refusal returns the carrier to review_required with the contract's reason. The action_allowed pattern hits are its docstring and the boolean read."
     ]
   }
 }
