@@ -36,14 +36,17 @@ def _recovery_carrier_review_identity(carrier: Optional[Dict[str, Any]]) -> Dict
 
 
 def _refresh_recovery_stage(evidence: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Return a copy of a Review item's evidence with ``recovery_carrier.
-    recovery_stage`` recomputed FRESH from the live carrier (QA Finding 7).
+    """Return a copy of a Review item's evidence with the ``recovery_carrier``
+    packet recomputed FRESH from the live carrier (QA Finding 7 + Step 2).
 
-    The stage stored at queue time is a snapshot (taken by the non-auto
-    hand-off BEFORE the carrier advances to review_required), so the queue can
-    show a stale stage. Recomputing on read reflects the carrier's current
-    state+checkpoint. A missing/unreadable carrier keeps the stored snapshot
-    unchanged -- never crash, never fabricate a stage."""
+    The packet stored at queue time is a snapshot (taken by the non-auto
+    hand-off BEFORE the carrier advances / before the advancer computes the
+    matching contract), so the queue can show a stale stage AND a stale
+    confidence. Recomputing the whole ``review_identity`` on read reflects the
+    carrier's current state+checkpoint, its per-track download/verification
+    status, provenance and -- the Step-2 reconciliation -- the single
+    contract-derived confidence + matching_decision. A missing/unreadable
+    carrier keeps the stored snapshot unchanged -- never crash, never fabricate."""
     if not isinstance(evidence, dict):
         return evidence or {}
     rc = evidence.get("recovery_carrier")
@@ -54,11 +57,13 @@ def _refresh_recovery_stage(evidence: Optional[Dict[str, Any]]) -> Dict[str, Any
         carrier = recovery_carrier.get_carrier(carrier_id)
         if not carrier:
             return evidence  # carrier gone: keep the stored snapshot
-        fresh = recovery_carrier.workflow_stage(carrier)
+        fresh_packet = recovery_carrier.review_identity(carrier)
     except Exception:
         return evidence  # unreadable store: keep the stored snapshot
     evidence = dict(evidence)
-    evidence["recovery_carrier"] = {**rc, "recovery_stage": fresh}
+    # Merge the fresh packet over the stored snapshot so any queue-time-only
+    # keys are preserved while stage/confidence/tracks/matching_decision refresh.
+    evidence["recovery_carrier"] = {**rc, **fresh_packet}
     return evidence
 
 

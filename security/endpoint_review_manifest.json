@@ -2981,7 +2981,7 @@
    "method": "POST",
    "endpoint": "fix_leaked_db_paths",
    "security_classification": "ADMIN_ONLY",
-   "purpose": "Fix leaked path DB rows (DB-only update \u2014 no files are moved).",
+   "purpose": "Fix leaked path DB rows (DB-only update — no files are moved).",
    "required_role_or_privilege": "owner/admin shared application secret",
    "handles_secrets": false,
    "accesses_files": true,
@@ -5165,6 +5165,26 @@
     "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
     "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
    ]
+  },
+  {
+   "method": "POST",
+   "endpoint": "import_recovery_advance_job",
+   "security_classification": "ADMIN_ONLY",
+   "purpose": "advance stuck missing-track recovery carriers (ARCH-030 Step 2); re-evaluates against the matching contract and hands gate-passing ones to verified insertion",
+   "required_role_or_privilege": "owner/admin shared application secret",
+   "handles_secrets": false,
+   "accesses_files": true,
+   "creates_background_job": true,
+   "invokes_external_services_or_subprocesses": true,
+   "destructive_or_high_impact": true,
+   "rate_limit_required": true,
+   "rate_limit_implemented": false,
+   "existing_security_tests": [
+    "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+    "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+    "tests/test_mtr_step2_identity_redesign.py::AdvancerTests::test_advancer_hands_off_gatepass_and_keeps_manual_in_review"
+   ],
+   "step6_security_review_pending": true
   }
  ]
 }

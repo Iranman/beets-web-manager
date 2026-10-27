@@ -7,6 +7,10 @@ import backend.provider_boundary as provider_boundary
 import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
+from backend.matching import (
+    DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR as _SLOT_ARTIST_TEXT_FLOOR,
+    candidate_is_unrelated as _candidate_is_unrelated,
+)
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _env_int, _s
@@ -488,6 +492,28 @@ def _ai_suggest_album_internal(
         c["acoustid_release_hits"] = acoustid_release_hits.get(c.get("mb_albumid", ""), 0)
         c["_match_score"] = _score_mb_release_candidate(album_ev, c)
     mb_candidates.sort(key=lambda c: c["_match_score"]["total"], reverse=True)
+    # ARCH-030 item 5: when the target album's canonical Release Group is known
+    # (a recovery/repair pins identity -- it is NOT reconstructed from the
+    # folder/tag title), apply the Step-1 relatedness veto so a title-collision
+    # release on an UNRELATED Release Group (e.g. FLEUR "FOREVER FOREVER" vs
+    # 112 "Forever") can never sort first as the primary suggestion. A stable
+    # partition keeps the scorer's order within each group and is a strict
+    # no-op when no target RG is known (text-only suggestion ranking unchanged).
+    _target_rg = _s(getattr(album, "mb_releasegroupid", "")).strip()
+    if _target_rg and mb_candidates:
+        _target_artist_id = _s(getattr(album, "mb_albumartistid", "")).strip()
+        _target_artist = _s(getattr(album, "albumartist", "")).strip()
+
+        def _unrelated(c: Dict[str, Any]) -> bool:
+            try:
+                return _candidate_is_unrelated(
+                    c, target_release_group_id=_target_rg,
+                    target_artist_id=_target_artist_id, target_artist=_target_artist,
+                    artist_text_floor=_SLOT_ARTIST_TEXT_FLOOR)
+            except Exception:
+                return False
+
+        mb_candidates.sort(key=_unrelated)  # stable: unrelated RGs sink below related/unknown
     if not mb_candidates:
         sug = {
             "candidate_index": -1,

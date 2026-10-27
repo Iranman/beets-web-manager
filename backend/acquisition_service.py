@@ -322,6 +322,29 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         if not (_carrier_identity_matches(_existing)
                 and _requested_tracks_covered(_existing)):
             _resume_carrier_id = ""
+    # Step-2 dedup/resume: the SERVER-derived stable recovery identity
+    # (existing album | canonical RG | sorted wanted-track signatures). Two
+    # identical "download missing" requests resolve to the SAME key, so the
+    # second RESUMES the existing non-terminal carrier instead of minting a new
+    # one -- fixing the duplicate-folder storm and giving the recovery path the
+    # same cross-request + sequential dedup the full-album content-hash path has.
+    # Never client-trusted: derived only from the already-validated structured
+    # request fields, never from the client carrier id or a folder name.
+    _recovery_identity_key = (
+        recovery_carrier.compute_identity_key(existing_album_id, _requested_rgid, wanted_tracks)
+        if _is_recovery else "")
+    if _is_recovery and not _resume_carrier_id and _recovery_identity_key:
+        try:
+            _by_identity = recovery_carrier.get_by_identity(identity_key=_recovery_identity_key)
+        except Exception:
+            _by_identity = None
+        # A non-terminal carrier for this exact identity is this recovery:
+        # resume it (and its one guarded workflow + staged folder set) rather
+        # than start a parallel one. The identity match + track-coverage checks
+        # are the same ones the client-id resume path uses (defense in depth).
+        if (_by_identity and _carrier_identity_matches(_by_identity)
+                and _requested_tracks_covered(_by_identity)):
+            _resume_carrier_id = _s(_by_identity.get("carrier_id")).strip()
     _recovery_carrier_id = (_resume_carrier_id or uuid.uuid4().hex) if _is_recovery else ""
 
     def _do(log, cancel_event=None):
@@ -1185,11 +1208,19 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     label = f"{_download_method_job_label(method)} Import: {artist} – {album}"
     # One download+import per album at a time, across processes and restarts.
     # A missing-track recovery runs as ONE guarded, resumable workflow keyed on
-    # the carrier id, so a restart resumes the same recovery (its job record
-    # carries this slug) instead of splitting into decoupled jobs (ARCH-030).
-    # A plain full-album download keeps the per-album download-import workflow.
+    # the STABLE server-derived identity (not the ephemeral per-request carrier
+    # uuid), so two concurrent duplicate requests collide on the same workflow
+    # lock (fail_fast => the second is refused as a live duplicate) and a
+    # restart resumes the same recovery -- cross-request + sequential dedup
+    # parity with the full-album content-hash path (ARCH-030). A plain
+    # full-album download keeps the per-album download-import workflow.
     if _is_recovery and _recovery_carrier_id:
-        workflow = recovery_carrier.recovery_workflow_id(_recovery_carrier_id)
+        # Hash the identity to a lock-safe 16-char slug (the full-album path
+        # hashes its content key the same way); the raw 64-char key exceeds the
+        # resource-lock key length limit.
+        workflow = recovery_carrier.recovery_workflow_id(
+            job_contract.slug(_recovery_identity_key) if _recovery_identity_key
+            else _recovery_carrier_id)
     else:
         workflow = "download-import-" + job_contract.slug(f"{artist}|{album}|{mb_albumid}")
     job = jobs.start_python(job_contract.guarded(_do_and_patch, workflow=workflow, fail_fast_in_process=True), label=label,

@@ -628,6 +628,34 @@
     "backend/playlist_service.py::_playlist_query_match_variants": [
       "CANDIDATE_GENERATION_ONLY",
       "Builds (artist,title) query shapes (title split, dash-order variants) for playlist candidate scoring; makes no final decision and mutates no library data."
+    ],
+    "backend/recovery_carrier.py::contract_confidence": [
+      "DISPLAY_ONLY",
+      "Derives the single review-row confidence string from the already-computed matching_decision contract (reads action_allowed/identity_proof); decides nothing."
+    ],
+    "backend/recovery_carrier.py::review_identity": [
+      "DISPLAY_ONLY",
+      "Flattens the carrier into the Review packet (identity + matching_decision + display confidence + per-track status); decides nothing."
+    ],
+    "backend/pending_review_store.py::_refresh_recovery_stage": [
+      "DISPLAY_ONLY",
+      "Refreshes the Review item's recovery packet for display from the live carrier; decides nothing."
+    ],
+    "routes_import.py::_review_row_confidence": [
+      "DISPLAY_ONLY",
+      "Selects the Review row's display confidence from the canonical matching_decision contract; decides nothing."
+    ],
+    "backend/recovery_service.py::<module>": [
+      "COMPATIBILITY_WRAPPER",
+      "Recovery lifecycle advancer; consumes canonical matching_decision.action_allowed to authorize verified insertion (can only narrow), never makes an identity decision."
+    ],
+    "backend/recovery_service.py::_reevaluate_carrier": [
+      "COMPATIBILITY_WRAPPER",
+      "Runs the canonical folder preflight and reads its action_allowed as a consume-only gate; decides nothing itself."
+    ],
+    "backend/recovery_service.py::_attach_decision": [
+      "DISPLAY_ONLY",
+      "Records the canonical matching_decision onto the carrier for the Review packet; decides nothing."
     ]
   }
 }

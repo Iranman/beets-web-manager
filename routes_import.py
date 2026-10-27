@@ -433,6 +433,25 @@ def _review_row_has_evidence(row: Dict[str, Any]) -> bool:
     return bool(evidence.get("top_candidates") or evidence.get("preflight"))
 
 
+def _review_row_confidence(suggestion: Dict[str, Any], evidence: Dict[str, Any]) -> str:
+    """The SINGLE review-row confidence (ARCH-030 E1). For a recovery item it
+    derives from the matching_decision CONTRACT (the fresh carrier packet),
+    never the stale coarse ``suggestion['confidence']`` ("low") copied at queue
+    time. A non-recovery row keeps the suggestion value unchanged."""
+    from backend.recovery_carrier import contract_confidence
+    ev = evidence if isinstance(evidence, dict) else {}
+    rc_pkt = ev.get("recovery_carrier") if isinstance(ev.get("recovery_carrier"), dict) else None
+    if rc_pkt is not None:
+        md = rc_pkt.get("matching_decision") if isinstance(rc_pkt.get("matching_decision"), dict) else {}
+        conf = _s(rc_pkt.get("confidence")) or contract_confidence(md)
+        # A recovery item reflects the contract (or "" while none is computed
+        # yet) -- it never falls back to the stale suggestion "low".
+        return conf
+    md = ev.get("matching_decision") if isinstance(ev.get("matching_decision"), dict) else {}
+    conf = contract_confidence(md)
+    return conf or _s(suggestion.get("confidence", ""))
+
+
 _SKIPPED_SCAN_CAP = 2000  # same ceiling as /api/import-skipped
 
 
@@ -471,6 +490,10 @@ def import_review_queue():
                 item=item,
                 evidence=item.get("evidence") or {},
             )
+            # Step 2 (ARCH-030 E1): refresh the carrier packet FIRST so both the
+            # row's single confidence and its served evidence derive from the
+            # live matching_decision contract, never the stale coarse suggestion.
+            refreshed_evidence = _refresh_recovery_stage(item.get("evidence") or {})
             blocked = _review_blocked_metadata(item_status, s.get("reason", ""), s, item.get("evidence") or {})
             rows.append({
                 "id": "pending:" + item.get("path", ""),
@@ -486,7 +509,7 @@ def import_review_queue():
                 "path": item.get("path", ""),
                 "folder": str(Path(item.get("path", "")).parent) if item.get("path") else "",
                 "folder_name": item.get("folder_name", ""),
-                "confidence": s.get("confidence", ""),
+                "confidence": _review_row_confidence(s, refreshed_evidence),
                 "reason": s.get("reason", ""),
                 "mb_albumid": s.get("mb_albumid", ""),
                 "mb_releasegroupid": s.get("mb_releasegroupid", ""),
@@ -506,7 +529,7 @@ def import_review_queue():
                 # Recompute the carrier-backed recovery stage FRESH at read time
                 # so the queue reflects the carrier's current state, not the
                 # snapshot captured when the item was queued (QA Finding 7).
-                "evidence": _refresh_recovery_stage(item.get("evidence") or {}),
+                "evidence": refreshed_evidence,
                 **origin_info,
             })
     except Exception:
@@ -701,6 +724,22 @@ def import_review_auto_enqueue_ready_job():
     job = jobs.start_python(_do, label="Auto-import ready review items", metadata={
         "type": "import-review-auto-enqueue-ready", "category": "import", "mutating": True,
         "dedupe_key": "import-review-auto-enqueue-ready", "limit": limit})
+    return jsonify({"ok": True, "job_id": job.job_id, "limit": limit})
+
+
+@app.post("/api/import/recovery/advance")
+def import_recovery_advance_job():
+    """Start the bounded, idempotent missing-track-recovery advancer
+    (ARCH-030 Step 2): re-evaluate stuck / review_required carriers against the
+    matching contract and hand gate-passing ones to verified insertion. The job
+    is deduplicated (dedupe_key) and guarded by a workflow lock, so a second
+    start while one runs returns 409 via the DuplicateJobError handler."""
+    import backend.recovery_service as recovery_service
+    payload = request.get_json(silent=True) or {}
+    limit, err = _limit_arg(payload, recovery_service.DEFAULT_ADVANCE_LIMIT, 200)
+    if err:
+        return _invalid_param(err)
+    job = recovery_service.start_recovery_advance_job(limit=limit or recovery_service.DEFAULT_ADVANCE_LIMIT)
     return jsonify({"ok": True, "job_id": job.job_id, "limit": limit})
 
 

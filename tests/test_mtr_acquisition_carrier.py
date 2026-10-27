@@ -134,8 +134,15 @@ class AcquisitionCarrierTests(unittest.TestCase):
         cid = res.metadata["recovery_carrier_id"]
         self.assertTrue(cid)
 
-        # (3) ONE guarded workflow keyed on the carrier -> resumable, not split.
-        self.assertEqual(res.workflow, recovery_carrier.recovery_workflow_id(cid))
+        # (3) ONE guarded workflow keyed on the STABLE server-derived identity
+        # (Step-2 dedup parity), not the ephemeral per-request carrier uuid, so
+        # two identical requests collide on one workflow lock -> resumable, not
+        # split. The slug hashes the identity key to a lock-safe 16-char slug.
+        expected_key = recovery_carrier.compute_identity_key(
+            42, RGID, [{"track": 6, "title": "Last Song", "recording_id": "rec-6"}])
+        self.assertEqual(
+            res.workflow,
+            recovery_carrier.recovery_workflow_id(job_contract.slug(expected_key)))
 
         carrier = recovery_carrier.get_carrier(cid)
         self.assertIsNotNone(carrier)
