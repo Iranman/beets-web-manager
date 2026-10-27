@@ -206,10 +206,24 @@ ORPHAN_MIN_AGE_S = 3600
 
 def _staging_root() -> str:
     """Realpath of the one validated recovery staging root
-    (``<downloads>/_beets_missing_import``), or "" if it cannot be resolved."""
+    (``<downloads>/_beets_missing_import``), or "" if it cannot be resolved or if
+    that root is itself a symlink.
+
+    SEC-007/#325 (Finding B): ``realpath`` would silently FOLLOW a symlinked
+    ``_beets_missing_import`` (attacker pre-plant or a benign relocation symlink)
+    to its target -- e.g. the whole ``<downloads>`` root -- and ``root`` would
+    then equal that target, so the per-child realpath/commonpath containment
+    check in ``reconcile_orphan_staging_folders`` would accept the target's aged,
+    unowned top-level entries for cleanup (destroying not-yet-imported downloads).
+    Failing closed on a symlinked root (``lstat`` via ``islink``, which never
+    follows the final component) keeps ``root`` the genuine staging directory, so
+    cleanup can only ever touch entries truly inside it."""
     try:
         from backend.app_runtime import validated_downloads_root
-        return os.path.realpath(str(validated_downloads_root() / "_beets_missing_import"))
+        path = str(validated_downloads_root() / "_beets_missing_import")
+        if os.path.islink(path):
+            return ""
+        return os.path.realpath(path)
     except Exception:
         return ""
 
