@@ -238,12 +238,28 @@ export function RecoveryReviewCard({
   const acoustidChip = classifyAcoustid(fingerprint, suggestion?.acoustid_status);
   const aiChip = classifyAi(aiStatus, providerHealth?.ai);
 
-  // The single primary action label is derived from the contract when the page
-  // does not override it. action_allowed governs; nothing else grants it.
+  // Product direction: "auto when deterministic evidence is strong; ELSE
+  // MANUAL". The single primary slot serves both:
+  //  - AUTO path (action_allowed === true): an automatic import, allowed only
+  //    by the backend's deterministic gate. Unchanged.
+  //  - MANUAL path (action_allowed !== true): a clearly-labelled human confirm
+  //    that routes through the EXISTING human Review import call — the same
+  //    onPrimaryAction the pre-redesign footer Apply/Import button used
+  //    (page startApply -> confirm dialog -> runApply, which carries NO
+  //    recovery_carrier_id and is therefore human-authorized, still fully
+  //    server-side validated; it is never the unattended auto-gated advancer).
+  // The manual path never flips the auto-gate and never selects an alternative
+  // candidate: the target identity is always the carrier's canonical Release
+  // Group shown in WANTED above — an unrelated title-collision candidate can
+  // never become the confirmed target.
   const actionAllowed = decision?.action_allowed === true;
-  const defaultLabel = actionAllowed ? 'Import recovered track' : 'Needs verification before import';
-  const label = primaryActionLabel || defaultLabel;
-  const disabled = Boolean(primaryActionDisabled) || !actionAllowed || Boolean(busy);
+  const autoLabel = primaryActionLabel || 'Import recovered track';
+  const label = actionAllowed ? autoLabel : 'Review & import manually';
+  // action_allowed gates only the AUTOMATIC path. The human path is gated only
+  // by the page's real block reasons (busy / applyBlockedReason, carried in
+  // primaryActionDisabled) — so a legitimately-in-review recovery can still be
+  // completed by a human.
+  const disabled = Boolean(primaryActionDisabled) || Boolean(busy);
 
   const alternatives = alternativeCandidates(item, suggestion);
   const confidence = (carrier.confidence || '').trim();
@@ -389,24 +405,42 @@ export function RecoveryReviewCard({
           ) : null}
         </section>
 
-        {/* ── NEXT ── exactly one primary action. */}
-        <section data-recovery-section="next" className="flex flex-wrap items-center gap-3">
+        {/* ── NEXT ── exactly one primary action. In the AUTO case it is the
+            automatic import; in the MANUAL case the same slot becomes the
+            human-review confirm (visibly distinct, never an automatic action). */}
+        <section data-recovery-section="next" className="flex flex-col gap-2">
           <h3 className="sr-only">Next</h3>
-          {onPrimaryAction ? (
-            <button
-              type="button"
-              onClick={onPrimaryAction}
-              disabled={disabled}
-              data-testid="recovery-primary-action"
-              className="rounded bg-violet-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-500"
-            >
-              {label}
-            </button>
-          ) : null}
+          <div className="flex flex-wrap items-center gap-3">
+            {onPrimaryAction ? (
+              <button
+                type="button"
+                onClick={onPrimaryAction}
+                disabled={disabled}
+                data-testid="recovery-primary-action"
+                data-recovery-action-mode={actionAllowed ? 'auto' : 'manual'}
+                className={
+                  actionAllowed
+                    ? 'rounded bg-violet-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-500'
+                    : 'rounded border border-violet-600 bg-white px-3 py-1.5 text-sm font-semibold text-violet-800 hover:bg-violet-50 disabled:cursor-not-allowed disabled:border-zinc-300 disabled:text-zinc-400'
+                }
+              >
+                {label}
+              </button>
+            ) : null}
+            {!actionAllowed ? (
+              <span className="rounded border border-violet-300 bg-violet-50 px-1.5 py-0.5 text-xs font-semibold text-violet-800">
+                Manual review — not an automatic import
+              </span>
+            ) : null}
+          </div>
           {!actionAllowed ? (
-            <span className="text-xs text-zinc-600">
-              {decision?.recommended_action || decision?.explanation || 'Verify the download matches this album before importing.'}
-            </span>
+            <p className="text-xs text-zinc-600" data-testid="recovery-manual-note">
+              Automatic import is not allowed:{' '}
+              {decision?.recommended_action || decision?.explanation || 'verify the download matches this album before importing.'}{' '}
+              You can still confirm this import by hand — it imports into{' '}
+              <span className="font-semibold text-zinc-800">{albumName}</span> (the canonical Release Group shown above),
+              never an alternative candidate, and the backend still validates it.
+            </p>
           ) : null}
         </section>
 

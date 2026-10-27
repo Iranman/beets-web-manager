@@ -143,15 +143,7 @@ describe('RecoveryReviewCard — information architecture', () => {
     }
   });
 
-  it('exposes exactly one primary action, disabled while the contract does not allow import', () => {
-    render(<RecoveryReviewCard item={item(carrier())} onPrimaryAction={() => {}} />);
-    const buttons = screen.getAllByTestId('recovery-primary-action');
-    expect(buttons).toHaveLength(1);
-    expect((buttons[0] as HTMLButtonElement).disabled).toBe(true);
-    expect(buttons[0].textContent).toMatch(/needs verification/i);
-  });
-
-  it('enables the primary action and fires it when the contract allows import', () => {
+  it('keeps exactly one primary action — the AUTO import — when the contract allows it', () => {
     const onPrimary = vi.fn();
     const c = carrier({
       matching_decision: {
@@ -161,10 +153,65 @@ describe('RecoveryReviewCard — information architecture', () => {
       },
     });
     render(<RecoveryReviewCard item={item(c)} onPrimaryAction={onPrimary} />);
-    const btn = screen.getByTestId('recovery-primary-action') as HTMLButtonElement;
+    const buttons = screen.getAllByTestId('recovery-primary-action');
+    expect(buttons).toHaveLength(1);
+    const btn = buttons[0] as HTMLButtonElement;
+    expect(btn.getAttribute('data-recovery-action-mode')).toBe('auto');
+    expect(btn.textContent).toMatch(/import recovered track/i);
     expect(btn.disabled).toBe(false);
     btn.click();
     expect(onPrimary).toHaveBeenCalledTimes(1);
+    // No competing manual note while auto is allowed.
+    expect(screen.queryByTestId('recovery-manual-note')).toBeNull();
+  });
+
+  // F5 (QA FAIL) regression guard: a recovery legitimately in manual review
+  // (action_allowed=false, e.g. AcoustID unavailable) must still be completable
+  // by a human, through the SAME onPrimaryAction the human Review import uses —
+  // without re-introducing a competing auto-import.
+  it('exposes a human-review confirm (not an automatic action) when the contract does NOT allow auto-import', () => {
+    const onPrimary = vi.fn();
+    render(<RecoveryReviewCard item={item(carrier())} onPrimaryAction={onPrimary} />);
+    const buttons = screen.getAllByTestId('recovery-primary-action');
+    // Still exactly one primary action — no two competing auto/manual buttons.
+    expect(buttons).toHaveLength(1);
+    const btn = buttons[0] as HTMLButtonElement;
+    // It is the MANUAL human path, visibly not automatic.
+    expect(btn.getAttribute('data-recovery-action-mode')).toBe('manual');
+    expect(btn.textContent).toMatch(/review & import manually/i);
+    expect(btn.textContent).not.toMatch(/\bimport recovered track\b/i);
+    // It is usable (not blocked by action_allowed) and invokes the human import.
+    expect(btn.disabled).toBe(false);
+    btn.click();
+    expect(onPrimary).toHaveBeenCalledTimes(1);
+    // The note makes clear this is a human-reviewed import, not an auto one.
+    expect(screen.getByTestId('recovery-manual-note').textContent).toMatch(/not allowed/i);
+  });
+
+  it('manual-confirm never names an unrelated/alternative candidate as the target', () => {
+    const onPrimary = vi.fn();
+    render(
+      <RecoveryReviewCard item={item(carrier())} suggestion={suggestionWithFleur(false)} onPrimaryAction={onPrimary} />,
+    );
+    const btn = screen.getByTestId('recovery-primary-action') as HTMLButtonElement;
+    expect(btn.getAttribute('data-recovery-action-mode')).toBe('manual');
+    // The confirmed target is the carrier album, never the FLEUR collision.
+    expect(btn.textContent).not.toMatch(/FOREVER FOREVER|FLEUR/i);
+    const note = screen.getByTestId('recovery-manual-note');
+    expect(note.textContent).toMatch(/Forever/);
+    expect(note.textContent).not.toMatch(/FOREVER FOREVER|FLEUR/i);
+    // The manual path still routes to the human import callback, unchanged.
+    btn.click();
+    expect(onPrimary).toHaveBeenCalledTimes(1);
+  });
+
+  it('respects the page block gate (busy / applyBlockedReason) for the manual confirm', () => {
+    const onPrimary = vi.fn();
+    render(<RecoveryReviewCard item={item(carrier())} onPrimaryAction={onPrimary} primaryActionDisabled busy />);
+    const btn = screen.getByTestId('recovery-primary-action') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    btn.click();
+    expect(onPrimary).not.toHaveBeenCalled();
   });
 
   it('returns null for a non-recovery item', () => {
@@ -204,8 +251,9 @@ describe('RecoveryReviewCard — expected vs suggested (req 6): unrelated never 
     );
     const btn = screen.getByTestId('recovery-primary-action');
     expect(btn.textContent).not.toMatch(/FOREVER FOREVER|FLEUR/i);
-    // The disabled, carrier-bound primary never carries the collision identity.
-    expect((btn as HTMLButtonElement).disabled).toBe(true);
+    // The carrier-bound primary (here the manual confirm, since auto is not
+    // allowed) never carries the collision identity.
+    expect(btn.getAttribute('data-recovery-action-mode')).toBe('manual');
   });
 });
 
