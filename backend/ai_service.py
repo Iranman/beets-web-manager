@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import functools, hashlib, json, os, re, stat, threading, time, uuid
+import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
 from pathlib import Path
@@ -747,9 +747,37 @@ def _ai_suggest_album_internal(
         return {"ok": False, "error": "Could not generate suggestions."}
 
 
+# ── AI review / history state files ─────────────────────────────────────────
+# ARCH-034: these are Web Manager application state (import history, AI match
+# history, legacy review decisions), never authoritative Beets library state,
+# so they live under WEB_MANAGER_DATA_DIR -- the root this container owns --
+# like _AI_BATCH_STATE_DIR and recovery_carrier, not under /config (the Beets
+# config mount). WEB_MANAGER_DATA_DIR itself is the configurable knob; no
+# per-file override (mirrors recovery_carrier).
+#
+# Older deployments wrote these under /config. _migrate_legacy_config_state()
+# moves each one to its new home ONCE, on first import, with no data loss:
+#   old exists, new absent -> move (shutil.move handles a cross-device mount);
+#   both exist             -> keep the new file (newer data wins), old untouched;
+#   neither                -> nothing, the feature just starts empty.
+# A move failure is logged and leaves the old file in place -- never deleted.
+def _migrate_legacy_config_state(old: Path, new: Path) -> None:
+    try:
+        if new.exists() or not old.exists():
+            return
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old), str(new))
+        _app_logger.info("ARCH-034: migrated %s to %s", old, new)
+    except Exception as exc:
+        _app_logger.warning(
+            "ARCH-034 state migration skipped for %s: %s", old.name, type(exc).__name__
+        )
+
+
 # ── AI Match history ──────────────────────────────────────────────────────────
 
-_AI_MATCH_HISTORY_FILE = Path("/config/ai_match_history.json")
+_AI_MATCH_HISTORY_FILE = WEB_MANAGER_DATA_DIR / "ai_match_history.json"
+_migrate_legacy_config_state(Path("/config/ai_match_history.json"), _AI_MATCH_HISTORY_FILE)
 
 
 _ai_match_history_lock = threading.Lock()
@@ -2687,7 +2715,8 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
 # Lives here, the lowest layer with an import completion path (batch import);
 # import_service and routes_import record through it too (F9).
 
-_RECENT_IMPORTS_FILE = Path("/config/recent_imports.json")
+_RECENT_IMPORTS_FILE = WEB_MANAGER_DATA_DIR / "recent_imports.json"
+_migrate_legacy_config_state(Path("/config/recent_imports.json"), _RECENT_IMPORTS_FILE)
 
 
 _recent_imports_lock = threading.Lock()
@@ -2912,7 +2941,10 @@ def _auto_merge_case_duplicate_artist_folder(root: str, albumartist: str,
     return bool(summary.get("folders"))
 
 
-_AI_REVIEW_DECISIONS_FILE = Path("/config/ai_review_decisions.json")
+# Legacy JSON folded into the SQLite store by migrate_legacy_files() at
+# startup; move it to the new home first so that migration still finds it.
+_AI_REVIEW_DECISIONS_FILE = WEB_MANAGER_DATA_DIR / "ai_review_decisions.json"
+_migrate_legacy_config_state(Path("/config/ai_review_decisions.json"), _AI_REVIEW_DECISIONS_FILE)
 
 
 _AI_BATCH_AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aiff", ".wv", ".ape"}

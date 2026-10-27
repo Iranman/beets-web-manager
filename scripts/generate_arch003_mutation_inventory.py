@@ -147,6 +147,11 @@ _APP_STATE_VERIFIED_FUNCTIONS = frozenset({
     "_library_import_all_write_last",
     "_load_pending_reviews",
     "_mark_pending_review_status",
+    # ARCH-034: one-time move of Web Manager's own AI review/history JSON state
+    # from the old /config home to WEB_MANAGER_DATA_DIR. App state, not a music
+    # library mutation (so it is not an engine/transaction path), like the
+    # _record_ai_match / _record_recent_import writers it relocates.
+    "_migrate_legacy_config_state",
     "_record_ai_review_decision",
     "_record_ai_match",
     "_record_import_skips",

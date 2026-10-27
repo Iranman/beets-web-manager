@@ -313,6 +313,10 @@ export interface ReviewItem {
   recording_id_conflicts?: string[];
   title_mismatch_warnings?: string[];
   required_review?: boolean;
+  /** ARCH-034: the stored AI suggestion's folder_signature no longer matches
+   * the folder's current contents, so it should be re-run (Find Match) before
+   * trusting it. Apply still requires its own fresh match/preview regardless. */
+  suggestion_stale?: boolean;
   suggestion?: AiSuggestion;
   origin_type?: ReviewOriginType;
   origin_label?: string;

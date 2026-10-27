@@ -1830,6 +1830,23 @@ export function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?:
   return { rows, warnings };
 }
 
+/** ARCH-034: marks a stored AI suggestion whose folder changed since it was
+ *  generated, so the operator knows to re-run Find Match instead of trusting
+ *  it. Hidden once a fresh candidate is selected (its own preflight governs).
+ *  Surfacing only -- Apply still requires a fresh match/preview regardless. */
+export function SuggestionStaleBadge({ item, selectedMatchActive }: { item: ReviewItem; selectedMatchActive: boolean }) {
+  if (!item.suggestion_stale || selectedMatchActive) return null;
+  return (
+    <Chip
+      size="small"
+      color="warning"
+      variant="outlined"
+      label="Suggestion stale"
+      title="The folder changed since this suggestion was generated. Run Find Match again before importing."
+    />
+  );
+}
+
 export function MatchingSafetyPanel({ response, selectedMatch }: { response?: AiSuggestResponse; selectedMatch?: SelectedMatch }) {
   const { rows, warnings } = matchingSafetyData(response, selectedMatch);
   if (!rows.length && !warnings.length) return null;
@@ -2888,6 +2905,7 @@ export function ReviewCard({
                   title="A folder in the Import Review queue already targets this album. Resolve it there first, or match here if you are sure."
                 />
               ) : null}
+              <SuggestionStaleBadge item={item} selectedMatchActive={selectedMatchActive} />
             </div>
 
             <h2 className="mt-3 truncate text-lg font-semibold text-zinc-950">{itemTitle(item)}</h2>
