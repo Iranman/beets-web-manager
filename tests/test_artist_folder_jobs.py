@@ -17,7 +17,10 @@ class ArtistFolderJobsTests(unittest.TestCase):
         ]
         merge_route = app_source[
             app_source.index('@app.post("/api/clean/artist-folders/merge")'):
-            app_source.index("def _stamp_artist_folder_candidates")
+            # (was: def _stamp_artist_folder_candidates, removed by the W2
+            # dead-code sweep; the merge route is directly followed by the
+            # stamp-mbid route in routes_cleanup.py)
+            app_source.index('@app.post("/api/clean/artist-folders/stamp-mbid")')
         ]
         stamp_route = app_source[
             app_source.index('@app.post("/api/clean/artist-folders/stamp-mbid")'):

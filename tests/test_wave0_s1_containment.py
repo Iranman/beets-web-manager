@@ -255,13 +255,6 @@ class AlbumCleanupTests(_Env):
         self.assertTrue(res["ok"])
         self.assertEqual(ad.destructive_calls(), [("remove", [], [8], False)])
 
-    def test_library_failed_import_helper_never_deletes_files(self):
-        import backend.library_service as ls
-        ad = self._ad()
-        with mock.patch.object(cw, "beets_adapter", ad), mock.patch.object(cw, "_default_store", self.store):
-            ls._delete_album_ids_from_db([8], [], delete_files=True)
-        self.assertEqual(ad.destructive_calls(), [("remove", [], [8], False)])
-
     def test_confirmed_import_honours_copy_mode(self):
         ad = mock.MagicMock()
         ad.find_all_albums_by_mb_albumid.return_value = []

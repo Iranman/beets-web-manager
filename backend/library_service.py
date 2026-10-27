@@ -844,96 +844,6 @@ def _delete_source_folder_already_in_library(src_path: str, log: list, *,
     return True
 
 
-def _delete_album_ids_from_db(album_ids: list, log: list, *,
-                              delete_files: bool = False) -> int:
-    """Remove failed imported album rows through the engine transaction boundary."""
-    ids = [int(aid) for aid in album_ids if str(aid).isdigit()]
-    if not ids:
-        return 0
-    removed_files = 0
-    removed_albums = 0
-    if delete_files:
-        log.append("  Failed-import cleanup removes Beets rows only; audio files are kept on disk.")
-    for aid in ids:
-        try:
-            # LT-17: row-only, whatever delete_files says.
-            res = composite_workflows.remove_album_rows_after_failed_import(
-                int(aid), reason="failed import cleanup")
-        except BeetsUnavailableError as ex:
-            log.append(f"  Engine unavailable during failed-import cleanup for album_id {aid}: {ex}")
-            continue
-        except BeetsError as ex:
-            log.append(f"  Engine cleanup rejected album_id {aid}: {ex}")
-            continue
-        except Exception as ex:
-            _app_logger.warning("Failed-import cleanup failed for album_id=%s: %s", aid, type(ex).__name__)
-            log.append(f"  Engine cleanup failed for album_id {aid}")
-            continue
-        if not res.get("ok") and not res.get("success"):
-            log.append(f"  Engine cleanup rejected album_id {aid}: {res.get('error') or 'unknown error'}")
-            continue
-        removed_albums += 1
-        log.append(f"  Removed failed import album_id {aid} rows through an engine transaction (files kept)")
-    if removed_albums:
-        log.append(f"  Removed failed import DB rows for {removed_albums} album(s); no file was deleted")
-    return removed_files
-
-
-def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list) -> int:
-    """Remove the DB rows of one album's items whose files are still under a
-    failed staging folder.
-
-    Rows only: the files are NOT deleted or quarantined here (S1). The
-    removal is a ``playlist_media_cleanup_v1`` rows-only transaction that is
-    approved on behalf of the failed-import cleanup that called this, then
-    claimed, locked and verified like every other apply. Returns the number
-    of rows actually removed."""
-    if not album_id or not folder_path:
-        return 0
-    folder = Path(folder_path).resolve(strict=False)
-    try:
-        rows = composite_workflows.find_all_items_by_album_id(int(album_id))
-    except BeetsUnavailableError as ex:
-        log.append(f"  Staged-file cleanup failed: engine unavailable: {ex}")
-        raise
-    except Exception as ex:
-        log.append(f"  Staged-file cleanup warning: {ex}")
-        return 0
-
-    delete_ids: list = []
-    for row in rows:
-        raw_path = _s(row["path"])
-        if not raw_path:
-            continue
-        abs_path = Path(raw_path)
-        if not abs_path.is_absolute():
-            abs_path = MUSIC_ROOT / raw_path
-        try:
-            abs_resolved = abs_path.resolve(strict=False)
-            abs_resolved.relative_to(folder)
-        except Exception:
-            continue
-        delete_ids.append(int(row["id"]))
-
-    if not delete_ids:
-        return 0
-    try:
-        app_res = composite_workflows.remove_item_rows_keep_files(
-            delete_ids, reason=f"failed staged import rows (album {int(album_id)})",
-            approved_by="failed-import cleanup")
-    except Exception as ex:
-        log.append(f"  Staged-file DB cleanup warning: {ex}")
-        return 0
-    removed = list(app_res.get("deleted_items") or [])
-    if not app_res.get("ok"):
-        log.append(
-            f"  Staged-file DB cleanup incomplete: removed {len(removed)} of {len(delete_ids)} row(s): "
-            f"{app_res.get('error') or app_res.get('status')}")
-        return len(removed)
-    log.append(f"  Removed {len(removed)} failed staged DB item(s) (files kept)")
-    return len(removed)
-
-
 def _strip_year_from_album_name(aid: int, log: list) -> str:
     """If the album name ends with a year suffix like ' (2022)' or ' [2022]',
     strip it so the beets path template doesn't produce double-year folder names
@@ -1322,25 +1232,6 @@ def _artist_library_mbid(artist_name: str) -> str:
     except Exception:
         pass
     return counts.most_common(1)[0][0] if counts else ""
-
-
-def _album_item_position_hints(item: Dict[str, Any]) -> tuple:
-    try:
-        disc = int(item.get("disc") or 1)
-    except Exception:
-        disc = 1
-    try:
-        track = int(item.get("track") or 0)
-    except Exception:
-        track = 0
-    path = _s(item.get("path", ""))
-    if path:
-        path_disc, path_track = _audio_position_from_path(path)
-        if path_track and (not track or track == path_track):
-            track = path_track
-        if path_disc and (disc <= 1 or path_disc != 1):
-            disc = path_disc
-    return max(disc, 1), max(track, 0)
 
 
 def _db_item_file_exists(raw_path: str) -> bool:
@@ -3055,17 +2946,6 @@ def _artist_alias_rejected_map() -> Dict[str, Dict[str, Any]]:
     return {}
 
 
-def _artist_alias_write_rejected_map(rejected: Dict[str, Dict[str, Any]]) -> None:
-    try:
-        with _artist_alias_rejected_lock:
-            _ARTIST_ALIAS_REJECTED_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _ARTIST_ALIAS_REJECTED_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"rejected": rejected}, indent=2), encoding="utf-8")
-            tmp.replace(_ARTIST_ALIAS_REJECTED_FILE)
-    except Exception:
-        pass
-
-
 def _artist_id_alias_groups(include_rejected: bool = False) -> List[Dict[str, Any]]:
     try:
         res = composite_workflows.get_artist_alias_groups()
@@ -3126,60 +3006,6 @@ def _resolve_artist_alias_mbid(source: str, canonical: str, mb_artistid: str,
                 )
             return candidate
     return ""
-
-
-def _artist_alias_values(row: sqlite3.Row) -> List[str]:
-    values: List[str] = []
-    for col in ("albumartist", "albumartist_credit"):
-        try:
-            values.append(_s(row[col]))
-        except Exception:
-            pass
-    for col in ("albumartists", "albumartists_credit"):
-        try:
-            values.extend(_split_beets_multi(_s(row[col])))
-        except Exception:
-            pass
-    return [v for v in values if _s(v).strip()]
-
-
-def _artist_alias_ids(row: sqlite3.Row) -> List[str]:
-    vals: List[str] = []
-    for col in ("mb_albumartistids", "mb_albumartistid"):
-        try:
-            vals.extend(_split_beets_multi(_s(row[col])))
-        except Exception:
-            pass
-    return [_s(v).strip().lower() for v in vals if _MB_UUID_RE.match(_s(v).strip())]
-
-
-def _artist_alias_updates(canonical: str, mbid: str, *, album: bool) -> Dict[str, Any]:
-    prefix = "album" if album else ""
-    updates = {
-        f"{prefix}artist": canonical,
-        f"{prefix}artists": canonical,
-        f"{prefix}artist_credit": canonical,
-        f"{prefix}artists_credit": canonical,
-        f"{prefix}artist_sort": canonical,
-        f"{prefix}artists_sort": canonical,
-    }
-    if mbid:
-        updates[f"mb_{prefix}artistid"] = mbid
-        updates[f"mb_{prefix}artistids"] = mbid
-        if not album:
-            updates["artists_ids"] = mbid
-    return updates
-
-
-def _item_artist_matches_alias(row: sqlite3.Row, source_keys: set) -> bool:
-    values: List[str] = []
-    for col in ("artist", "artist_credit", "artists", "artists_credit"):
-        try:
-            values.append(_s(row[col]))
-            values.extend(_split_beets_multi(_s(row[col])))
-        except Exception:
-            pass
-    return any(_artist_alias_key(v) in source_keys for v in values if _s(v).strip())
 
 
 def _run_normalize_artists_if_needed():
@@ -5192,13 +5018,6 @@ def _artist_folder_canonical_name(artist_name: str, mb_artistid: str = "") -> st
     return base
 
 
-def _stamp_db_path_prefix_pairs(src: Path, dst: Path) -> List[Tuple[bytes, bytes]]:
-    return [
-        (str(src).encode() + b"/", str(dst).encode() + b"/"),
-        (src.name.encode() + b"/", dst.name.encode() + b"/"),
-    ]
-
-
 def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
     """Scan artist folders under root for MB ID stamping eligibility.
 
@@ -5460,10 +5279,6 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
             if str(Path(entry["path"]).resolve(strict=False)) not in candidate_paths
         ]
     return {"ok": True, "candidates": candidates, "skipped": skipped}
-
-
-def _stamp_artist_folder_candidates(root: Path) -> List[Dict[str, Any]]:
-    return _stamp_artist_folder_scan(root)["candidates"]
 
 
 def _append_stamp_candidate_log(log: List[str], candidates: List[Dict[str, Any]], limit: int = 20) -> None:
