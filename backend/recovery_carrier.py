@@ -244,6 +244,13 @@ class RecoveryCarrierStore:
                 )
                 """
             )
+            # Migrate BEFORE creating any index on a v2-only column: on a real
+            # v1 (base-schema) DB the recovery_carrier table already exists
+            # without recovery_identity_key, so an index referencing it would
+            # raise "no such column" unless the ALTER runs first. The migration
+            # also writes recovery_staged_folder, so both tables must exist by
+            # now (they do, created just above).
+            self._migrate_v1_to_v2(conn)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_recovery_staged_folder_carrier "
                 "ON recovery_staged_folder(carrier_id)"
@@ -264,7 +271,6 @@ class RecoveryCarrierStore:
                 "CREATE INDEX IF NOT EXISTS idx_recovery_carrier_job "
                 "ON recovery_carrier(origin_job_id)"
             )
-            self._migrate_v1_to_v2(conn)
 
     def _migrate_v1_to_v2(self, conn: sqlite3.Connection) -> None:
         """Forward migration v1 -> v2 (idempotent). Adds recovery_identity_key
