@@ -294,7 +294,8 @@ def _mb_recording_search(title: str, artist: str, limit: int = 8):
 def _mb_release_search(album: str, artist: str, limit: int = 8,
                        year: str = "", track_count: int = 0,
                        log: Optional[list] = None,
-                       artist_mbid: str = ""):
+                       artist_mbid: str = "",
+                       release_group_id: str = ""):
     """Query MusicBrainz for release candidates.
 
     Returns up to `limit` entries — de-duplicated across pressings of the same
@@ -312,6 +313,13 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
         r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I
     )
     parts = []
+    # ARCH-030 2.5: when a carrier pins the canonical Release Group, scope the
+    # search to it with rgid: -- a binding seed, never title reconstruction.
+    # This part alone is a valid query, so the candidate pool starts from the
+    # Release Group's own releases even with no title/artist text supplied.
+    rgid = (release_group_id or "").strip().lower()
+    if rgid and _MB_UUID_RE.match(rgid):
+        parts.append(f'rgid:{rgid}')
     if album:  parts.append(f'release:"{album}"')
     if artist_mbid and _MB_UUID_RE.match(artist_mbid.strip()):
         parts.append(f'arid:{artist_mbid.strip().lower()}')

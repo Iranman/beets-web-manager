@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Changed
+
+- **Carrier-bound recovery seeds MusicBrainz candidates from the canonical Release Group, not folder/tag/filename title text (ARCH-030 Step 2.5).** When a recovery/repair pins the carrier's canonical `mb_releasegroupid`, the AI suggestion path (`ai_service._ai_suggest_album_internal`) now starts its candidate pool from that Release Group's own releases — a new `rgid:` binding seed on `helpers_mb._mb_release_search` — instead of a free `release:"<title>"` text search. This closes the remaining vector behind requirement 4 ("do not allow generic MusicBrainz title matching to replace a known target album"): a title-collision release on an unrelated Release Group (e.g. FLEUR "FOREVER FOREVER" vs 112 "Forever", RG 2da91738 vs 37cb4a72) is now **neither seeded nor** ranked primary, composing with the existing Step-1 relatedness veto (which the seed makes a no-op since no unrelated RG is in the pool). On an empty rgid search (search-index lag) the fallback stays RG-bound: `musicbrainz_service._mb_release_search_by_folder_tracks` gains an optional `release_group_id` that scopes every recording query with `rgid:` and stamps the resulting candidates with that RG (binding, not reconstruction), rather than a free title match that could land on another group. The canonical RG is only ever taken from the carrier — never reconstructed from the folder/job/filename. A genuine new-album import (no carrier RG) is unchanged. Tests: `tests/test_recovery_rg_seeding.py`.
+
 ## v0.14.0 - 2026-10-26
 
 ### Upgrade Notes

@@ -479,10 +479,31 @@ def _ai_suggest_album_internal(
 
     # #252 NF-1: a MusicBrainz outage keeps the AcoustID evidence already
     # gathered and is reported, as the folder and track routes do.
+    # ARCH-030 2.5: a carrier-bound recovery pins the canonical Release Group
+    # (never reconstructed from folder/tag/filename text). SEED the candidate
+    # pool from that RG's own releases so generic MusicBrainz title matching
+    # can't replace a known target album (requirement 4). No carrier RG -> the
+    # unchanged text search (genuine new-album import). Composes with the
+    # Step-1 relatedness veto below: an unrelated RG is never seeded here, so
+    # the veto has nothing to demote.
+    _target_rg = _extract_mb_uuid(_s(getattr(album, "mb_releasegroupid", "")).strip())
     mb_unavailable = False
     try:
-        mb_candidates = _mb_release_search(album.album or "", album.albumartist or "", limit=8,
-                                           year=album_year, track_count=track_count)
+        if _target_rg:
+            mb_candidates = _mb_release_search("", "", limit=8, year=album_year,
+                                               track_count=track_count,
+                                               release_group_id=_target_rg)
+            if not mb_candidates and (track_paths or aid):
+                # RG binding still holds on an empty rgid search (index lag):
+                # scope the folder-track recording search to the RG instead of
+                # a free title match that could land on another Release Group.
+                mb_candidates = _mb_release_search_by_folder_tracks(
+                    album_dir or "", existing_album_id=aid,
+                    artist=album.albumartist or "", limit=8,
+                    release_group_id=_target_rg)
+        else:
+            mb_candidates = _mb_release_search(album.album or "", album.albumartist or "", limit=8,
+                                               year=album_year, track_count=track_count)
     except provider_boundary.ProviderError:
         mb_unavailable, mb_candidates = True, []
     provider_flags = {"musicbrainz_unavailable": mb_unavailable,
@@ -499,7 +520,6 @@ def _ai_suggest_album_internal(
     # 112 "Forever") can never sort first as the primary suggestion. A stable
     # partition keeps the scorer's order within each group and is a strict
     # no-op when no target RG is known (text-only suggestion ranking unchanged).
-    _target_rg = _s(getattr(album, "mb_releasegroupid", "")).strip()
     if _target_rg and mb_candidates:
         _target_artist_id = _s(getattr(album, "mb_albumartistid", "")).strip()
         _target_artist = _s(getattr(album, "albumartist", "")).strip()

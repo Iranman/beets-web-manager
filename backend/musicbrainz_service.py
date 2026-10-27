@@ -346,17 +346,28 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
                                         existing_album_id: int = 0,
                                         artist: str = "",
                                         log: Optional[list] = None,
-                                        limit: int = 8) -> List[Dict[str, Any]]:
-    """Find release candidates by aggregating MB recording search release hits."""
+                                        limit: int = 8,
+                                        release_group_id: str = "") -> List[Dict[str, Any]]:
+    """Find release candidates by aggregating MB recording search release hits.
+
+    ARCH-030 2.5: when ``release_group_id`` is a carrier-pinned canonical RG,
+    every recording query is scoped to it (``rgid:``) so a title collision can
+    never pull in a release from an unrelated Release Group. Hits are then by
+    construction inside that RG, so each candidate is stamped with it (binding,
+    not reconstruction). Empty/invalid RG -> unchanged generic title matching.
+    """
     titles = _folder_track_search_titles(source_folder, existing_album_id, limit=12)
     if not titles:
         return []
+    rgid = _s(release_group_id).strip().lower()
+    rgid_scope = f'rgid:{rgid}' if _MB_UUID_RE.match(rgid) else ""
     if log is not None:
         log.append(
             "  Searching MusicBrainz by folder track titles: "
             + ", ".join(titles[:5])
             + ("…" if len(titles) > 5 else "")
             + (f" (artist scoped to {artist})" if artist else "")
+            + (f" (Release Group scoped to {rgid})" if rgid_scope else "")
         )
 
     release_hits: Dict[str, Dict[str, Any]] = {}
@@ -364,9 +375,10 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
     for pos, title in enumerate(titles, start=1):
         data: Dict[str, Any] = {}
         query_terms: List[tuple] = []
+        _rg_and = f' AND {rgid_scope}' if rgid_scope else ""
         if artist:
-            query_terms.append(("artist", f'artist:"{artist}" AND recording:"{title}"'))
-        query_terms.append(("title", f'recording:"{title}"'))
+            query_terms.append(("artist", f'artist:"{artist}" AND recording:"{title}"{_rg_and}'))
+        query_terms.append(("title", f'recording:"{title}"{_rg_and}'))
         for query_scope, query in query_terms:
             params = _up.urlencode({
                 "query": query,
@@ -429,6 +441,9 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
     for cand in cands:
         cand["score"] = int(cand.get("score") or 0) * 10
         cand.pop("_hit_titles", None)
+        if rgid_scope:
+            # Binding: the query guaranteed every hit lives in this RG.
+            cand["mb_releasegroupid"] = rgid
     cands.sort(key=lambda c: c.get("score", 0), reverse=True)
     return cands[:limit]
 
