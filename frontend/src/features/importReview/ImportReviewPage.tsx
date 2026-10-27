@@ -47,8 +47,9 @@ import {
 } from '../../api/client';
 import { ReconciliationReviewPanel } from './ReconciliationReviewPanel';
 import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
-import { MbidLink, RecoveryIdentityPanel, RecoveryStageIndicator, getRecoveryIdentity, getRecoveryStage, isValidMbid } from './MbidLink';
+import { MbidLink, getRecoveryIdentity, getRecoveryStage, isValidMbid } from './MbidLink';
 import type { MbEntity } from './MbidLink';
+import { RecoveryReviewCard } from './RecoveryReviewCard';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -2911,8 +2912,13 @@ export function ReviewCard({
             <h2 className="mt-3 truncate text-lg font-semibold text-zinc-950">{itemTitle(item)}</h2>
             {meta.length ? <div className="mt-1 text-sm text-zinc-600">{meta.join(' / ')}</div> : null}
 
-            <RecoveryIdentityPanel item={item} />
-            <RecoveryStageIndicator item={item} />
+            <RecoveryReviewCard
+              item={item}
+              suggestion={suggestion}
+              onPrimaryAction={onApply}
+              busy={busy}
+              primaryActionDisabled={busy || Boolean(applyBlockedReason)}
+            />
 
             {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
             {item.path ? <div className="mt-3 truncate font-mono text-xs text-zinc-500">{item.path}</div> : null}
@@ -3128,18 +3134,23 @@ export function ReviewCard({
               </div>
             ) : null}
 
-            <div className="grid grid-cols-2 gap-2">
+            {/* Recovery items get their single primary action inside
+               RecoveryReviewCard (NEXT section), so the footer here shows only
+               the secondary "Find Match" — never a competing primary Import. */}
+            <div className={recoveryIdentity ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-2 gap-2'}>
               <Button size="small" variant="outlined" sx={blockedPanelActionButtonSx} onClick={onSuggest} disabled={busy}>
                 Find Match
               </Button>
-              <Button
-                size="small"
-                variant="contained"
-                onClick={onApply}
-                disabled={busy || Boolean(applyBlockedReason)}
-              >
-                {actionLabel(item, selectedMatch, targetPreviewState?.preview)}
-              </Button>
+              {recoveryIdentity ? null : (
+                <Button
+                  size="small"
+                  variant="contained"
+                  onClick={onApply}
+                  disabled={busy || Boolean(applyBlockedReason)}
+                >
+                  {actionLabel(item, selectedMatch, targetPreviewState?.preview)}
+                </Button>
+              )}
             </div>
 
             <Button size="small" variant="text" color="inherit" onClick={onDismiss} disabled={busy}>
