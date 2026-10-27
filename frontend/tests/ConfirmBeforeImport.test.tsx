@@ -19,7 +19,6 @@ vi.mock('../src/api/client', async (importOriginal) => {
     getSetupStatus: vi.fn(),
     runPreflight: vi.fn(),
     recoverAiBatch: vi.fn(),
-    retryLibraryImportAllFailed: vi.fn(),
     getRecentImports: vi.fn(),
     getAiMatchHistory: vi.fn(),
     clearRecentImports: vi.fn(),
@@ -67,7 +66,6 @@ beforeEach(() => {
   mocked.revalidateImportReview.mockResolvedValue({ ok: true, items: [], reviewed_count: 2, queued_count: 1 } as never);
   mocked.cleanupStaleReview.mockResolvedValue({ ok: true, removed_total: 0, removed_folder_gone: 0, removed_mb_in_library: 0, remaining: 2 } as never);
   mocked.getSetupStatus.mockResolvedValue({ paths: { downloads: { path: '/srv/dl', exists: true } } } as never);
-  mocked.retryLibraryImportAllFailed.mockResolvedValue({ ok: true, job_id: 'r1' } as never);
   mocked.recoverAiBatch.mockResolvedValue({ ok: true, job_id: 'job1', state: { status: 'running', job_id: 'job1' } } as never);
   mocked.getRecentImports.mockResolvedValue({ imports: [{ artist: 'A', album: 'B', timestamp: 1 }] } as never);
   mocked.getAiMatchHistory.mockResolvedValue({ history: [] } as never);
@@ -164,7 +162,6 @@ describe('Intake: retry and recover actions confirm first', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await settle();
     expect(mocked.recoverAiBatch).not.toHaveBeenCalled();
-    expect(mocked.retryLibraryImportAllFailed).not.toHaveBeenCalled();
 
     fireEvent.click(button);
     dialog = await screen.findByRole('dialog');
@@ -174,7 +171,6 @@ describe('Intake: retry and recover actions confirm first', () => {
     fireEvent.click(retryButton);
     await waitFor(() => expect(mocked.recoverAiBatch).toHaveBeenCalledWith('batch1', true));
     expect(confirmSpy).not.toHaveBeenCalled();
-    expect(mocked.retryLibraryImportAllFailed).not.toHaveBeenCalled();
     await waitFor(() => expect(localStorage.getItem(JOB_KEY)).toBe('job2'));
     expect(await screen.findByText(/Retry started for \d+ failed folders?\. Progress shows below\./)).toBeTruthy();
   });
