@@ -324,14 +324,6 @@ def _resolve_host(host: str, port: int) -> Tuple[ipaddress._BaseAddress, ...]:
     return tuple(dict.fromkeys(addresses))
 
 
-def _address_is_prohibited(ip: ipaddress._BaseAddress) -> bool:
-    """Operator-path policy (BA-4/SEC-6): anything that is not a globally
-    routable unicast address -- private, loopback, link-local, CGNAT/shared
-    (100.64/10, e.g. Tailscale), benchmarking, documentation, reserved, and
-    IPv6 forms embedding such an IPv4 -- needs an allowlist rule."""
-    return not address_is_public(ip)
-
-
 def _plain_address(ip: ipaddress._BaseAddress) -> ipaddress._BaseAddress:
     """An IPv4-mapped IPv6 address (::ffff:a.b.c.d) as the IPv4 it maps."""
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
@@ -792,10 +784,11 @@ def _embedded_ipv4(ip: ipaddress._BaseAddress) -> Optional[ipaddress.IPv4Address
 
 
 def address_is_public(ip: ipaddress._BaseAddress) -> bool:
-    """True only for a globally routable unicast address. Stricter than
-    _address_is_prohibited(): also rejects shared/CGNAT space (100.64/10),
-    benchmarking, documentation and any IPv6 form embedding a non-public
-    IPv4 address (IPv4-mapped, 6to4, Teredo, NAT64)."""
+    """True only for a globally routable unicast address (the BA-4/SEC-6
+    operator-path policy: private, loopback, link-local, shared/CGNAT space
+    (100.64/10), benchmarking, documentation and any IPv6 form embedding a
+    non-public IPv4 address (IPv4-mapped, 6to4, Teredo, NAT64) are all
+    rejected)."""
     if ip in _METADATA_IPS or not ip.is_global or ip.is_multicast:
         return False
     if isinstance(ip, ipaddress.IPv6Address) and ip in _IPV4_COMPATIBLE:  # deprecated ::a.b.c.d

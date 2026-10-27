@@ -192,12 +192,6 @@ class FolderDiscoveryTests(_Roots):
             out = ai._run_ai_batch_import("b-unread", str(self.dl), [], None, None)
         self.assertEqual(out.get("folders_unreadable"), 2)
 
-    def test_engine_discovery_is_not_used(self):
-        self.audio("Album/01.flac")
-        with mock.patch.object(ai.composite_workflows, "discover_import_sources",
-                               side_effect=AssertionError("engine discovery called")):
-            ai._ai_batch_find_audio_dirs(str(self.dl))
-
 
 class ScanRootTests(_Roots):
     """F3/F4: the scan-root rule."""

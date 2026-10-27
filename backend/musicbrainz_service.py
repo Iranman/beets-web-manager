@@ -582,29 +582,6 @@ def _ensure_release_group_art(mbid: str, artist_name: str = "", album_title: str
     return {"ok": True, "url": url}
 
 
-def _library_album_ids_for_musicbrainz(mb_albumid: str = "", mb_releasegroupid: str = "") -> List[int]:
-    release_id = _extract_mb_uuid(_s(mb_albumid).strip().lower())
-    release_group_id = _extract_mb_uuid(_s(mb_releasegroupid).strip().lower())
-    if not release_id and not release_group_id:
-        return []
-    album_ids: List[int] = []
-    try:
-        if release_id:
-            albums = composite_workflows.find_all_albums_by_mb_albumid(release_id)
-            album_ids.extend(int(a["id"]) for a in albums if a.get("id"))
-        if release_group_id:
-            rg_albums = composite_workflows.find_all_albums_by_releasegroupid(release_group_id)
-            for a in rg_albums[:25]:
-                aid = int(a.get("id") or 0)
-                if aid and aid not in album_ids:
-                    album_ids.append(aid)
-    except BeetsUnavailableError:
-        raise
-    except Exception:
-        return []
-    return album_ids
-
-
 _MB_ENTITY_PATH_RE = re.compile(
     r"(?:^|/)("
     r"release-group|release|recording"

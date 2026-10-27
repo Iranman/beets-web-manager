@@ -1697,10 +1697,6 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
     return str(slot_dir), complete
 
 
-def _deno_download_url() -> str:
-    return ""
-
-
 # ── Acquisition queue ─────────────────────────────────────────────────────────
 
 def _acq_text_key(value: Any) -> str:
@@ -2642,21 +2638,6 @@ def _acq_start_download_job(payload: Dict[str, Any]) -> str:
     return _s(data["job_id"])
 
 
-def _acq_start_import_disk_job(item: Dict[str, Any]) -> str:
-    if not _acq_can_import_disk(item):
-        raise RuntimeError("Acquire row cannot be imported from disk")
-    local = item.get("local") or {}
-    aldir = _s(local.get("aldir") or "")
-    mbid = _acq_item_mbid(item)
-    existing_album_id = int(local.get("album_id") or 0)
-    return _start_reimport_disk_job_internal(
-        aldir,
-        mbid,
-        albumartist=_s(item.get("artist") or ""),
-        existing_album_id=existing_album_id,
-    )
-
-
 def _acq_trim_batch_log(log: List[str], keep: int = 1200) -> None:
     if len(log) <= keep:
         return
@@ -3328,15 +3309,3 @@ def _qbit_hardlink_missing_impl(*, dry_run: bool, category: str,
         f"{summary['errors']} error(s)."
     )
     return summary
-
-
-def _audio_files_under(path_value: str) -> List[Path]:
-    root = Path(path_value)
-    try:
-        if root.is_file():
-            return [root] if root.suffix.lower() in AUDIO_EXT else []
-        if root.exists():
-            return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT]
-    except Exception:
-        return []
-    return []

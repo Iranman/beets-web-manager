@@ -114,16 +114,6 @@ def _import_review_cleanup_destination(path: Path) -> Path:
     return root / time.strftime("%Y%m%d") / path
 
 
-def _unique_import_review_cleanup_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    for idx in range(1, 1000):
-        candidate = path.with_name(f"{path.stem}.{idx}{path.suffix}")
-        if not candidate.exists():
-            return candidate
-    return path.with_name(f"{path.stem}.{uuid.uuid4().hex[:8]}{path.suffix}")
-
-
 def _review_blocked_metadata(status: Any,
                              reason: Any = "",
                              suggestion: Optional[Dict[str, Any]] = None,

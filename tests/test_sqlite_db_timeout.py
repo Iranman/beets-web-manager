@@ -11,19 +11,19 @@ APP_SOURCE = app_family_source()
 
 
 class SqliteDbTimeoutTests(unittest.TestCase):
-    def test_shared_db_helper_waits_for_transient_locks(self):
-        start = APP_SOURCE.index("def _sqlite_is_locked_error")
+    def test_shared_db_helper_still_fails_closed(self):
+        start = APP_SOURCE.index("def _db(")
         end = APP_SOURCE.index("def _stamp_album_release_id", start)
         source = APP_SOURCE[start:end]
 
         # ARCH-001: _db() referenced a control-agent helper removed with the
         # custom engine (it could only raise NameError). It now fails closed
-        # explicitly; the Web Manager never opens the Beets database.
+        # explicitly; the Web Manager never opens the Beets database. The
+        # transient-lock retry helpers that used to follow it were swept in
+        # the W2 dead-code pass (nothing called them any more).
         self.assertIn("direct Beets database access is not available in the Web Manager", source)
         self.assertNotIn("get_db_connection", source)
         self.assertNotIn("sqlite3.connect", source)
-        self.assertIn("def _sqlite_write_retry", source)
-        self.assertIn("database locked while", source)
 
 
 if __name__ == "__main__":

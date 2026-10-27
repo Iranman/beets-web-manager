@@ -5,7 +5,7 @@ Boot environment loading, environment-derived settings, filesystem roots, shared
 
 from __future__ import annotations
 
-import logging, os, platform, re, shutil, sqlite3, subprocess, threading, time
+import logging, os, platform, re, shutil, subprocess, threading
 import urllib.error, urllib.parse, urllib.request
 from contextlib import contextmanager
 from pathlib import Path
@@ -659,28 +659,6 @@ _DEFAULT_ALBUM_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$y
 
 
 _SINGLE_TRACK_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$artist - $album - %right{00$track,2} - $title ($disc)%if{$mb_artistid,{$mb_artistid$}}"
-
-
-def _sqlite_is_locked_error(exc: BaseException) -> bool:
-    return isinstance(exc, sqlite3.OperationalError) and (
-        "database is locked" in str(exc).lower()
-        or "database is busy" in str(exc).lower()
-    )
-
-
-def _sqlite_write_retry(label: str, fn, *, log=None, attempts: int = 5):
-    for attempt in range(1, max(1, attempts) + 1):
-        try:
-            return fn()
-        except sqlite3.OperationalError as exc:
-            if not _sqlite_is_locked_error(exc) or attempt >= attempts:
-                raise
-            message = f"database locked while {label}; retrying {attempt + 1}/{attempts}"
-            if isinstance(log, list) and message not in log[-5:]:
-                log.append(message)
-            time.sleep(min(2.0, 0.2 * (2 ** (attempt - 1))))
-
-
 
 
 EDITABLE_FIELDS = [

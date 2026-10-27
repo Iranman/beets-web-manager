@@ -331,10 +331,6 @@ def _slskd_file_wanted_match_score(remote_name: str,
     return best
 
 
-def _slskd_file_matches_wanted(remote_name: str, wanted_tracks: List[Dict[str, Any]]) -> bool:
-    return bool(_slskd_file_wanted_match_score(remote_name, wanted_tracks).get("ok"))
-
-
 def _wanted_tracks_remaining_after_satisfied(
     wanted_tracks: List[Dict[str, Any]],
     satisfied_tracks: List[Dict[str, Any]],

@@ -998,11 +998,6 @@ def _plex_section_track_index(section_key, log=None, force: bool = False) -> Dic
     return index
 
 
-def _plex_section_track_lookup(section_key, log=None) -> Dict[tuple, str]:
-    """Compatibility wrapper: return the cached Plex lookup map."""
-    return _plex_section_track_index(section_key, log=log).get("lookup", {})
-
-
 def _plex_unique_index_value(mapping: Dict[Any, set], key: Any) -> str:
     values = mapping.get(key) or set()
     if len(values) == 1:

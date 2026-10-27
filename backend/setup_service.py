@@ -14,22 +14,6 @@ from backend.auth_service import _GENERATED_AUTH_TOKEN_FILE, _INITIAL_BROWSER_PA
 # ── ARCH-001 extracted code ──
 
 
-def _pip_install(*packages, timeout=300) -> bool:
-    """Runtime package installation is intentionally disabled."""
-    wanted = ", ".join(str(pkg) for pkg in packages if pkg) or "requested packages"
-    _plugin_install_log.append(
-        f"[blocked] runtime package installation disabled; preinstall pinned {wanted} in the image build"
-    )
-    return False
-
-
-def _run_install_command(cmd: List[str], timeout: int = 240) -> bool:
-    _plugin_install_log.append(
-        "[blocked] runtime package-manager execution disabled; install required tools during image build"
-    )
-    return False
-
-
 def _binary_status(name: str) -> Dict[str, Any]:
     path = shutil.which(name)
     fallback = Path("/usr/bin") / name
