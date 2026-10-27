@@ -137,13 +137,14 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
         self.assertNotIn('composite_workflows.plan_folder_cleanup({"path":', self.app_source)
 
     def test_staged_item_and_orphan_cleanup_use_playlist_media_cleanup(self):
-        """Both real DB-row-deletion call sites (the failed-staged-import
-        cleanup and the pre-import stale-row cleanup) must route through
+        """Every real DB-row-deletion call site (the pre-import stale-row
+        cleanup in import_service and the playlist flow) must route through
         playlist_media_cleanup_v1 via the rows-only engine wrapper (S1: the
         family removes Beets rows and keeps files; it is approved, claimed and
-        locked inside the transaction layer)."""
-        self.assertEqual(self.app_source.count("composite_workflows.remove_item_rows_keep_files("), 3)
-        self.assertIn('reason=f"failed staged import rows', self.app_source)
+        locked inside the transaction layer). A third historical site inside
+        the dead staged-import row-delete stratum was already unreachable and
+        went away with the W2 dead-code sweep."""
+        self.assertEqual(self.app_source.count("composite_workflows.remove_item_rows_keep_files("), 2)
         self.assertIn('reason="stale wanted rows before re-import"', self.app_source)
         self.assertNotIn("composite_workflows.plan_playlist_media_cleanup(", self.app_source)
 
