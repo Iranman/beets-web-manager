@@ -257,6 +257,31 @@ class BeetsAdapterTests(unittest.TestCase):
             for key, value in row.items():
                 self.assertEqual(value, stock[row["id"]][key], key)
 
+    def test_bulk_readers_use_fields_route(self):
+        """ARCH-031: get_artist_counts and list_item_paths go through the
+        fields-limited route (never the stock full /item//album/ read) and
+        return the same contract as before."""
+        real = self.adapter._request
+        calls = []
+
+        def record(method, path, **kw):
+            calls.append(path)
+            return real(method, path, **kw)
+
+        self.adapter._request = record
+
+        counts = self.adapter.get_artist_counts()
+        self.assertEqual(counts["Daft Punk"], {"albums": 2, "tracks": 2})
+
+        detailed = self.adapter.list_item_paths(details=True)
+        self.assertEqual(len(detailed), 3)
+        plain = self.adapter.list_item_paths()
+        self.assertEqual(len(plain), 3)
+
+        self.assertNotIn("/item/", calls)
+        self.assertNotIn("/album/", calls)
+        self.assertTrue(all(c.startswith("/webmanager/fields/") for c in calls), calls)
+
     def test_fields_read_omits_paths_when_include_paths_is_off(self):
         beets_web_app.config["INCLUDE_PATHS"] = False
         self.addCleanup(beets_web_app.config.__setitem__, "INCLUDE_PATHS", True)

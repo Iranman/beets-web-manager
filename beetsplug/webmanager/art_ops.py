@@ -209,10 +209,25 @@ def _restore_embedded(lib, album_id: int, saved: Dict[str, List[Dict[str, Any]]]
 
 
 def _write_manifest(folder: str, manifest: Dict[str, Any]) -> None:
-    tmp = os.path.join(folder, MANIFEST_NAME + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
+    # Containment barrier (SEC-007): callers already pass a server-minted
+    # uuid4 folder or a _manifest_dir()-validated id, but re-resolve the
+    # folder and re-check containment here, inline before the sink, so the
+    # write fail-closes if it ever resolves outside the engine's own
+    # quarantine root. Only the folder is resolved; the final ".tmp"
+    # component is left unresolved so O_NOFOLLOW below still rejects a symlink
+    # planted at that name (resolving it here would defeat O_NOFOLLOW).
+    root = os.path.realpath(_quarantine_root())
+    real_folder = os.path.realpath(folder)
+    if not real_folder.startswith(root + os.sep):
+        raise ValueError("manifest path escapes the quarantine root")
+    tmp = os.path.join(real_folder, MANIFEST_NAME + ".tmp")
+    # O_NOFOLLOW: reject a symlink planted at the .tmp name so the write cannot
+    # be redirected outside the engine's own quarantine folder (SEC-007).
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh)
-    os.replace(tmp, os.path.join(folder, MANIFEST_NAME))
+    os.replace(tmp, os.path.join(real_folder, MANIFEST_NAME))
 
 
 def _embedded_hashes(lib, album_id: int) -> Dict[str, List[str]]:

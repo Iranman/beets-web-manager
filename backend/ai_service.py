@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import functools, hashlib, json, os, re, stat, threading, time, uuid
+import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
 from pathlib import Path
@@ -747,9 +747,37 @@ def _ai_suggest_album_internal(
         return {"ok": False, "error": "Could not generate suggestions."}
 
 
+# ── AI review / history state files ─────────────────────────────────────────
+# ARCH-034: these are Web Manager application state (import history, AI match
+# history, legacy review decisions), never authoritative Beets library state,
+# so they live under WEB_MANAGER_DATA_DIR -- the root this container owns --
+# like _AI_BATCH_STATE_DIR and recovery_carrier, not under /config (the Beets
+# config mount). WEB_MANAGER_DATA_DIR itself is the configurable knob; no
+# per-file override (mirrors recovery_carrier).
+#
+# Older deployments wrote these under /config. _migrate_legacy_config_state()
+# moves each one to its new home ONCE, on first import, with no data loss:
+#   old exists, new absent -> move (shutil.move handles a cross-device mount);
+#   both exist             -> keep the new file (newer data wins), old untouched;
+#   neither                -> nothing, the feature just starts empty.
+# A move failure is logged and leaves the old file in place -- never deleted.
+def _migrate_legacy_config_state(old: Path, new: Path) -> None:
+    try:
+        if new.exists() or not old.exists():
+            return
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old), str(new))
+        _app_logger.info("ARCH-034: migrated %s to %s", old, new)
+    except Exception as exc:
+        _app_logger.warning(
+            "ARCH-034 state migration skipped for %s: %s", old.name, type(exc).__name__
+        )
+
+
 # ── AI Match history ──────────────────────────────────────────────────────────
 
-_AI_MATCH_HISTORY_FILE = Path("/config/ai_match_history.json")
+_AI_MATCH_HISTORY_FILE = WEB_MANAGER_DATA_DIR / "ai_match_history.json"
+_migrate_legacy_config_state(Path("/config/ai_match_history.json"), _AI_MATCH_HISTORY_FILE)
 
 
 _ai_match_history_lock = threading.Lock()
@@ -1969,6 +1997,23 @@ def _ai_batch_already_in_library(folder_path: str) -> bool:
         return False
 
 
+def _ai_batch_albums_present(album_ids: List[Any]) -> bool:
+    """True when at least one of these album ids is still a library album
+    (ARCH-033 N1). A folder Beets already imported (albums moved out of the
+    source folder, so ``_ai_batch_already_in_library`` no longer sees them)
+    must not be re-imported on retry merely because its Review row could not
+    be written."""
+    for aid in album_ids:
+        try:
+            if composite_workflows.get_album(int(aid)):
+                return True
+        except BeetsUnavailableError:
+            raise
+        except Exception:
+            continue
+    return False
+
+
 def _ai_batch_folder_state(batch_job_id: str, source_folder: str) -> Dict[str, Any]:
     return {
         "folder_id": _ai_batch_folder_id(source_folder),
@@ -2180,12 +2225,25 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=evidence, batch_job_id=batch_id)
         except PendingReviewLoadError:
             # SEC-006: queue left untouched; keep this folder's own fields and leave it retryable.
+            # ARCH-033 N2: stash the full suggestion+evidence so the final pass
+            # (or a retry) re-creates the Review row WITH its evidence
+            # (conflict / skipped_paths / kept_album_ids / deterministic_decision)
+            # instead of a minimal one. ARCH-033 N1: record any album(s) Beets
+            # already imported so a retry re-creates the Review row instead of
+            # re-running Stage 1 against an already-imported folder.
             log.append("  Review item not created (Review Queue could not be read); retry this folder later")
             reason = _s(fields.get("failure_reason"))
-            mark(**{**fields, "status": "import_failed", "current_step": "Review Queue could not be read",
-                    "failure_reason": "review_queue_unreadable" + (f" ({reason})" if reason else "")})
+            imported = [a for a in (fields.get("album_ids") or suggestion.get("kept_album_ids") or []) if a]
+            stash_fields = dict(fields)
+            if imported:
+                stash_fields["imported_album_ids"] = imported
+            mark(**{**stash_fields, "status": "import_failed", "current_step": "Review Queue could not be read",
+                    "failure_reason": "review_queue_unreadable" + (f" ({reason})" if reason else ""),
+                    "pending_review": {"suggestion": suggestion, "evidence": evidence,
+                                       "status": status, "current_step": current_step}})
             return
         log.append(f"review item created: {folder}")
+        folder_state.pop("pending_review", None)  # row now exists; drop the stash
         mark(status=status, current_step=current_step, review_item_id=review_id, **fields)
 
     def plain_suggestion(reason: str) -> Dict[str, Any]:
@@ -2202,6 +2260,29 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     if not folder_state.get("review_item_id") and _pending_review_has_path(folder):
         log.append("  Already in the Review Queue - skipped")
         mark(status="review_created", current_step="review item already exists", review_item_id=fid)
+        return
+
+    # ── ARCH-033 N1: idempotent hand-off after a Review enqueue failed ──────
+    # A prior run imported album(s) from this folder but could not write the
+    # Review row (the queue was unreadable), so the folder was left retryable.
+    # Those albums were moved out of the source folder, so the library check
+    # above cannot see them. Re-create the Review row from the stashed payload
+    # (ARCH-033 N2) and never re-run Stage 1 against an already-imported folder.
+    prior_albums = [a for a in (folder_state.get("imported_album_ids") or []) if a]
+    if prior_albums and _ai_batch_albums_present(prior_albums):
+        fields = {"album_ids": prior_albums, "album_id": prior_albums[0],
+                  "metadata_imported": True, "stage": "done"}
+        if folder_state.get("review_item_id") or _pending_review_has_path(folder):
+            log.append("  Folder already imported in a prior run; Review row exists")
+            mark(status="review_required", current_step="imported; Review row exists", **fields)
+            return
+        stash = folder_state.get("pending_review") or {}
+        if stash.get("suggestion") is not None:
+            log.append("  Folder already imported in a prior run; re-creating Review row")
+            review(stash["suggestion"], stash.get("evidence") or {}, status="review_required",
+                   current_step="imported; Review row re-created", **fields)
+        else:
+            mark(status="review_required", current_step="imported; awaiting Review row", **fields)
         return
 
     # ── Stage 1: Beets quiet autotag import of this one folder ──────────────
@@ -2420,22 +2501,33 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
     def _queue(folder_state: Dict[str, Any], folder: str, reason: str, status: str, key: str) -> None:
         if folder_state.get("review_item_id") or not folder or _pending_review_has_path(folder):
             return
-        name = Path(folder).name
-        suggestion = {
-            "artist": folder_state.get("detected_artist") or name,
-            "album": folder_state.get("detected_album") or name,
-            "albumartist": folder_state.get("detected_artist") or name,
-            "confidence": "low",
-            "reason": reason,
-        }
+        # ARCH-033 N2: when an inline Review enqueue failed earlier, it stashed
+        # the full suggestion+evidence (conflict / skipped_paths /
+        # kept_album_ids / deterministic_decision). Re-use it instead of a
+        # minimal row so that evidence survives. No stash means the folder was
+        # genuinely skipped/failed with nothing computed: the minimal row is
+        # correct.
+        stash = folder_state.get("pending_review") or {}
+        suggestion = stash.get("suggestion")
+        evidence = stash.get("evidence")
+        if suggestion is None:
+            name = Path(folder).name
+            suggestion = {
+                "artist": folder_state.get("detected_artist") or name,
+                "album": folder_state.get("detected_album") or name,
+                "albumartist": folder_state.get("detected_artist") or name,
+                "confidence": "low",
+                "reason": reason,
+            }
+            evidence = {key: reason, "status": status, "batch_job_id": batch_id}
         try:
             folder_state["review_item_id"] = _ai_batch_queue_pending_review(
-                folder, suggestion, evidence={key: reason, "status": status, "batch_job_id": batch_id},
-                batch_job_id=batch_id)
+                folder, suggestion, evidence=evidence, batch_job_id=batch_id)
         except PendingReviewLoadError:
             # SEC-006: the queue is left as it was; one folder never stops the final pass.
             log.append(f"review item not created (Review Queue could not be read): {folder}")
             return
+        folder_state.pop("pending_review", None)  # row now exists; drop the stash
         log.append(f"review item created: {folder}")
         _commit()
 
@@ -2623,7 +2715,8 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
 # Lives here, the lowest layer with an import completion path (batch import);
 # import_service and routes_import record through it too (F9).
 
-_RECENT_IMPORTS_FILE = Path("/config/recent_imports.json")
+_RECENT_IMPORTS_FILE = WEB_MANAGER_DATA_DIR / "recent_imports.json"
+_migrate_legacy_config_state(Path("/config/recent_imports.json"), _RECENT_IMPORTS_FILE)
 
 
 _recent_imports_lock = threading.Lock()
@@ -2848,7 +2941,10 @@ def _auto_merge_case_duplicate_artist_folder(root: str, albumartist: str,
     return bool(summary.get("folders"))
 
 
-_AI_REVIEW_DECISIONS_FILE = Path("/config/ai_review_decisions.json")
+# Legacy JSON folded into the SQLite store by migrate_legacy_files() at
+# startup; move it to the new home first so that migration still finds it.
+_AI_REVIEW_DECISIONS_FILE = WEB_MANAGER_DATA_DIR / "ai_review_decisions.json"
+_migrate_legacy_config_state(Path("/config/ai_review_decisions.json"), _AI_REVIEW_DECISIONS_FILE)
 
 
 _AI_BATCH_AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aiff", ".wv", ".ape"}

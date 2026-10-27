@@ -184,6 +184,29 @@ class QuarantineRemoveItemsTests(unittest.TestCase):
         res = self._post("/webmanager/quarantine-remove-items/rollback", {"quarantine_id": "a" * 32})
         self.assertEqual(res.status_code, 404)
 
+    def test_rollback_refuses_a_quarantine_path_that_escapes_the_folder(self):
+        """SEC-007 (Codex review): a manifest-derived quarantine_path that
+        resolves outside the engine folder is refused with resolved containment
+        -- the old lexical ``startswith(folder + os.sep)`` let ``folder/../..``
+        slip through and could have moved an external file into the library."""
+        import json
+        data = self._remove().get_json()
+        qid = data["quarantine_id"]
+        folder = os.path.join(self.quarantine, qid)
+        manifest_path = os.path.join(folder, "manifest.json")
+        outside = os.path.join(self.td, "escape.wav")
+        with open(outside, "wb") as f:
+            f.write(b"outside-content")
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        # Lexically starts with "<folder>/" but resolves to self.td/escape.wav.
+        manifest["items"][0]["quarantine_path"] = os.path.join(folder, "..", "..", "escape.wav")
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f)
+        res = self._post("/webmanager/quarantine-remove-items/rollback", {"quarantine_id": qid})
+        self.assertEqual(res.get_json().get("error_code"), "RECORD_PATH_INVALID")
+        self.assertTrue(os.path.isfile(outside))  # never moved into the library
+
     def test_capability(self):
         self.assertIn("quarantine_remove_items", ops_mod.get_capabilities())
 

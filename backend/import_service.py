@@ -7,7 +7,7 @@ import copy, hashlib, json, math, os, re, sqlite3, threading, time
 import backend.job_contract as job_contract
 from backend.matching import verify_audio_against_request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
 from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
@@ -242,19 +242,39 @@ def _recovery_carrier_for_merge(source_folder: str, existing_album_id: int,
 
 
 def _recovery_slot_present(existing_items: Iterable[Dict[str, Any]],
-                           expected: Dict[str, Any]) -> bool:
+                           expected: Dict[str, Any], *,
+                           strict: bool = False,
+                           exists_fn: Optional[Callable[[Dict[str, Any]], bool]] = None) -> bool:
     """True when the existing album already holds the expected (missing) track
     -- matched by recording id or by (disc, track) slot. Proves the track is
-    NOT missing, so re-importing it would duplicate audio."""
+    NOT missing, so re-importing it would duplicate audio.
+
+    ``strict`` (NF-2, used by the IMPORTED delivery decision): when the expected
+    track carries a recording id, ONLY a row with that recording id satisfies it;
+    the (disc, track) position branch is a fallback used solely when no recording
+    id is available to compare. So a DIFFERENT recording occupying the same slot
+    can never read as delivered. The default (tolerant, position OR rid) is kept
+    for the precheck double-import guard, where counting a position collision as
+    'present' routes the folder to Review -- the safe direction, not loosened.
+    This only ever makes IMPORTED harder to reach, never easier.
+
+    ``exists_fn`` (NF-2): when given, a row that matched the slot/rid counts only
+    if ``exists_fn`` also confirms its file is present, so a stale DB row whose
+    audio is gone does not read as delivered. It runs only on an already-matched
+    row, so it adds at most one stat per matched row -- no album-wide scan."""
     rid = _s(expected.get("recording_id")).strip().lower()
     try:
         exp_disc, exp_track = int(expected.get("disc") or 1), int(expected.get("track") or 0)
     except (TypeError, ValueError):
         exp_disc, exp_track = 1, 0
     for row in existing_items or []:
+        matched = False
         if rid and _s(row.get("mb_trackid")).strip().lower() == rid:
-            return True
-        if exp_track and (int(row.get("disc") or 1), int(row.get("track") or 0)) == (exp_disc, exp_track):
+            matched = True
+        elif exp_track and not (strict and rid) and \
+                (int(row.get("disc") or 1), int(row.get("track") or 0)) == (exp_disc, exp_track):
+            matched = True
+        if matched and (exists_fn is None or exists_fn(row)):
             return True
     return False
 
@@ -329,7 +349,23 @@ def _recovery_intended_tracks(carrier: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     Entries with neither a recording id nor a positive track number are
     dropped: they are unidentifiable and the coverage signature ignores them
-    too, so they must not make a full delivery look partial."""
+    too, so they must not make a full delivery look partial.
+
+    NF-3 (resolved -- accept by design, not stranding): dropping an
+    unidentifiable intended track is the SAFE choice, and the alternative
+    (classifying delivery ``review_required`` whenever one is present) would
+    strand the identifiable tracks. An entry with no recording id and track<=0
+    can NEVER satisfy ``_recovery_slot_present`` (no rid to match, and the
+    position branch needs a positive track), so keeping it in the intended set
+    would make ``_recovery_fully_delivered`` permanently False -> the carrier
+    could never reach ``imported``/IMPORTED even after every identifiable track
+    is on the album, leaving the whole recovery stuck in review with no evidence
+    that could ever flip it. Instead the complementary acquisition gate
+    (``acquisition_service._requested_tracks_covered`` F5) treats such a track
+    as UNPROVEN, so the IMPORTED/PLEX resume short-circuit never fires for a
+    request that contains one and a resubmit re-recovers it -- no stranding.
+    (Regression: tests/test_mtr_recovery_merge.py::test_unidentifiable_intended
+    _track_does_not_block_imported.)"""
     out: List[Dict[str, Any]] = []
     for t in (list(carrier.get("expected_tracks") or [])
               + list(carrier.get("wanted_tracks") or [])):
@@ -347,7 +383,8 @@ def _recovery_intended_tracks(carrier: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _recovery_fully_delivered(carrier: Dict[str, Any],
-                              present_items: Iterable[Dict[str, Any]], log: list) -> bool:
+                              present_items: Iterable[Dict[str, Any]], log: list,
+                              *, exists_fn: Optional[Callable[[Dict[str, Any]], bool]] = None) -> bool:
     """True only when EVERY intended track of this recovery is present in the
     album as it stands after this merge (``present_items`` = the existing
     album's rows plus the imported rows this merge moves onto it). A strict
@@ -362,7 +399,10 @@ def _recovery_fully_delivered(carrier: Dict[str, Any],
     if not intended:
         return True
     rows = list(present_items or [])
-    undelivered = [t for t in intended if not _recovery_slot_present(rows, t)]
+    # NF-2: strict rid matching (a recording id is satisfied only by its own
+    # recording, never by a different one sharing the slot) + file presence.
+    undelivered = [t for t in intended
+                   if not _recovery_slot_present(rows, t, strict=True, exists_fn=exists_fn)]
     if undelivered:
         log.append(f"  [merge] partial recovery: {len(undelivered)}/{len(intended)} expected/wanted "
                    f"track(s) not delivered; carrier NOT marked IMPORTED.")
@@ -372,7 +412,8 @@ def _recovery_fully_delivered(carrier: Dict[str, Any],
 
 def _recovery_mark_outcome(carrier: Dict[str, Any], result: int, existing_album_id: int,
                            present_items: Iterable[Dict[str, Any]],
-                           recon_op_id: str, log: list) -> None:
+                           recon_op_id: str, log: list,
+                           *, exists_fn: Optional[Callable[[Dict[str, Any]], bool]] = None) -> None:
     """Drive the carrier to its terminal state once the merge body returned.
     IMPORTED is reached ONLY when the merge landed on the existing album
     (``result == existing_album_id``) AND every expected/wanted track of this
@@ -387,7 +428,8 @@ def _recovery_mark_outcome(carrier: Dict[str, Any], result: int, existing_album_
     carrier ``evidence`` would clobber music-identity's verification_evidence."""
     cid = _s(carrier.get("carrier_id"))
     try:
-        if int(result) == int(existing_album_id) and _recovery_fully_delivered(carrier, present_items, log):
+        if int(result) == int(existing_album_id) and _recovery_fully_delivered(
+                carrier, present_items, log, exists_fn=exists_fn):
             recovery_carrier.advance_state(cid, "imported", checkpoint="IMPORTED")
             log.append(f"  [merge] Recovery carrier {cid}: state 'imported', checkpoint IMPORTED "
                        f"(reconcile tx {recon_op_id or 'n/a'}).")
@@ -559,13 +601,16 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
             # never [] (NO_RESULT) (#297 N4).
             return _acoustid_hits_or_none(_album_item_abs_path(_s(row.get("path") or "")))
 
+        def _row_file_present(row: Dict[str, Any]) -> bool:
+            p = _album_item_abs_path(_s(row.get("path") or ""))
+            return bool(p and Path(p).is_file())
+
         plan = _import_reconciliation.plan_reconciliation(
             existing_items, imported_items, target_by_slot,
             _import_reconciliation.album_identity(existing, imported, target_rgid),
             forced_replace_ids=replace_existing_item_ids or (),
             hits_fn=_hits,
-            exists_fn=lambda row: bool(_album_item_abs_path(_s(row.get("path") or ""))
-                                       and Path(_album_item_abs_path(_s(row.get("path") or ""))).is_file()),
+            exists_fn=_row_file_present,
             similarity_fn=_track_ai_similarity,
         )
         log.append(f"  [merge] Reconciliation plan: {plan.counts()} (album identity: {plan.album.reason})")
@@ -652,7 +697,16 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
             moved_ids = {int(i) for i in (plan.move_ids or [])}
             moved_rows = [r for r in imported_items if int(r.get("id") or 0) in moved_ids]
             present_after = list(existing_items) + moved_rows
-            _recovery_mark_outcome(carrier, result, existing_album_id, present_after, recon_op_id, log)
+            # NF-2: a freshly-moved row's file provably exists (the apply above
+            # just placed it) but its pre-move path in `imported_items` is now
+            # stale, so trust it by id; an EXISTING DB row counts as delivered
+            # only when its audio file is actually present on disk. Item ids are
+            # globally unique in Beets, so a moved id never collides with an
+            # existing-album row.
+            def _delivered_present(row: Dict[str, Any]) -> bool:
+                return int(row.get("id") or 0) in moved_ids or _row_file_present(row)
+            _recovery_mark_outcome(carrier, result, existing_album_id, present_after,
+                                   recon_op_id, log, exists_fn=_delivered_present)
         return result
     except _ExistingAlbumMergeFailed:
         _recovery_mark_failed(carrier, log)

@@ -150,6 +150,65 @@ class RecoveryCarrierMergeTests(Wave20FixtureBase):
         self.assertEqual(rec["state"], "imported")
         self.assertEqual(rec["checkpoint"], "IMPORTED")
 
+    # --- NF-2: a different recording at a wanted slot is not delivery -----
+    def test_wanted_track_at_slot_of_a_different_recording_is_not_imported(self):
+        """NF-2: a wanted track carrying a recording id whose album slot is held
+        by a DIFFERENT recording must NOT read as delivered. The genuinely
+        missing expected track still lands, but the carrier stays
+        review_required (not IMPORTED), so the wanted track is never falsely
+        reported delivered and then short-circuited/stranded on a resubmit.
+        Before the fix the position-only tolerance marked this IMPORTED."""
+        WANTED_RID = "cccccccc-0000-0000-0000-000000000000"
+        self._create_album(1, "Existing Album", rg_id=RG_A, rel_id=REL_A)
+        self._create_album(2, "Imported Temp Album", rg_id=RG_A, rel_id=REL_A)
+        self._create_item(10, 1, "Track 1", 1, 1, "t1_existing.wav", rec_id=REC_1, rg_id=RG_A)
+        # A DIFFERENT recording (REC_3) already occupies position (1,3).
+        self._create_item(13, 1, "Something Else", 1, 3, "t3_existing.wav", rec_id=REC_3, rg_id=RG_A)
+        # The verified missing track (1,2) is staged in the imported album.
+        self._create_item(20, 2, "Track 2", 1, 2, "t2_imported.wav", staging=True,
+                          rec_id=REC_2, rg_id=RG_A)
+        cid = rc.create_carrier(
+            existing_album_id=1, mb_releasegroupid=RG_A,
+            expected_tracks=[{"recording_id": REC_2, "track": 2, "disc": 1, "title": "Track 2"}],
+            wanted_tracks=[{"recording_id": WANTED_RID, "track": 3, "disc": 1, "title": "Wanted 3"}],
+            staged_folder_path=self.staged, state="verifying")["carrier_id"]
+        plan, apply = self._reconcile_ok()
+        with plan, apply:
+            res = isvc._merge_imported_album_into_existing(2, 1, self.staged, [], mb_albumid="")
+        self.assertEqual(res, 1)  # the expected track (1,2) was moved onto the album
+        rec = rc.get_carrier(cid)
+        self.assertEqual(rec["state"], "review_required")   # wanted 3 NOT delivered
+        self.assertNotEqual(rec["checkpoint"], "IMPORTED")
+
+    # --- NF-3: an unidentifiable intended track does not block IMPORTED ---
+    def test_unidentifiable_intended_track_does_not_block_imported(self):
+        """NF-3 (resolved -- accept by design, not stranding): a title-only /
+        unidentifiable intended track (no recording id, track<=0) is dropped
+        from the delivery check, so a recovery whose identifiable tracks all
+        land still reaches IMPORTED instead of being stuck in review forever
+        (it could never satisfy _recovery_slot_present). It is NOT stranded:
+        acquisition F5 treats such a track as UNPROVEN, so a resubmit
+        re-recovers it (acquisition_service._requested_tracks_covered)."""
+        self._two_albums()
+        cid = rc.create_carrier(
+            existing_album_id=1, mb_releasegroupid=RG_A,
+            expected_tracks=[{"recording_id": REC_2, "track": 2, "disc": 1, "title": "Track 2"}],
+            wanted_tracks=[{"title": "Mystery Bonus", "track": 0}],  # unidentifiable
+            staged_folder_path=self.staged, state="verifying")["carrier_id"]
+        plan, apply = self._reconcile_ok()
+        with plan, apply:
+            res = isvc._merge_imported_album_into_existing(2, 1, self.staged, [], mb_albumid="")
+        self.assertEqual(res, 1)
+        rec = rc.get_carrier(cid)
+        self.assertEqual(rec["state"], "imported")
+        self.assertEqual(rec["checkpoint"], "IMPORTED")
+        # The rationale directly: the unidentifiable track is dropped, so it can
+        # never make a full delivery look partial.
+        self.assertEqual(
+            isvc._recovery_intended_tracks(
+                {"expected_tracks": [], "wanted_tracks": [{"title": "x", "track": 0}]}),
+            [])
+
     # --- concurrency / crash recovery ------------------------------------
     def test_concurrent_recovery_in_importing_is_refused(self):
         """A carrier already 'importing' (a second job, or a crash that left
@@ -322,6 +381,36 @@ class RecoveryMergeHelperUnitTests(unittest.TestCase):
     def test_slot_absent_when_neither_matches(self):
         rows = [{"disc": 1, "track": 1, "mb_trackid": "rec-1"}]
         self.assertFalse(isvc._recovery_slot_present(rows, {"disc": 1, "track": 2, "recording_id": "rec-2"}))
+
+    # --- NF-2: strict rid matching + file presence -----------------------
+    def test_slot_present_strict_rejects_a_different_recording_at_the_slot(self):
+        """NF-2: strict mode satisfies a recording id ONLY by its own recording;
+        a different recording at the same (disc,track) does not count. The
+        tolerant default (precheck double-import guard) still counts it as
+        present -- that direction routes to Review and must not be loosened."""
+        rows = [{"disc": 1, "track": 3, "mb_trackid": "rec-other"}]
+        want = {"recording_id": "rec-wanted", "disc": 1, "track": 3}
+        self.assertFalse(isvc._recovery_slot_present(rows, want, strict=True))
+        self.assertTrue(isvc._recovery_slot_present(rows, want))  # precheck unchanged
+
+    def test_slot_present_strict_matches_its_own_recording_any_position(self):
+        rows = [{"disc": 9, "track": 99, "mb_trackid": "rec-wanted"}]
+        self.assertTrue(isvc._recovery_slot_present(
+            rows, {"recording_id": "rec-wanted", "disc": 1, "track": 3}, strict=True))
+
+    def test_slot_present_strict_falls_back_to_position_without_a_rid(self):
+        """No recording id to compare -> position is the only signal, even
+        strict (the position branch is a fallback, not disabled outright)."""
+        rows = [{"disc": 2, "track": 3, "mb_trackid": ""}]
+        self.assertTrue(isvc._recovery_slot_present(rows, {"disc": 2, "track": 3}, strict=True))
+
+    def test_slot_present_exists_fn_rejects_a_row_whose_file_is_gone(self):
+        """NF-2: a matched DB row whose audio file is missing does not count as
+        delivered; exists_fn runs only on an already-matched row."""
+        rows = [{"id": 5, "disc": 1, "track": 3, "mb_trackid": "rec-x"}]
+        want = {"recording_id": "rec-x", "disc": 1, "track": 3}
+        self.assertFalse(isvc._recovery_slot_present(rows, want, strict=True, exists_fn=lambda r: False))
+        self.assertTrue(isvc._recovery_slot_present(rows, want, strict=True, exists_fn=lambda r: True))
 
     def test_mark_failed_is_a_no_op_without_a_carrier(self):
         log = []

@@ -281,6 +281,13 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertIn("config_invalid", self._failed(out["status"]))
         self.assertEqual(out["stats_error"][:2], ["BeetsAdapterConnectionError", "BEETS_EMBEDDED_UNAVAILABLE"])
         self.assertIn("config", out["stats_error"][2])
+        # SEC-007: the raw parser exception text must not be echoed into the
+        # (authenticated) status message; only the bounded type name survives.
+        msg = next(c["message"] for c in out["status"]["checks"] if c["code"] == "config_invalid")
+        self.assertTrue(msg.endswith("(see the log for detail)."), msg)
+        detail = msg.split("could not be read: ", 1)[1].split(".", 1)[0]
+        self.assertNotIn(" ", detail)  # exception class name only, no message body
+        self.assertNotIn(":", detail)
 
     def test_unloadable_plugin_is_named(self):
         self._write_config(plugins="[doesnotexist]")
@@ -381,6 +388,13 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         out = self._run("bad_library")
         self.assertIn("library_open_failed", self._failed(out["status"]))
         self.assertEqual(out["stats_error"][1], "BEETS_EMBEDDED_UNAVAILABLE")
+        # SEC-007: raw open-exception text (which can carry internal paths/
+        # detail) must not reach the status message; only the type name does.
+        msg = next(c["message"] for c in out["status"]["checks"] if c["code"] == "library_open_failed")
+        self.assertTrue(msg.endswith("(see the log for detail)."), msg)
+        detail = msg.split("could not be opened: ", 1)[1].split(".", 1)[0]
+        self.assertNotIn(" ", detail)
+        self.assertNotIn(":", detail)
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file permissions")
     @unittest.skipIf(os.name == "nt", "POSIX permissions")

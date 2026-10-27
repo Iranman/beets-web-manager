@@ -70,9 +70,25 @@ def _write_manifest(folder: str, manifest: Dict[str, Any]) -> None:
 
     ``os.replace`` is atomic on one filesystem, so the reader either sees the
     previous complete manifest or this one (H2)."""
-    path = os.path.join(folder, MANIFEST_NAME)
+    # Containment barrier (SEC-007): callers already pass a server-minted
+    # uuid4 folder or a _manifest_dir()-validated id, but re-resolve the
+    # folder and re-check containment here, inline before the sink, so the
+    # write fail-closes if it ever resolves outside the engine's own
+    # quarantine root. Only the folder is resolved; the final ".tmp"
+    # component is left unresolved so O_NOFOLLOW below still rejects a symlink
+    # planted at that name (resolving it here would defeat O_NOFOLLOW).
+    root = os.path.realpath(_quarantine_root())
+    real_folder = os.path.realpath(folder)
+    if not real_folder.startswith(root + os.sep):
+        raise ValueError("manifest path escapes the quarantine root")
+    path = os.path.join(real_folder, MANIFEST_NAME)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    # O_NOFOLLOW: a symlink planted at the .tmp name (by something with write
+    # access to the engine's own quarantine dir) must not redirect this write
+    # outside the folder. O_TRUNC overwrites a stale tmp left by a prior crash.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh)
         fh.flush()
         os.fsync(fh.fileno())

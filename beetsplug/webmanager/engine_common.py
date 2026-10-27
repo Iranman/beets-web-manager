@@ -80,6 +80,18 @@ def _inside_allowed(path: str) -> bool:
     return ops.is_strict_descendant(path, ops.get_allowed_roots())
 
 
+def _inside_folder(path: str, folder: str) -> bool:
+    """Resolved containment: a ``..`` component or a symlink in ``path`` cannot
+    make it pass for a file that really sits outside ``folder``. Use this to
+    validate manifest-derived move sources (the manifest is engine-written, but
+    a resolved check keeps the rollback fail-closed if one is ever poisoned)."""
+    try:
+        root = os.path.realpath(folder)
+        return os.path.commonpath([os.path.realpath(path), root]) == root
+    except (OSError, ValueError):
+        return False
+
+
 def _error(message: str, code: str, status: int = 400):
     return jsonify({"error": message, "error_code": code}), status
 

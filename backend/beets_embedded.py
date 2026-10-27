@@ -120,9 +120,12 @@ class EmbeddedBeets:
             directory = os.fsdecode(config["directory"].as_filename())
             configured = list(config["plugins"].as_str_seq())
         except Exception as ex:  # confuse.ConfigError and YAML errors
+            # The raw exception text can carry config-file contents/paths; keep
+            # it server-side and return only the bounded type name (SEC-007).
+            log.exception("Beets config could not be read")
             _check(checks, "config_invalid", False,
                    f"Beets config {config_path or '(BEETSDIR/config.yaml)'} could not be read: "
-                   f"{type(ex).__name__}: {ex}. Fix the file and restart Web Manager.")
+                   f"{type(ex).__name__}. Fix the file and restart Web Manager (see the log for detail).")
             self.status = _summary(checks, beets_version=version)
             raise EmbeddedBeetsUnavailable(self.status)
         _check(checks, "config_invalid", True, "")
@@ -167,9 +170,12 @@ class EmbeddedBeets:
             lib = Library(dbpath, directory)
             lib.get_item(0)  # opens the connection, as `beet` does
         except Exception as ex:
+            # Raw exception text can leak internal paths/details into the
+            # /api/health/detail response; log it, return the type only (SEC-007).
+            log.exception("Beets library could not be opened")
             _check(checks, "library_open_failed", False,
-                   f"Beets library {dbpath} could not be opened: {type(ex).__name__}: {ex}. "
-                   "Check the /config mount and its permissions for PUID/PGID.")
+                   f"Beets library {dbpath} could not be opened: {type(ex).__name__}. "
+                   "Check the /config mount and its permissions for PUID/PGID (see the log for detail).")
             self.status = _summary(checks, beets_version=version, loaded_plugins=loaded)
             raise EmbeddedBeetsUnavailable(self.status)
         _check(checks, "library_open_failed", True, "")

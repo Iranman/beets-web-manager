@@ -3745,11 +3745,30 @@ def plan_album_metadata(
         payload["release_group_change"] = {"from": old_rg, "to": new_rg, "operator_selected": selected}
         summary += f" (Release Group {old_rg} -> {new_rg}, {'operator-selected' if selected else 'explicit'})"
     before: Dict[str, Any] = {"album": {"id": aid, "fields": _restorable(album, album_updates)}, "items": []}
+    # ARCH-032: an album write with tag-writing rewrites every item's tags, so
+    # a rollback that restored only the album's value would stamp it onto every
+    # item -- blanking an item whose own tag already carried the value. Capture
+    # each album item's OWN value of the album-written fields so the rollback
+    # restores the item's value, not the album's; explicit per-item updates add
+    # their own fields on top.
+    rows: Dict[int, Tuple[Dict[str, Any], set]] = {}
+    if album_updates:
+        try:
+            for it in ad.find_all_items_by_album_id(aid) or []:
+                iid = it.get("id")
+                if iid is not None:
+                    rows[int(iid)] = (it, set(album_updates.keys()))
+        except Exception:
+            rows = {}  # an adapter that cannot enumerate items: capture none
     for iid, fields in per_item.items():
         item = ad.get_item(int(iid))
         if not item or int(item.get("album_id") or 0) != aid:
             return {"ok": False, "code": "item_not_in_album", "error": f"Item {iid} is not on album {aid}."}
-        before["items"].append({"id": int(iid), "fields": _restorable(item, fields),
+        existing = rows.get(int(iid))
+        rows[int(iid)] = (item, (existing[1] if existing else set()) | set(fields.keys()))
+    for iid in sorted(rows):
+        item, keys = rows[iid]
+        before["items"].append({"id": iid, "fields": _restorable(item, keys),
                                 "path": _s(item.get("path"))})
     tx = st.create(
         operation_type="Metadata Update",

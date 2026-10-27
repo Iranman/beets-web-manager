@@ -2549,6 +2549,60 @@ class RecoverImportRollbackTests(unittest.TestCase):
             self.assertTrue(staged.exists())
             self.assertEqual(staged.read_bytes(), b"\x00" * 4096)
 
+    def test_rollback_lookup_failure_error_is_bounded(self):
+        """SEC-007 (CodeQL #1444/#1445): an adapter read failure used to embed
+        the raw exception text (``{_s(exc)}``) into the ``error`` field that the
+        rollback response returns; it is now a bounded message, detail logged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Look Track", uploader="DJ Me", fname="look.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+
+            def boom(iid):
+                raise ValueError("LEAK_MARKER token=secret-abc at /internal/path")
+            fake.get_item = boom
+
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=music_root)
+            self.assertFalse(res["ok"], res)
+            self.assertEqual(res["code"], "recover_rollback_lookup_failed")
+            self.assertNotIn("LEAK_MARKER", json.dumps(res))
+            self.assertNotIn("secret-abc", json.dumps(res))
+            self.assertNotIn("/internal/path", json.dumps(res))
+            self.assertEqual(res["error"], f"Could not read item {out['imported_item_id']} from Beets.")
+
+    def test_rollback_execution_failure_error_is_bounded(self):
+        """SEC-007 (CodeQL #1444/#1445): a failure during the undo mutation used
+        to return ``error: _s(exc)`` to the client; now bounded. The raw text
+        stays only in the transaction's persisted logs (operator-only)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            from backend import transaction_engine as txe
+            music_root = os.path.join(tmp, "music")
+            os.makedirs(music_root, exist_ok=True)
+            fake = _FakeRecoverLib(music_root)
+            tx_store, out, staged = self._import_one(
+                tmp, fake, title="Boom Track", uploader="DJ Me", fname="boom.flac")
+            self.assertTrue(out["imported"], out)
+            tx_id = out["transaction_id"]
+
+            def boom(item_ids=None, album_ids=None, delete_files=False):
+                raise RuntimeError("LEAK_MARKER /internal/beets/detail")
+            fake.remove = boom
+
+            res = txe.rollback_recover_import(tx_store, tx_id, adapter=fake, music_root=music_root)
+            self.assertFalse(res["ok"], res)
+            self.assertEqual(res["code"], "recover_rollback_failed")
+            self.assertNotIn("LEAK_MARKER", json.dumps(res))
+            self.assertNotIn("/internal/beets", json.dumps(res))
+            self.assertEqual(res["error"],
+                             "Rollback stopped before completion; the transaction needs recovery.")
+            # The detail is still kept server-side in the persisted logs.
+            self.assertTrue(any("LEAK_MARKER" in m for m in tx_store._read(tx_id)["logs"]))
+
     def test_rollback_never_touches_preexisting_library_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             from backend import transaction_engine as txe

@@ -1252,7 +1252,11 @@ class BeetsAdapter:
         without paths (``web.include_paths`` disabled) instead of returning
         an empty list that looks like an empty library.
         """
-        items = self.get_items()
+        # ARCH-031: only path and album_id are read here, so fetch just those
+        # through the fields-limited route (an older plugin falls back to the
+        # stock full read inside get_fields()). With include_paths off the
+        # route omits path, so _require_item_paths still raises as before.
+        items = self.get_fields("item", ("path", "album_id"))
         self._require_item_paths(items)
         if details:
             records: List[Dict[str, Any]] = []
@@ -1286,8 +1290,11 @@ class BeetsAdapter:
         items belonging to an album with that albumartist, not items whose
         own artist field happens to match.
         """
-        albums = self.get_albums()
-        items = self.get_items()
+        # ARCH-031: only albumartist (albums) and album_id (items) are read, so
+        # fetch just those through the fields-limited route; an older plugin
+        # falls back to the stock full read inside get_fields().
+        albums = self.get_fields("album", ("albumartist",))
+        items = self.get_fields("item", ("album_id",))
 
         albumartist_by_album_id: Dict[int, str] = {}
         album_counts: Dict[str, int] = {}

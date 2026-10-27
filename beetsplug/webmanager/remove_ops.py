@@ -44,6 +44,7 @@ from .engine_common import (
     _error,
     _fspath,
     _inside_allowed,
+    _inside_folder,
     _manifest_dir,
     _quarantine_root,
     _sha256_file,
@@ -214,7 +215,7 @@ def run_quarantine_remove_items_rollback():
     for record in records:
         original = _fspath(record.get("original_path"))
         qpath = _fspath(record.get("quarantine_path"))
-        if not original or not _inside_allowed(original) or not qpath.startswith(folder + os.sep):
+        if not original or not _inside_allowed(original) or not _inside_folder(qpath, folder):
             return _error("recorded path is invalid", "RECORD_PATH_INVALID")
         if os.path.exists(original):
             return _error(f"{original} is occupied", "ORIGINAL_PATH_OCCUPIED", 409)

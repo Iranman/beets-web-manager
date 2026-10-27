@@ -2696,8 +2696,12 @@ def rollback_recover_import(
             try:
                 item = ad.get_item(item_id)
             except Exception as exc:  # noqa: BLE001
+                # Raw exception text would reach the client via the rollback
+                # response; log it, return a bounded error (SEC-007).
+                LOG.warning("recover rollback: could not read item %s from Beets: %s",
+                            item_id, type(exc).__name__)
                 return {"ok": False, "code": "recover_rollback_lookup_failed", "operation_id": operation_id,
-                        "mutated": False, "error": f"Could not read item {item_id} from Beets: {_s(exc)}"}
+                        "mutated": False, "error": f"Could not read item {item_id} from Beets."}
             if not item and status in _RECOVER_ROLLBACK_RESUME:
                 # F7 crash-resume: the row is already gone. A crash between
                 # adapter.remove and the progress persist leaves db_removed
@@ -2774,11 +2778,17 @@ def rollback_recover_import(
                 log.append(f"Deleted recovered file {safe2}.")
             op["progress"] = {"db_removed": True, "file_deleted": True}
         except Exception as exc:  # noqa: BLE001
+            # The raw exception text stays in the transaction's persisted logs
+            # (operator-only, via GET the transaction); the client-facing error
+            # is bounded so no stack-trace detail is exposed (SEC-007).
+            LOG.exception("recover rollback stopped for %s", operation_id)
             store.transition(operation_id, "Running", "Recovery Required",
                              rollback={"operations": [op]},
                              logs=list(tx.get("logs") or []) + log + [f"Rollback stopped: {_s(exc)}"])
             return {"ok": False, "code": "recover_rollback_failed", "operation_id": operation_id,
-                    "status": "Recovery Required", "mutated": True, "error": _s(exc), "log": log}
+                    "status": "Recovery Required", "mutated": True,
+                    "error": "Rollback stopped before completion; the transaction needs recovery.",
+                    "log": log}
 
         store.transition(
             operation_id, "Running", "Rolled Back",
