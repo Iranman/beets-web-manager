@@ -84,11 +84,37 @@ def _wanted_tracks_not_in_album(existing_album_id: int, mb_albumid: str,
     return filtered
 
 
+def _recovery_stage_prefix_for(source_folder: str) -> Optional[str]:
+    """Best-effort DETERMINISTIC staging prefix for a recovery: the stable
+    recovery-identity key of the carrier bound to ``source_folder`` (never the
+    folder name). Threading it into the staging layer makes every retry of the
+    SAME recovery reuse one ``_beets_missing_import/rec-<hex>-<album>`` folder
+    instead of minting a fresh uuid family each attempt (the duplicate-folder
+    storm). Returns None (random uuid, unchanged behaviour) off the recovery
+    path or on any lookup failure -- a strict no-op when no carrier is bound.
+    The value is a fixed-length hex-of-a-hash; the staging layer still
+    re-sanitises it and re-checks containment (SEC-007/#325)."""
+    if not _s(source_folder).strip():
+        return None
+    try:
+        carrier = recovery_carrier.load_for_folder(source_folder)
+    except Exception:
+        return None
+    key = _s((carrier or {}).get("recovery_identity_key")).strip().lower()
+    return ("rec-" + key[:16]) if key else None
+
+
 def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
                                 artist: str, album: str, log: list,
                                 force_stage: bool = False,
-                                target_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
-    """Copy a selected subset to a clean import folder when the source has extras."""
+                                target_tracks: Optional[List[Dict[str, Any]]] = None,
+                                stage_prefix: Optional[str] = None) -> str:
+    """Copy a selected subset to a clean import folder when the source has extras.
+
+    ``stage_prefix`` pins the staged-folder name deterministically so a recovery
+    reuses one folder across retries; when not supplied it is derived from a
+    recovery carrier bound to ``aldir`` (if any), so every call site gets the
+    reuse behaviour without threading identity through each of them."""
     # #427: a folder the app already staged that holds exactly the selected
     # files is imported in place; a second copy would leave the Review row and
     # the acquisition cleanup pointing at different folders.
@@ -104,12 +130,15 @@ def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
         if present and present == selected:
             log.append(f"  [import] Using staged folder in place: {aldir}")
             return aldir
+    if stage_prefix is None:
+        stage_prefix = _recovery_stage_prefix_for(aldir)
     # Validated root only; an unsafe DOWNLOADS_ROOT raises the setup-block
     # message instead of creating _beets_missing_import inside it (#268 S-2).
     return _stage_selected_audio_files_impl(
         validated_downloads_root(), AUDIO_EXT, aldir, audio_files, artist, album, log,
         force_stage=force_stage,
         target_tracks=target_tracks,
+        stage_prefix=stage_prefix,
     )
 
 

@@ -444,9 +444,34 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
         pass
 
     safe_album = re.sub(r'[\\/:*?"<>|]', "_", f"{artist} - {album}").strip(" _-") or "missing-tracks"
-    prefix = stage_prefix if stage_prefix is not None else uuid.uuid4().hex[:10]
+    # SEC-007 / #325: a caller-supplied ``stage_prefix`` (the DETERMINISTIC
+    # recovery-identity prefix that lets retries REUSE one staged folder instead
+    # of minting a fresh uuid family each attempt) is sanitised to a bounded
+    # [0-9A-Za-z._-] token, so it can never carry a path separator, a drive
+    # segment or a ``..`` component into the staged path -- it is a fixed-length
+    # hex-of-a-hash, never raw identity text. An empty/degenerate prefix falls
+    # back to the previous random token.
+    reuse = stage_prefix is not None
+    if reuse:
+        prefix = re.sub(r"[^0-9A-Za-z._-]", "", str(stage_prefix)).strip("._-")[:40]
+    else:
+        prefix = ""
+    if not prefix:
+        prefix = uuid.uuid4().hex[:10]
     stage = Path(downloads_root) / "_beets_missing_import" / f"{prefix}-{safe_album}"
     stage.mkdir(parents=True, exist_ok=True)
+    # SEC-007 / #325 containment: the staged-folder name is now PREDICTABLE when
+    # a deterministic prefix is used, so verify the real path is a non-symlink
+    # directory that still resolves under the downloads root before copying into
+    # it. This closes the predictable-path/symlink TOCTOU a random uuid name
+    # previously masked (a pre-planted symlink at the known name would otherwise
+    # redirect the copy out of the root). Enforced for BOTH callers (defence in
+    # depth); never trusts the name alone.
+    root_resolved = Path(downloads_root).resolve(strict=False)
+    stage_resolved = stage.resolve(strict=False)
+    if (stage.is_symlink() or not stage_resolved.is_dir()
+            or not stage_resolved.is_relative_to(root_resolved)):
+        raise RuntimeError("staged import folder is not safely contained in the downloads root")
 
     def _target_dest(src: Path, target: Dict[str, Any]) -> Path:
         try:
@@ -476,7 +501,13 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
             except Exception:
                 dest = stage / src.name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
+        # On a deterministic REUSE of one recovery folder across retries, the
+        # same track re-downloaded maps to the same dest name and must REPLACE
+        # the prior attempt's copy (copy2 overwrites) rather than accumulate
+        # ``name.1``/``name.2`` siblings that would then collide at import. The
+        # random-prefix path keeps the de-dupe suffixing (distinct passes never
+        # share a folder there).
+        if dest.exists() and not reuse:
             base, ext = dest.stem, dest.suffix
             n = 1
             while dest.exists():

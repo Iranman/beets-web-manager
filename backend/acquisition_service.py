@@ -346,6 +346,17 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 and _requested_tracks_covered(_by_identity)):
             _resume_carrier_id = _s(_by_identity.get("carrier_id")).strip()
     _recovery_carrier_id = (_resume_carrier_id or uuid.uuid4().hex) if _is_recovery else ""
+    # Step-3: a DETERMINISTIC staging-folder prefix derived from the stable
+    # recovery identity, so every retry of the SAME recovery REUSES one staged
+    # folder instead of minting a fresh uuid/timestamp family each attempt (the
+    # duplicate-folder storm). Fixed-length hex of the identity hash with a
+    # constant ``rec-`` marker (lets Step-4 cleanup recognise recovery folders);
+    # never raw identity text -- the staging layer still re-sanitises it and
+    # re-checks containment (SEC-007/#325). None for a non-recovery (keeps the
+    # random-token behaviour).
+    _recovery_stage_prefix = (
+        ("rec-" + _recovery_identity_key[:16])
+        if (_is_recovery and _recovery_identity_key) else None)
 
     def _do(log, cancel_event=None):
         def _recovery_resume_short_circuit():
@@ -401,6 +412,41 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         if _resume_result is not None:
             return _resume_result
 
+        def _recovery_provenance_payload(folder_path: str) -> Optional[Dict[str, Any]]:
+            """Additive durable provenance (requirement 2) for the carrier
+            ``source`` dict, computed from the landed download ``folder_path``.
+            The discovery query/provider was recorded at create; this adds the
+            CHOSEN-result reference (resolved MB release + method + staged folder)
+            and the per-file source of what was actually delivered. Returned as a
+            ``payload_extra`` fragment so it merges onto an EXISTING carrier
+            advance (no extra lifecycle transition / checkpoint). Records no
+            secret or token. Returns None off the recovery path or when the
+            carrier cannot be read."""
+            if not _recovery_carrier_id or not _s(folder_path).strip():
+                return None
+            try:
+                carrier = recovery_carrier.get_carrier(_recovery_carrier_id)
+            except Exception:
+                carrier = None
+            if not carrier:
+                return None
+            src = dict(carrier.get("source") or {})
+            src["result"] = {
+                "provider": method,
+                "mb_release": _s(resolved_mbid),
+                "mb_releasegroupid": _s(carrier.get("mb_releasegroupid")),
+                "staged_folder": _s(folder_path),
+            }
+            try:
+                files = sorted(
+                    p.name for p in Path(folder_path).rglob("*")
+                    if p.is_file() and p.suffix.lower() in AUDIO_EXT)
+            except OSError:
+                files = []
+            if files:
+                src["per_file"] = [{"name": n, "source": method} for n in files]
+            return {"source": src}
+
         def _recovery_bind_folder(folder_path: str) -> None:
             """Bind the staged download folder to the recovery carrier so
             load_for_folder() resolves the album identity (AI-batch scan,
@@ -413,16 +459,22 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             except Exception as ex:
                 log.append(f"  [recovery] WARN could not bind staged folder: {type(ex).__name__}")
 
-        def _recovery_advance(state: str, checkpoint: str) -> None:
+        def _recovery_advance(state: str, checkpoint: str, *,
+                              source_folder: str = "") -> None:
             """Advance the recovery carrier as the download progresses
             (CREATED->DOWNLOADED->STAGED) so the single guarded recovery
-            workflow can resume from the last checkpoint. Best-effort: a store
-            failure never breaks the download/import."""
+            workflow can resume from the last checkpoint. When ``source_folder``
+            is given, the additive result/per-file provenance is merged onto the
+            SAME transition (no separate write). Best-effort: a store failure
+            never breaks the download/import."""
             if not _recovery_carrier_id:
                 return
+            payload_extra = (_recovery_provenance_payload(source_folder)
+                             if source_folder else None)
             try:
                 recovery_carrier.advance_state(
-                    _recovery_carrier_id, state, checkpoint=checkpoint)
+                    _recovery_carrier_id, state, checkpoint=checkpoint,
+                    payload_extra=payload_extra)
             except Exception as ex:
                 log.append(
                     f"  [recovery] WARN could not advance carrier to {checkpoint}: "
@@ -480,7 +532,30 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                         }
                         for t in job_wanted_tracks
                     ],
-                    source={"method": method, "provenance": "download-import"},
+                    # Durable discovery + search provenance (requirement 2): the
+                    # provider/method and the discovery QUERY the recovery was
+                    # launched from. The chosen-result reference and per-file
+                    # source are added after the download lands (see
+                    # ``_recovery_record_provenance``). Additive to the carrier
+                    # ``source`` dict; no secret/token is recorded here.
+                    source={
+                        "method": method,
+                        "provider": method,
+                        "provenance": "download-import",
+                        "discovery_query": {
+                            "artist": artist,
+                            "album": album,
+                            "year": year,
+                            "mb_releasegroupid": rgid,
+                            "release_id": _s(resolved_mbid),
+                            "tracks": [
+                                {"title": _s(t.get("title")),
+                                 "track": t.get("track"),
+                                 "disc": t.get("disc")}
+                                for t in job_wanted_tracks
+                            ],
+                        },
+                    },
                     origin_job_id=_recovery_box.get("job_id", ""),
                     state="downloading",
                 )
@@ -669,7 +744,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # reimport-disk child job carries the recovery identity, and record
             # that the files landed in it (DOWNLOADED = folder bound).
             _recovery_bind_folder(import_dir)
-            _recovery_advance("downloaded", "DOWNLOADED")
+            _recovery_advance("downloaded", "DOWNLOADED", source_folder=import_dir)
             active_wanted_tracks = (
                 _normalise_wanted_tracks(import_wanted_tracks)
                 if import_wanted_tracks is not None
@@ -723,7 +798,12 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 else job_wanted_tracks
             )
             if active_tracks:
-                suffix = str(int(time.time() * 1000))
+                # Step-3: a recovery reuses ONE download folder across retries
+                # (the deterministic recovery-identity prefix) instead of a fresh
+                # per-attempt timestamp family; a non-recovery keeps the unique
+                # timestamp. ``_download_dest_under`` still enforces root
+                # containment (#268 S-1) on the resulting predictable name.
+                suffix = _recovery_stage_prefix or str(int(time.time() * 1000))
                 source_slug = re.sub(r"[^a-z0-9]+", "", source_method) or "download"
                 return str(_download_dest_under(
                     downloads_root, safe_artist,
@@ -1006,6 +1086,7 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     import_dir = _stage_selected_audio_files(
                         aldir, afiles, artist, album, log,
                         target_tracks=dl_wanted_tracks or None,
+                        stage_prefix=_recovery_stage_prefix,
                     )
                     try:
                         download_result = {
@@ -1176,7 +1257,12 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                                "review hand-off; failing closed to avoid stranding the folder.")
                 if _queued:
                     try:
-                        recovery_carrier.advance_state(_recovery_carrier_id, "review_required")
+                        # Fold the result/per-file provenance onto the same
+                        # transition (manual-review recovery has no DOWNLOADED
+                        # leg to carry it).
+                        recovery_carrier.advance_state(
+                            _recovery_carrier_id, "review_required",
+                            payload_extra=_recovery_provenance_payload(aldir_na))
                     except Exception as ex:
                         log.append(f"  [recovery] WARN carrier review_required not recorded: {type(ex).__name__}")
                     download_result["queued_for_review"] = True

@@ -1205,6 +1205,27 @@ def ai_suggest(iid):
         )
         suggestions["ai_available"] = ai_available
         suggestions["ai_unavailable_reason"] = ai_unavailable_reason
+        # When AI did not actually contribute (not configured, or its key was
+        # rejected/unreachable -- classified by _classify_openai_error), the
+        # confidence below is a MusicBrainz/AcoustID (or absent) verdict, NOT an
+        # AI one. Emit a STRUCTURED ai_status (separating configured vs validly
+        # reachable, with the provider boundary's last classified outcome, which
+        # knows a 401-rejected key) plus an explicit confidence_source, so the UI
+        # can render a provider-status chip instead of a misleading "AI low".
+        # matching_decision.ai is left untouched (its boundary default is correct
+        # by design).
+        _ai_ph = (provider_boundary.provider_health() or {}).get("ai") or {}
+        suggestions["ai_status"] = {
+            "configured": bool(ai_configured),
+            "attempted": bool(ai_configured),
+            "contributed": bool(ai_contributed),
+            "available": bool(ai_contributed),
+            "unavailable_reason": "" if ai_contributed else ai_unavailable_reason,
+            "last_outcome": _ai_ph.get("last_outcome"),
+            "last_status_code": _ai_ph.get("last_status_code"),
+        }
+        suggestions["confidence_source"] = (
+            "ai" if ai_contributed else ("musicbrainz" if mb_candidates else "none"))
         suggestions["evidence"] = evidence
         return jsonify({"ok": True, "suggestions": suggestions,
                         "mb_candidates": mb_candidates,
