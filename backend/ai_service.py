@@ -1149,6 +1149,24 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
     acoustid_status = acoustid_failure_status(acoustid_lookup) if acoustid_lookup else ""
     acoustid_cands: List[Dict[str, Any]] = list(acoustid_lookup.data or []) if acoustid_lookup else []
 
+    # ── carrier-bound canonical Release Group (ARCH-030 2.5, finding F4) ───────
+    # A staged folder bound to a recovery carrier is a single-track recovery for
+    # a KNOWN album; its canonical identity comes ONLY from the carrier's stored
+    # mb_releasegroupid (recovery_carrier.load_for_folder) -- NEVER reconstructed
+    # from the folder/filename/tag text. When present it pins the MB candidate
+    # pool (seed) and vetoes unrelated-RG title collisions (e.g. FLEUR
+    # "FOREVER FOREVER" can't replace a 112 "Forever" recovery), exactly as
+    # _ai_suggest_album_internal does. No carrier -> genuine new-album import:
+    # _target_rg is "" and both the seed and the veto are strict no-ops.
+    _target_rg = ""
+    try:
+        from backend import recovery_carrier
+        _carrier = recovery_carrier.load_for_folder(folder_path)
+        if _carrier:
+            _target_rg = _extract_mb_uuid(_s(_carrier.get("mb_releasegroupid", "")).strip())
+    except Exception:
+        _target_rg = ""
+
     # ── MusicBrainz release search ─────────────────────────────────────────────
     # When the artist folder is MBID-stamped, prefer arid: lookup over artist name
     # search — more reliable for non-ASCII or unusual artist names (e.g. ¥$).
@@ -1158,33 +1176,48 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
     mb_search_log: List[str] = []
     mb_unavailable = False
     try:
-        mb_candidates = _mb_release_search(guessed_album, guessed_artist, limit=8,
-                                           year=guessed_year, track_count=folder_track_count,
-                                           artist_mbid=guessed_artist_mbid, log=mb_search_log)
-        if not mb_candidates and guessed_artist:
-            mb_candidates = _mb_release_search(guessed_album, "", limit=8,
+        if _target_rg:
+            # Carrier-pinned: seed the pool from the canonical Release Group's
+            # own releases (rgid:-bound), so generic title matching can't pull in
+            # another Release Group. Empty rgid search (index lag) -> RG-scoped
+            # folder-track recording search, never a free title match.
+            mb_candidates = _mb_release_search("", "", limit=8,
+                                               year=guessed_year, track_count=folder_track_count,
+                                               release_group_id=_target_rg, log=mb_search_log)
+            if not mb_candidates:
+                mb_candidates = _mb_release_search_by_folder_tracks(
+                    folder_path, artist=guessed_artist, log=mb_search_log, limit=8,
+                    release_group_id=_target_rg)
+        else:
+            mb_candidates = _mb_release_search(guessed_album, guessed_artist, limit=8,
                                                year=guessed_year, track_count=folder_track_count,
                                                artist_mbid=guessed_artist_mbid, log=mb_search_log)
-        if not mb_candidates and guessed_album:
-            short = " ".join(guessed_album.split()[:3])
-            mb_candidates = _mb_release_search(short, guessed_artist, limit=8,
-                                               year=guessed_year, track_count=folder_track_count,
-                                               artist_mbid=guessed_artist_mbid, log=mb_search_log)
-        if not mb_candidates:
-            # Last resort: search MB by track titles extracted from the audio files.
-            # Useful when folder/tag names are badly mangled but track metadata is intact.
-            mb_candidates = _mb_release_search_by_folder_tracks(
-                folder_path, artist=guessed_artist, log=mb_search_log, limit=8)
+            if not mb_candidates and guessed_artist:
+                mb_candidates = _mb_release_search(guessed_album, "", limit=8,
+                                                   year=guessed_year, track_count=folder_track_count,
+                                                   artist_mbid=guessed_artist_mbid, log=mb_search_log)
+            if not mb_candidates and guessed_album:
+                short = " ".join(guessed_album.split()[:3])
+                mb_candidates = _mb_release_search(short, guessed_artist, limit=8,
+                                                   year=guessed_year, track_count=folder_track_count,
+                                                   artist_mbid=guessed_artist_mbid, log=mb_search_log)
+            if not mb_candidates:
+                # Last resort: search MB by track titles extracted from the audio files.
+                # Useful when folder/tag names are badly mangled but track metadata is intact.
+                mb_candidates = _mb_release_search_by_folder_tracks(
+                    folder_path, artist=guessed_artist, log=mb_search_log, limit=8)
     except provider_boundary.ProviderError as exc:
         # An outage is not "no candidates": keep going with AcoustID/Discogs
         # evidence and report the lookup failure below.
         mb_unavailable, mb_candidates = True, []
         mb_search_log.append(f"WARN: MusicBrainz lookup failed: {exc}")
     discogs_fallback: Dict[str, Any] = {}
-    if not mb_candidates:
+    if not mb_candidates and not _target_rg:
         # MusicBrainz text search exhausted every variant it knows; Discogs'
         # larger catalog and cleaner "Artist - Album" parsing can sometimes
-        # succeed where the raw folder-name guess didn't.
+        # succeed where the raw folder-name guess didn't. Skipped for a
+        # carrier-bound recovery: the canonical RG is pinned, so a free-text
+        # Discogs/MB retry must not pull in an unrelated Release Group.
         discogs_fallback = _discogs_release_fallback_candidate(guessed_artist, guessed_album)
         if discogs_fallback:
             mb_search_log.append(
@@ -1222,6 +1255,21 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         c["acoustid_release_hits"] = acoustid_release_hits.get(c.get("mb_albumid", ""), 0)
         c["_match_score"] = _score_mb_release_candidate(ev, c)
     mb_candidates.sort(key=lambda c: c["_match_score"]["total"], reverse=True)
+    # ARCH-030 2.5 / finding F4: when the folder is bound to a recovery carrier
+    # whose canonical Release Group is known, apply the Step-1 relatedness veto
+    # so a title-collision release on an UNRELATED Release Group (FLEUR
+    # "FOREVER FOREVER" vs 112 "Forever") can never sort first as the primary
+    # suggestion. The target RG is the carrier's (never folder/filename text).
+    # Stable partition -> preserves the scorer's order within each group; a
+    # strict no-op when no carrier RG is known (text-only ranking unchanged).
+    if _target_rg and mb_candidates:
+        def _unrelated(c: Dict[str, Any]) -> bool:
+            try:
+                return _candidate_is_unrelated(c, target_release_group_id=_target_rg)
+            except Exception:
+                return False
+
+        mb_candidates.sort(key=_unrelated)  # stable: unrelated RGs sink below related/unknown
 
     # ── AcoustID shortcut (skip AI when fingerprints strongly agree) ──────────
     # 2+ tracks fingerprinted to the same release that's already in candidates
