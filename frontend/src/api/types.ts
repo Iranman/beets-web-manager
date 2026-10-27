@@ -188,6 +188,91 @@ export interface ReviewRecordingCandidate {
   safety_key?: 'safe' | 'review' | 'conflict' | 'none' | string;
   reason?: string;
 }
+/** One of the five independent checks the album matching decision answers
+ * (req-7). Mirrors backend/matching_contract.py `decision_dimensions`.
+ * `ok` is descriptive only — `MatchingDecision.action_allowed` is the single
+ * authorization field; a dimension never grants authority. Read-only. */
+export interface MatchingDecisionDimension {
+  ok?: boolean;
+  status?: string;
+  detail?: string;
+}
+
+/** The five serialized decision dimensions, surfaced separately so the UI can
+ * show exactly which check passed or failed instead of one collapsed blob. */
+export interface MatchingDecisionDimensions {
+  identifier_syntax?: MatchingDecisionDimension;
+  mb_entity_lookup?: MatchingDecisionDimension;
+  album_identity_verification?: MatchingDecisionDimension;
+  downloaded_recording_verification?: MatchingDecisionDimension;
+  import_eligibility?: MatchingDecisionDimension;
+}
+
+/** Canonical album matching decision contract v3 (build_album_matching_decision
+ * → backend/matching_contract.py `decision_payload`). The UI displays these; it
+ * never recomputes eligibility from scores. `action_allowed` is the single
+ * authorization field. Read-only. */
+export interface MatchingDecision {
+  action_allowed?: boolean;
+  explanation?: string;
+  reason_code?: string;
+  reason?: string;
+  eligibility_reason?: string;
+  recommended_action?: string;
+  identity_proof?: string;
+  identity_verified?: boolean;
+  review_required?: boolean;
+  confidence_score?: number | null;
+  confidence_tier?: string;
+  /** "release_group" (RG-derived) or "metadata" (slot-derived). */
+  confidence_source?: string;
+  safety_result?: string;
+  safety_key?: string;
+  conflicts?: string[];
+  warnings?: string[];
+  dimensions?: MatchingDecisionDimensions;
+}
+
+/** One provider's last classified call outcome since process start, from
+ * backend/provider_boundary.py `provider_health()` (redacted: no URLs/keys).
+ * Surfaced under `/api/health/detail` → `provider_health`. Read-only. */
+export interface ProviderHealthRow {
+  provider?: string;
+  calls?: number;
+  failures?: number;
+  retries?: number;
+  last_outcome?: string | null;
+  last_status_code?: number | null;
+  last_message?: string;
+  last_reason?: string | null;
+  last_success_at?: number | null;
+  last_failure_at?: number | null;
+}
+
+/** Structured AI-provider status on an ai-suggest response (routes_library.py).
+ * `configured` is env-var PRESENCE; `contributed`/`available` is whether AI
+ * actually produced the suggestion. The UI must NEVER present AI confidence
+ * when `contributed` is false (not run, or key rejected/unreachable). Read-only. */
+export interface AiStatus {
+  configured?: boolean;
+  attempted?: boolean;
+  contributed?: boolean;
+  available?: boolean;
+  unavailable_reason?: string;
+  last_outcome?: string | null;
+  last_status_code?: number | null;
+}
+
+/** Per expected (missing) recovery track with its download/verification status.
+ * Mirrors backend/recovery_carrier.py `_per_track_status`. Read-only. */
+export interface RecoveryTrackStatus {
+  recording_id?: string;
+  title?: string;
+  disc?: number | string | null;
+  position?: number | string | null;
+  status?: 'imported' | 'verified' | 'downloaded' | 'pending' | string;
+}
+
 export interface ReviewPreflight {
   ok?: boolean;
   matches?: number;
@@ -211,8 +296,8 @@ export interface ReviewPreflight {
   error?: string;
   examples?: string[];
   reason?: string;
-  /** Canonical album decision (build_album_matching_decision). */
-  matching_decision?: { action_allowed?: boolean; explanation?: string; reason_code?: string } | null;
+  /** Canonical album decision (build_album_matching_decision), contract v3. */
+  matching_decision?: MatchingDecision | null;
 }
 
 export interface ReviewEvidence {
@@ -2417,6 +2502,8 @@ export interface RecoveryCarrierIdentity {
   recovery_stage?: RecoveryStage;
   recovery?: boolean;
   recovery_carrier_id?: string;
+  /** Stable recovery identity key (schema v2); groups one-to-many staged folders. */
+  recovery_identity_key?: string;
   /** The existing library album this download is being recovered into. */
   existing_album_id?: number;
   /** Canonical album identity (ADR-0002). */
@@ -2426,6 +2513,18 @@ export interface RecoveryCarrierIdentity {
   destination_album_path?: string;
   wanted_tracks?: unknown[];
   expected_tracks?: RecoveryExpectedTrack[];
+  /** Per expected-track download/verification status (status ∈ imported,
+   * verified, downloaded, pending). Mirrors `_per_track_status`. */
+  tracks?: RecoveryTrackStatus[];
+  /** Acquisition provenance (carrier `source`): how/where the files came from. */
+  provenance?: Record<string, unknown>;
+  /** Canonical album matching decision contract v3 for this carrier. */
+  matching_decision?: MatchingDecision;
+  /** SINGLE review-row confidence derived from the contract
+   * (contract_confidence). Empty when no decision has been computed yet. */
+  confidence?: 'high' | 'medium' | 'review_required' | '' | string;
+  /** Why the carrier is at review (verification_evidence.rejection_reason). */
+  review_reason?: string;
 }
 
 export interface AiSuggestion {
@@ -2511,10 +2610,22 @@ export interface AiSuggestion {
     format?: string;
     genre?: string;
   } | null;
+  /** Structured AI-provider status (routes_library.py). Present on the
+   * ai-suggest `suggestions` payload. The UI reads this (not a coarse
+   * confidence string) to render a provider chip and to suppress AI
+   * confidence when `contributed` is false. */
+  ai_status?: AiStatus;
+  /** Where the confidence came from: "ai", "musicbrainz" or "none". */
+  confidence_source?: string;
 }
 
 export interface AiSuggestResponse extends ApiOkResponse {
   suggestion?: AiSuggestion;
+  /** Structured AI-provider status + confidence provenance. routes_library.py
+   * attaches these to the `suggestions` object; typed here too so top-level
+   * callers can read them without narrowing. */
+  ai_status?: AiStatus;
+  confidence_source?: string;
   /** /api/items/<iid>/ai-suggest uses this key (plural) instead of
    * `suggestion` -- a pre-existing backend inconsistency, not replicated
    * here on purpose, just typed as-is so item-level callers can read it. */
@@ -2886,6 +2997,10 @@ export interface HealthChecks {
 
 export interface HealthResponse extends ApiOkResponse {
   checks: HealthChecks;
+  /** Per-provider VALIDITY signal (last classified outcome), distinct from
+   * `checks` which reports env-var PRESENCE only. Keyed by provider name
+   * (e.g. "ai", "acoustid", "lidarr"). From provider_boundary.provider_health. */
+  provider_health?: Record<string, ProviderHealthRow>;
 }
 
 export interface StatsResponse {
