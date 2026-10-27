@@ -7,7 +7,6 @@ import backend.provider_boundary as provider_boundary
 import json, os, re, sqlite3, threading, time, uuid
 from collections import Counter, defaultdict
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ALLOWED_ROOTS, DOWNLOADS_ROOT, EDITABLE_FIELDS, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, TORRENT_SOURCE_MOVE_ALLOWED, TORRENT_SOURCE_ROOTS, WEB_MANAGER_DATA_DIR, _ANSI_RE, _LITERAL_PLACEHOLDER_RE, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _s, _up, _ur
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE, _ai_evidence_clean_artist_guess, _ai_evidence_clean_segment, _ai_evidence_extract_year, _ai_evidence_scene_guess, _ai_evidence_weak_album_guess, _ai_evidence_weak_artist_guess, _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
@@ -39,8 +38,8 @@ from backend.artwork_service import _art_repair_build_report, _art_repair_save_l
 
 
 class AttachRecordingCancelled(RuntimeError):
-    """Raised when a beet subprocess stage of the attach-recording /
-    recording-ID-rollback workflow was cancelled (rc=-9), so callers can
+    """Raised when an attach-recording / recording-ID-rollback stage was
+    cancelled while running in the job engine (rc=-9), so callers can
     tell an intentional cancellation apart from an ordinary failure."""
 
 
@@ -1076,7 +1075,7 @@ def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[s
         return False
 
 
-# ── attach-recording: per-item reservation + strict subprocess outcomes ───────
+# ── attach-recording: per-item reservation + strict stage outcomes ────────────
 #
 # Concurrency: keyed by Beets item id, process-local, and deliberately
 # narrow to this one feature -- two concurrent attach-recording requests for
@@ -2732,50 +2731,6 @@ def _album_genre_value(album) -> str:
     return _album_genre_value_by_id(int(getattr(album, "id", 0) or 0))
 
 
-def _beet_output(r) -> str:
-    return _ANSI_RE.sub(
-        "",
-        ((getattr(r, "stdout", "") or "") + (getattr(r, "stderr", "") or "")).strip()
-    )
-
-
-def _require_beet_ok(r, label: str, log: list) -> str:
-    out = _beet_output(r)
-    if r.returncode == -9:
-        raise RuntimeError(f"{label} cancelled")
-    if r.returncode == 124:
-        if out:
-            log.append(out[:400])
-        raise RuntimeError(f"{label} timed out")
-    if r.returncode != 0:
-        if out:
-            log.append(out[:400])
-        raise RuntimeError(f"{label} failed rc={r.returncode}")
-    return out
-
-
-def _log_beet_output_excerpt(log: list, label: str, out: str,
-                             *, max_lines: int = 18, max_chars: int = 1600) -> None:
-    """Append a compact subprocess output excerpt for jobs that otherwise look idle."""
-    clean = _s(out).strip()
-    if not clean:
-        log.append(f"  {label} completed with no console output")
-        return
-    lines = [ln.strip() for ln in clean.splitlines() if ln.strip()]
-    if not lines:
-        return
-    excerpt = lines[-max_lines:]
-    total = 0
-    log.append(f"  {label} output:")
-    for line in excerpt:
-        line = line[:240]
-        total += len(line)
-        if total > max_chars:
-            log.append("    ...")
-            break
-        log.append(f"    {line}")
-
-
 def _apply_genre_to_album(album_id: int, genre: str, log: list, env: Optional[dict] = None,
                            cancel_event=None) -> bool:
     """Write genre to every track via album_metadata_repair_v1 family."""
@@ -2789,28 +2744,6 @@ def _apply_genre_to_album(album_id: int, genre: str, log: list, env: Optional[di
     _invalidate_lib_cache()
     log.append(f"  ✓ Genre set: {genre}")
     return True
-
-
-def _lastgenre_cmd(force: bool, query: str, log: list, env: Optional[dict] = None,
-                   cancel_event=None, timeout: int = 180):
-    """Run controlled album-scoped lastgenre repair via BeetsClient IPC."""
-    raw_query = _s(query).strip()
-    match = re.fullmatch(r"album_id:(\d+)", raw_query)
-    if not match:
-        return SimpleNamespace(
-            returncode=1,
-            stdout="",
-            stderr="lastgenre repair requires an album_id query",
-        )
-    try:
-        result = composite_workflows.repair_album_genre(int(match.group(1)), force=force, timeout=float(timeout))
-    except Exception as ex:
-        result = {"ok": False, "error": str(ex)}
-    return SimpleNamespace(
-        returncode=0 if result.get("ok") else 1,
-        stdout=str(result.get("stdout") or result.get("output") or ""),
-        stderr=str(result.get("stderr") or result.get("error") or ""),
-    )
 
 
 # Service behind POST /api/library/fix-genres (ARCH-001): request-free,
@@ -2845,10 +2778,13 @@ def start_library_fix_genres(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             log.append(f"  [{idx}/{len(targets)}] {name}")
             before = _album_genre_value(album)
             try:
-                r = _lastgenre_cmd(force, f"album_id:{aid}", log, cancel_event=cancel_event)
-                out = _require_beet_ok(r, "lastgenre", log)
-                if idx == 1:
-                    _log_beet_output_excerpt(log, "lastgenre", out)
+                # Controlled engine op directly (wave 27): no fake beet-CLI
+                # return-code shim; result errors and exceptions both surface
+                # as RuntimeError for the per-album WARN below.
+                result = composite_workflows.repair_album_genre(aid, force=force, timeout=180.0)
+                if not result.get("ok"):
+                    raise RuntimeError(
+                        str(result.get("error") or result.get("stderr") or "lastgenre repair failed"))
             except Exception as ex:
                 failed_lastfm += 1
                 log.append(f"    WARN lastgenre failed for album_id:{aid}: {ex}")

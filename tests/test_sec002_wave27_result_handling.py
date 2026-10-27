@@ -470,29 +470,6 @@ class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
         apply_merge.assert_not_called()
 
 
-@unittest.skipIf(APP is None, f"app.py could not be imported: {_APP_IMPORT_ERROR}")
-class LastgenreControlledRepairTests(unittest.TestCase):
-    def test_non_album_query_fails_closed(self):
-        result = APP._lastgenre_cmd(False, "id:999", [], {}, timeout=1)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("album_id", result.stderr)
-
-    def test_album_query_uses_controlled_genre_repair(self):
-        with mock.patch.object(APP.composite_workflows, "repair_album_genre", return_value={"ok": True, "output": "genre ok"}) as repair, \
-             mock.patch.object(APP.composite_workflows, "run_command") as run_command:
-            result = APP._lastgenre_cmd(True, "album_id:123", [], {}, timeout=2)
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("genre ok", result.stdout)
-        repair.assert_called_once_with(123, force=True, timeout=2.0)
-        run_command.assert_not_called()
-
-    def test_album_query_failure_is_process_failure(self):
-        with mock.patch.object(APP.composite_workflows, "repair_album_genre", return_value={"ok": False, "error": "plugin failed"}):
-            result = APP._lastgenre_cmd(False, "album_id:123", [], {}, timeout=2)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("plugin failed", result.stderr)
-
-
 class BeetsClientRequiredWrapperTests(unittest.TestCase):
     def setUp(self):
         self.client = APP.composite_workflows
