@@ -146,11 +146,6 @@ class AcoustIdCallerTests(unittest.TestCase):
             res = helpers_mb.acoustid_lookup_outcome(str(self.audio))
         self.assertEqual(res.outcome, ProviderOutcome.UNAVAILABLE)
 
-    def test_compat_list_api_is_unchanged(self):
-        body = {"status": "ok", "results": [{"score": 1.0, "id": "a", "recordings": [{"id": "rec-9"}]}]}
-        with mock.patch.object(helpers_mb._ur, "urlopen", return_value=_Resp(json.dumps(body).encode())):
-            self.assertEqual([c["mb_trackid"] for c in helpers_mb._acoustid_lookup(str(self.audio))], ["rec-9"])
-
 
 class MusicBrainzCallerTests(unittest.TestCase):
     REL = "45347542-db98-422a-a307-ae95d5371f60"

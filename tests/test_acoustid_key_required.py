@@ -44,7 +44,6 @@ class NotConfiguredOutcomeTests(unittest.TestCase):
         self.assertNotIn(result.outcome, pb.RETRYABLE)
         self.assertEqual(result.data, [])
         self.assertIn("AcoustID not configured", result.message)
-        self.assertEqual(helpers_mb._acoustid_lookup("/music/a.flac"), [])
 
     def test_not_configured_is_never_cached(self):
         from backend import acoustid_service

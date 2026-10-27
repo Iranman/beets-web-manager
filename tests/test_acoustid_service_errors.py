@@ -38,8 +38,8 @@ class AcoustidServiceErrorTests(unittest.TestCase):
 
         with mock.patch.object(helpers_mb._ur, "urlopen", side_effect=rejected), \
                 self.assertLogs("helpers_mb", level="WARNING") as logs:
-            self.assertEqual(helpers_mb._acoustid_lookup("/music/a.flac"), [])
-            self.assertEqual(helpers_mb._acoustid_lookup("/music/b.flac"), [])
+            self.assertEqual(helpers_mb.acoustid_lookup_outcome("/music/a.flac").data, [])
+            self.assertEqual(helpers_mb.acoustid_lookup_outcome("/music/b.flac").data, [])
         self.assertEqual(len(logs.records), 1)
         self.assertIn("ACOUSTID_API_KEY", logs.output[0])
         self.assertEqual(helpers_mb.ACOUSTID_LAST_SERVICE_ERROR["code"], 4)

@@ -885,14 +885,6 @@ def acoustid_lookup_outcome(file_path: str):
     return result
 
 
-def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
-    """Run fpcalc + AcoustID lookup. Returns list of MB recording candidate dicts.
-
-    Compatibility wrapper: [] for "no match" AND for "could not ask". Callers
-    that must tell those apart (or cache) use acoustid_lookup_outcome()."""
-    return list(acoustid_lookup_outcome(file_path).data or [])
-
-
 def _resolve_release_group_to_release(rg_mbid: str, log: list,
                                       year: str = "", track_count: int = 0) -> str:
     """Resolve a MusicBrainz release-group UUID to a concrete release UUID."""
@@ -1001,68 +993,3 @@ def _resolve_mb_release_id(mb_input: str, log: list) -> str:
             log.append(f"  WARN: release-group lookup failed ({ex}); release not resolved")
             return ""
     return mb_uuid
-
-
-def fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Fetch tracklist for a MusicBrainz release ID without app.py dependencies."""
-    mb_albumid = (mb_albumid or "").strip().lower()
-    if not _MB_UUID_RE.match(mb_albumid):
-        return {"ok": False, "error": "Invalid MusicBrainz release ID", "tracks": []}
-    mb_url = (f"https://musicbrainz.org/ws/2/release/{mb_albumid}"
-              "?inc=recordings+release-groups&fmt=json")
-    req = _ur.Request(
-        mb_url,
-        headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"}
-    )
-    mb_data: Dict[str, Any] = {}
-    # BA-5: retries happen once, inside provider_boundary.opened.
-    try:
-        with provider_boundary.opened("musicbrainz", req, timeout=30) as resp:
-            mb_data = json.loads(resp.read())
-    except Exception as ex:
-        unavailable = _mb_unavailable(ex)
-        error = "MusicBrainz is unavailable." if unavailable is not None else "MusicBrainz lookup failed."
-        if log is not None:
-            log.append(f"  MB fetch failed: {error}")
-        return {"ok": False, "error": error, "tracks": [],
-                "unavailable": unavailable is not None}
-
-    rg = mb_data.get("release-group") or {}
-    release_group_id = str(rg.get("id") or "").strip().lower()
-    tracks: List[Dict[str, Any]] = []
-    for medium in mb_data.get("media", []) or []:
-        disc_num = int(medium.get("position") or 1)
-        for trk in medium.get("tracks", []) or []:
-            rec = trk.get("recording") or {}
-            rec_id = str(rec.get("id") or "").strip()
-            if not rec_id:
-                continue
-            try:
-                length_ms = int(trk.get("length") or rec.get("length") or 0)
-            except Exception:
-                length_ms = 0
-            tracks.append({
-                "disc": disc_num,
-                "track": int(trk.get("position") or len(tracks) + 1),
-                "title": _mb_text(trk.get("title") or rec.get("title")),
-                "mb_trackid": rec_id,
-                "duration_ms": length_ms,
-            })
-    return {
-        "ok": True,
-        "release_id": mb_albumid,
-        "release_group": release_group_id,
-        "release_title": _mb_text(mb_data.get("title")),
-        "tracks": tracks,
-        # ARCH-003 Wave 33: top-level fields already present on the same MB
-        # Release API response (no extra request needed) -- added so
-        # album_mb_track_repair_v1's stamp_release_metadata option (used by
-        # the migrated _match_tracks_from_mb_shared()) can plan year/
-        # country stamping from this same fetch, matching app.py's own
-        # (app.py-local) _fetch_mb_release_tracklist(), which already
-        # returns both. Purely additive: no existing caller of this
-        # function reads either key today.
-        "country": _mb_text(mb_data.get("country")),
-        "date": _mb_text(mb_data.get("date")),
-    }
-
