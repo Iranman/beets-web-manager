@@ -233,17 +233,20 @@ def _live_carrier_prefixes(limit: int = 500) -> Dict[str, str]:
     so a Step-3-scheme orphan folder whose deterministic prefix matches a live
     carrier can be ADOPTED (re-bound) instead of re-minted. The identity comes
     from the carrier record; the folder name only carries a server-generated
-    token, never identity derived from the name."""
+    token, never identity derived from the name.
+
+    F8 (fail-closed): a carrier-store read error PROPAGATES here instead of being
+    swallowed into an empty map. An empty return therefore means "store read OK,
+    no live carriers", which is a trustworthy negative; a raise means "ownership
+    UNKNOWN", which the caller treats as not-deletable (a folder matching an
+    unread live-carrier prefix must not be mistaken for unowned)."""
     out: Dict[str, str] = {}
     live_states = [s for s in recovery_carrier.CARRIER_STATES
                    if s not in recovery_carrier.TERMINAL_STATES]
-    try:
-        for c in recovery_carrier.list_carriers_by_state(live_states, limit=limit):
-            key = _s(c.get("recovery_identity_key")).strip().lower()
-            if key:
-                out.setdefault("rec-" + key[:16], _s(c.get("carrier_id")))
-    except Exception:
-        pass
+    for c in recovery_carrier.list_carriers_by_state(live_states, limit=limit):
+        key = _s(c.get("recovery_identity_key")).strip().lower()
+        if key:
+            out.setdefault("rec-" + key[:16], _s(c.get("carrier_id")))
     return out
 
 
@@ -280,7 +283,15 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
     root = _staging_root()
     if not root or not os.path.isdir(root):
         return summary
-    live_prefixes = _live_carrier_prefixes()
+    # F8 (fail-closed): if the live-carrier prefix read fails, ownership is
+    # UNKNOWN for EVERY folder this run (a folder could match a live carrier we
+    # could not read), so no deletion is permitted -- recorded per-folder below.
+    try:
+        live_prefixes = _live_carrier_prefixes()
+        prefixes_err: Optional[str] = None
+    except Exception as ex:
+        live_prefixes = {}
+        prefixes_err = type(ex).__name__
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name)
     except OSError:
@@ -311,10 +322,14 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
             continue
         # ADOPT: a folder the carrier store still resolves (side table or legacy
         # last-bound column) belongs to a carrier -- keep it, never delete.
+        # F8 (fail-closed): a lookup that RAISES is ownership-UNKNOWN, not
+        # proof-of-unowned; remember it so cleanup is refused below.
+        folder_err: Optional[str] = None
         try:
             bound = recovery_carrier.load_for_folder(child)
-        except Exception:
+        except Exception as ex:
             bound = None
+            folder_err = type(ex).__name__
         if bound:
             summary["kept"] += 1
             continue
@@ -328,6 +343,17 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
                 log.append(f"[recovery-reconcile] adopted staging folder for carrier {owner}.")
             except Exception:
                 summary["skipped"] += 1
+            continue
+        # CLEANUP gate (F8, fail-closed): delete ONLY when ownership positively
+        # resolved as unowned. If either carrier-store read failed (this folder's
+        # lookup raised, or the live-carrier prefix read raised), ownership is
+        # UNKNOWN -- the folder may belong to a LIVE carrier -- so skip, never
+        # delete. Log the exception type + folder name only (no secrets).
+        store_err = folder_err or prefixes_err
+        if store_err:
+            summary["skipped"] += 1
+            log.append(f"[recovery-reconcile] skipped {entry.name} "
+                       f"(carrier-store unavailable: {store_err}).")
             continue
         # CLEANUP: no carrier owns it. Age guard against an in-flight download.
         try:
