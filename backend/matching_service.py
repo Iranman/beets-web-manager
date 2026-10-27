@@ -798,7 +798,20 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             title = _s(props.get("title")) or _slskd_title_guess_from_name(Path(rel_path).name) or Path(rel_path).stem
             mb_trackid = _s(props.get("mb_trackid"))
             length = float(props.get("length") or 0.0)
-            _add_candidate(title, rel_path, track=track, disc=disc, mb_trackid=mb_trackid, length=length)
+            # D2: thread real per-file AcoustID hits into the album-decision
+            # alignment so an answered-empty lookup is seen as NO_RESULT, not
+            # the fingerprint-blind UNAVAILABLE default (track_alignment.py).
+            # In the no-local-mount topology we cannot fpcalc here, so hits can
+            # only come pre-attached (engine inspection or, later, the recovery
+            # carrier); absent that they correctly stay UNAVAILABLE. A present
+            # key -- including [] for a genuine no_result -- is threaded as-is.
+            inspect_hits = entry.get("acoustid_hits")
+            if inspect_hits is None:
+                inspect_hits = props.get("acoustid_hits")
+            _add_candidate(
+                title, rel_path, track=track, disc=disc, mb_trackid=mb_trackid, length=length,
+                acoustid_hits=inspect_hits if (fingerprint_evidence and inspect_hits is not None) else None,
+            )
     else:
         for fpath in audio_files:
             disc, track = _audio_position_from_path(str(fpath))
@@ -1021,9 +1034,35 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             # or no existing album): cannot auto-verify -> keep for review.
             gate_ok = False
 
+    # req-5: name which preflight surface this actually is, so a targeted
+    # recovery is never read as a full-album incompleteness rejection. The
+    # four surfaces are distinct checks, not one "N/9 matched" headline:
+    #   - single_track_recovery : carrier-pinned missing-slot fill; authority
+    #     is the per-recording proof, judged against the expected missing
+    #     track(s), NOT the full release tracklist.
+    #   - existing_album_fill   : subset import into an existing album.
+    #   - new_full_album        : a whole release being identified fresh.
+    expected_missing = len(wanted_tracks or [])
+    if recovery_mode:
+        preflight_mode = "single_track_recovery"
+    elif existing_album_id and audio_files and len(audio_files) < expected:
+        preflight_mode = "existing_album_fill"
+    else:
+        preflight_mode = "new_full_album"
+    recovery_scope: Dict[str, Any] = {}
+    if recovery_mode:
+        proof_rec = result.get("missing_track_proof") or {}
+        recovery_scope = {
+            "expected_missing": expected_missing,
+            "staged_audio": len(audio_files),
+            "verified": len(proof_rec.get("files") or []),
+            "existing_album_id": int(existing_album_id or 0),
+        }
     result.update({
         "ok": gate_ok,
         "tracklist_ok": bool(tracklist_ok),
+        "preflight_mode": preflight_mode,
+        "recovery_scope": recovery_scope,
         "matches": matches,
         "min_required": min_required,
         "max_audio_allowed": max_audio_allowed,
@@ -1093,6 +1132,20 @@ def _preflight_review_reason(preflight: Optional[Dict[str, Any]],
         return (f"The folder tracklist matched the {release_label}, but it was refused: "
                 f"{_preflight_rejection_reason(preflight)}. Review the identity "
                 "evidence before importing.")
+
+    # req-5: a targeted missing-track recovery is judged against the expected
+    # missing slot(s), never the whole release tracklist. Do not lead with
+    # "only 2/9 matched" -- that framing is a full-album incompleteness
+    # rejection and is wrong for a recovery whose scope is the 2 missing tracks.
+    if preflight.get("preflight_mode") == "single_track_recovery":
+        scope = preflight.get("recovery_scope") or {}
+        want = int(scope.get("expected_missing") or 0)
+        got = int(scope.get("verified") or 0)
+        staged = int(scope.get("staged_audio") or audio_count)
+        head = (f"Missing-track recovery for the {release_label}: verified "
+                f"{got} of {want} expected missing track(s) from {staged} staged file(s).")
+        detail = _preflight_rejection_reason(preflight)
+        return f"{head} {('Held for review: ' + detail + '.') if detail else 'Held for review.'}".strip()
 
     parts: List[str] = []
     if preflight.get("oversized_subset_complete"):

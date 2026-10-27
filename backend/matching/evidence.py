@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from .models import ConfidenceState, IdentityProof, ReleaseGroupMatchResult, ReleaseMatch, TrackAlignmentResult
+from .models import (
+    DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR,
+    CandidateRelatedness,
+    ConfidenceState,
+    IdentityProof,
+    ReleaseGroupMatchResult,
+    ReleaseMatch,
+    TrackAlignmentResult,
+)
 from .normalize import normalize_artist, normalize_title, similarity
 from .track_alignment import align_tracks_global
 
@@ -49,6 +57,69 @@ def _candidate_identity(candidate: Dict[str, Any]) -> Dict[str, Any]:
         "release_title": release_title,
         "date": _s(candidate.get("date") or candidate.get("year") or ""),
     }
+
+
+def classify_candidate_relatedness(
+    candidate: Dict[str, Any],
+    *,
+    target_release_group_id: str = "",
+    target_artist_id: str = "",
+    target_artist: str = "",
+    artist_text_floor: float = DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR,
+) -> CandidateRelatedness:
+    """Pure relatedness/veto predicate for the suggestion candidate pool.
+
+    Classifies ``candidate`` against a target identity (the carrier's pinned
+    target Release Group and artist) WITHOUT consulting title text, so a
+    title collision alone can never make an unrelated release look related:
+
+    - RELATED_RELEASE_GROUP: candidate's Release Group MBID == target's.
+    - RELATED_ARTIST: candidate's artist MBID == target's, or (when an MBID
+      is unavailable on either side) artist text similarity >= the floor.
+    - UNRELATED: everything else -- a veto. A later step must never surface
+      an UNRELATED candidate as the primary suggestion.
+
+    Dependency-free and side-effect-free: only this module's existing
+    normalize/similarity helpers. Later steps wire it into the candidate
+    pool; this step just defines what "related" means."""
+    target_rg = _id(target_release_group_id)
+    cand_rg = _release_group_id(candidate)
+    if target_rg and cand_rg and target_rg == cand_rg:
+        return CandidateRelatedness.RELATED_RELEASE_GROUP
+
+    target_aid = _id(target_artist_id)
+    cand_aid = _artist_id(candidate)
+    if target_aid and cand_aid:
+        return (
+            CandidateRelatedness.RELATED_ARTIST
+            if target_aid == cand_aid
+            else CandidateRelatedness.UNRELATED
+        )
+
+    cand_artist = _s(candidate.get("artist") or candidate.get("albumartist") or candidate.get("release_artist") or "")
+    if target_artist and cand_artist:
+        if similarity(normalize_artist(target_artist), normalize_artist(cand_artist)) >= float(artist_text_floor):
+            return CandidateRelatedness.RELATED_ARTIST
+    return CandidateRelatedness.UNRELATED
+
+
+def candidate_is_unrelated(
+    candidate: Dict[str, Any],
+    *,
+    target_release_group_id: str = "",
+    target_artist_id: str = "",
+    target_artist: str = "",
+    artist_text_floor: float = DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR,
+) -> bool:
+    """Convenience veto: True when ``candidate`` is UNRELATED to the target
+    and must not be offered as the primary suggestion."""
+    return classify_candidate_relatedness(
+        candidate,
+        target_release_group_id=target_release_group_id,
+        target_artist_id=target_artist_id,
+        target_artist=target_artist,
+        artist_text_floor=artist_text_floor,
+    ) == CandidateRelatedness.UNRELATED
 
 
 def _candidate_metadata_mixed(candidate: Dict[str, Any], identity: Dict[str, Any]) -> bool:
@@ -256,7 +327,37 @@ def evaluate_release_group_candidate(
     # complete target coverage -- that's real identity for the tracks
     # present, not the same thing as a fully confirmed release.
     local_tracks_total = len(local_tracks)
-    local_tracks_verified = sum(1 for row in alignment.assignments if row.is_deterministic)
+    hard_verified = sum(1 for row in alignment.assignments if row.is_deterministic)
+
+    # DETERMINISTIC_METADATA_SLOT (docs/adr/0007): a file can verify its slot
+    # on strong deterministic metadata (exact title + duration tolerance +
+    # exact position + genuine AcoustID NO_RESULT -- the per-track half) ONLY
+    # when the album-level half holds too: candidate RG == target RG
+    # (release_group_status validated), no hard conflicts, and artist matched
+    # by MBID or, when neither side has an artist MBID, a high artist-text
+    # floor. This is deliberately VERIFIED_SUBSET-grade and never sets
+    # action_allowed (the FULL_RELEASE authorization), so it can only ever
+    # unlock can_auto_accept(VERIFIED_SUBSET), never a whole-release action.
+    artist_slot_ok = (
+        "artist_id_matches" in positives
+        or (
+            not (local_artist_id and candidate_artist_id)
+            and artist_score >= DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR
+        )
+    )
+    metadata_slot_album_ok = bool(
+        release_group_status == "validated"
+        and not conflicts
+        and artist_slot_ok
+    )
+    slot_verified = sum(
+        1
+        for row in alignment.assignments
+        if metadata_slot_album_ok
+        and not row.is_deterministic
+        and row.is_deterministic_metadata_slot()
+    )
+    local_tracks_verified = hard_verified + slot_verified
     local_coverage_complete = bool(local_tracks_total) and local_tracks_verified == local_tracks_total and not alignment.unmatched_local_count
     target_tracks_total = alignment.total_target_tracks
     target_tracks_matched = alignment.matched_count
@@ -274,7 +375,13 @@ def evaluate_release_group_candidate(
     elif release_complete:
         identity_proof = IdentityProof.CONFIRMED_RELEASE
     elif local_coverage_complete:
-        identity_proof = IdentityProof.DETERMINISTIC_TRACK_RECORDING_ID
+        # Hard per-track proof outranks metadata-slot proof: only label the
+        # weaker tier when at least one present track leaned on it.
+        identity_proof = (
+            IdentityProof.DETERMINISTIC_TRACK_RECORDING_ID
+            if slot_verified == 0
+            else IdentityProof.DETERMINISTIC_METADATA_SLOT
+        )
     else:
         identity_proof = IdentityProof.RELEASE_GROUP_ID
 

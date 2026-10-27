@@ -31,8 +31,38 @@ class IdentityProof(str, Enum):
 
     INSUFFICIENT = "insufficient"
     RELEASE_GROUP_ID = "release_group_id"
+    # Strong-deterministic-metadata slot proof: the file fills one specific
+    # release-track slot proven by exact normalized title + duration within
+    # canonical tolerance + exact release-track position, with the candidate
+    # Release Group == the target's and artist matched, AND the per-file
+    # AcoustID lookup genuinely answered empty (NO_RESULT, never UNAVAILABLE).
+    # Ranked below hard per-track recording-ID/fingerprint proof and above a
+    # bare Release-Group-ID match. VERIFIED_SUBSET-only -- it never authorizes
+    # a whole-release (FULL_RELEASE) action. See docs/adr/0007-*.
+    DETERMINISTIC_METADATA_SLOT = "deterministic_metadata_slot"
     DETERMINISTIC_TRACK_RECORDING_ID = "deterministic_track_recording_id"
     CONFIRMED_RELEASE = "confirmed_release"
+
+
+#: Canonical slot-proof thresholds (docs/adr/0007-deterministic-metadata-slot-gate.md).
+#: Deliberately tight: a wrong-recording file in the right slot must not pass.
+#: Duration tolerance is seconds between the local file and the target track;
+#: the artist-text floor applies only when neither side carries an artist MBID.
+DETERMINISTIC_SLOT_DURATION_TOLERANCE_S = 7.0
+DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR = 0.85
+
+
+class CandidateRelatedness(str, Enum):
+    """How a suggestion candidate relates to a target identity (target RG +
+    artist). Used as a veto predicate for the suggestion/review candidate
+    pool: an UNRELATED candidate (neither the target Release Group nor the
+    target artist) must never be offered as the primary suggestion, however
+    well its title string happens to collide (the FLEUR "FOREVER FOREVER" vs
+    112 "Forever" title-collision case)."""
+
+    RELATED_RELEASE_GROUP = "related_release_group"
+    RELATED_ARTIST = "related_artist"
+    UNRELATED = "unrelated"
 
 
 class ActionScope(str, Enum):
@@ -87,6 +117,38 @@ class TrackAssignment:
             )
         )
 
+    def is_deterministic_metadata_slot(
+        self,
+        duration_tolerance_s: float = DETERMINISTIC_SLOT_DURATION_TOLERANCE_S,
+    ) -> bool:
+        """True when this matched assignment is strong-deterministic-metadata
+        proof for its specific release-track slot: exact normalized title,
+        exact release-track position (disc+track), measured duration within
+        the canonical tolerance, no conflicts, AND the per-file AcoustID
+        lookup genuinely answered empty (NO_RESULT).
+
+        This is the per-track half of the DETERMINISTIC_METADATA_SLOT tier;
+        the album-level half (candidate RG == target RG, artist matched, no
+        hard conflicts) is enforced in evidence.evaluate_release_group_candidate.
+        It is intentionally NOT part of `is_deterministic` -- hard per-track
+        identity (embedded recording ID / confirmed fingerprint) stays a
+        strictly stronger, separate signal.
+
+        NO_RESULT is required, never UNAVAILABLE: an answered-but-empty
+        fingerprint lookup means the recording simply is not in the AcoustID
+        database, which is compatible with a correct match; a lookup that
+        never ran (UNAVAILABLE: no key/outage) is not evidence of anything
+        and must not unlock an auto action."""
+        return bool(
+            self.status == "matched"
+            and self.acoustid_status == AcoustIDStatus.NO_RESULT
+            and not self.conflicts
+            and self.position_match
+            and self.title_similarity >= 0.999
+            and self.duration_delta is not None
+            and self.duration_delta <= float(duration_tolerance_s)
+        )
+
     @property
     def target_recording_id(self) -> str:
         return str(
@@ -121,6 +183,8 @@ class TrackAssignment:
             "position_match": self.position_match,
             "status": self.status,
             "acoustid_status": self.acoustid_status.value,
+            "is_deterministic": self.is_deterministic,
+            "deterministic_metadata_slot": self.is_deterministic_metadata_slot(),
             "positives": list(self.positives),
             "warnings": list(self.warnings),
             "conflicts": list(self.conflicts),

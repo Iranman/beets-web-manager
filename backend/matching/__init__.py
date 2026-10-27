@@ -4,13 +4,20 @@ This package is intentionally dependency-free so the same evidence logic can
 run in the web manager and in the flattened beets control-agent image.
 """
 
-from .evidence import evaluate_release_group_candidate
+from .evidence import (
+    candidate_is_unrelated,
+    classify_candidate_relatedness,
+    evaluate_release_group_candidate,
+)
 from .library_gaps import GAP_KINDS, library_identity_gaps
 from .models import (
     AcoustIDStatus,
     ActionScope,
+    CandidateRelatedness,
     ConfidenceState,
     DEFAULT_MATCH_POLICY,
+    DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR,
+    DETERMINISTIC_SLOT_DURATION_TOLERANCE_S,
     IdentityProof,
     MatchPolicy,
     ReleaseGroupMatchResult,
@@ -53,6 +60,11 @@ __all__ = [
     "AcoustIDRecordingEvidence",
     "AcoustIDStatus",
     "ActionScope",
+    "CandidateRelatedness",
+    "DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR",
+    "DETERMINISTIC_SLOT_DURATION_TOLERANCE_S",
+    "candidate_is_unrelated",
+    "classify_candidate_relatedness",
     "RECORDING_HARD_CONFLICTS",
     "RecordingIdentityProof",
     "RecordingMatchResult",

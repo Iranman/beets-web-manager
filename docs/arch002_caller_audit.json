@@ -373,6 +373,10 @@
       "CANONICAL_FINAL_DECISION",
       "Applies decide_slot outcomes; non-destructive outcomes hold both rows."
     ],
+    "backend/matching/evidence.py::classify_candidate_relatedness": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Pure relatedness/veto predicate (target RG/artist vs a candidate): classifies related-RG / related-artist / unrelated using only RG-MBID, artist-MBID, or an artist-text floor, never title text. Veto-only -- a later step uses it to keep an unrelated candidate (FLEUR title collision) out of the primary-suggestion slot; it produces evidence and authorizes nothing. The 'similarity('/'floor' pattern hit is this artist-text comparison."
+    ],
     "backend/matching/evidence.py::evaluate_release_group_candidate": [
       "CANONICAL_FINAL_DECISION",
       "Canonical album evaluator."

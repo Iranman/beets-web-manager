@@ -448,7 +448,11 @@ class MatchingDecision:
         safety_result = _s(self.decision.get("safety_result") or "Needs review")
 
         return {
-            "contract_version": 2,
+            # v3 (backward-readable): v2 fields are all still present and
+            # unchanged; v3 only ADDS the separated req-7 `dimensions` and a
+            # top-level `identity_proof`. Older readers keying on
+            # action_allowed/safety_key keep working.
+            "contract_version": 3,
             "release_group_id": rg_id,
             "release_id": rel_id,
             "recording_id": rec_id,
@@ -463,12 +467,14 @@ class MatchingDecision:
             "confidence": confidence,
             "confidence_source": confidence_source,
             "identity_verified": identity_verified,
+            "identity_proof": _s(self.decision.get("identity_proof") or ""),
             "review_required": review_required,
             "action_allowed": action_allowed,
             "reason_code": reason_code,
             "explanation": explanation,
             "safety_key": safety_key,
             "safety_result": safety_result,
+            "dimensions": self.decision.get("dimensions") or {},
         }
 
     def to_review_recording_candidate(self) -> Dict[str, Any]:
@@ -1148,11 +1154,21 @@ def build_album_matching_decision(
     identity_verified = bool(candidate_rg_id and not conflicts and canonical.identity_proof != IdentityProof.INSUFFICIENT)
     canonical_auto_ok = canonical.can_auto_accept(_ALBUM_DECISION_POLICY)
 
-    # #303: say how to get past review when the only gap is missing
-    # fingerprint evidence (no key, rejected key, outage).
-    acoustid_hint = (" No AcoustID fingerprint evidence was available (AcoustID not configured or not reachable): "
-                     "set ACOUSTID_API_KEY and re-check, or confirm the match manually in Review."
-                     if "acoustid_unavailable" in warnings else "")
+    # #303: say how to get past review when the only gap is fingerprint
+    # evidence. no_result (AcoustID answered, the recording is simply not in
+    # its database) is a DIFFERENT fact from unavailable (no key / outage /
+    # rejected key -- the lookup never ran) and must not be reported with the
+    # "not configured or not reachable" wording. Unavailable outranks
+    # no_result when both appear (a provider outage would have produced the
+    # empty answers too).
+    if "acoustid_unavailable" in warnings:
+        acoustid_hint = (" No AcoustID fingerprint evidence was available (AcoustID not configured or not reachable): "
+                         "set ACOUSTID_API_KEY and re-check, or confirm the match manually in Review.")
+    elif "acoustid_no_result" in warnings:
+        acoustid_hint = (" AcoustID returned no fingerprint match for these files "
+                         "(the recording is not in the AcoustID database): confirm the match manually in Review.")
+    else:
+        acoustid_hint = ""
 
     if conflicts:
         safety_result = "Conflict"
@@ -1218,11 +1234,59 @@ def build_album_matching_decision(
         "canonical_match": canonical_dict,
     }
     ai_payload = (ai_state or AiState()).to_dict()
+
+    # req-7: the matching decision answers several independent questions that
+    # were previously collapsed into one `safety_key`. Surface them as
+    # distinct serialized dimensions so a later step (and the UI) can show
+    # exactly which check passed or failed, without re-deriving it. These are
+    # descriptive only -- `action_allowed` remains the single authorization
+    # field; nothing here grants authority.
+    raw_rg = _s(candidate.get("mb_releasegroupid") or candidate.get("release_group_id"))
+    id_syntax_status = "valid" if candidate_rg_id else ("malformed" if raw_rg else "absent")
+    proof_value = _s(getattr(canonical.identity_proof, "value", canonical.identity_proof))
+    recording_verification = {
+        IdentityProof.CONFIRMED_RELEASE.value: "complete_release",
+        IdentityProof.DETERMINISTIC_TRACK_RECORDING_ID.value: "recording_id_or_fingerprint",
+        IdentityProof.DETERMINISTIC_METADATA_SLOT.value: "deterministic_metadata_slot",
+        IdentityProof.RELEASE_GROUP_ID.value: "release_group_only",
+    }.get(proof_value, "none")
+    decision_dimensions = {
+        "identifier_syntax": {
+            "ok": bool(candidate_rg_id) or (not raw_rg),
+            "status": id_syntax_status,
+            "detail": "Release Group identifier is a well-formed MBID." if candidate_rg_id
+            else ("Provided Release Group identifier is not a valid MBID." if raw_rg
+                  else "No Release Group identifier provided."),
+        },
+        "mb_entity_lookup": {
+            "ok": bool(candidate_rg_id and track_list),
+            "status": "resolved" if (candidate_rg_id and track_list) else ("no_tracks" if candidate_rg_id else "unresolved"),
+            "detail": f"MusicBrainz release resolved with {len(track_list)} track(s)." if track_list
+            else "No MusicBrainz release/tracklist resolved for this candidate.",
+        },
+        "album_identity_verification": {
+            "ok": bool(identity_verified),
+            "status": "verified" if identity_verified else "unverified",
+            "detail": eligibility_reason,
+        },
+        "downloaded_recording_verification": {
+            "ok": recording_verification not in ("none", "release_group_only"),
+            "status": recording_verification,
+            "detail": f"Per-track identity proof: {proof_value or 'insufficient'}.",
+        },
+        "import_eligibility": {
+            "ok": bool(action_allowed),
+            "status": "allowed" if action_allowed else ("blocked" if conflicts else "review_required"),
+            "detail": recommended_action,
+        },
+    }
+
     decision_payload = {
         "confidence_score": confidence_score,
         "confidence_tier": confidence_tier,
         "confidence_source": "release_group" if candidate_rg_id else "metadata",
         "identity_verified": identity_verified,
+        "identity_proof": proof_value,
         "review_required": review_required,
         "action_allowed": action_allowed,
         "reason_code": reason_code,
@@ -1234,6 +1298,7 @@ def build_album_matching_decision(
         "conflicts": sorted(set(conflicts)),
         "warnings": sorted(set(warnings)),
         "explanation": eligibility_reason,
+        "dimensions": decision_dimensions,
     }
 
     return MatchingDecision(
