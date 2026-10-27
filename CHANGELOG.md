@@ -135,6 +135,10 @@ The project uses Semantic Versioning.
 - **Find Match can no longer occupy every server worker.** Each Find Match runs for seconds (fingerprints, rate-limited MusicBrainz, the AI call) inside a web request, and the Review page started one for every item the cursor landed on, so paging through the queue could stall the whole UI. The folder, album and item Find Match routes now run at most two at once (one when `WEBCONTROL_THREADS` is below 8) and answer `503 suggest_busy` straight away beyond that; the page runs one automatic Find Match at a time, gives the item under the cursor its turn when it finishes, and shows a refusal as a warning to retry.
 - **Find Match and import-with-id answer a malformed request body with an error instead of a 500.** A non-object JSON body or a non-text `path` no longer raises inside the route.
 
+### Removed
+
+- **Dead frontend surface removed.** Four unused panels (`views/Clean.tsx`, `DiscographyPanel`, `WantedPanel` with its `WantedPanel.test.tsx`, and the never-rendered `TorrentRepairPanel`) and the now-orphaned client layer around them: 28 `api/client.ts` functions (the singleton-rescue trio, the qBittorrent status/hardlink pair, artist discography/release-art/completeness, duplicate-resolver plan/apply, Lidarr wanted and artist-albums-by-name, startMoveAll, libraryImportAll/getLibraryImportAllLast/retryLibraryImportAllFailed, per-album art status/url/upload/delete/move-to-library, getGenreStats/fixAlbumGenre, repairAlbumMbTracks/fixAlbumMetadata, batchSuggestAlbums, reconcileAutoEnqueueImport, getAlbumMbFormat), their `api/types.ts` response clusters, five dead `lib/libraryHealth.ts` helpers and the unused `downloadMethodShortLabel`. Live equivalents (Find Music/AcquisitionPanel, the `/clean` → `/jobs` redirect, `runLidarrAlbumSearch`, per-album artwork fetch, `fixGenres`, `downloadMethodShortLabel`'s data field) are untouched. Tests that only stubbed removed functions keep their live confirm-gate assertions.
+
 ## v0.13.5 - 2026-10-22
 
 ### Performance
