@@ -4,7 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## Unreleased
+## v0.15.0 - 2026-10-28
+
+### Upgrade Notes
+
+- **No operator action required.** This release ships the ARCH-030 missing-track
+  recovery and Import Review redesign (a new user-facing feature family and new
+  recovery/import endpoints), which is why the minor version moves to `0.15.0`.
+  On first boot the backend creates a new crash-safe SQLite store,
+  `recovery_carriers` (WAL), under `WEB_MANAGER_DATA_DIR`; it self-initializes
+  and manages its own schema, and nothing rewrites your existing
+  `/web-manager-data` state, the Beets `config.yaml`, `beetsplug/`, or the music
+  library DB. The webmanager plugin version is unchanged (`PLUGIN_VERSION 1.19.0`,
+  `PROTOCOL_VERSION 1.0`), so Beets does not need a plugin-driven restart.
 
 ### Security
 
