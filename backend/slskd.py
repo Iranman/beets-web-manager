@@ -429,28 +429,42 @@ def _staging_fd_supported() -> bool:
             and os.unlink in os.supports_dir_fd)
 
 
-def _staged_copy_nofollow(stage: Path, rel_parts: Sequence[str], src: Path,
+def _staged_copy_nofollow(downloads_root: Path, stage: Path,
+                          rel_parts: Sequence[str], src: Path,
                           overwrite: bool) -> None:
-    """Copy ``src`` into ``stage``/``rel_parts`` fd-relative from the already
-    validated ``stage`` folder (SEC-007 / #325), mirroring the barrier discipline
-    in ``composite_workflows`` (``_staging_dir_fd`` / ``_copy_file_across_fs``).
+    """Copy ``src`` into ``stage``/``rel_parts`` fd-relative from the trusted
+    ``downloads_root`` (SEC-007 / #325), mirroring the barrier discipline in
+    ``composite_workflows`` (``_staging_dir_fd`` / ``_copy_file_across_fs``).
 
-    Every directory below ``stage`` -- including each ``CD NN`` disc subdir -- is
-    opened, or created, one component at a time with O_DIRECTORY|O_NOFOLLOW, so a
-    component pre-planted as a symlink is refused, never followed out of the
-    staged folder. The bytes are written to an O_CREAT|O_EXCL|O_NOFOLLOW temp and
-    then atomically ``rename``d onto the final name: the rename replaces a dest
-    planted on a deterministic REUSE -- symlink or file -- WITHOUT following it,
-    so downloaded bytes can never land on the symlink's target (config, Beets DB,
-    media). The caller must already have verified ``stage`` itself is a
-    non-symlink directory contained under the downloads root."""
+    EVERY directory below ``downloads_root`` -- the intermediate
+    ``_beets_missing_import`` staging dir, the ``<prefix>-album`` folder AND each
+    ``CD NN`` disc subdir -- is opened, or created, one component at a time with
+    O_DIRECTORY|O_NOFOLLOW, so a component pre-planted as a symlink is refused,
+    never followed out of the staged folder. O_NOFOLLOW only guards the FINAL
+    component of a path, so opening the full ``stage`` path in a single
+    ``os.open`` would FOLLOW a symlinked ``_beets_missing_import`` intermediate
+    (F1/C5); descending fd-relative from the root closes that gap. The bytes are
+    written to an O_CREAT|O_EXCL|O_NOFOLLOW temp and then atomically ``rename``d
+    onto the final name: the rename replaces a dest planted on a deterministic
+    REUSE -- symlink or file -- WITHOUT following it, so downloaded bytes can
+    never land on the symlink's target (config, Beets DB, media). ``stage`` must
+    be ``downloads_root`` joined with one or more fixed staging components."""
     parts = [p for p in rel_parts]
     if not parts or any(p in ("", ".", "..") for p in parts):
         raise RuntimeError("refusing to stage a file with an unsafe relative path")
-    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    fds = [os.open(str(stage), dir_flags)]
     try:
-        for name in parts[:-1]:
+        stage_parts = list(Path(stage).relative_to(Path(downloads_root)).parts)
+    except ValueError as exc:
+        raise RuntimeError("staged import folder is not under the downloads root") from exc
+    if not stage_parts or any(p in ("", ".", "..") for p in stage_parts):
+        raise RuntimeError("refusing to stage through an unsafe staging path component")
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    # Open the trusted downloads root WITHOUT O_NOFOLLOW (it is the configured
+    # mount, mirroring ``_unlink_proven_under``); every component beneath it,
+    # intermediate staging dirs included, is descended with O_NOFOLLOW below.
+    fds = [os.open(str(downloads_root), os.O_RDONLY | os.O_DIRECTORY)]
+    try:
+        for name in stage_parts + parts[:-1]:
             try:
                 fd = os.open(name, dir_flags, dir_fd=fds[-1])
             except FileNotFoundError:
@@ -556,12 +570,14 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
     # SEC-007 / #325 containment: the staged-folder name is now PREDICTABLE when
     # a deterministic prefix is used, so verify the real path is a non-symlink
     # directory that still resolves under the downloads root before copying into
-    # it. This validates ONLY the top-level stage dir -- it does NOT by itself
-    # close the per-file TOCTOU, because each dest file and every ``CD NN`` disc
-    # subdir created below could still be pre-planted as a symlink (by a local
-    # writer to this app-private dir, or via a race between recovery retries).
-    # The per-file copy loop below (``_staged_copy_nofollow``) is what closes
-    # that: it traverses fd-relative with O_NOFOLLOW and writes each dest with
+    # it. This resolve()-based check is a SEPARATE syscall from the copy, so it
+    # does NOT by itself close the TOCTOU: the intermediate
+    # ``_beets_missing_import`` dir, the ``<prefix>-album`` folder, each dest
+    # file and every ``CD NN`` disc subdir could still be swapped for a symlink
+    # (by a local writer to this app-private dir, or via a race between recovery
+    # retries). The per-file copy loop below (``_staged_copy_nofollow``) is what
+    # closes that: it descends fd-relative from the downloads root -- intermediate
+    # staging components included -- with O_NOFOLLOW and writes each dest with
     # O_CREAT|O_EXCL then atomic rename. Enforced for BOTH callers (defence in
     # depth); never trusts the name alone.
     root_resolved = Path(downloads_root).resolve(strict=False)
@@ -609,7 +625,7 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
         # name and must REPLACE the prior copy (``overwrite``) rather than
         # accumulate ``name.1``/``name.2`` siblings that would collide at import;
         # a fresh random-prefix pass keeps the de-dupe suffixing.
-        _staged_copy_nofollow(stage, rel.parts, src, overwrite=reuse)
+        _staged_copy_nofollow(downloads_root, stage, rel.parts, src, overwrite=reuse)
         copied += 1
 
     if copied:
