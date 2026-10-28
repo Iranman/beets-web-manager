@@ -105,6 +105,8 @@ def _recovery_stage_prefix_for(source_folder: str) -> Optional[str]:
 
 
 def _recovery_auto_insert_authorized(folder_path: str, carrier_id: str,
+                                     *, client_releasegroupid: str = "",
+                                     client_existing_album_id: int = 0,
                                      log: Optional[list] = None) -> Dict[str, Any]:
     """ARCH-030 Step 4 (library-transaction): the matching contract's
     ``action_allowed=True`` is the ONLY authorization to auto-insert a staged
@@ -120,7 +122,22 @@ def _recovery_auto_insert_authorized(folder_path: str, carrier_id: str,
     is started / no file is touched. Fail-closed: a missing/empty decision or an
     unbound folder refuses. A VERIFIED_SUBSET authorization only ever reaches the
     existing-album missing-track merge, which acts on the carrier's wanted subset
-    -- never the whole release."""
+    -- never the whole release.
+
+    C3 (target binding): matching ``carrier_id`` to the folder is not enough --
+    ``start_folder_import_with_id`` would otherwise use the CLIENT payload's
+    ``mb_albumid``/release group/existing album, so a crafted request with a
+    valid authorized carrier + its folder but a DIFFERENT target could aim the
+    authorized insert elsewhere. The target is therefore refused when the
+    client's release group or existing album DIVERGES from the carrier's, and on
+    success the carrier record is returned so the caller RE-DERIVES the whole
+    target (RG / release / existing album / wanted subset) from the carrier --
+    never the client payload.
+
+    C7 (CAS): the refusal transition back to ``review_required`` is a
+    compare-and-set on a FRESH read, so a concurrent claim that moved the carrier
+    to ``importing`` (or any other state) is never clobbered back into review.
+    Mirrors the F9 fallback in ``recovery_service.advance_stuck_carriers``."""
     try:
         carrier = recovery_carrier.load_for_folder(folder_path)
     except Exception:
@@ -128,17 +145,44 @@ def _recovery_auto_insert_authorized(folder_path: str, carrier_id: str,
     if not carrier or _s(carrier.get("carrier_id")) != _s(carrier_id).strip():
         return {"ok": False,
                 "reason": "recovery carrier is not bound to this folder; auto-insert refused"}
+    # C3: bind to the carrier's OWN canonical identity. Refuse a client target
+    # that diverges from it (the caller re-derives the rest from the carrier).
+    carrier_rg = _extract_mb_uuid(_s(carrier.get("mb_releasegroupid")))
+    req_rg = _extract_mb_uuid(_s(client_releasegroupid))
+    if req_rg and carrier_rg and req_rg != carrier_rg:
+        return {"ok": False, "code": "recovery_target_mismatch",
+                "reason": "recovery auto-insert target diverges from the authorizing "
+                          "carrier's release group; refused"}
+    try:
+        carrier_album = int(carrier.get("existing_album_id") or 0)
+    except Exception:
+        carrier_album = 0
+    try:
+        req_album = int(client_existing_album_id or 0)
+    except Exception:
+        req_album = 0
+    if req_album and carrier_album and req_album != carrier_album:
+        return {"ok": False, "code": "recovery_target_mismatch",
+                "reason": "recovery auto-insert target diverges from the authorizing "
+                          "carrier's existing album; refused"}
     decision = carrier.get("matching_decision") if isinstance(carrier.get("matching_decision"), dict) else {}
     if decision.get("action_allowed") is True:
-        return {"ok": True}
+        return {"ok": True, "carrier": carrier}
     reason = (_s(decision.get("reason")) or _s(decision.get("eligibility_reason"))
               or _s(decision.get("explanation"))
               or "matching contract did not authorize an auto-insert (identity not verified)")
     try:
-        state = _s(carrier.get("state"))
-        if state not in recovery_carrier.TERMINAL_STATES and state not in ("importing", "review_required"):
-            recovery_carrier.advance_state(_s(carrier.get("carrier_id")), "review_required",
-                                           payload_extra={"advancer_reason": reason})
+        current = recovery_carrier.get_carrier(_s(carrier.get("carrier_id"))) or carrier
+        cur_state = _s(current.get("state"))
+        if cur_state in recovery_carrier.ADVANCER_STATES and cur_state != "review_required":
+            recovery_carrier.advance_state(
+                _s(current.get("carrier_id")), "review_required",
+                payload_extra={"advancer_reason": reason},
+                expected_revision=int(current.get("revision") or 0))
+    except recovery_carrier.RecoveryCarrierConflictError:
+        # A concurrent transition landed since the re-read; skip rather than
+        # overwrite -- the next sweep re-evaluates it fresh.
+        pass
     except Exception:
         pass
     if log is not None:
@@ -2993,11 +3037,34 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # keeps the carrier in manual review with the contract's reason.
     _recovery_auto_insert_id = _s(payload.get("recovery_carrier_id")).strip()
     if _recovery_auto_insert_id:
-        _gate = _recovery_auto_insert_authorized(folder_path, _recovery_auto_insert_id)
+        _gate = _recovery_auto_insert_authorized(
+            folder_path, _recovery_auto_insert_id,
+            client_releasegroupid=selected_releasegroupid or raw_mb_releasegroupid,
+            client_existing_album_id=existing_album_id)
         if not _gate.get("ok"):
             return {"ok": False,
                     "error": _gate.get("reason") or "recovery auto-insert not authorized",
-                    "code": "recovery_action_not_allowed"}, 409
+                    "code": _gate.get("code") or "recovery_action_not_allowed"}, 409
+        # C3: an UNATTENDED auto-insert is bound to the carrier's OWN identity.
+        # The client payload only had to pass the divergence check above; the
+        # actual target (release group / representative release / existing album
+        # / wanted subset) is re-derived here from the carrier record, so a
+        # crafted payload can never redirect the authorized insert (e.g. via a
+        # bare release UUID in a different release group).
+        _auth_carrier = _gate.get("carrier") or {}
+        raw_mb_releasegroupid = _s(_auth_carrier.get("mb_releasegroupid")).strip() or raw_mb_releasegroupid
+        raw_mb_albumid = _s(_auth_carrier.get("release_id")).strip() or raw_mb_releasegroupid
+        raw_mb_input = raw_mb_albumid or raw_mb_releasegroupid
+        mb_albumid = _extract_mb_uuid(raw_mb_input)
+        selected_releasegroupid = _extract_mb_uuid(raw_mb_releasegroupid)
+        if not selected_releasegroupid and "release-group" in raw_mb_input.casefold():
+            selected_releasegroupid = mb_albumid
+        input_looks_like_release_group = (
+            bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid)
+        existing_album_id = int(_auth_carrier.get("existing_album_id") or 0)
+        wanted_tracks = _normalise_wanted_tracks(
+            _auth_carrier.get("expected_tracks")
+            or _auth_carrier.get("wanted_tracks") or wanted_tracks)
     # F16: the caller (the Review page, or the auto-import replaying a stored
     # suggestion) proposes an identity; its evidence is never kept. The review
     # paths below queue only this, and revalidation recomputes the evidence.
