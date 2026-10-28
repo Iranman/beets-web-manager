@@ -213,6 +213,36 @@ class StageRenameWritesGenuineEvidence(unittest.TestCase):
                          "Song (Live 2019) [YouTube].flac",
                          "the GENUINE original name must survive the laundering rename")
 
+    def test_restage_carries_genuine_original_not_the_laundered_name(self):
+        # ARCH-030 F2: restaging the still-missing subset FROM an already
+        # app-staged/renamed folder must carry the GENUINE original download name
+        # forward (from the source sidecar), not relabel the laundered "01 Song"
+        # staged name as the "original" -- which would collapse Option-C's two
+        # independent sources (original-name + embedded-tags) to embedded-only.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name, "downloads").resolve()
+        aldir = root / "src"
+        aldir.mkdir(parents=True)
+        (aldir / "Song (Live 2019) [YouTube].flac").write_bytes(b"x")
+        log = []
+        target = {"disc": 1, "track": 1, "title": "Song"}
+        staged1 = slskd.stage_selected_audio_files(
+            root, {".flac"}, str(aldir),
+            [aldir / "Song (Live 2019) [YouTube].flac"],
+            "Artist", "Album", log, target_tracks=[target])
+        s1 = Path(staged1) / "01 Song.flac"
+        self.assertTrue(s1.exists(), "first stage produced the laundered staged name")
+
+        staged2 = slskd.stage_selected_audio_files(
+            root, {".flac"}, staged1, [s1], "Artist", "Album", log,
+            target_tracks=[target])
+        self.assertNotEqual(Path(staged2), Path(staged1), "restage uses a new folder")
+        names = slskd.original_download_names_for_folder(staged2)
+        self.assertEqual(names[str(Path(staged2) / "01 Song.flac")],
+                         "Song (Live 2019) [YouTube].flac",
+                         "restage must carry the genuine original forward, not '01 Song.flac'")
+
 
 class OptionCEvidenceDiscriminator(unittest.TestCase):
     """B1: the two produced sources carry exactly the discriminator Option C
@@ -428,6 +458,162 @@ class B2MixedBatchIsolatesDeferredFromBeets(unittest.TestCase):
         self.assertTrue(result.get("imported"), result)
         self.assertEqual([t["title"] for t in result.get("undelivered_tracks", [])],
                          ["Last Song"])
+
+
+class F8DeferredSeparationFailsClosed(unittest.TestCase):
+    """ARCH-030 F8: _separate_deferred_slot_files must report whether EVERY
+    deferred file was relocated. A file whose move RAISED stays in import_dir, so
+    ``complete`` is False and the caller must NOT inline-import it (bypassing the
+    slot gate) and must NOT delete the retained audio. Patches the hardened move
+    so the test needs no fd_dir support."""
+
+    def _run(self, fail_name):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        import_dir = Path(tmp.name) / "imp"
+        import_dir.mkdir()
+        a = import_dir / "01 Alpha.flac"
+        b = import_dir / "06 Last Song.flac"
+        a.write_bytes(b"x")
+        b.write_bytes(b"x")
+
+        def _move(src, dest):
+            if fail_name in Path(src).name:
+                raise OSError("simulated collision / symlink refusal / I/O")
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dest)
+
+        with mock.patch.object(acq.composite_workflows, "move_staging_file",
+                               side_effect=_move):
+            slot_dir, complete = acq._separate_deferred_slot_files(
+                str(import_dir), [str(a), str(b)], [])
+        return import_dir, slot_dir, complete
+
+    def test_incomplete_when_one_deferred_move_fails(self):
+        import_dir, slot_dir, complete = self._run("Last Song")
+        self.assertFalse(complete,
+                         "one unmovable deferred file -> incomplete -> caller fails closed")
+        # The unmovable deferred file is RETAINED in import_dir (never deleted).
+        self.assertTrue((import_dir / "06 Last Song.flac").exists(),
+                        "the leftover deferred file must stay staged, not be lost")
+
+    def test_complete_when_all_deferred_move(self):
+        import_dir, slot_dir, complete = self._run("__nope__")
+        self.assertTrue(complete, "all deferred files relocated -> complete -> inline import may run")
+        self.assertTrue(slot_dir)
+
+
+@unittest.skipUnless(_fd_staging_supported(),
+                     "the deferred-file separation uses the fd-relative hardened "
+                     "staging move (Linux-only; the Docker suite exercises it)")
+class F8MixedBatchFailsClosedEndToEnd(unittest.TestCase):
+    """ARCH-030 F8 end to end: through the real start_album_download job, a mixed
+    batch (1 verified + 2 deferred) where one deferred file CANNOT be separated
+    must NOT run the inline Beets import on the folder and must NOT delete the
+    retained acquisition; the whole carrier is left staged for the slot gate."""
+
+    PAYLOAD = {
+        "artist": "Artist", "album": "Album", "year": "2024", "method": "ytdlp",
+        "auto_import": True, "existing_album_id": 42, "mb_releasegroupid": RGID,
+        "missing_tracks": [
+            {"track": 1, "title": "Alpha", "recording_id": "rec-1"},
+            {"track": 3, "title": "Beta", "recording_id": "rec-3"},
+            {"track": 6, "title": "Last Song", "recording_id": "rec-6"},
+        ],
+    }
+
+    def _matcher(self, path_value, _artist, title, _mbid=""):
+        stem = Path(path_value).stem
+        if "Alpha" in stem and title == "Alpha":
+            return {"ok": True, "title_score": 1.0, "artist_score": 1.0,
+                    "identity": {"final_action": "accept", "acoustid_status": "confirmed",
+                                 "acoustid_match_score": 0.95}}
+        return {"ok": False, "title_score": 1.0 if stem == title else 0.0, "artist_score": 1.0,
+                "identity": {"final_action": "review", "acoustid_status": "no_result",
+                             "acoustid_match_score": 0.0}}
+
+    def test_incomplete_separation_blocks_inline_import_and_keeps_audio(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        downloads = Path(tmp.name, "downloads").resolve()
+        downloads.mkdir(parents=True, exist_ok=True)
+        state_dir = Path(tmp.name, "carrier_state")
+
+        def _fake_ytdlp(artist, album, year, yt_dir, log, tracks=None, *a, **k):
+            Path(yt_dir).mkdir(parents=True, exist_ok=True)
+            (Path(yt_dir) / "Alpha.flac").write_bytes(b"x")
+            (Path(yt_dir) / "Beta.flac").write_bytes(b"x")
+            (Path(yt_dir) / "Last Song.flac").write_bytes(b"x")
+            return 3
+
+        def _forbid_delete(p):
+            raise AssertionError(f"no delete when a deferred file cannot be separated: {p}")
+
+        real_move = acq.composite_workflows.move_staging_file
+
+        def _move(src, dest):
+            # One of the two deferred files cannot be separated out.
+            if "Last Song" in Path(src).name:
+                raise OSError("simulated collision / symlink refusal / I/O")
+            return real_move(src, dest)
+
+        env = dict(os.environ)
+        env["RECOVERY_CARRIER_STATE_DIR"] = str(state_dir)
+        env["DOWNLOADS_ROOT"] = str(downloads)
+        reimport = mock.Mock(return_value="imp-1")
+        patches = [
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(acq, "jobs"),
+            mock.patch.object(acq, "validated_downloads_root", return_value=downloads),
+            mock.patch.object(acq, "slskd_configured", return_value=False),
+            mock.patch.object(acq, "_resolve_album_release_for_import", return_value=RELEASE),
+            mock.patch.object(acq, "_fetch_mb_release_tracklist",
+                              return_value={"ok": True, "tracks": [1, 2, 3, 4, 5, 6],
+                                            "release_group": RGID}),
+            mock.patch.object(acq, "_wanted_tracks_not_in_album",
+                              return_value=[{"disc": 1, "track": 1, "title": "Alpha",
+                                             "mb_trackid": "rec-1", "duration_ms": 180000},
+                                            {"disc": 1, "track": 3, "title": "Beta",
+                                             "mb_trackid": "rec-3", "duration_ms": 185000},
+                                            {"disc": 1, "track": 6, "title": "Last Song",
+                                             "mb_trackid": "rec-6", "duration_ms": 190000}]),
+            mock.patch.object(acq, "_album_folder_for_album_id", return_value="/music/Artist/Album"),
+            mock.patch.object(acq, "_ytdlp_missing_tracks_download", side_effect=_fake_ytdlp),
+            mock.patch.object(acq, "_ytdlp_album_download", side_effect=_fake_ytdlp),
+            mock.patch.object(acq, "_playlist_download_match", side_effect=self._matcher),
+            mock.patch.object(acq, "_playlist_download_audio_allowed", return_value=True),
+            mock.patch.object(acq, "_playlist_stamp_download_tags"),
+            mock.patch.object(acq, "_playlist_identity_log", side_effect=lambda m: str(m)),
+            mock.patch.object(acq, "_validate_import_source_audio"),
+            mock.patch.object(acq, "_start_reimport_disk_job_internal", reimport),
+            mock.patch.object(acq, "_wait_for_child_job", return_value={"ok": True}),
+            mock.patch.object(acq, "acquisition_queue_mark_done"),
+            mock.patch.object(acq.composite_workflows, "move_staging_file", side_effect=_move),
+            mock.patch.object(acq.composite_workflows, "delete_file", side_effect=_forbid_delete),
+        ]
+        started = [p.start() for p in patches]
+        self.addCleanup(lambda: [p.stop() for p in reversed(patches)])
+        jobs = started[1]
+        jobs.start_python.return_value.job_id = "job-xyz"
+
+        body, status = acq.start_album_download(self.PAYLOAD)
+        self.assertEqual(status, 200)
+        self.assertTrue(body.get("ok"), body)
+
+        job_fn = jobs.start_python.call_args[0][0]
+        log = []
+        result = job_fn(log, threading.Event())
+
+        # Fail closed: no inline Beets import ran on the folder with a leftover
+        # unverified file.
+        reimport.assert_not_called()
+        self.assertFalse(result.get("imported"), result)
+        self.assertTrue(result.get("staged_for_slot_gate"), result)
+        # The retained audio still exists on disk (nothing was deleted). The
+        # ytdlp download path keeps the original basenames (no slskd rename).
+        remaining = {p.name for p in downloads.rglob("*.flac")}
+        self.assertIn("Last Song.flac", remaining,
+                      "the un-separable deferred file must be retained, not deleted")
 
 
 if __name__ == "__main__":
