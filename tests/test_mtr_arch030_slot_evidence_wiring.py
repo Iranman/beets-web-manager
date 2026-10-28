@@ -99,9 +99,11 @@ class SlotEvidenceWiringE2E(unittest.TestCase):
         # is the only file I/O stubbed. Default = genuine, fully corroborating.
         self.embedded = {
             self.STAGED_INTRO: {"title": "Forever (Intro)", "mb_releasegroupid": RG_112,
-                                "mb_albumartistid": ART_112, "mb_artistid": ART_112},
+                                "mb_albumartistid": ART_112, "mb_artistid": ART_112,
+                                "track": "1", "disc": "1"},
             self.STAGED_OUTRO: {"title": "For Us (Outro)", "mb_releasegroupid": RG_112,
-                                "mb_albumartistid": ART_112, "mb_artistid": ART_112},
+                                "mb_albumartistid": ART_112, "mb_artistid": ART_112,
+                                "track": "9", "disc": "1"},
         }
         # Real on-disk sidecar: staged relative name -> original pre-rename
         # download basename. Default = genuine, corroborating the target title.
@@ -221,7 +223,8 @@ class SlotEvidenceWiringE2E(unittest.TestCase):
         self._make_carrier()
         self.embedded[self.STAGED_INTRO] = {
             "title": "Forever (Intro)", "mb_releasegroupid": RG_FLEUR,
-            "mb_albumartistid": ART_112, "mb_artistid": ART_112}
+            "mb_albumartistid": ART_112, "mb_artistid": ART_112,
+            "track": "1", "disc": "1"}
         self._write_sidecar()
         pre = self._preflight()
         self.assertTrue(pre.get("recovery_mode"))

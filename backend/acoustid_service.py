@@ -38,6 +38,7 @@ def _read_file_media_tags(path: Any) -> Dict[str, Any]:
                 "albumartist": getattr(mf, "albumartist", "") or "",
                 "year": str(getattr(mf, "year", "") or ""),
                 "track": getattr(mf, "track", "") or "",
+                "disc": getattr(mf, "disc", "") or "",
                 "mb_trackid": getattr(mf, "mb_trackid", "") or "",
                 "mb_albumid": getattr(mf, "mb_albumid", "") or "",
                 "mb_releasegroupid": getattr(mf, "mb_releasegroupid", "") or "",
@@ -58,9 +59,14 @@ def _read_file_media_tags(path: Any) -> Dict[str, Any]:
                 "albumartist": (f.get("albumartist") or [""])[0],
                 "year": (f.get("date") or [""])[0],
                 "track": (f.get("tracknumber") or [""])[0],
+                "disc": (f.get("discnumber") or [""])[0],
                 # MusicBrainz identity tags survive the slskd stage rename and are
                 # genuine embedded evidence (ARCH-030 B1). mutagen's easy map
-                # exposes them under the musicbrainz_* keys.
+                # exposes them under the musicbrainz_* keys. ``musicbrainz_trackid``
+                # is the RECORDING MBID (F1-RECID): the PRODUCTION reader must read
+                # it so a contradicting embedded recording id can veto an otherwise
+                # corroborated NO_RESULT slot (ADR-0007 req-5).
+                "mb_trackid": (f.get("musicbrainz_trackid") or [""])[0],
                 "mb_releasegroupid": (f.get("musicbrainz_releasegroupid") or [""])[0],
                 "mb_albumartistid": (f.get("musicbrainz_albumartistid") or [""])[0],
                 "mb_artistid": (f.get("musicbrainz_artistid") or [""])[0],
@@ -79,7 +85,15 @@ def embedded_identity_for_file(path: Any) -> Dict[str, str]:
     evidence that is INDEPENDENT of the (laundered) staged filename. Shape --
     exactly as pinned for ``file_embedded_ids`` values::
 
-        {"title", "mb_releasegroupid", "mb_albumartistid", "mb_artistid"}
+        {"title", "mb_releasegroupid", "mb_albumartistid", "mb_artistid",
+         "mb_recording_id", "track", "disc"}
+
+    ``mb_recording_id`` is the embedded RECORDING MBID (F1-RECID): a NO_RESULT
+    file whose RG+artist+title all corroborate the target but whose recording id
+    is a DIFFERENT recording (e.g. a deluxe/remaster take of a same-titled
+    intro/outro) must go to review, not auto-insert (ADR-0007 req-5). ``track``
+    and ``disc`` are the embedded position, an evidence source INDEPENDENT of the
+    circular staged filename (F1-POSITION).
 
     Returns ``{}`` when the file carries NO readable MusicBrainz identity tag;
     the gate treats an absent entry as "cannot corroborate" -> manual review.
@@ -96,6 +110,9 @@ def embedded_identity_for_file(path: Any) -> Dict[str, str]:
         "mb_releasegroupid": rgid,
         "mb_albumartistid": albumartistid,
         "mb_artistid": artistid,
+        "mb_recording_id": _s(tags.get("mb_trackid")).strip().lower(),
+        "track": _s(tags.get("track")).strip(),
+        "disc": _s(tags.get("disc")).strip(),
     }
 
 

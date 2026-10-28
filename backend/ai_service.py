@@ -1284,6 +1284,19 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                  if _s(c.get("mb_albumid", "")).strip().lower() == _top_aid_id.lower()),
                 None,
             )
+            # F7ai (req-4/req-6): the relatedness veto above only SORTS the
+            # candidate list; the AcoustID shortcut looks the winner up by
+            # release id, so without this guard a foreign fingerprint-matched
+            # release on an UNRELATED Release Group could still become the PRIMARY
+            # suggestion. The carrier/target RG is the identity constraint: an
+            # unrelated winner is refused the shortcut and falls through to the AI
+            # path (where the vetoed candidate is already sunk below related ones).
+            if _aid_cand is not None and _target_rg:
+                try:
+                    if _candidate_is_unrelated(_aid_cand, target_release_group_id=_target_rg):
+                        _aid_cand = None
+                except Exception:
+                    pass
             if _aid_cand is not None:
                 _aid_conf = "high" if _top_aid_hits >= 3 else "medium"
                 _aid_id = _s(_aid_cand.get("mb_albumid", "")).strip()

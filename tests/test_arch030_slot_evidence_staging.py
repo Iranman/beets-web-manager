@@ -39,6 +39,8 @@ OTHER_RGID = "99999999-6d31-473f-a740-38ffa548f225"    # a different release gro
 RELEASE = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 ARTISTID = "11111111-2222-3333-4444-555555555555"
 ALBUMARTISTID = "66666666-7777-8888-9999-000000000000"
+RECID = "aaaaaaaa-1111-2222-3333-444444444444"          # the target recording
+OTHER_RECID = "bbbbbbbb-1111-2222-3333-444444444444"    # a different recording
 
 
 def _fd_staging_supported():
@@ -66,7 +68,7 @@ def _inject_media_tags(test, tags_by_path):
     branch returns the given per-path tag dicts (the branch the source documents
     as the unit-test path). Exercises the new mb_albumartistid/mb_artistid/title
     fields end to end through embedded_identity_for_file."""
-    fields = ("title", "artist", "album", "albumartist", "year", "track",
+    fields = ("title", "artist", "album", "albumartist", "year", "track", "disc",
               "mb_trackid", "mb_albumid", "mb_releasegroupid",
               "mb_albumartistid", "mb_artistid", "genre")
 
@@ -94,17 +96,21 @@ class EmbeddedIdentityProducer(unittest.TestCase):
         f.write_bytes(b"x")
         return tmp.name, f
 
-    def test_genuine_file_exposes_all_four_fields(self):
+    def test_genuine_file_exposes_all_identity_fields(self):
         _, f = self._file()
         _inject_media_tags(self, {str(f): {
             "title": "Song", "mb_releasegroupid": RGID.upper(),  # case-folded by producer
-            "mb_albumartistid": ALBUMARTISTID, "mb_artistid": ARTISTID}})
+            "mb_albumartistid": ALBUMARTISTID, "mb_artistid": ARTISTID,
+            "mb_trackid": RECID.upper(), "track": "3", "disc": "1"}})
         got = acs.embedded_identity_for_file(f)
         self.assertEqual(got, {
             "title": "Song",
             "mb_releasegroupid": RGID,
             "mb_albumartistid": ALBUMARTISTID,
             "mb_artistid": ARTISTID,
+            "mb_recording_id": RECID,   # F1-RECID: recording id now carried
+            "track": "3",               # F1-POSITION: independent position
+            "disc": "1",
         })
 
     def test_wrong_version_embeds_disagreeing_release_group(self):

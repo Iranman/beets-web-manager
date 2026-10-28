@@ -353,9 +353,14 @@ class ProofDoubleCorroborationTests(unittest.TestCase):
         return {self.INTRO: "Forever (Intro).flac", self.OUTRO: "For Us (Outro).flac"}
 
     def _genuine_embedded(self):
+        # Genuine embedded tags carry an INDEPENDENT disc/track (F1-POSITION):
+        # a real release file is tagged with its position, which corroborates the
+        # target slot WITHOUT trusting the circular staged filename.
         return {
-            self.INTRO: {"title": "Forever (Intro)", "mb_releasegroupid": RG_112, "mb_albumartistid": ART_112},
-            self.OUTRO: {"title": "For Us (Outro)", "mb_releasegroupid": RG_112, "mb_albumartistid": ART_112},
+            self.INTRO: {"title": "Forever (Intro)", "mb_releasegroupid": RG_112,
+                         "mb_albumartistid": ART_112, "track": "1", "disc": "1"},
+            self.OUTRO: {"title": "For Us (Outro)", "mb_releasegroupid": RG_112,
+                         "mb_albumartistid": ART_112, "track": "9", "disc": "1"},
         }
 
     def test_fully_corroborated_auto_accepts_wanted_subset(self):
@@ -395,7 +400,8 @@ class ProofDoubleCorroborationTests(unittest.TestCase):
     def test_contradicting_embedded_artist_is_conflict(self):
         embedded = dict(self._genuine_embedded())
         embedded[self.INTRO] = {"title": "Forever (Intro)", "mb_releasegroupid": RG_112,
-                                "mb_albumartistid": "ffff9999-0000-0000-0000-000000000000"}
+                                "mb_albumartistid": "ffff9999-0000-0000-0000-000000000000",
+                                "track": "1", "disc": "1"}
         proof = self._proof(file_original_names=self._genuine_names(), file_embedded_ids=embedded)
         self.assertFalse(proof["ok"])
         self.assertEqual(proof["reason_code"], "identity_conflict")
@@ -403,7 +409,7 @@ class ProofDoubleCorroborationTests(unittest.TestCase):
     def test_contradicting_embedded_rg_is_conflict(self):
         embedded = dict(self._genuine_embedded())
         embedded[self.INTRO] = {"title": "Forever (Intro)", "mb_releasegroupid": RG_FLEUR,
-                                "mb_albumartistid": ART_112}
+                                "mb_albumartistid": ART_112, "track": "1", "disc": "1"}
         proof = self._proof(file_original_names=self._genuine_names(), file_embedded_ids=embedded)
         self.assertFalse(proof["ok"])
         self.assertEqual(proof["reason_code"], "identity_conflict")
