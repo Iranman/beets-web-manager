@@ -81,7 +81,7 @@ class _AcqHarness(unittest.TestCase):
             mock.patch.object(acq, "_ytdlp_missing_tracks_download", side_effect=self.ytdlp),
             mock.patch.object(acq, "_ytdlp_album_download", side_effect=self.ytdlp),
             mock.patch.object(acq, "_validate_wanted_download_identity_before_import",
-                              side_effect=lambda d, w, log, **k: (list(w), [])),
+                              side_effect=lambda d, w, log, **k: (list(w), [], [])),
             mock.patch.object(acq, "_validate_import_source_audio"),
             mock.patch.object(acq, "_start_reimport_disk_job_internal", return_value="imp-1"),
             mock.patch.object(acq, "_wait_for_child_job", return_value={"ok": True}),

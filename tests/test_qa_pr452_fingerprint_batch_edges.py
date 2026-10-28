@@ -58,7 +58,7 @@ class FormatRejectedFile(_Base):
     def test_format_rejected_verified_file_leaves_track_missing(self):
         tmp, log = self._run(["Alpha", "Beta"], {"Alpha", "Beta"},
                              allowed=lambda p: Path(p).stem != "Beta")
-        verified, undelivered = acq._validate_wanted_download_identity_before_import(tmp, TRACKS, log)
+        verified, undelivered, _deferred = acq._validate_wanted_download_identity_before_import(tmp, TRACKS, log)
         self.assertEqual([t["title"] for t in verified], ["Alpha"])
         self.assertEqual([t["title"] for t in undelivered], ["Beta"])
         self.assertEqual(os.listdir(tmp), ["Alpha.flac"])
@@ -72,7 +72,7 @@ class DuplicateFileForOneTrack(_Base):
                     "identity": {"final_action": "accept" if ok else "review"}}
         tmp, log = self._run(["Alpha", "Alpha (1)"], set())
         with mock.patch.object(acq, "_playlist_download_match", side_effect=match):
-            verified, undelivered = acq._validate_wanted_download_identity_before_import(tmp, TRACKS, log)
+            verified, undelivered, _deferred = acq._validate_wanted_download_identity_before_import(tmp, TRACKS, log)
         self.assertEqual([t["title"] for t in verified], ["Alpha"])
         self.assertEqual([t["title"] for t in undelivered], ["Beta"])
         self.assertEqual(len(os.listdir(tmp)), 1)

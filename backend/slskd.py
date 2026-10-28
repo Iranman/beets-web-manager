@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 import re
 import shutil
@@ -6,6 +7,13 @@ import stat
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+#: ARCH-030 B1: sidecar written into a staged recovery folder recording each
+#: staged file's ORIGINAL pre-rename download basename, before ``_target_dest``
+#: renamed it to ``{track:02d} {title}``. Dot-prefixed so it is ignored by the
+#: audio-extension scans and by Beets import; keys are POSIX paths relative to
+#: the staged folder, values the original basenames.
+RECOVERY_ORIGINAL_NAMES_SIDECAR = ".bwm_recovery_original_names.json"
 
 
 def _s(value) -> str:
@@ -607,6 +615,11 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
         return (Path(f"CD {disc:02d}") / name) if disc > 1 else Path(name)
 
     copied = 0
+    # ARCH-030 B1: map each staged file's path (relative to ``stage``) to the
+    # ORIGINAL pre-rename download basename, so the slot gate can corroborate the
+    # target against the genuine downloaded name instead of the ``{track:02d}
+    # {title}`` name this loop manufactures from the REQUESTED track.
+    original_names: Dict[str, str] = {}
     for idx, src in enumerate(selected):
         if not src.is_file():
             continue
@@ -626,9 +639,94 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
         # accumulate ``name.1``/``name.2`` siblings that would collide at import;
         # a fresh random-prefix pass keeps the de-dupe suffixing.
         _staged_copy_nofollow(downloads_root, stage, rel.parts, src, overwrite=reuse)
+        original_names[rel.as_posix()] = src.name
         copied += 1
 
     if copied:
+        _write_original_names_sidecar(stage, original_names)
         log.append(f"  [import] Staged {copied} selected audio file(s) at {stage}")
         return str(stage)
     return aldir
+
+
+def _read_text_nofollow(path: Path) -> str:
+    """Read a file's text refusing to follow a symlink at the final component
+    (SEC-007/#325). The staged folder is app-private but a symlink pre-planted at
+    the sidecar must never redirect this read to an arbitrary file. Falls back to
+    a plain read only where ``O_NOFOLLOW`` is unavailable (non-POSIX hosts, where
+    staging never actually runs)."""
+    if hasattr(os, "O_NOFOLLOW"):
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                return fh.read()
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+    return path.read_text(encoding="utf-8")
+
+
+def _write_text_nofollow(path: Path, text: str) -> None:
+    """Write text refusing to follow a symlink at the final component
+    (SEC-007/#325), so a symlink pre-planted at the sidecar can never redirect
+    this write to an arbitrary file. ``O_TRUNC`` replaces our own prior sidecar;
+    ``O_NOFOLLOW`` refuses a symlink there. Plain-write fallback only where
+    ``O_NOFOLLOW`` is unavailable (non-POSIX hosts, where staging never runs)."""
+    if hasattr(os, "O_NOFOLLOW"):
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return
+    path.write_text(text, encoding="utf-8")
+
+
+def _write_original_names_sidecar(stage: Path, original_names: Dict[str, str]) -> None:
+    """ARCH-030 B1: persist ``{staged-relative-path -> original basename}`` in the
+    staged folder. Merges with any prior sidecar (deterministic-prefix retries
+    REUSE one folder). Best-effort: a sidecar write failure never breaks staging
+    -- the gate then falls back to the on-disk name for those files. Both the
+    merge-read and the write refuse to follow a symlink at the sidecar
+    (SEC-007/#325) so they can never be redirected to an arbitrary file."""
+    if not original_names:
+        return
+    sidecar = stage / RECOVERY_ORIGINAL_NAMES_SIDECAR
+    merged: Dict[str, str] = {}
+    try:
+        prior = json.loads(_read_text_nofollow(sidecar))
+        if isinstance(prior, dict):
+            merged.update({str(k): _s(v) for k, v in prior.items()})
+    except Exception:
+        pass
+    merged.update(original_names)
+    try:
+        _write_text_nofollow(sidecar, json.dumps(merged, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def original_download_names_for_folder(folder: Any) -> Dict[str, str]:
+    """ARCH-030 B1 producer read-side: ``{staged_abs_path -> original pre-rename
+    download basename}`` for a staged recovery folder, from the sidecar
+    ``stage_selected_audio_files`` wrote at rename time.
+
+    One of Option C's two independent corroboration sources (the other being the
+    file's embedded tags, see ``acoustid_service.embedded_identity_for_file``).
+    Returns ``{}`` when no sidecar is present -- e.g. a non-slskd path that never
+    renamed the files -- in which case the on-disk name already IS the original
+    and the gate may read it directly."""
+    try:
+        base = Path(folder)
+        raw = json.loads(_read_text_nofollow(base / RECOVERY_ORIGINAL_NAMES_SIDECAR))
+    except Exception:
+        return {}
+    out: Dict[str, str] = {}
+    if isinstance(raw, dict):
+        for rel, orig in raw.items():
+            try:
+                out[str(base / Path(str(rel)))] = _s(orig)
+            except Exception:
+                continue
+    return out

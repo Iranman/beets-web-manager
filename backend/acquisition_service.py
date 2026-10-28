@@ -787,17 +787,30 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 else job_wanted_tracks
             )
             undelivered: List[Dict[str, Any]] = []
+            deferred_slot_paths: List[str] = []
             had_wanted_tracks = bool(active_wanted_tracks)
             if active_wanted_tracks:
                 # Only fingerprint-accepted tracks import inline; the rest stay
                 # missing. A genuine AcoustID NO_RESULT / UNAVAILABLE file is kept
                 # staged (not deleted) for the slot-gate advancer (ARCH-030 C1).
-                active_wanted_tracks, undelivered = _validate_wanted_download_identity_before_import(
-                    import_dir,
-                    active_wanted_tracks,
-                    log,
-                    fallback_artist=forced_albumartist or artist,
-                )
+                active_wanted_tracks, undelivered, deferred_slot_paths = (
+                    _validate_wanted_download_identity_before_import(
+                        import_dir,
+                        active_wanted_tracks,
+                        log,
+                        fallback_artist=forced_albumartist or artist,
+                    ))
+            if active_wanted_tracks and deferred_slot_paths:
+                # ARCH-030 B2: a MIXED batch (>=1 verified + >=1 deferred). The
+                # deferred NO_RESULT/UNAVAILABLE files are still physically in
+                # import_dir; the inline Beets import below runs on the WHOLE
+                # folder, so they would ride into autotag and bypass the slot gate
+                # ("no track bypasses identity verification", req-5). Separate them
+                # out to a carrier-bound slot-gate folder so only verified audio
+                # imports inline; the deferred files reach the slot gate only.
+                slot_dir = _separate_deferred_slot_files(import_dir, deferred_slot_paths, log)
+                if slot_dir:
+                    _recovery_bind_folder(slot_dir)
             _validate_import_source_audio(import_dir, log, reject_downloads=True)
             # Verified audio is staged and ready for Beets (STAGED). Later
             # checkpoints (VERIFIED/IMPORTED/PLEX_SYNCED) are advanced by the
@@ -1418,7 +1431,16 @@ def _download_identity_deferral(match: Optional[Dict[str, Any]]) -> str:
     status = _s(identity.get("acoustid_status")).strip().lower()
     if status == "no_result":
         return "no_result"
-    if status in ("failed", "not_attempted"):
+    # ARCH-030 B3: an AcoustID lookup that could not be ASKED is UNAVAILABLE, not
+    # evidence of wrong audio -- retain it staged for manual review, never delete.
+    # Production (acoustid_service._audio_identity_decision -> acoustid_failure_
+    # status) emits not_configured/auth_failed/lookup_failed for the real
+    # outage/throttle/rejected-key/missing-fpcalc cases; "failed"/"not_attempted"
+    # cover the file-access/not-run cases. All of them must DEFER. (The earlier
+    # test only mocked "failed", which the provider path never emits -- so the
+    # real statuses fell through to "" -> DELETE, which is why the bug shipped.)
+    if status in ("failed", "not_attempted",
+                  "not_configured", "auth_failed", "lookup_failed"):
         return "unavailable"
     return ""
 
@@ -1426,10 +1448,14 @@ def _download_identity_deferral(match: Optional[Dict[str, Any]]) -> str:
 def _validate_wanted_download_identity_before_import(import_dir: str,
                                                      wanted_tracks: List[Dict[str, Any]],
                                                      log: list,
-                                                     fallback_artist: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+                                                     fallback_artist: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     """Require downloaded wanted-track files to fingerprint-match before import.
 
-    Returns ``(verified_tracks, undelivered_tracks)``. A file that AcoustID
+    Returns ``(verified_tracks, undelivered_tracks, deferred_paths)``, where
+    ``deferred_paths`` are the staged absolute paths of NO_RESULT/UNAVAILABLE
+    files left in place for the slot gate (ARCH-030 B2: the caller separates
+    these out of the inline-import folder so only verified audio reaches Beets).
+    A file that AcoustID
     actively contradicts (wrong audio) or that fails format policy is removed
     from the staging folder so only trustworthy audio reaches Beets. A file
     whose AcoustID lookup genuinely answered empty (NO_RESULT) or could not run
@@ -1441,7 +1467,7 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
     """
     wanted = _normalise_wanted_tracks(wanted_tracks)
     if not wanted:
-        return [], []
+        return [], [], []
     audio_files = sorted(_audio_files_in_dir(import_dir))
     if not audio_files:
         raise RuntimeError(
@@ -1451,6 +1477,7 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
     verified: List[Dict[str, Any]] = []
     failures: List[str] = []
     deferred: List[str] = []
+    deferred_paths: List[str] = []
     remaining = list(wanted)
 
     def _identity_log(message: str) -> None:
@@ -1507,6 +1534,7 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
                         if best_idx < 0 and format_ok else "")
             if deferral:
                 deferred.append(Path(path_value).name)
+                deferred_paths.append(path_value)
                 _identity_log(
                     "deferred requested-track download to the metadata-slot gate "
                     f"(acoustid {deferral}): {Path(path_value).name}"
@@ -1575,7 +1603,70 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
             f"no file fingerprint-accepted inline; {len(deferred)} file(s) left "
             f"staged for the metadata-slot gate; still missing: {missing}"
         )
-    return verified, remaining
+    return verified, remaining, deferred_paths
+
+
+def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
+                                  log: list) -> str:
+    """ARCH-030 B2: move deferred (NO_RESULT/UNAVAILABLE, not-deleted) files OUT
+    of the inline-import folder into a sibling slot-gate staged folder, so only
+    the fingerprint-verified files import into Beets and the deferred files never
+    reach Beets autotag. Returns the slot folder path, or "" if nothing moved.
+
+    The files are already inside a containment-validated staged folder; this is
+    an intra-root relocation (``os.replace`` on the same volume), not a copy from
+    an untrusted source, so it does not re-open the SEC-007 copy surface."""
+    base = Path(import_dir)
+    slot_dir = base.parent / f"{base.name}__slot_deferred"
+    try:
+        slot_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as ex:
+        log.append("  [import] WARN could not create slot-gate folder for "
+                   f"deferred files: {type(ex).__name__}")
+        return ""
+    base_resolved = base.resolve(strict=False)
+    moved: List[Tuple[Path, Path]] = []
+    for p_str in deferred_paths:
+        src = Path(p_str)
+        if not src.is_file():
+            continue
+        try:
+            rel = src.resolve(strict=False).relative_to(base_resolved)
+        except Exception:
+            rel = Path(src.name)
+        dest = slot_dir / rel
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(src), str(dest))
+            moved.append((src, dest))
+        except OSError as ex:
+            log.append("  [import] WARN could not move deferred file out of the "
+                       f"import dir: {type(ex).__name__}")
+    if not moved:
+        try:
+            slot_dir.rmdir()
+        except OSError:
+            pass
+        return ""
+    # Carry the moved files' ORIGINAL pre-rename names (ARCH-030 B1) into the
+    # slot folder so the slot gate still has the genuine download name there and
+    # does not fall back to the laundered ``{track:02d} {title}`` staged name.
+    try:
+        from backend.slskd import (original_download_names_for_folder,
+                                   _write_original_names_sidecar)
+        names = original_download_names_for_folder(import_dir)
+        carried: Dict[str, str] = {}
+        for src, dest in moved:
+            orig = names.get(str(src)) or names.get(str(src.resolve(strict=False)))
+            if orig:
+                carried[dest.relative_to(slot_dir).as_posix()] = orig
+        if carried:
+            _write_original_names_sidecar(slot_dir, carried)
+    except Exception:
+        pass
+    log.append(f"  [import] ARCH-030 B2: separated {len(moved)} deferred file(s) to "
+               f"the slot-gate folder {slot_dir}; only verified audio imports inline.")
+    return str(slot_dir)
 
 
 def _deno_download_url() -> str:
