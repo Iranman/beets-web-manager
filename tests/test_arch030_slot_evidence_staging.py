@@ -150,6 +150,33 @@ class EmbeddedIdentityProducer(unittest.TestCase):
         self.assertEqual(m[str(good)]["mb_releasegroupid"], RGID)
         self.assertEqual(m[str(bare)], {}, "no-MB-tag file maps to {} (cannot corroborate)")
 
+    def test_symlinked_audio_file_is_not_read(self):
+        # SEC-007/#325: a symlink planted in untrusted staged/download content
+        # must not redirect the embedded-tag read outside the scanned folder.
+        try:
+            ln_probe = tempfile.mkdtemp()
+            os.symlink(ln_probe, os.path.join(ln_probe, "p"), target_is_directory=True)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("host lacks working symlinks")
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        secret = Path(outside.name) / "secret.flac"
+        secret.write_bytes(b"x")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        real = Path(tmp.name) / "01 Song.flac"
+        real.write_bytes(b"x")
+        link = Path(tmp.name) / "02 Leak.flac"
+        os.symlink(str(secret), str(link))
+        _inject_media_tags(self, {
+            str(real): {"title": "Song", "mb_releasegroupid": RGID,
+                        "mb_albumartistid": ALBUMARTISTID, "mb_artistid": ARTISTID},
+            str(secret): {"title": "Secret", "mb_releasegroupid": RGID}})
+        m = acs.embedded_identity_map_for_folder(tmp.name)
+        self.assertIn(str(real), m)
+        self.assertNotIn(str(link), m, "symlinked audio file must be skipped")
+        self.assertNotIn(str(secret), m)
+
 
 class OriginalNamesSidecarRoundTrip(unittest.TestCase):
     """B1: the original pre-rename download name survives staging as a sidecar."""

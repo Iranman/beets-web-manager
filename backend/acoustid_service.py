@@ -127,6 +127,13 @@ def embedded_identity_map_for_folder(folder: Any) -> Dict[str, Dict[str, str]]:
     try:
         base = Path(folder)
         for p in sorted(base.rglob("*")):
+            # SEC-007/#325: refuse symlinked entries so untrusted staged/download
+            # content cannot redirect a tag read outside the scanned folder,
+            # mirroring the symlink-refusing staged copy (_staged_copy_nofollow).
+            # rglob already does not recurse into symlinked dirs (py3.12/3.13);
+            # this also drops a planted symlinked audio FILE at the leaf.
+            if p.is_symlink():
+                continue
             if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
                 out[str(p)] = embedded_identity_for_file(p)
     except Exception:
