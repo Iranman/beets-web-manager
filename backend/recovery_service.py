@@ -265,10 +265,14 @@ def _staging_root() -> str:
                     # held fd), never a by-name re-resolution.
                     return os.readlink(f"/proc/self/fd/{fd}")
                 except OSError:
-                    # No /proc read-back: the open already refused a symlinked
-                    # final component, so a plain realpath here cannot be
-                    # redirected by a root symlink (there is none).
-                    return os.path.realpath(os.path.join(base, name))
+                    # No /proc read-back on an fd-capable host: FAIL CLOSED.
+                    # The old by-name ``realpath(base/name)`` fallback dropped
+                    # the pinned fd and re-resolved the whole path by name,
+                    # reopening the TOCTOU window the O_NOFOLLOW fd-open had
+                    # just closed (an intermediate component swapped to a
+                    # symlink between the open and the realpath would be
+                    # followed). Returning "" keeps the caller fail-closed.
+                    return ""
                 finally:
                     os.close(fd)
             finally:
@@ -440,9 +444,11 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
         # Review with no carrier binding. Deleting it would lose a not-yet-
         # imported download and leave a dangling Review row. Apply the SAME check
         # import_service._delete_staged_import_folder uses: keep on a positive
-        # match AND fail closed on an unreadable queue (`unknown=True`).
-        from backend.pending_review_store import _pending_review_has_path
-        if _pending_review_has_path(child, unknown=True):
+        # match AND fail closed on an unreadable queue (`unknown=True`). This
+        # sweep scans TOP-LEVEL staging folders, so the match is ancestor/
+        # descendant-aware (a Review row at `<child>/CD 02`), not exact-only.
+        from backend.pending_review_store import _pending_review_has_path_or_overlap
+        if _pending_review_has_path_or_overlap(child, unknown=True):
             summary["kept"] += 1
             log.append(f"[recovery-reconcile] kept {entry.name} (queued for Review).")
             continue

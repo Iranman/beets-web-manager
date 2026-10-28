@@ -12,7 +12,7 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT,
 from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
-from backend.pending_review_store import _pending_review_has_path, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
+from backend.pending_review_store import _pending_review_has_path_or_overlap, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
 import backend.recovery_carrier as recovery_carrier
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
@@ -188,6 +188,27 @@ def _recovery_auto_insert_authorized(folder_path: str, carrier_id: str,
     if log is not None:
         log.append(f"[recovery] auto-insert refused by matching contract: {reason}")
     return {"ok": False, "reason": reason}
+
+
+def _recovery_slot_authorized(folder_path: str) -> bool:
+    """True when the recovery carrier bound to ``folder_path`` carries a
+    gate-authorized slot decision (matching_decision.action_allowed is True).
+
+    This is the SAME server-side authorization the unattended auto-insert gate
+    consumes in ``_recovery_auto_insert_authorized`` -- it is only READ here, via
+    the folder binding (never the client, never recomputed, never relaxed).
+    Under the Option C double-corroboration policy (docs/adr/0007) a
+    VERIFIED_SUBSET / DETERMINISTIC_METADATA_SLOT decision can be
+    action_allowed=True yet still be routed to manual review, so both the
+    unattended advance and the human-confirmed merge of that same slot read it
+    here to let the fill complete. Fail closed: no carrier, a non-dict/empty
+    decision, or action_allowed!=True -> False (strict AcoustID gate)."""
+    try:
+        carrier = recovery_carrier.load_for_folder(folder_path)
+    except Exception:
+        return False
+    decision = (carrier or {}).get("matching_decision")
+    return isinstance(decision, dict) and decision.get("action_allowed") is True
 
 
 def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
@@ -881,9 +902,10 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
         downloads_root = DOWNLOADS_ROOT.resolve(strict=False)
         if folder == downloads_root:
             return False
-        if _pending_review_has_path(str(folder), unknown=True):
-            # #427: the import queued this folder for Review; deleting it
-            # would leave the row dangling. An unreadable queue keeps it too.
+        if _pending_review_has_path_or_overlap(str(folder), unknown=True):
+            # #427: the import queued this folder (or a child/parent of it) for
+            # Review; deleting it would leave the row dangling or lose a queued
+            # download. An unreadable queue keeps it too.
             log.append(f"  [import] Kept staging folder queued for Review: {folder}")
             return False
         if folder.exists():
@@ -1743,7 +1765,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # (duplicate_action keep); merge them onto the existing album.
             if wanted_tracks:
                 fp_validation = _validate_wanted_album_items_with_acoustid(
-                    aid, mb_albumid, wanted_tracks, log, expected_artist=_guess_artist)
+                    aid, mb_albumid, wanted_tracks, log, expected_artist=_guess_artist,
+                    slot_authorized=_recovery_slot_authorized(aldir))
                 if not fp_validation.get("ok"):
                     _needs_review(fp_validation.get("reason") or "AcoustID did not verify the downloaded "
                                   "file(s) for the requested missing MusicBrainz track(s).")
@@ -1899,7 +1922,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
                                                wanted_tracks: List[Dict[str, Any]],
                                                log: list,
-                                               expected_artist: str = "") -> Dict[str, Any]:
+                                               expected_artist: str = "",
+                                               slot_authorized: bool = False) -> Dict[str, Any]:
     """Gate merging downloaded missing-track files into an existing album.
 
     Merging reassigns audio to the album, so it needs deterministic proof
@@ -1909,7 +1933,19 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
     a fingerprint with no AcoustID result (``no_result``) and a fingerprint
     that was never checked (``not_checked``: no key, rejected key, outage,
     fpcalc) all send the folder to review with ``reason``. Nothing here
-    ever deletes a download (#244 F2)."""
+    ever deletes a download (#244 F2).
+
+    ARCH-030 B4: ``slot_authorized`` is the recovery carrier's own
+    gate-authorized slot decision (matching_decision.action_allowed is True,
+    VERIFIED_SUBSET / DETERMINISTIC_METADATA_SLOT -- docs/adr/0007), read by
+    the caller from the folder-bound carrier and never recomputed here. When it
+    is set, a fingerprint that AcoustID has no result for (``no_result``) is
+    expected -- the gate already corroborated that slot deterministically under
+    the Option C policy -- so it no longer blocks the merge of the authorized
+    wanted subset. Everything stronger still refuses even when authorized: a
+    different-song ``mismatch``, an infra ``not_checked`` failure, and a file
+    that maps to no requested track (``unverified``, i.e. outside the authorized
+    subset) all keep the strict behavior."""
     wanted = _normalise_wanted_tracks(wanted_tracks)
     if not album_id or not mb_albumid or not wanted:
         return {"ok": True, "checked": 0, "mismatches": []}
@@ -2053,8 +2089,22 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         reason = ("The downloaded file(s) were not merged: "
                   f"{ACOUSTID_FAILURE_MESSAGES[not_checked[0]['status']]}")
     elif unverified or no_result or not confirmed:
-        reason = ("AcoustID did not confirm that the downloaded file(s) are the requested MusicBrainz "
-                  "recording(s), so they were not merged into the existing album.")
+        # ARCH-030 B4: honor an already gate-authorized NO_RESULT slot. A carrier
+        # whose matching_decision.action_allowed is True was deterministically
+        # corroborated (docs/adr/0007, Option C), so AcoustID having no result
+        # for its tracks is expected and no longer strands the fill as a separate
+        # album. ``unverified`` is never relaxed -- those files map to no
+        # requested track (outside the authorized subset) -- and mismatches /
+        # not_checked were already refused above.
+        if slot_authorized and not unverified:
+            log.append(
+                "  AcoustID missing-track validation: no AcoustID result for "
+                f"{no_result} authorized track(s); merge honored under the carrier's "
+                "deterministic-metadata-slot authorization (docs/adr/0007)."
+            )
+        else:
+            reason = ("AcoustID did not confirm that the downloaded file(s) are the requested MusicBrainz "
+                      "recording(s), so they were not merged into the existing album.")
     for mismatch in mismatches[:5]:
         cand = mismatch.get("candidate") or {}
         target = mismatch.get("target") or {}

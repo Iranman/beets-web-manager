@@ -660,6 +660,14 @@
     "backend/import_service.py::_recovery_auto_insert_authorized": [
       "COMPATIBILITY_WRAPPER",
       "Consume-only gate for the unattended recovery auto-insert (ARCH-030 Step 4): resolves the carrier from the folder binding and reads the canonical matching_decision.action_allowed the advancer already attached. Can only narrow (fail-closed on missing/false decision or unbound folder); never recomputes a decision, computes no similarity/confidence, and makes no identity decision. On refusal returns the carrier to review_required with the contract's reason. The action_allowed pattern hits are its docstring and the boolean read."
+    ],
+    "backend/import_service.py::_recovery_slot_authorized": [
+      "COMPATIBILITY_WRAPPER",
+      "Consume-only read of the recovery carrier's gate decision (ARCH-030 B4): loads the carrier from the folder binding and returns matching_decision.action_allowed (True only). Never recomputes a decision, computes no similarity/confidence, makes no identity decision; fail-closed on missing carrier/decision or a store error. The action_allowed pattern hits are its docstring and the boolean read. Twin of _recovery_auto_insert_authorized."
+    ],
+    "backend/import_service.py::_validate_wanted_album_items_with_acoustid": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Post-import AcoustID evidence gate for merging downloaded missing-track files into an existing album: per file it defers the identity verdict to the canonical verify_audio_against_request (Recording-ID floor + ambiguity window) and refuses on mismatch/not_checked/unverified. ARCH-030 B4 adds a consume-only honor of the carrier's already-set matching_decision.action_allowed (slot_authorized) so an authorized NO_RESULT subset is not re-refused; it recomputes no matching decision and authorizes nothing itself. The action_allowed/VERIFIED_SUBSET pattern hits are its docstring and the slot_authorized flag."
     ]
   }
 }

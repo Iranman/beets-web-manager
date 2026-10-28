@@ -21209,6 +21209,7 @@
     "_maintenance_clean_all_counts",
     "_missing_mb_rows",
     "_pending_review_has_path",
+    "_pending_review_has_path_or_overlap",
     "_pending_review_path_set",
     "_run_import_review_auto_enqueue_ready_batch",
     "_run_import_review_revalidation",
@@ -21218,7 +21219,7 @@
     "import_preflight",
     "import_review_queue"
    ],
-   "caller_count": 13,
+   "caller_count": 14,
    "dependencies": [
     "_compute_prune_resolutions",
     "_load_pending_reviews_locked",
@@ -21427,10 +21428,33 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_ai_batch_process_decisions",
-    "_ai_batch_process_folder",
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_load_pending_reviews",
+    "_pending_review_path_key",
+    "_pending_review_path_set"
+   ]
+  },
+  {
+   "name": "_pending_review_has_path_or_overlap",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    742,
+    766
+   ],
+   "size": 25,
+   "body_lines": 14,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
     "_delete_staged_import_folder"
    ],
-   "caller_count": 3,
+   "caller_count": 1,
    "dependencies": [
     "_load_pending_reviews",
     "_pending_review_path_key",
@@ -21441,8 +21465,8 @@
    "name": "_pending_review_path_key",
    "module": "backend/pending_review_store.py",
    "lines": [
-    742,
-    749
+    769,
+    776
    ],
    "size": 8,
    "body_lines": 7,
@@ -21453,10 +21477,11 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_pending_review_has_path",
+    "_pending_review_has_path_or_overlap",
     "_pending_review_path_set",
     "_run_ai_batch_import"
    ],
-   "caller_count": 3,
+   "caller_count": 4,
    "dependencies": [
     "_s"
    ]
@@ -21465,8 +21490,8 @@
    "name": "_pending_review_path_set",
    "module": "backend/pending_review_store.py",
    "lines": [
-    752,
-    758
+    779,
+    785
    ],
    "size": 7,
    "body_lines": 6,
@@ -21477,9 +21502,10 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_pending_review_has_path",
+    "_pending_review_has_path_or_overlap",
     "_run_ai_batch_import"
    ],
-   "caller_count": 2,
+   "caller_count": 3,
    "dependencies": [
     "_load_pending_reviews",
     "_pending_review_path_key",
@@ -21491,8 +21517,8 @@
    "name": "_import_review_folder_signature",
    "module": "backend/pending_review_store.py",
    "lines": [
-    761,
-    779
+    788,
+    806
    ],
    "size": 19,
    "body_lines": 15,
@@ -21515,8 +21541,8 @@
    "name": "_review_id_matches_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    782,
-    791
+    809,
+    818
    ],
    "size": 10,
    "body_lines": 9,
@@ -21538,8 +21564,8 @@
    "name": "_trusted_stored_review_path",
    "module": "backend/pending_review_store.py",
    "lines": [
-    794,
-    826
+    821,
+    853
    ],
    "size": 33,
    "body_lines": 24,
@@ -21561,8 +21587,8 @@
    "name": "_pending_review_matches",
    "module": "backend/pending_review_store.py",
    "lines": [
-    829,
-    843
+    856,
+    870
    ],
    "size": 15,
    "body_lines": 14,
@@ -21589,8 +21615,8 @@
    "name": "_finalize_pending_review_format_policy_rejection",
    "module": "backend/pending_review_store.py",
    "lines": [
-    846,
-    879
+    873,
+    906
    ],
    "size": 34,
    "body_lines": 30,
@@ -21618,8 +21644,8 @@
    "name": "_mark_pending_review_status",
    "module": "backend/pending_review_store.py",
    "lines": [
-    882,
-    926
+    909,
+    953
    ],
    "size": 45,
    "body_lines": 43,
@@ -26214,11 +26240,31 @@
    ]
   },
   {
-   "name": "_stage_selected_audio_files",
+   "name": "_recovery_slot_authorized",
    "module": "backend/import_service.py",
    "lines": [
     193,
-    228
+    211
+   ],
+   "size": 19,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ARTWORK",
+   "desired_owner": "backend/artwork_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "start_reimport_disk"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_stage_selected_audio_files",
+   "module": "backend/import_service.py",
+   "lines": [
+    214,
+    249
    ],
    "size": 36,
    "body_lines": 22,
@@ -26242,8 +26288,8 @@
    "name": "_prune_stale_wanted_rows_before_import",
    "module": "backend/import_service.py",
    "lines": [
-    231,
-    317
+    252,
+    338
    ],
    "size": 87,
    "body_lines": 83,
@@ -26267,8 +26313,8 @@
    "name": "_recovery_carrier_for_merge",
    "module": "backend/import_service.py",
    "lines": [
-    334,
-    356
+    355,
+    377
    ],
    "size": 23,
    "body_lines": 13,
@@ -26289,8 +26335,8 @@
    "name": "_recovery_slot_present",
    "module": "backend/import_service.py",
    "lines": [
-    359,
-    394
+    380,
+    415
    ],
    "size": 36,
    "body_lines": 15,
@@ -26312,8 +26358,8 @@
    "name": "_recovery_claim_importing",
    "module": "backend/import_service.py",
    "lines": [
-    397,
-    419
+    418,
+    440
    ],
    "size": 23,
    "body_lines": 15,
@@ -26334,8 +26380,8 @@
    "name": "_recovery_precheck",
    "module": "backend/import_service.py",
    "lines": [
-    422,
-    454
+    443,
+    475
    ],
    "size": 33,
    "body_lines": 26,
@@ -26358,8 +26404,8 @@
    "name": "_recovery_intended_tracks",
    "module": "backend/import_service.py",
    "lines": [
-    457,
-    497
+    478,
+    518
    ],
    "size": 41,
    "body_lines": 14,
@@ -26380,8 +26426,8 @@
    "name": "_recovery_fully_delivered",
    "module": "backend/import_service.py",
    "lines": [
-    500,
-    525
+    521,
+    546
    ],
    "size": 26,
    "body_lines": 13,
@@ -26403,8 +26449,8 @@
    "name": "_recovery_mark_outcome",
    "module": "backend/import_service.py",
    "lines": [
-    528,
-    556
+    549,
+    577
    ],
    "size": 29,
    "body_lines": 13,
@@ -26426,8 +26472,8 @@
    "name": "_recovery_mark_failed",
    "module": "backend/import_service.py",
    "lines": [
-    559,
-    570
+    580,
+    591
    ],
    "size": 12,
    "body_lines": 8,
@@ -26448,8 +26494,8 @@
    "name": "_recovery_rebind_restaged",
    "module": "backend/import_service.py",
    "lines": [
-    573,
-    595
+    594,
+    616
    ],
    "size": 23,
    "body_lines": 15,
@@ -26471,8 +26517,8 @@
    "name": "_recovery_plex_sync_leg",
    "module": "backend/import_service.py",
    "lines": [
-    598,
-    647
+    619,
+    668
    ],
    "size": 50,
    "body_lines": 38,
@@ -26496,8 +26542,8 @@
    "name": "_merge_imported_album_into_existing",
    "module": "backend/import_service.py",
    "lines": [
-    650,
-    832
+    671,
+    853
    ],
    "size": 183,
    "body_lines": 158,
@@ -26527,8 +26573,8 @@
    "name": "_start_reimport_disk_job_internal",
    "module": "backend/import_service.py",
    "lines": [
-    835,
-    861
+    856,
+    882
    ],
    "size": 27,
    "body_lines": 19,
@@ -26554,11 +26600,11 @@
    "name": "_delete_staged_import_folder",
    "module": "backend/import_service.py",
    "lines": [
-    864,
-    895
+    885,
+    917
    ],
-   "size": 32,
-   "body_lines": 24,
+   "size": 33,
+   "body_lines": 25,
    "route": null,
    "mutation_capable": true,
    "domain": "IMPORT",
@@ -26571,18 +26617,18 @@
    "dependencies": [
     "_app_managed_download_path",
     "_path_is_under",
-    "_pending_review_has_path"
+    "_pending_review_has_path_or_overlap"
    ]
   },
   {
    "name": "start_reimport_disk",
    "module": "backend/import_service.py",
    "lines": [
-    905,
-    1896
+    927,
+    1919
    ],
-   "size": 992,
-   "body_lines": 968,
+   "size": 993,
+   "body_lines": 969,
    "route": null,
    "mutation_capable": true,
    "domain": "IMPORT",
@@ -26615,6 +26661,7 @@
     "_record_recent_import_for_album",
     "_recovery_plex_sync_leg",
     "_recovery_rebind_restaged",
+    "_recovery_slot_authorized",
     "_remove_pending_review_for_path",
     "_repair_album_mbid_sticking_once",
     "_resolve_album_release_for_import",
@@ -26632,11 +26679,11 @@
    "name": "_validate_wanted_album_items_with_acoustid",
    "module": "backend/import_service.py",
    "lines": [
-    1899,
-    2076
+    1922,
+    2126
    ],
-   "size": 178,
-   "body_lines": 164,
+   "size": 205,
+   "body_lines": 178,
    "route": null,
    "mutation_capable": false,
    "domain": "ACQUISITION",
@@ -26660,8 +26707,8 @@
    "name": "_beet_import_timeout",
    "module": "backend/import_service.py",
    "lines": [
-    2079,
-    2090
+    2129,
+    2140
    ],
    "size": 12,
    "body_lines": 10,
@@ -26682,8 +26729,8 @@
    "name": "_audio_validation_inspection_failed",
    "module": "backend/import_service.py",
    "lines": [
-    2093,
-    2111
+    2143,
+    2161
    ],
    "size": 19,
    "body_lines": 18,
@@ -26704,8 +26751,8 @@
    "name": "_filter_import_review_selected_audio_files",
    "module": "backend/import_service.py",
    "lines": [
-    2114,
-    2164
+    2164,
+    2214
    ],
    "size": 51,
    "body_lines": 49,
@@ -26729,8 +26776,8 @@
    "name": "_resolve_import_review_db_music_path",
    "module": "backend/import_service.py",
    "lines": [
-    2167,
-    2186
+    2217,
+    2236
    ],
    "size": 20,
    "body_lines": 14,
@@ -26753,8 +26800,8 @@
    "name": "_read_log_tail",
    "module": "backend/import_service.py",
    "lines": [
-    2192,
-    2202
+    2242,
+    2252
    ],
    "size": 11,
    "body_lines": 9,
@@ -26774,8 +26821,8 @@
    "name": "_import_skipped_items",
    "module": "backend/import_service.py",
    "lines": [
-    2205,
-    2255
+    2255,
+    2305
    ],
    "size": 51,
    "body_lines": 48,
@@ -26799,8 +26846,8 @@
    "name": "_target_preview_source_files",
    "module": "backend/import_service.py",
    "lines": [
-    2258,
-    2316
+    2308,
+    2366
    ],
    "size": 59,
    "body_lines": 58,
@@ -26825,8 +26872,8 @@
    "name": "_import_review_selected_source_files",
    "module": "backend/import_service.py",
    "lines": [
-    2345,
-    2381
+    2395,
+    2431
    ],
    "size": 37,
    "body_lines": 31,
@@ -26850,8 +26897,8 @@
    "name": "_import_target_preview_cache_key",
    "module": "backend/import_service.py",
    "lines": [
-    2384,
-    2431
+    2434,
+    2481
    ],
    "size": 48,
    "body_lines": 47,
@@ -26873,8 +26920,8 @@
    "name": "_cached_import_target_preview",
    "module": "backend/import_service.py",
    "lines": [
-    2434,
-    2453
+    2484,
+    2503
    ],
    "size": 20,
    "body_lines": 19,
@@ -26897,8 +26944,8 @@
    "name": "_build_import_target_preview",
    "module": "backend/import_service.py",
    "lines": [
-    2456,
-    2743
+    2506,
+    2793
    ],
    "size": 288,
    "body_lines": 281,
@@ -26928,8 +26975,8 @@
    "name": "_import_review_confidence_score",
    "module": "backend/import_service.py",
    "lines": [
-    2746,
-    2762
+    2796,
+    2812
    ],
    "size": 17,
    "body_lines": 16,
@@ -26949,8 +26996,8 @@
    "name": "_import_review_auto_state",
    "module": "backend/import_service.py",
    "lines": [
-    2765,
-    2773
+    2815,
+    2823
    ],
    "size": 9,
    "body_lines": 8,
@@ -26971,8 +27018,8 @@
    "name": "_write_import_review_auto_state",
    "module": "backend/import_service.py",
    "lines": [
-    2776,
-    2781
+    2826,
+    2831
    ],
    "size": 6,
    "body_lines": 5,
@@ -26991,8 +27038,8 @@
    "name": "_import_review_auto_update",
    "module": "backend/import_service.py",
    "lines": [
-    2784,
-    2793
+    2834,
+    2843
    ],
    "size": 10,
    "body_lines": 9,
@@ -27017,8 +27064,8 @@
    "name": "_import_review_auto_key",
    "module": "backend/import_service.py",
    "lines": [
-    2796,
-    2807
+    2846,
+    2857
    ],
    "size": 12,
    "body_lines": 10,
@@ -27039,8 +27086,8 @@
    "name": "evaluate_import_eligibility",
    "module": "backend/import_service.py",
    "lines": [
-    2810,
-    2926
+    2860,
+    2976
    ],
    "size": 117,
    "body_lines": 115,
@@ -27070,8 +27117,8 @@
    "name": "start_folder_import_with_id",
    "module": "backend/import_service.py",
    "lines": [
-    2931,
-    3682
+    2981,
+    3732
    ],
    "size": 752,
    "body_lines": 741,
@@ -27131,8 +27178,8 @@
    "name": "_coerce_library_import_all_album",
    "module": "backend/import_service.py",
    "lines": [
-    3691,
-    3718
+    3741,
+    3768
    ],
    "size": 28,
    "body_lines": 27,
@@ -27156,8 +27203,8 @@
    "name": "_library_import_all_retry_payload",
    "module": "backend/import_service.py",
    "lines": [
-    3721,
-    3729
+    3771,
+    3779
    ],
    "size": 9,
    "body_lines": 8,
@@ -27179,8 +27226,8 @@
    "name": "_library_import_all_record",
    "module": "backend/import_service.py",
    "lines": [
-    3732,
-    3743
+    3782,
+    3793
    ],
    "size": 12,
    "body_lines": 10,
@@ -27203,8 +27250,8 @@
    "name": "_library_import_all_read_last",
    "module": "backend/import_service.py",
    "lines": [
-    3746,
-    3754
+    3796,
+    3804
    ],
    "size": 9,
    "body_lines": 8,
@@ -27224,8 +27271,8 @@
    "name": "_library_import_all_write_last",
    "module": "backend/import_service.py",
    "lines": [
-    3757,
-    3765
+    3807,
+    3815
    ],
    "size": 9,
    "body_lines": 8,
@@ -27244,8 +27291,8 @@
    "name": "_resolve_import_source_path",
    "module": "backend/import_service.py",
    "lines": [
-    3773,
-    3807
+    3823,
+    3857
    ],
    "size": 35,
    "body_lines": 16,
