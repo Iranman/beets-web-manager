@@ -198,7 +198,8 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
     # Option C double-corroborate (USER-chosen gate): per staged path, the
     # ORIGINAL pre-rename download basename (file_original_names) and the file's
     # EMBEDDED MB tags (file_embedded_ids, keyed by the pinned contract field
-    # names {"title","mb_releasegroupid","mb_albumartistid","mb_artistid"}).
+    # names {"title","mb_releasegroupid","mb_albumartistid","mb_artistid",
+    # "mb_recording_id","track","disc"}).
     # Both halves must independently corroborate the target title, and the
     # embedded Release-Group + artist MBID must be PRESENT and match, or the
     # slot fails closed to review. A fresh download with no readable MB tags
@@ -213,7 +214,14 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
     # alignment below (ADR-0007), not re-decided here: {row_index: path}.
     slot_pending: Dict[int, str] = {}
     for path, hits in file_hits:
-        disc, num = _audio_position_from_path(path)
+        original_name = _s(file_original_names.get(_s(path))).strip()
+        embedded = file_embedded_ids.get(_s(path)) or {}
+        # F1-POSITION: disc/track come from evidence INDEPENDENT of the staged
+        # filename (embedded tags + ORIGINAL download name), never from the
+        # circular staged name the system renamed to the target slot. A file with
+        # no independent position carries track 0 -> position_match is False ->
+        # the NO_RESULT slot cannot corroborate position and goes to review.
+        disc, num, _pos_ok = _independent_slot_position(original_name, embedded)
         # The row ``title`` is the staged/renamed-name guess used only for
         # alignment (which target slot this file maps to). The STRICT Option C
         # title gate never reads it: it reads ``original_name`` (the pre-rename
@@ -224,10 +232,8 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         measured = float(file_durations.get(_s(path)) or 0.0)
         if measured > 0:
             row["length"] = measured
-        original_name = _s(file_original_names.get(_s(path))).strip()
         if original_name:
             row["original_name"] = original_name
-        embedded = file_embedded_ids.get(_s(path)) or {}
         if _s(embedded.get("title")).strip():
             row["embedded_title"] = _s(embedded.get("title")).strip()
         if _s(embedded.get("mb_releasegroupid")).strip():
@@ -235,6 +241,14 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         emb_artist = _s(embedded.get("mb_albumartistid") or embedded.get("mb_artistid")).strip()
         if emb_artist:
             row["embedded_artist_id"] = emb_artist.lower()
+        # F1-RECID: the embedded RECORDING MBID is top-tier identity evidence.
+        # Threading it onto the local row lets the EXISTING recording_id_conflict
+        # in track_alignment fire: an embedded recording id that contradicts the
+        # target recording is a conflict, which blocks is_deterministic_metadata_slot
+        # (``not self.conflicts``) and sends the file to review (ADR-0007 req-5).
+        emb_recording = _s(embedded.get("mb_recording_id") or embedded.get("mb_trackid")).strip().lower()
+        if emb_recording:
+            row["recording_id"] = emb_recording
         statuses = [(t, acoustid_evidence_from_hits(hits, t.get("mb_trackid"))) for t in mb_tracks if t.get("mb_trackid")]
         confirmed = [t for t, ev in statuses if ev.confirmed]
         if not confirmed:
@@ -429,6 +443,30 @@ def _disc_number_from_path(path: str) -> int:
             except Exception:
                 return 0
     return 0
+
+
+def _parse_leading_int(value: Any) -> int:
+    """First run of digits in ``value`` (handles embedded ``"5/12"`` / ``"5"``)."""
+    m = re.match(r"\s*(\d+)", _s(value))
+    return int(m.group(1)) if m else 0
+
+
+def _independent_slot_position(original_name: str, embedded: Dict[str, Any]) -> Tuple[int, int, bool]:
+    """Disc/track from evidence INDEPENDENT of the circular staged filename
+    (F1-POSITION): the embedded disc/track tags and the ORIGINAL pre-rename
+    download basename. The staged name was set by the system to the target slot,
+    so a position read off it is trivially true and proves nothing.
+
+    Returns ``(disc, track, corroborated)``; ``corroborated`` is False when
+    NEITHER independent source carries a track number -- position then cannot be
+    corroborated and the NO_RESULT slot must fail closed to review (Option C)."""
+    emb_track = _parse_leading_int(embedded.get("track"))
+    emb_disc = _parse_leading_int(embedded.get("disc"))
+    nums = _slskd_track_numbers_from_name(original_name) if _s(original_name).strip() else []
+    name_disc, name_track = (nums[0] if nums else (0, 0))
+    track = emb_track or name_track
+    disc = emb_disc or name_disc
+    return (max(disc or 1, 1), max(track, 0), track > 0)
 
 
 def _audio_position_from_path(path: str) -> tuple:
@@ -1165,8 +1203,9 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             # On the production local-scan recovery path nothing stamps these
             # onto the candidate rows, so source them here from the readers
             # (authoritative); the pinned contract field names
-            # ("title","mb_releasegroupid","mb_albumartistid","mb_artistid")
-            # are produced verbatim by acoustid_service. Any candidate-carried
+            # ("title","mb_releasegroupid","mb_albumartistid","mb_artistid",
+            # "mb_recording_id","track","disc") are produced verbatim by
+            # acoustid_service. Any candidate-carried
             # values (engine-inspection topology) only fill gaps. Both the
             # original-name title and the embedded-tag set must corroborate the
             # target for a NO_RESULT file to slot-auto-insert; the F7 guard
@@ -1194,6 +1233,15 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                     emb["mb_releasegroupid"] = _s(c.get("embedded_release_group_id")).strip()
                 if _s(c.get("embedded_artist_id")).strip():
                     emb["mb_albumartistid"] = _s(c.get("embedded_artist_id")).strip()
+                # F1-RECID / F1-POSITION: carry any engine-inspected recording id
+                # and embedded position so the same conflict/position gates apply
+                # on this gap-fill path too.
+                if _s(c.get("embedded_recording_id") or c.get("mb_recording_id")).strip():
+                    emb["mb_recording_id"] = _s(c.get("embedded_recording_id") or c.get("mb_recording_id")).strip().lower()
+                if _s(c.get("embedded_track")).strip():
+                    emb["track"] = _s(c.get("embedded_track")).strip()
+                if _s(c.get("embedded_disc")).strip():
+                    emb["disc"] = _s(c.get("embedded_disc")).strip()
                 if emb:
                     proof_embedded_ids[cpath] = emb
             proof = _missing_track_recording_proof(

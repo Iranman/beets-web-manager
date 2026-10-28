@@ -146,10 +146,17 @@ outweigh.
   deterministic_metadata_slot`, `review_required=False`) **only when integrations supplies the
   double-corroboration**: a per-staged-path `file_original_names` map (original pre-rename
   download basename) and a `file_embedded_ids` map keyed by the pinned contract field names
-  `{"title","mb_releasegroupid","mb_albumartistid","mb_artistid"}`, consumed by
-  `_missing_track_recording_proof`. A recovery with no readable embedded MB tags (or no known
-  original name) now fails closed to manual review — the USER-chosen safe behavior — rather
+  `{"title","mb_releasegroupid","mb_albumartistid","mb_artistid","mb_recording_id","track","disc"}`,
+  consumed by `_missing_track_recording_proof`. A recovery with no readable embedded MB tags (or no
+  known original name) now fails closed to manual review — the USER-chosen safe behavior — rather
   than auto-inserting on title/position/duration alone.
+- **req-5 (F1-RECID)**: `mb_recording_id` is the embedded RECORDING MBID, read by the PRODUCTION
+  reader (`_read_file_media_tags`' mutagen branch, `musicbrainz_trackid`). Threaded onto the local
+  proof row, it lets the existing `recording_id_conflict` fire: a NO_RESULT file whose RG+artist+title
+  corroborate the target but whose embedded recording id is a DIFFERENT recording goes to review, never
+  auto-inserts. **req (F1-POSITION)**: `track`/`disc` give an INDEPENDENT position; the slot's
+  `position_match` is cross-checked against them and the original download name, never the circular
+  staged filename, and a file with no independent position fails closed to review.
 - `no_result` vs `unavailable` are now reported with distinct, accurate messages; the
   "AcoustID not configured or not reachable" wording is used only for genuine `UNAVAILABLE`.
 - The matching-decision contract is bumped to `contract_version: 3` (backward-readable: all v2
