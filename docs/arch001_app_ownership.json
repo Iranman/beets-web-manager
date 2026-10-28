@@ -7415,10 +7415,10 @@
    "module": "backend/matching_service.py",
    "lines": [
     141,
-    289
+    306
    ],
-   "size": 149,
-   "body_lines": 123,
+   "size": 166,
+   "body_lines": 138,
    "route": null,
    "mutation_capable": false,
    "domain": "LIBRARY",
@@ -7439,8 +7439,8 @@
    "name": "_repair_album_mbid_sticking_once",
    "module": "backend/matching_service.py",
    "lines": [
-    292,
-    347
+    309,
+    364
    ],
    "size": 56,
    "body_lines": 50,
@@ -7464,8 +7464,8 @@
    "name": "_normalize_album",
    "module": "backend/matching_service.py",
    "lines": [
-    352,
-    362
+    369,
+    379
    ],
    "size": 11,
    "body_lines": 9,
@@ -7488,8 +7488,8 @@
    "name": "_album_key",
    "module": "backend/matching_service.py",
    "lines": [
-    365,
-    376
+    382,
+    393
    ],
    "size": 12,
    "body_lines": 10,
@@ -7512,8 +7512,8 @@
    "name": "_album_title_match",
    "module": "backend/matching_service.py",
    "lines": [
-    379,
-    395
+    396,
+    412
    ],
    "size": 17,
    "body_lines": 15,
@@ -7537,8 +7537,8 @@
    "name": "_disc_number_from_path",
    "module": "backend/matching_service.py",
    "lines": [
-    398,
-    413
+    415,
+    430
    ],
    "size": 16,
    "body_lines": 15,
@@ -7559,8 +7559,8 @@
    "name": "_audio_position_from_path",
    "module": "backend/matching_service.py",
    "lines": [
-    416,
-    422
+    433,
+    439
    ],
    "size": 7,
    "body_lines": 6,
@@ -7587,8 +7587,8 @@
    "name": "_is_configured_root",
    "module": "backend/matching_service.py",
    "lines": [
-    425,
-    432
+    442,
+    449
    ],
    "size": 8,
    "body_lines": 5,
@@ -7607,8 +7607,8 @@
    "name": "_load_recovery_carrier_for_folder",
    "module": "backend/matching_service.py",
    "lines": [
-    435,
-    452
+    452,
+    469
    ],
    "size": 18,
    "body_lines": 12,
@@ -7629,8 +7629,8 @@
    "name": "_carrier_expected_as_wanted",
    "module": "backend/matching_service.py",
    "lines": [
-    455,
-    471
+    472,
+    488
    ],
    "size": 17,
    "body_lines": 12,
@@ -7651,8 +7651,8 @@
    "name": "_recovery_duration_tolerance_ok",
    "module": "backend/matching_service.py",
    "lines": [
-    474,
-    493
+    491,
+    510
    ],
    "size": 20,
    "body_lines": 9,
@@ -7671,8 +7671,8 @@
    "name": "_recovery_duration_conflicts",
    "module": "backend/matching_service.py",
    "lines": [
-    496,
-    537
+    513,
+    554
    ],
    "size": 42,
    "body_lines": 30,
@@ -7694,8 +7694,8 @@
    "name": "_record_carrier_preflight_evidence",
    "module": "backend/matching_service.py",
    "lines": [
-    547,
-    598
+    564,
+    615
    ],
    "size": 52,
    "body_lines": 44,
@@ -7717,11 +7717,11 @@
    "name": "_folder_release_preflight",
    "module": "backend/matching_service.py",
    "lines": [
-    601,
-    1211
+    618,
+    1268
    ],
-   "size": 611,
-   "body_lines": 588,
+   "size": 651,
+   "body_lines": 628,
    "route": null,
    "mutation_capable": false,
    "domain": "MATCHING",
@@ -7761,8 +7761,8 @@
    "name": "_preflight_rejection_reason",
    "module": "backend/matching_service.py",
    "lines": [
-    1214,
-    1237
+    1271,
+    1294
    ],
    "size": 24,
    "body_lines": 18,
@@ -7785,8 +7785,8 @@
    "name": "_preflight_review_reason",
    "module": "backend/matching_service.py",
    "lines": [
-    1240,
-    1313
+    1297,
+    1370
    ],
    "size": 74,
    "body_lines": 72,
@@ -7809,8 +7809,8 @@
    "name": "_invalidate_lib_cache",
    "module": "backend/matching_service.py",
    "lines": [
-    1328,
-    1342
+    1385,
+    1399
    ],
    "size": 15,
    "body_lines": 14,
@@ -7853,8 +7853,8 @@
    "name": "_fast_album_mb_health_fields",
    "module": "backend/matching_service.py",
    "lines": [
-    1345,
-    1380
+    1402,
+    1437
    ],
    "size": 36,
    "body_lines": 28,
@@ -7876,8 +7876,8 @@
    "name": "_ai_api_key",
    "module": "backend/matching_service.py",
    "lines": [
-    1383,
-    1396
+    1440,
+    1453
    ],
    "size": 14,
    "body_lines": 5,
@@ -7904,8 +7904,8 @@
    "name": "_ai_model_and_endpoint",
    "module": "backend/matching_service.py",
    "lines": [
-    1399,
-    1418
+    1456,
+    1475
    ],
    "size": 20,
    "body_lines": 3,
@@ -7929,8 +7929,8 @@
    "name": "_load_album_mb_suggestions",
    "module": "backend/matching_service.py",
    "lines": [
-    1421,
-    1428
+    1478,
+    1485
    ],
    "size": 8,
    "body_lines": 7,
@@ -7950,8 +7950,8 @@
    "name": "_compact_preflight",
    "module": "backend/matching_service.py",
    "lines": [
-    1431,
-    1461
+    1488,
+    1518
    ],
    "size": 31,
    "body_lines": 30,
@@ -7974,8 +7974,8 @@
    "name": "_album_preflight_folder",
    "module": "backend/matching_service.py",
    "lines": [
-    1464,
-    1485
+    1521,
+    1542
    ],
    "size": 22,
    "body_lines": 21,
@@ -7997,8 +7997,8 @@
    "name": "_match_tracks_from_mb",
    "module": "backend/matching_service.py",
    "lines": [
-    1488,
-    1503
+    1545,
+    1560
    ],
    "size": 16,
    "body_lines": 7,
@@ -8021,8 +8021,8 @@
    "name": "_match_tracks_from_mb_shared",
    "module": "backend/matching_service.py",
    "lines": [
-    1506,
-    1588
+    1563,
+    1645
    ],
    "size": 83,
    "body_lines": 56,
@@ -8041,8 +8041,8 @@
    "name": "_album_track_feature_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1614,
-    1620
+    1671,
+    1677
    ],
    "size": 7,
    "body_lines": 5,
@@ -8061,8 +8061,8 @@
    "name": "_album_track_parenthetical_alias_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1623,
-    1629
+    1680,
+    1686
    ],
    "size": 7,
    "body_lines": 5,
@@ -8081,8 +8081,8 @@
    "name": "_album_track_path_prefixes",
    "module": "backend/matching_service.py",
    "lines": [
-    1632,
-    1697
+    1689,
+    1754
    ],
    "size": 66,
    "body_lines": 64,
@@ -8105,8 +8105,8 @@
    "name": "_album_track_title_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1700,
-    1760
+    1757,
+    1817
    ],
    "size": 61,
    "body_lines": 60,
@@ -8133,8 +8133,8 @@
    "name": "_mb_release_tracklist_cache_path",
    "module": "backend/matching_service.py",
    "lines": [
-    1763,
-    1780
+    1820,
+    1837
    ],
    "size": 18,
    "body_lines": 4,
@@ -8157,8 +8157,8 @@
    "name": "_mb_release_tracklist_read_disk",
    "module": "backend/matching_service.py",
    "lines": [
-    1783,
-    1800
+    1840,
+    1857
    ],
    "size": 18,
    "body_lines": 17,
@@ -8179,8 +8179,8 @@
    "name": "_mb_release_tracklist_write_disk",
    "module": "backend/matching_service.py",
    "lines": [
-    1803,
-    1818
+    1860,
+    1875
    ],
    "size": 16,
    "body_lines": 15,
@@ -8201,8 +8201,8 @@
    "name": "_fetch_mb_release_tracklist",
    "module": "backend/matching_service.py",
    "lines": [
-    1821,
-    1904
+    1878,
+    1961
    ],
    "size": 84,
    "body_lines": 83,
@@ -8249,8 +8249,8 @@
    "name": "_album_track_score",
    "module": "backend/matching_service.py",
    "lines": [
-    1907,
-    1912
+    1964,
+    1969
    ],
    "size": 6,
    "body_lines": 5,
@@ -8269,8 +8269,8 @@
    "name": "_best_album_track_match",
    "module": "backend/matching_service.py",
    "lines": [
-    1915,
-    1920
+    1972,
+    1977
    ],
    "size": 6,
    "body_lines": 5,
@@ -8298,8 +8298,8 @@
    "name": "_ai_review_album_track_candidates",
    "module": "backend/matching_service.py",
    "lines": [
-    1923,
-    2025
+    1980,
+    2082
    ],
    "size": 103,
    "body_lines": 99,
@@ -8323,8 +8323,8 @@
    "name": "_scan_album_track_integrity",
    "module": "backend/matching_service.py",
    "lines": [
-    2033,
-    2239
+    2090,
+    2296
    ],
    "size": 207,
    "body_lines": 202,
@@ -8351,8 +8351,8 @@
    "name": "_album_mb_match_plan",
    "module": "backend/matching_service.py",
    "lines": [
-    2242,
-    2317
+    2299,
+    2374
    ],
    "size": 76,
    "body_lines": 74,
@@ -8378,8 +8378,8 @@
    "name": "_album_mb_completeness",
    "module": "backend/matching_service.py",
    "lines": [
-    2320,
-    2425
+    2377,
+    2482
    ],
    "size": 106,
    "body_lines": 104,
@@ -8410,8 +8410,8 @@
    "name": "_remove_album_track_items",
    "module": "backend/matching_service.py",
    "lines": [
-    2428,
-    2473
+    2485,
+    2530
    ],
    "size": 46,
    "body_lines": 32,
@@ -8436,8 +8436,8 @@
    "name": "_artist_folder_name_without_mbid",
    "module": "backend/matching_service.py",
    "lines": [
-    2482,
-    2483
+    2539,
+    2540
    ],
    "size": 2,
    "body_lines": 1,
@@ -8467,8 +8467,8 @@
    "name": "_stamp_folder_for_item_path",
    "module": "backend/matching_service.py",
    "lines": [
-    2486,
-    2513
+    2543,
+    2570
    ],
    "size": 28,
    "body_lines": 22,
@@ -8489,8 +8489,8 @@
    "name": "_artist_folder_album_rows",
    "module": "backend/matching_service.py",
    "lines": [
-    2516,
-    2524
+    2573,
+    2581
    ],
    "size": 9,
    "body_lines": 4,
@@ -8511,8 +8511,8 @@
    "name": "_stamp_artist_folder_album_mbid_counts",
    "module": "backend/matching_service.py",
    "lines": [
-    2527,
-    2568
+    2584,
+    2625
    ],
    "size": 42,
    "body_lines": 37,
@@ -8536,8 +8536,8 @@
    "name": "_playlist_artist_credit_info",
    "module": "backend/matching_service.py",
    "lines": [
-    2574,
-    2600
+    2631,
+    2657
    ],
    "size": 27,
    "body_lines": 26,
