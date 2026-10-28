@@ -22,8 +22,9 @@ from helpers_mb import _resolve_release_group_to_release, acoustid_api_key
 from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError, beets_adapter
 import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
-from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file,_album_item_abs_path, _album_track_fingerprint_check, _album_track_norm, _normalize_albumartist
+from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file,_album_item_abs_path, _album_track_fingerprint_check, _album_track_norm, _normalize_albumartist, embedded_identity_map_for_folder
 from backend.artwork_service import _get_album_item_dir
+from backend.slskd import original_download_names_for_folder
 from backend.slskd_service import _slskd_title_guess_from_name, _slskd_track_numbers_from_name, _strip_track_filename_id_suffix
 from backend.plex_service import _trigger_plex_refresh
 
@@ -1157,21 +1158,35 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 for c in candidates if float(c.get("length") or 0.0) > 0
             }
             proof_durations.update({p: d for p, d in file_measured_durations.items() if d > 0})
-            # Option C: carry the ORIGINAL pre-rename download name and the
-            # embedded MB tags the candidate rows picked up (engine inspection)
-            # into the proof's own rows, keyed by staged path, under the pinned
-            # contract field names. Both the original-name title and the
-            # embedded-tag set must corroborate the target for a NO_RESULT file
-            # to slot-auto-insert; the F7 guard still fails a contradicting
-            # embedded RG/artist closed to review. Absent values stay absent
-            # (fresh download, no tags) -> the slot cannot fire -> manual review.
-            proof_original_names: Dict[str, str] = {}
-            proof_embedded_ids: Dict[str, Dict[str, str]] = {}
+            # Option C: the two independent corroborators are PRODUCED by the
+            # integrations folder readers -- the slskd sidecar's ORIGINAL pre-
+            # rename download names and each staged file's EMBEDDED MB tags --
+            # keyed to the SAME staged abs paths as proof_file_hits/audio_files.
+            # On the production local-scan recovery path nothing stamps these
+            # onto the candidate rows, so source them here from the readers
+            # (authoritative); the pinned contract field names
+            # ("title","mb_releasegroupid","mb_albumartistid","mb_artistid")
+            # are produced verbatim by acoustid_service. Any candidate-carried
+            # values (engine-inspection topology) only fill gaps. Both the
+            # original-name title and the embedded-tag set must corroborate the
+            # target for a NO_RESULT file to slot-auto-insert; the F7 guard
+            # still fails a contradicting embedded RG/artist closed to review.
+            # Absent evidence stays absent (fresh download, no tags / no
+            # sidecar) -> the slot cannot fire -> manual review.
+            proof_original_names: Dict[str, str] = dict(
+                original_download_names_for_folder(folder_path))
+            proof_embedded_ids: Dict[str, Dict[str, str]] = {
+                p: emb
+                for p, emb in embedded_identity_map_for_folder(folder_path).items()
+                if emb
+            }
             for c in candidates:
                 cpath = _s(c.get("path"))
                 orig = _s(c.get("original_name")).strip()
                 if orig:
-                    proof_original_names[cpath] = orig
+                    proof_original_names.setdefault(cpath, orig)
+                if cpath in proof_embedded_ids:
+                    continue
                 emb: Dict[str, str] = {}
                 if _s(c.get("embedded_title")).strip():
                     emb["title"] = _s(c.get("embedded_title")).strip()
