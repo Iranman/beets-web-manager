@@ -2917,7 +2917,10 @@ export function ReviewCard({
               suggestion={suggestion}
               onPrimaryAction={onApply}
               busy={busy}
-              primaryActionDisabled={busy || Boolean(applyBlockedReason)}
+              // ARCH-030 C8: the carrier identity is pinned & valid, so the
+              // page-level "enter/select an MBID" block never gates a recovery
+              // apply; the backend re-validates in runApply.
+              primaryActionDisabled={busy || (!recoveryIdentity && Boolean(applyBlockedReason))}
             />
 
             {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
@@ -4397,6 +4400,18 @@ export function ImportReviewPage({
   }, [setAction]);
 
   const startApply = useCallback((item: ReviewItem) => {
+    // ARCH-030 C8: a carrier-backed recovery item imports into the pinned
+    // destination album the card displays. Confirm + submit the carrier's
+    // canonical Release Group, never the editable page-level mbid/selectedMatch
+    // (which can be an unrelated title-collision candidate). The page-level
+    // "enter an MBID" block does not apply here — the identity is already pinned
+    // and the backend re-validates it in runApply.
+    const recovery = getRecoveryIdentity(item);
+    if (item.evidence?.recovery_carrier && recovery?.mbReleaseGroupId) {
+      const rgid = recovery.mbReleaseGroupId;
+      setConfirmIntent({ kind: 'apply', item, mbid: rgid, entity: applyMbidEntity(item, rgid) });
+      return;
+    }
     const mbid = (mbids[item.id] || '').trim();
     const sm = selectedMatches[item.id];
     const previewState = currentTargetPreviewState(item, sm, targetPreviews);
@@ -4409,7 +4424,16 @@ export function ImportReviewPage({
   const runApply = useCallback(async (item: ReviewItem, mbid: string) => {
     if (runningJobItemIdsRef.current.has(item.id)) return;
     setAction(item.id, { status: 'running', message: 'Starting backend job...' });
-    const sm = selectedMatches[item.id];
+    // ARCH-030 C8: for a carrier-backed recovery item the submitted identity is
+    // the pinned carrier identity the card displays (canonical Release Group +
+    // edition + destination album) — NEVER the editable page-level
+    // mbid/selectedMatch, which may be an unrelated title-collision candidate.
+    // The page-selected match is dropped so an alternative candidate can never
+    // become the recovery target. No recovery_carrier_id is sent, so this stays
+    // the human-authorized Review import path (not the auto-gated advancer).
+    const recovery = getRecoveryIdentity(item);
+    const carrierBacked = Boolean(item.evidence?.recovery_carrier && recovery?.mbReleaseGroupId);
+    const sm = carrierBacked ? undefined : selectedMatches[item.id];
     // The backend decides (ARCH-005): the page's own check is an instant
     // mirror; this is the verdict. Unreachable backend = nothing starts.
     try {
@@ -4434,13 +4458,19 @@ export function ImportReviewPage({
       });
       return;
     }
-    const representativeId = sm?.representative_release_id && sm.representative_release_id !== sm.release_group_id
-      ? sm.representative_release_id
-      : mbid;
+    const representativeId = carrierBacked
+      ? (recovery!.releaseId || recovery!.mbReleaseGroupId)
+      : sm?.representative_release_id && sm.representative_release_id !== sm.release_group_id
+        ? sm.representative_release_id
+        : mbid;
     try {
       let started: JobStartResponse | AttachRecordingResponse;
-      const existingId = existingAlbumId(item);
-      const releaseGroupId = sm?.release_group_id || selectedReleaseGroupId(item, mbid, suggestions[item.id]);
+      const existingId = carrierBacked
+        ? (recovery!.existingAlbumId || existingAlbumId(item))
+        : existingAlbumId(item);
+      const releaseGroupId = carrierBacked
+        ? recovery!.mbReleaseGroupId
+        : sm?.release_group_id || selectedReleaseGroupId(item, mbid, suggestions[item.id]);
       const preview = currentTargetPreviewState(item, sm, targetPreviews)?.preview;
       const unfilteredSelectedFiles = selectedImportSourceFiles(sm);
       const selectedSourceFiles = selectedImportSourceFiles(sm, preview);
