@@ -81,7 +81,7 @@ class ValidatorClassification(unittest.TestCase):
         deleted = []
         self._patch(_identity_match("no_result"), deleted.append)
         tmp, f = self._one_file()
-        verified, undelivered = acq._validate_wanted_download_identity_before_import(
+        verified, undelivered, _deferred = acq._validate_wanted_download_identity_before_import(
             tmp, [self.TRACK], [])
         self.assertEqual(verified, [])
         self.assertEqual([t["title"] for t in undelivered], ["Last Song"])
@@ -92,7 +92,7 @@ class ValidatorClassification(unittest.TestCase):
         deleted = []
         self._patch(_identity_match("failed"), deleted.append)
         tmp, f = self._one_file()
-        verified, undelivered = acq._validate_wanted_download_identity_before_import(
+        verified, undelivered, _deferred = acq._validate_wanted_download_identity_before_import(
             tmp, [self.TRACK], [])
         self.assertEqual(verified, [])
         self.assertTrue(f.exists(), "UNAVAILABLE file must be retained (never auto-import, never delete)")
@@ -136,7 +136,7 @@ class ValidatorClassification(unittest.TestCase):
         last = Path(tmp.name) / "Last Song.flac"
         alpha.write_bytes(b"x")
         last.write_bytes(b"x")
-        verified, undelivered = acq._validate_wanted_download_identity_before_import(
+        verified, undelivered, _deferred = acq._validate_wanted_download_identity_before_import(
             tmp.name,
             [{"title": "Alpha", "track": 1, "mb_trackid": "rec-1"}, self.TRACK],
             [],

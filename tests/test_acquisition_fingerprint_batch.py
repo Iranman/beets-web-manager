@@ -73,7 +73,7 @@ class ValidatorMixedBatch(_Patched):
         with tempfile.TemporaryDirectory() as tmp:
             self._files(tmp, ["Alpha", "Beta", "Gamma"])
             log = []
-            verified, undelivered = acq._validate_wanted_download_identity_before_import(tmp, TRACKS, log)
+            verified, undelivered, _deferred = acq._validate_wanted_download_identity_before_import(tmp, TRACKS, log)
             self.assertEqual([t["title"] for t in verified], ["Alpha", "Beta"])
             self.assertEqual([t["title"] for t in undelivered], ["Gamma"])
             # Only verified audio is left for Beets to import.

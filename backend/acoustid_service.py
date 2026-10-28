@@ -41,6 +41,8 @@ def _read_file_media_tags(path: Any) -> Dict[str, Any]:
                 "mb_trackid": getattr(mf, "mb_trackid", "") or "",
                 "mb_albumid": getattr(mf, "mb_albumid", "") or "",
                 "mb_releasegroupid": getattr(mf, "mb_releasegroupid", "") or "",
+                "mb_albumartistid": getattr(mf, "mb_albumartistid", "") or "",
+                "mb_artistid": getattr(mf, "mb_artistid", "") or "",
                 "genre": getattr(mf, "genre", "") or "",
             }
         except Exception:
@@ -56,11 +58,63 @@ def _read_file_media_tags(path: Any) -> Dict[str, Any]:
                 "albumartist": (f.get("albumartist") or [""])[0],
                 "year": (f.get("date") or [""])[0],
                 "track": (f.get("tracknumber") or [""])[0],
+                # MusicBrainz identity tags survive the slskd stage rename and are
+                # genuine embedded evidence (ARCH-030 B1). mutagen's easy map
+                # exposes them under the musicbrainz_* keys.
+                "mb_releasegroupid": (f.get("musicbrainz_releasegroupid") or [""])[0],
+                "mb_albumartistid": (f.get("musicbrainz_albumartistid") or [""])[0],
+                "mb_artistid": (f.get("musicbrainz_artistid") or [""])[0],
                 "genre": (f.get("genre") or [""])[0],
             }
     except Exception:
         pass
     return {}
+
+
+def embedded_identity_for_file(path: Any) -> Dict[str, str]:
+    """ARCH-030 B1 producer: the embedded MusicBrainz identity of a staged file
+    for the Option-C slot-corroboration gate (music-identity consumes it).
+
+    Embedded tags survive slskd's ``_target_dest`` rename, so they are genuine
+    evidence that is INDEPENDENT of the (laundered) staged filename. Shape --
+    exactly as pinned for ``file_embedded_ids`` values::
+
+        {"title", "mb_releasegroupid", "mb_albumartistid", "mb_artistid"}
+
+    Returns ``{}`` when the file carries NO readable MusicBrainz identity tag;
+    the gate treats an absent entry as "cannot corroborate" -> manual review.
+    A bare title with no MB id is not enough to corroborate, so it also yields
+    ``{}``."""
+    tags = _read_file_media_tags(path)
+    rgid = _s(tags.get("mb_releasegroupid")).strip().lower()
+    albumartistid = _s(tags.get("mb_albumartistid")).strip().lower()
+    artistid = _s(tags.get("mb_artistid")).strip().lower()
+    if not (rgid or albumartistid or artistid):
+        return {}
+    return {
+        "title": _s(tags.get("title")).strip(),
+        "mb_releasegroupid": rgid,
+        "mb_albumartistid": albumartistid,
+        "mb_artistid": artistid,
+    }
+
+
+def embedded_identity_map_for_folder(folder: Any) -> Dict[str, Dict[str, str]]:
+    """ARCH-030 B1 producer: ``{staged_abs_path -> embedded_identity_for_file()}``
+    for every audio file in a staged recovery folder.
+
+    Each audio file gets an entry; a file with no readable MB tag maps to ``{}``
+    so the gate can see it cannot corroborate (-> manual). The recovery gate may
+    instead call ``embedded_identity_for_file`` per path it already iterates."""
+    out: Dict[str, Dict[str, str]] = {}
+    try:
+        base = Path(folder)
+        for p in sorted(base.rglob("*")):
+            if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+                out[str(p)] = embedded_identity_for_file(p)
+    except Exception:
+        return out
+    return out
 
 
 _ACOUSTID_FILE_CACHE_DIR = METADATA_CACHE_ROOT / "acoustid"
