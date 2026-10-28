@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from .normalize import canonical_title_identity_variants, normalize_title
+
 
 class AcoustIDStatus(str, Enum):
     CONFIRMED = "confirmed"
@@ -138,16 +140,42 @@ class TrackAssignment:
         fingerprint lookup means the recording simply is not in the AcoustID
         database, which is compatible with a correct match; a lookup that
         never ran (UNAVAILABLE: no key/outage) is not evidence of anything
-        and must not unlock an auto action."""
+        and must not unlock an auto action.
+
+        F4 (orchestrator-verified): the title test is a STRICT, version-
+        PRESERVING canonical identity comparison, NOT ``title_similarity`` --
+        that field is the variant-maximized ranking score from
+        ``_title_similarity``, which deliberately strips ``(Live)``/remaster/
+        alt-take/``feat.`` text so a wrong recording ("Song (Live 2019)") can
+        normalize to the bare target title and score 1.0. The auto-accept
+        precondition must not inherit that looseness: a live take, remaster,
+        alt-take, or edit title whose version marker is absent on the target
+        is a DIFFERENT recording and must fail closed to review. Ranking
+        behavior (``title_similarity``/``_title_similarity``) is unchanged."""
         return bool(
             self.status == "matched"
             and self.acoustid_status == AcoustIDStatus.NO_RESULT
             and not self.conflicts
             and self.position_match
-            and self.title_similarity >= 0.999
+            and self._exact_canonical_title()
             and self.duration_delta is not None
             and self.duration_delta <= float(duration_tolerance_s)
         )
+
+    def _exact_canonical_title(self) -> bool:
+        """Strict version-preserving title identity for the slot gate: the
+        canonical (version-preserving) target title must equal one of the
+        local title's version-preserving canonical forms exactly."""
+        target_norm = normalize_title(
+            self.target_track.get("title") or self.target_track.get("mb_title") or ""
+        )
+        if not target_norm:
+            return False
+        local_forms = canonical_title_identity_variants(
+            self.local_track.get("title") or "",
+            self.local_track.get("path") or self.local_track.get("filename") or "",
+        )
+        return target_norm in local_forms
 
     @property
     def target_recording_id(self) -> str:

@@ -352,9 +352,12 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
 
     ARCH-030 2.5: when ``release_group_id`` is a carrier-pinned canonical RG,
     every recording query is scoped to it (``rgid:``) so a title collision can
-    never pull in a release from an unrelated Release Group. Hits are then by
-    construction inside that RG, so each candidate is stamped with it (binding,
-    not reconstruction). Empty/invalid RG -> unchanged generic title matching.
+    never pull in a recording from an unrelated Release Group. The ``rgid:``
+    filter scopes which RECORDINGS match, NOT which releases: a matched
+    recording still lists every release it appears on, so each release is kept
+    only when its OWN release-group id equals the target (C6) before being
+    stamped with it (binding, not reconstruction). Empty/invalid RG ->
+    unchanged generic title matching.
     """
     titles = _folder_track_search_titles(source_folder, existing_album_id, limit=12)
     if not titles:
@@ -415,6 +418,19 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
                 rid = _s(rel.get("id", "")).strip().lower()
                 if not rid:
                     continue
+                if rgid_scope:
+                    # C6 (orchestrator-verified): the ``rgid:`` filter scopes
+                    # which RECORDINGS match, but a matched recording's
+                    # ``releases`` array lists EVERY release it appears on --
+                    # including releases in OTHER Release Groups (compilations,
+                    # alternate editions). Keep only releases that genuinely
+                    # belong to the target RG; a release whose own
+                    # release-group id is absent/unverifiable is DROPPED, never
+                    # fabricated into the target RG (no false "incorrect album
+                    # suggestions").
+                    rel_rg_id = _s((rel.get("release-group") or {}).get("id") or "").strip().lower()
+                    if rel_rg_id != rgid:
+                        continue
                 entry = release_hits.setdefault(rid, {
                     "score": 0,
                     "mb_albumid": rid,
@@ -442,7 +458,9 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
         cand["score"] = int(cand.get("score") or 0) * 10
         cand.pop("_hit_titles", None)
         if rgid_scope:
-            # Binding: the query guaranteed every hit lives in this RG.
+            # Every surviving release was verified above to belong to this RG
+            # (its own release-group id == rgid); foreign/unverifiable releases
+            # were dropped, so this stamp is truthful, not a fabrication.
             cand["mb_releasegroupid"] = rgid
     cands.sort(key=lambda c: c.get("score", 0), reverse=True)
     return cands[:limit]
