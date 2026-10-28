@@ -645,6 +645,10 @@
       "DISPLAY_ONLY",
       "Selects the Review row's display confidence from the canonical matching_decision contract; decides nothing."
     ],
+    "routes_import.py::_review_rows_for_stuck_recovery_carriers": [
+      "DISPLAY_ONLY",
+      "Surfaces review_required recovery carriers in the Import Review queue, reading the canonical review_identity packet (identity + matching_decision + display confidence + per-track status) for display; decides nothing and never changes the gate or carrier state (F9)."
+    ],
     "backend/recovery_service.py::<module>": [
       "COMPATIBILITY_WRAPPER",
       "Recovery lifecycle advancer; consumes canonical matching_decision.action_allowed to authorize verified insertion (can only narrow), never makes an identity decision."
