@@ -454,6 +454,93 @@ def _review_row_confidence(suggestion: Dict[str, Any], evidence: Dict[str, Any])
 
 _SKIPPED_SCAN_CAP = 2000  # same ceiling as /api/import-skipped
 
+# Bounded listing of recovery carriers surfaced in Review. A full listing would
+# be unbounded; we cap and SURFACE the cap (never silently truncate).
+_RECOVERY_REVIEW_SCAN_CAP = 1000
+
+
+def _review_rows_for_stuck_recovery_carriers(
+    exclude_carrier_ids: set, exclude_paths: set
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Surface recovery carriers stuck in ``review_required`` as Review rows.
+
+    F9 (ARCH-030): under Option C a NO_RESULT recovery the deterministic gate
+    declines lands in ``review_required`` WITHOUT an enqueued pending-review row
+    (the advancer's keep path only transitions carrier state), so it was
+    invisible in Import Review and the user could neither see nor act on their
+    missing-track recovery. This read-only pass lists those carriers and
+    flattens each via the SAME ``review_identity`` packet the enqueued recovery
+    rows and the RecoveryReviewCard already render (recovery_carrier_id, canonical
+    mb_releasegroupid, existing_album_id, wanted/expected tracks, per-track
+    status, matching_decision, review_reason). Only ``review_required`` is
+    surfaced -- the other advanceable states (downloading/downloaded/verifying/
+    created/failed) are still progressing and the advancer re-evaluates them, so
+    they will auto-complete or be moved to review_required by a later sweep.
+
+    Deduped against the already-built pending rows by carrier id AND staged path
+    so a carrier the non-auto hand-off DID enqueue is never shown twice. Returns
+    (rows, truncated); ``truncated`` is True when the bounded listing hit the cap
+    so the caller can surface it instead of silently dropping carriers."""
+    import backend.recovery_carrier as recovery_carrier
+    try:
+        carriers = recovery_carrier.list_carriers_by_state(
+            ("review_required",), limit=_RECOVERY_REVIEW_SCAN_CAP)
+    except Exception:
+        _app_logger.exception("import_review_queue: could not list recovery carriers")
+        return [], False
+    truncated = len(carriers) >= _RECOVERY_REVIEW_SCAN_CAP
+    rows: List[Dict[str, Any]] = []
+    for carrier in carriers:
+        cid = _s(carrier.get("carrier_id")).strip()
+        if not cid or cid in exclude_carrier_ids:
+            continue
+        staged = _s(carrier.get("staged_folder_path")).strip()
+        if not staged:
+            try:
+                folders = recovery_carrier.staged_folders_for(cid)
+            except Exception:
+                folders = []
+            staged = _s(folders[0]).strip() if folders else ""
+        if staged and os.path.normpath(staged) in exclude_paths:
+            continue
+        try:
+            packet = recovery_carrier.review_identity(carrier)
+        except Exception:
+            continue
+        existing_album_id = int(packet.get("existing_album_id") or 0)
+        existing_ids = [existing_album_id] if existing_album_id else []
+        dest = _s(packet.get("destination_album_path"))
+        album_label = Path(dest).name if dest else (Path(staged).name if staged else "")
+        reason = _s(packet.get("review_reason")) or "Recovery could not auto-resolve; needs manual review."
+        evidence = {"recovery_carrier": packet}
+        rows.append({
+            "id": "recovery:" + cid,
+            "type": "pending_ai",
+            "status": "Pending AI",
+            "status_key": "pending_ai",
+            "title": album_label or ("Recovery " + cid),
+            "artist": "",
+            "album": album_label,
+            "year": 0,
+            "path": staged,
+            "folder": str(Path(staged).parent) if staged else "",
+            "folder_name": Path(staged).name if staged else "",
+            "confidence": _review_row_confidence({}, evidence),
+            "reason": reason,
+            "mb_albumid": "",
+            "mb_releasegroupid": _s(packet.get("mb_releasegroupid")),
+            "mb_releasegroupurl": "",
+            "mb_url": "",
+            "mb_valid": False,
+            "suggestion_stale": False,
+            "existing_album_ids": existing_ids,
+            "existing_album_id": existing_album_id,
+            "tracks": 0,
+            "sort_ts": float(carrier.get("updated_at") or 0),
+            "evidence": evidence,
+        })
+    return rows, truncated
+
 
 @app.get("/api/import/review-queue")
 def import_review_queue():
@@ -535,6 +622,23 @@ def import_review_queue():
     except Exception:
         _app_logger.exception("import_review_queue: could not load pending review items")
 
+    # F9 (ARCH-030): also surface recovery carriers stuck in review_required that
+    # were never enqueued as a pending row, deduped against the rows above by
+    # carrier id and staged path so an already-enqueued carrier is not doubled.
+    recovery_excluded_ids = set()
+    recovery_excluded_paths = set()
+    for r in rows:
+        if r.get("path"):
+            recovery_excluded_paths.add(os.path.normpath(r["path"]))
+        _rc = (r.get("evidence") or {}).get("recovery_carrier")
+        if isinstance(_rc, dict):
+            _cid = _s(_rc.get("recovery_carrier_id")).strip()
+            if _cid:
+                recovery_excluded_ids.add(_cid)
+    recovery_rows, recovery_truncated = _review_rows_for_stuck_recovery_carriers(
+        recovery_excluded_ids, recovery_excluded_paths)
+    rows.extend(recovery_rows)
+
     # F18: a folder already in Pending Review is not listed again as skipped.
     pending_paths = {os.path.normpath(r["path"]) for r in rows if r.get("path")}
     try:
@@ -599,6 +703,9 @@ def import_review_queue():
         "limit": limit,
         "counts": {"all": len(filtered_rows), "pending_ai": counts["pending_ai"], "skipped": counts["skipped"]},
         "origin_counts": dict(origin_counts),
+        # F9: surfaced when the bounded recovery-carrier listing was capped, so
+        # the client knows some stuck recoveries may not be shown (no silent drop).
+        "recovery_review_truncated": recovery_truncated,
     })
 
 

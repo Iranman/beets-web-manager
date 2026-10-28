@@ -36890,6 +36890,29 @@
    "dependencies": []
   },
   {
+   "name": "_review_rows_for_stuck_recovery_carriers",
+   "module": "routes_import.py",
+   "lines": [
+    462,
+    542
+   ],
+   "size": 81,
+   "body_lines": 59,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ARTWORK",
+   "desired_owner": "backend/artwork_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "import_review_queue"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_review_row_confidence",
+    "_s"
+   ]
+  },
+  {
    "name": "_review_row_confidence",
    "module": "routes_import.py",
    "lines": [
