@@ -84,6 +84,26 @@ class StagingSymlinkSafetyTests(unittest.TestCase):
         self.assertTrue(dest.is_file())
         self.assertEqual(dest.read_bytes(), b"DOWNLOADED")
 
+    def test_symlink_pre_planted_at_intermediate_staging_dir_is_refused(self):
+        # F1/C5: O_NOFOLLOW guards ONLY a path's final component, so the
+        # intermediate ``_beets_missing_import`` dir must be descended
+        # fd-relative from the downloads root, never followed in a single
+        # os.open of the full stage path. Point it at a decoy that is still
+        # UNDER the downloads root, so the separate resolve() containment check
+        # PASSES and only the fd-walk's O_NOFOLLOW can refuse the swap.
+        f = self._mk("c.flac", b"DOWNLOADED")
+        mi = self.downloads / "_beets_missing_import"
+        shutil.rmtree(mi)
+        decoy = self.downloads / "decoy"
+        decoy.mkdir()
+        os.symlink(str(decoy), str(mi), target_is_directory=True)
+
+        with self.assertRaises(RuntimeError):
+            self._stage([f], [{"track": 3, "disc": 1, "title": "Three"}])
+
+        # The download was NOT written through the symlinked intermediate.
+        self.assertEqual(list(decoy.rglob("*.flac")), [])
+
     def test_symlink_pre_planted_at_cd_disc_subdir_is_refused(self):
         f = self._mk("b.flac", b"DOWNLOADED")
         evil = self.outside / "evil_dir"
