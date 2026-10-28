@@ -321,10 +321,14 @@ class B3RealUnavailableStatusesDefer(unittest.TestCase):
                          "a wrong-audio candidate is still deleted, not deferred")
 
 
+@unittest.skipUnless(_fd_staging_supported(),
+                     "the deferred-file separation uses the fd-relative hardened "
+                     "staging move (Linux-only; the Docker suite exercises it)")
 class B2MixedBatchIsolatesDeferredFromBeets(unittest.TestCase):
     """B2 end to end: through the real start_album_download job, a mixed batch
     (1 verified + 1 NO_RESULT) imports ONLY the verified file inline; the
-    NO_RESULT file is separated out and never reaches the Beets import."""
+    NO_RESULT file is separated out (via the SEC-007-hardened staging move) and
+    never reaches the Beets import."""
 
     PAYLOAD = {
         "artist": "Artist", "album": "Album", "year": "2024", "method": "ytdlp",
@@ -363,6 +367,9 @@ class B2MixedBatchIsolatesDeferredFromBeets(unittest.TestCase):
 
         env = dict(os.environ)
         env["RECOVERY_CARRIER_STATE_DIR"] = str(state_dir)
+        # Align the hardened staging move's allowed root (config_layers.
+        # downloads_root) with this test's temp downloads tree.
+        env["DOWNLOADS_ROOT"] = str(downloads)
         reimport = mock.Mock(return_value="imp-1")
         patches = [
             mock.patch.dict(os.environ, env, clear=True),

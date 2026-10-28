@@ -1613,17 +1613,13 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
     the fingerprint-verified files import into Beets and the deferred files never
     reach Beets autotag. Returns the slot folder path, or "" if nothing moved.
 
-    The files are already inside a containment-validated staged folder; this is
-    an intra-root relocation (``os.replace`` on the same volume), not a copy from
-    an untrusted source, so it does not re-open the SEC-007 copy surface."""
+    The relocation goes through ``composite_workflows.move_staging_file`` -- the
+    SEC-007/#325-hardened staging primitive (both ends validated inside a staging
+    root, fd-relative, refuses a symlinked component or an existing target, and
+    creates the destination parents safely) -- never a raw ``os.replace``, so it
+    introduces no new unhardened filesystem mutation sink."""
     base = Path(import_dir)
     slot_dir = base.parent / f"{base.name}__slot_deferred"
-    try:
-        slot_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as ex:
-        log.append("  [import] WARN could not create slot-gate folder for "
-                   f"deferred files: {type(ex).__name__}")
-        return ""
     base_resolved = base.resolve(strict=False)
     moved: List[Tuple[Path, Path]] = []
     for p_str in deferred_paths:
@@ -1636,17 +1632,12 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
             rel = Path(src.name)
         dest = slot_dir / rel
         try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(str(src), str(dest))
+            composite_workflows.move_staging_file(str(src), str(dest))
             moved.append((src, dest))
-        except OSError as ex:
-            log.append("  [import] WARN could not move deferred file out of the "
-                       f"import dir: {type(ex).__name__}")
+        except Exception as ex:
+            log.append("  [import] WARN could not separate deferred file to the "
+                       f"slot-gate folder: {type(ex).__name__}")
     if not moved:
-        try:
-            slot_dir.rmdir()
-        except OSError:
-            pass
         return ""
     # Carry the moved files' ORIGINAL pre-rename names (ARCH-030 B1) into the
     # slot folder so the slot gate still has the genuine download name there and
