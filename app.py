@@ -445,6 +445,13 @@ if _legacy_local_scan_enabled():
     start_auto_scan_schedule()  # jobs.every: stopped by jobs.close()
 
 
+# ARCH-030 F6: run the missing-track recovery advancer automatically on the job
+# scheduler so a downloaded/stuck carrier advances without a manual POST
+# (jobs.every; stopped by jobs.close()). No-op if disabled via env.
+import backend.recovery_service as _recovery_service  # noqa: E402
+_recovery_service.start_recovery_advance_schedule()
+
+
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
 

@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional
 import backend.job_contract as job_contract
 import backend.recovery_carrier as recovery_carrier
 from backend.app_runtime import jobs, _s
+from job_engine import DuplicateJobError
 
 logger = logging.getLogger(__name__)
 
@@ -182,11 +183,25 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
                 continue
             # Hand-off refused/raced: fall through and keep it in review.
         # Keep (or place) the carrier in MANUAL review with an accurate reason.
-        try:
-            if _s(fresh.get("state")) != "review_required":
-                recovery_carrier.advance_state(cid, "review_required")
-        except Exception:
-            pass
+        # F9 (CAS): the slow preflight + `_attach_decision` above have moved the
+        # carrier's revision on, and a concurrent job may have CLAIMED it since
+        # the top-of-loop read. Re-read NOW, and only transition when it is STILL
+        # advanceable (never drag an already-claimed 'importing'/terminal carrier
+        # back to review) and compare-and-set on the revision just read, so a
+        # racing writer wins instead of being clobbered by this blind fallback.
+        current = recovery_carrier.get_carrier(cid) or fresh
+        cur_state = _s(current.get("state"))
+        if cur_state in recovery_carrier.ADVANCER_STATES and cur_state != "review_required":
+            try:
+                recovery_carrier.advance_state(
+                    cid, "review_required",
+                    expected_revision=int(current.get("revision") or 0))
+            except recovery_carrier.RecoveryCarrierConflictError:
+                # A concurrent transition landed since the re-read; skip rather
+                # than overwrite -- the next sweep re-evaluates it fresh.
+                pass
+            except Exception:
+                pass
         summary["kept_review"] += 1
         summary["carriers"].append({"carrier_id": cid, "outcome": "kept_review",
                                     "reason": evaluation["reason"]})
@@ -398,3 +413,48 @@ def start_recovery_advance_job(limit: int = DEFAULT_ADVANCE_LIMIT):
         metadata=job_contract.contract_metadata(
             ADVANCER_WORKFLOW, {"type": ADVANCER_JOB_TYPE, "mutating": True,
                                 "dedupe_key": ADVANCER_JOB_TYPE}))
+
+
+# ── automatic scheduling (F6) ───────────────────────────────────────────────
+# The advancer used to run ONLY when something POSTed /api/import/recovery/advance,
+# so a carrier that a download left stuck in DOWNLOADED/verifying/review_required
+# never advanced on its own (requirement 8 was not met end-to-end). It now runs
+# on the canonical job scheduler (`jobs.every`, the same hook maintenance's auto-
+# scan uses) -- NOT an ad-hoc thread. Each tick starts the SAME bounded, guarded
+# advancer job; `jobs.every` skips a tick while the one it returned still runs,
+# and the job is workflow-locked + dedupe-keyed on ADVANCER_JOB_TYPE, so the sweep
+# never overlaps itself across threads, processes or restarts. The trigger only
+# RE-EVALUATES carriers against the matching contract; the `action_allowed` gate
+# in `start_folder_import_with_id` is still the one and only auto-insert
+# authority, and a carrier the contract does not authorize stays in review.
+ADVANCER_SCHEDULE_NAME = ADVANCER_WORKFLOW
+# Default cadence; override via env. <= 0 disables the automatic schedule
+# (the manual POST endpoint still works).
+ADVANCER_INTERVAL_SECONDS = float(
+    os.environ.get("RECOVERY_ADVANCE_INTERVAL_SECONDS", "120") or 0)
+# Let Flask finish starting before the first sweep (mirrors the auto-scan delay).
+ADVANCER_STARTUP_DELAY = 45.0
+
+
+def _advance_schedule_tick():
+    """One scheduler tick: start the bounded advancer as a tracked job and
+    return it so ``jobs.every`` does not overlap the next tick with it. A sweep
+    already running (a manual POST, or a prior tick that is still going) is
+    refused at start with ``DuplicateJobError`` -- that is the dedupe doing its
+    job, so the tick is a quiet no-op rather than a retry storm."""
+    try:
+        return start_recovery_advance_job()
+    except DuplicateJobError:
+        return None
+
+
+def start_recovery_advance_schedule():
+    """Register the automatic advancer sweep on the job scheduler (F6). A second
+    call (app.py re-imported in tests) is a no-op; interval <= 0 disables it."""
+    if ADVANCER_INTERVAL_SECONDS <= 0:
+        return None
+    try:
+        return jobs.every(ADVANCER_SCHEDULE_NAME, ADVANCER_INTERVAL_SECONDS,
+                          _advance_schedule_tick, initial_delay=ADVANCER_STARTUP_DELAY)
+    except ValueError:
+        return None
