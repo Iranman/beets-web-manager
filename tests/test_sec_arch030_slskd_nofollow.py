@@ -118,6 +118,62 @@ class StagingSymlinkSafetyTests(unittest.TestCase):
         self.assertEqual(list(evil.iterdir()), [])
 
 
+@unittest.skipUnless(FD and _symlinks_work(),
+                     "needs O_NOFOLLOW/dir_fd support and working symlinks")
+class SidecarNofollowTests(unittest.TestCase):
+    """ARCH-030 F4: the original-names sidecar I/O (``_write_text_nofollow`` /
+    ``_read_text_nofollow``) must descend fd-relative so neither an intermediate
+    parent-dir symlink swap nor a planted symlink/hardlink at the sidecar leaf is
+    followed or truncated. Previously both opened the full path with O_NOFOLLOW
+    (guards only the final component) and the write used O_TRUNC (truncates a
+    planted hardlink)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.stage = root / "stage"
+        self.stage.mkdir()
+        self.outside = root / "outside"
+        self.outside.mkdir()
+        self.secret = self.outside / "secret.txt"
+        self.secret.write_bytes(b"SECRET")
+        self.sidecar = self.stage / ".sidecar.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_write_at_symlinked_leaf_replaces_not_followed(self):
+        os.symlink(str(self.secret), str(self.sidecar))
+        slskd._write_text_nofollow(self.sidecar, "DATA")
+        self.assertEqual(self.secret.read_bytes(), b"SECRET",
+                         "the symlink target must not be written through")
+        self.assertFalse(self.sidecar.is_symlink())
+        self.assertEqual(self.sidecar.read_text(encoding="utf-8"), "DATA")
+
+    def test_write_does_not_truncate_planted_hardlink(self):
+        os.link(str(self.secret), str(self.sidecar))  # hardlink: shares the inode
+        slskd._write_text_nofollow(self.sidecar, "DATA")
+        # temp+rename gives the sidecar name a NEW inode; the other link keeps its
+        # content (O_TRUNC would have zeroed the shared inode).
+        self.assertEqual(self.secret.read_bytes(), b"SECRET")
+        self.assertEqual(self.sidecar.read_text(encoding="utf-8"), "DATA")
+
+    def test_write_refuses_symlinked_parent_dir(self):
+        decoy = Path(self.tmp.name) / "decoy"
+        decoy.mkdir()
+        linkdir = Path(self.tmp.name) / "linkdir"
+        os.symlink(str(decoy), str(linkdir), target_is_directory=True)
+        with self.assertRaises(OSError):
+            slskd._write_text_nofollow(linkdir / ".sidecar.json", "DATA")
+        self.assertEqual(list(decoy.iterdir()), [],
+                         "nothing written through the symlinked parent dir")
+
+    def test_read_refuses_symlinked_leaf(self):
+        os.symlink(str(self.secret), str(self.sidecar))
+        with self.assertRaises(OSError):
+            slskd._read_text_nofollow(self.sidecar)
+
+
 @unittest.skipIf(FD, "exercises the no-dir_fd fail-closed branch only")
 class StagingFailClosedTests(unittest.TestCase):
     def test_refuses_when_fd_support_unavailable(self):

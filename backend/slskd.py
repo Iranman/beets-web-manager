@@ -620,6 +620,14 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
     # target against the genuine downloaded name instead of the ``{track:02d}
     # {title}`` name this loop manufactures from the REQUESTED track.
     original_names: Dict[str, str] = {}
+    # ARCH-030 F2: when the SOURCE is itself an already app-staged/renamed folder
+    # (a restage of the still-missing subset), its files no longer carry their
+    # genuine download basename -- ``src.name`` is the laundered ``{track:02d}
+    # {title}`` staged name. Recording that as the "original" would launder the
+    # real original away and collapse Option-C's two independent sources to
+    # embedded-only. Carry the GENUINE original forward from the source folder's
+    # sidecar instead (same relocation discipline as _separate_deferred_slot_files).
+    prior_original_names = original_download_names_for_folder(source)
     for idx, src in enumerate(selected):
         if not src.is_file():
             continue
@@ -639,7 +647,10 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
         # accumulate ``name.1``/``name.2`` siblings that would collide at import;
         # a fresh random-prefix pass keeps the de-dupe suffixing.
         _staged_copy_nofollow(downloads_root, stage, rel.parts, src, overwrite=reuse)
-        original_names[rel.as_posix()] = src.name
+        original_names[rel.as_posix()] = (
+            prior_original_names.get(str(src))
+            or prior_original_names.get(str(src.resolve(strict=False)))
+            or src.name)
         copied += 1
 
     if copied:
@@ -650,37 +661,57 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
 
 
 def _read_text_nofollow(path: Path) -> str:
-    """Read a file's text refusing to follow a symlink at the final component
-    (SEC-007/#325). The staged folder is app-private but a symlink pre-planted at
-    the sidecar must never redirect this read to an arbitrary file. Falls back to
-    a plain read only where ``O_NOFOLLOW`` is unavailable (non-POSIX hosts, where
-    staging never actually runs)."""
-    if hasattr(os, "O_NOFOLLOW"):
-        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
-        try:
-            with os.fdopen(fd, "r", encoding="utf-8") as fh:
-                return fh.read()
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
-    return path.read_text(encoding="utf-8")
+    """Read a file's text refusing to follow a symlink -- at the FINAL component
+    AND at its immediate parent dir (SEC-007/#325). The staged folder is
+    app-private, but a symlink pre-planted at the sidecar, or a swap of the
+    sidecar's parent dir to a symlink, must never redirect this read to an
+    arbitrary file. ``O_NOFOLLOW`` alone guards only a path's final component, so
+    the parent is opened fd-relative with ``O_DIRECTORY | O_NOFOLLOW`` and the
+    leaf opened under it, mirroring the sibling ``_staged_copy_nofollow``. Falls
+    back to a plain read only where dir_fd / ``O_NOFOLLOW`` are unavailable
+    (non-POSIX hosts, where staging never actually runs)."""
+    path = Path(path)
+    if not _staging_fd_supported():
+        return path.read_text(encoding="utf-8")
+    dir_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        return fh.read()
 
 
 def _write_text_nofollow(path: Path, text: str) -> None:
-    """Write text refusing to follow a symlink at the final component
-    (SEC-007/#325), so a symlink pre-planted at the sidecar can never redirect
-    this write to an arbitrary file. ``O_TRUNC`` replaces our own prior sidecar;
-    ``O_NOFOLLOW`` refuses a symlink there. Plain-write fallback only where
-    ``O_NOFOLLOW`` is unavailable (non-POSIX hosts, where staging never runs)."""
-    if hasattr(os, "O_NOFOLLOW"):
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
+    """Write text without following a symlink at the sidecar OR at its immediate
+    parent dir, and without truncating a planted hardlink (SEC-007/#325). The
+    bytes go to an ``O_CREAT | O_EXCL | O_NOFOLLOW`` temp opened fd-relative under
+    the parent dir (itself opened ``O_DIRECTORY | O_NOFOLLOW``) and are atomically
+    renamed onto the sidecar name: the rename REPLACES any pre-planted symlink or
+    hardlink at the leaf without following or truncating it -- so no ``O_TRUNC``
+    ever touches the real name. Plain-write fallback only where dir_fd /
+    ``O_NOFOLLOW`` are unavailable (non-POSIX hosts, where staging never runs)."""
+    path = Path(path)
+    if not _staging_fd_supported():
+        path.write_text(text, encoding="utf-8")
         return
-    path.write_text(text, encoding="utf-8")
+    dir_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        tmp = f".{uuid.uuid4().hex[:12]}.part"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
+                     dir_fd=dir_fd)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.rename(tmp, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
 
 
 def _write_original_names_sidecar(stage: Path, original_names: Dict[str, str]) -> None:

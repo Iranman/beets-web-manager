@@ -808,7 +808,33 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 # ("no track bypasses identity verification", req-5). Separate them
                 # out to a carrier-bound slot-gate folder so only verified audio
                 # imports inline; the deferred files reach the slot gate only.
-                slot_dir = _separate_deferred_slot_files(import_dir, deferred_slot_paths, log)
+                slot_dir, separation_complete = _separate_deferred_slot_files(
+                    import_dir, deferred_slot_paths, log)
+                if not separation_complete:
+                    # ARCH-030 F8: fail CLOSED. At least one deferred
+                    # NO_RESULT/UNAVAILABLE file could not be moved out of
+                    # import_dir (collision / symlink refusal / I/O). Running the
+                    # inline Beets import now would let that leftover UNVERIFIED
+                    # file ride into autotag and bypass the slot gate (req-5:
+                    # "no track bypasses identity verification"); a later
+                    # import-validation raise would then delete the whole folder
+                    # and destroy the RETAINED acquisition (B3: retain, never
+                    # delete). So do NOT inline-import and do NOT delete -- keep
+                    # the carrier bound to import_dir and leave it STAGED for the
+                    # metadata-slot recovery gate to verify downstream.
+                    _recovery_advance("downloaded", "STAGED")
+                    log.append(
+                        "[import] ARCH-030 F8: deferred-file separation incomplete; "
+                        f"leaving the whole carrier staged in {import_dir} for the "
+                        "metadata-slot recovery gate (no inline import, retained "
+                        "audio not deleted).")
+                    return {
+                        "imported": False,
+                        "staged_for_slot_gate": True,
+                        "existing_album_id": existing_album_id,
+                        "missing_track_count": len(undelivered),
+                        "undelivered_tracks": undelivered,
+                    }
                 if slot_dir:
                     _recovery_bind_folder(slot_dir)
             _validate_import_source_audio(import_dir, log, reject_downloads=True)
@@ -1607,11 +1633,19 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
 
 
 def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
-                                  log: list) -> str:
+                                  log: list) -> Tuple[str, bool]:
     """ARCH-030 B2: move deferred (NO_RESULT/UNAVAILABLE, not-deleted) files OUT
     of the inline-import folder into a sibling slot-gate staged folder, so only
     the fingerprint-verified files import into Beets and the deferred files never
-    reach Beets autotag. Returns the slot folder path, or "" if nothing moved.
+    reach Beets autotag.
+
+    Returns ``(slot_dir, complete)`` where ``slot_dir`` is the slot folder path
+    (or "" if nothing moved) and ``complete`` is True only when EVERY deferred
+    file was successfully relocated out of ``import_dir``. A deferred path that no
+    longer exists is counted as already-separated (it cannot ride into autotag);
+    a deferred file whose move RAISED is still physically in ``import_dir``, so
+    ``complete`` is False and the caller must fail closed (ARCH-030 F8): not run
+    the inline import on the folder, and not delete the retained audio.
 
     The relocation goes through ``composite_workflows.move_staging_file`` -- the
     SEC-007/#325-hardened staging primitive (both ends validated inside a staging
@@ -1622,6 +1656,7 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
     slot_dir = base.parent / f"{base.name}__slot_deferred"
     base_resolved = base.resolve(strict=False)
     moved: List[Tuple[Path, Path]] = []
+    failures = 0
     for p_str in deferred_paths:
         src = Path(p_str)
         if not src.is_file():
@@ -1635,10 +1670,12 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
             composite_workflows.move_staging_file(str(src), str(dest))
             moved.append((src, dest))
         except Exception as ex:
+            failures += 1
             log.append("  [import] WARN could not separate deferred file to the "
                        f"slot-gate folder: {type(ex).__name__}")
+    complete = failures == 0
     if not moved:
-        return ""
+        return "", complete
     # Carry the moved files' ORIGINAL pre-rename names (ARCH-030 B1) into the
     # slot folder so the slot gate still has the genuine download name there and
     # does not fall back to the laundered ``{track:02d} {title}`` staged name.
@@ -1657,7 +1694,7 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
         pass
     log.append(f"  [import] ARCH-030 B2: separated {len(moved)} deferred file(s) to "
                f"the slot-gate folder {slot_dir}; only verified audio imports inline.")
-    return str(slot_dir)
+    return str(slot_dir), complete
 
 
 def _deno_download_url() -> str:
