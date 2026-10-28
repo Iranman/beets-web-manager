@@ -577,7 +577,7 @@ def track_title_variants_for_matching(title: Any, path: Any = "") -> List[str]:
 
 
 def canonical_title_identity_variants(title: Any, path: Any = "") -> List[str]:
-    """Version/recording-PRESERVING normalized local-title forms for the strict
+    """Version/recording-PRESERVING normalized title forms for the strict
     DETERMINISTIC_METADATA_SLOT auto-accept gate (docs/adr/0007).
 
     Unlike ``title_variants`` (which strips ``(Live)``/remaster/``feat.``/
@@ -588,12 +588,23 @@ def canonical_title_identity_variants(title: Any, path: Any = "") -> List[str]:
     track-number prefix. The slot is proven only when the version-preserving
     normalized TARGET title is one of these forms exactly -- never via the
     variant-maximized ``_title_similarity`` used for candidate ranking.
+
+    F4 (security runtime-proven): the form is built from the TITLE only when a
+    title is present; the filename ``path`` stem is used ONLY as a fallback when
+    there is no title at all. Mixing both is what let a version-bearing title
+    (``Song (Live 2019)``) and a bare filename (``01 Song.flac``) jointly yield
+    ``['song live 2019','01 song','song']`` -- the track-number strip laundering
+    the version-bearing authoritative title down to the bare target ``song``.
+    With the two sources separated, a version marker in the authoritative title
+    can no longer be erased by a bare filename, and vice versa; Option C then
+    requires the ORIGINAL-name form and the EMBEDDED-title form to BOTH match
+    the target independently (backend/matching/models.is_deterministic_metadata_slot).
     """
     raws: List[str] = []
     primary = _s(title).strip()
     if primary:
         raws.append(primary)
-    if path:
+    elif path:
         stem = Path(_s(path)).stem
         if stem:
             raws.append(stem)

@@ -147,8 +147,10 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
                                    release_group_id: str,
                                    release_title: str = "",
                                    release_artist: str = "",
+                                   release_artist_id: str = "",
                                    unfingerprintable: Optional[set] = None,
                                    file_durations: Optional[Dict[str, float]] = None,
+                                   file_original_names: Optional[Dict[str, str]] = None,
                                    file_embedded_ids: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
     """Full per-track proof for a missing-track fill of an existing album.
 
@@ -191,14 +193,17 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
                      else "acoustid_unavailable")
 
     file_durations = file_durations or {}
-    # F5/C2: embedded Release-Group/artist identity per staged path, when the
-    # engine/inspection supplied it. The common fresh-download recovery path is
-    # fingerprint-only (no tag read), so this is usually empty -- and empty is
-    # correct: absence is neutral, the slot is then held by the F4 strict title
-    # + exact position + duration + genuine NO_RESULT gate, never by a tag we
-    # never read. When embedded identity IS present and contradicts the target,
-    # the row carries it so the F7 guard in backend.matching.evidence fails the
-    # slot closed to review.
+    file_original_names = file_original_names or {}
+    # Option C double-corroborate (USER-chosen gate): per staged path, the
+    # ORIGINAL pre-rename download basename (file_original_names) and the file's
+    # EMBEDDED MB tags (file_embedded_ids, keyed by the pinned contract field
+    # names {"title","mb_releasegroupid","mb_albumartistid","mb_artistid"}).
+    # Both halves must independently corroborate the target title, and the
+    # embedded Release-Group + artist MBID must be PRESENT and match, or the
+    # slot fails closed to review. A fresh download with no readable MB tags
+    # ({} here) therefore goes to manual review -- the intended safe behavior --
+    # and the F7 guard in backend.matching.evidence catches a contradicting
+    # embedded RG/artist as a hard conflict.
     file_embedded_ids = file_embedded_ids or {}
     wanted_keys = {_wanted_track_key(t) for t in wanted_tracks}
     used = set(existing_recordings)
@@ -208,16 +213,27 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
     slot_pending: Dict[int, str] = {}
     for path, hits in file_hits:
         disc, num = _audio_position_from_path(path)
+        # The row ``title`` is the staged/renamed-name guess used only for
+        # alignment (which target slot this file maps to). The STRICT Option C
+        # title gate never reads it: it reads ``original_name`` (the pre-rename
+        # download name) and ``embedded_title`` instead, because the staged name
+        # was set by the system to the target and is circular.
         row: Dict[str, Any] = {"title": _slskd_title_guess_from_name(Path(path).name) or Path(path).stem,
                                "path": path, "disc": disc, "track": num, "acoustid_hits": hits}
         measured = float(file_durations.get(_s(path)) or 0.0)
         if measured > 0:
             row["length"] = measured
+        original_name = _s(file_original_names.get(_s(path))).strip()
+        if original_name:
+            row["original_name"] = original_name
         embedded = file_embedded_ids.get(_s(path)) or {}
-        if _s(embedded.get("release_group_id")).strip():
-            row["embedded_release_group_id"] = _s(embedded.get("release_group_id")).strip().lower()
-        if _s(embedded.get("artist_id")).strip():
-            row["embedded_artist_id"] = _s(embedded.get("artist_id")).strip().lower()
+        if _s(embedded.get("title")).strip():
+            row["embedded_title"] = _s(embedded.get("title")).strip()
+        if _s(embedded.get("mb_releasegroupid")).strip():
+            row["embedded_release_group_id"] = _s(embedded.get("mb_releasegroupid")).strip().lower()
+        emb_artist = _s(embedded.get("mb_albumartistid") or embedded.get("mb_artistid")).strip()
+        if emb_artist:
+            row["embedded_artist_id"] = emb_artist.lower()
         statuses = [(t, acoustid_evidence_from_hits(hits, t.get("mb_trackid"))) for t in mb_tracks if t.get("mb_trackid")]
         confirmed = [t for t, ev in statuses if ev.confirmed]
         if not confirmed:
@@ -251,7 +267,8 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         current={"album": _s(album_row.get("album")), "albumartist": _s(album_row.get("albumartist")),
                  "mb_releasegroupid": album_rgid},
         candidate={"mb_releasegroupid": release_group_id, "mb_albumid": rid,
-                   "album": release_title, "artist": release_artist},
+                   "album": release_title, "artist": release_artist,
+                   "mb_albumartistid": release_artist_id},
         items=rows,
         mb_tracks=mb_tracks,
     ).to_dict()
@@ -815,7 +832,9 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                        length: float = 0.0,
                        acoustid_hits: Optional[List[Dict[str, Any]]] = None,
                        embedded_release_group_id: str = "",
-                       embedded_artist_id: str = "") -> None:
+                       embedded_artist_id: str = "",
+                       original_name: str = "",
+                       embedded_title: str = "") -> None:
         key = (_album_track_norm(title), _s(path), int(track or 0), int(disc or 1))
         if key in seen_keys:
             return
@@ -846,6 +865,14 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             row["embedded_release_group_id"] = _s(embedded_release_group_id).strip().lower()
         if _s(embedded_artist_id).strip():
             row["embedded_artist_id"] = _s(embedded_artist_id).strip().lower()
+        # Option C: the ORIGINAL pre-rename download name and the EMBEDDED title
+        # tag, the two independent title corroborators for the slot gate. Absent
+        # => the slot cannot fire (fail closed), never laundered from the staged
+        # (renamed-to-target) filename.
+        if _s(original_name).strip():
+            row["original_name"] = _s(original_name).strip()
+        if _s(embedded_title).strip():
+            row["embedded_title"] = _s(embedded_title).strip()
         candidates.append(row)
 
     unfingerprintable: set = set()  # files fpcalc could not fingerprint (not an AcoustID failure)
@@ -912,11 +939,20 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                                  or props.get("mb_albumartistid")
                                  or props.get("mb_artistid")
                                  or props.get("embedded_artist_id"))
+            # Option C corroborators from engine inspection: the embedded title
+            # tag (props.title is the file's own tag, authoritative, not the
+            # staged name) and the ORIGINAL pre-rename download name when the
+            # inspection/carrier supplied it. Absent original name => the slot
+            # fails closed (manual review), never laundered from the staged name.
+            original_name = _s(entry.get("original_name") or props.get("original_name"))
+            embedded_title = _s(props.get("title"))
             _add_candidate(
                 title, rel_path, track=track, disc=disc, mb_trackid=mb_trackid, length=length,
                 acoustid_hits=inspect_hits if (fingerprint_evidence and inspect_hits is not None) else None,
                 embedded_release_group_id=embedded_rg,
                 embedded_artist_id=embedded_artist,
+                original_name=original_name,
+                embedded_title=embedded_title,
             )
     else:
         for fpath in audio_files:
@@ -1076,6 +1112,10 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             "mb_albumid": mb_albumid,
             "album": result.get("release_title"),
             "artist": result.get("release_artist"),
+            # B5/F7: the canonical album-artist MBID, so the F7 artist-
+            # contradiction check and the Option C embedded-artist
+            # corroboration have a target to compare against.
+            "mb_albumartistid": _s(mb.get("release_artist_id")),
         },
         items=candidates,
         mb_tracks=mb_tracks,
@@ -1117,15 +1157,30 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 for c in candidates if float(c.get("length") or 0.0) > 0
             }
             proof_durations.update({p: d for p, d in file_measured_durations.items() if d > 0})
-            # F5/C2: carry any embedded Release-Group/artist identity the
-            # candidate rows picked up (engine inspection) into the proof's own
-            # rows, so the F7 contradiction guard is effective on this path too.
+            # Option C: carry the ORIGINAL pre-rename download name and the
+            # embedded MB tags the candidate rows picked up (engine inspection)
+            # into the proof's own rows, keyed by staged path, under the pinned
+            # contract field names. Both the original-name title and the
+            # embedded-tag set must corroborate the target for a NO_RESULT file
+            # to slot-auto-insert; the F7 guard still fails a contradicting
+            # embedded RG/artist closed to review. Absent values stay absent
+            # (fresh download, no tags) -> the slot cannot fire -> manual review.
+            proof_original_names: Dict[str, str] = {}
             proof_embedded_ids: Dict[str, Dict[str, str]] = {}
             for c in candidates:
-                rg = _s(c.get("embedded_release_group_id")).strip()
-                art = _s(c.get("embedded_artist_id")).strip()
-                if rg or art:
-                    proof_embedded_ids[_s(c.get("path"))] = {"release_group_id": rg, "artist_id": art}
+                cpath = _s(c.get("path"))
+                orig = _s(c.get("original_name")).strip()
+                if orig:
+                    proof_original_names[cpath] = orig
+                emb: Dict[str, str] = {}
+                if _s(c.get("embedded_title")).strip():
+                    emb["title"] = _s(c.get("embedded_title")).strip()
+                if _s(c.get("embedded_release_group_id")).strip():
+                    emb["mb_releasegroupid"] = _s(c.get("embedded_release_group_id")).strip()
+                if _s(c.get("embedded_artist_id")).strip():
+                    emb["mb_albumartistid"] = _s(c.get("embedded_artist_id")).strip()
+                if emb:
+                    proof_embedded_ids[cpath] = emb
             proof = _missing_track_recording_proof(
                 proof_file_hits,
                 mb_tracks=mb_tracks,
@@ -1136,8 +1191,10 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 release_group_id=_s(result.get("release_group")),
                 release_title=_s(result.get("release_title")),
                 release_artist=_s(result.get("release_artist")),
+                release_artist_id=_s(mb.get("release_artist_id")),
                 unfingerprintable=unfingerprintable,
                 file_durations=proof_durations,
+                file_original_names=proof_original_names,
                 file_embedded_ids=proof_embedded_ids,
             )
             result["missing_track_proof"] = {k: v for k, v in proof.items() if k != "matching_decision"}

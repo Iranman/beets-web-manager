@@ -37,13 +37,33 @@ Add a new identity-proof tier **`DETERMINISTIC_METADATA_SLOT`**, ranked **below*
 fills one specific release-track slot on strong deterministic metadata, and it may auto-satisfy
 acceptance only under a deliberately narrow gate.
 
-### Exact signals required (ALL, per present track)
+### Exact signals required (ALL, per present track) — Option C (hybrid double-corroborate)
 
-Per-track (the `is_deterministic_metadata_slot` half, `backend/matching/models.py`):
+The gate auto-accepts a `NO_RESULT` track **only** when TWO independent sources corroborate
+the identity: the file's **ORIGINAL pre-rename download name** and its **EMBEDDED MB tags**.
+A `title_similarity == 1.0` check is *explicitly rejected* — that field is the variant-
+maximized ranking score from `_title_similarity`, which strips `(Live)`/remaster/alt-take/
+`feat.` text so a wrong recording (`Song (Live 2019)`) normalizes to the bare target and
+scores 1.0. The gate uses the strict **version-PRESERVING** `_exact_canonical_title` forms
+built by `canonical_title_identity_variants`, and requires both corroborators to match. A
+fresh download lacking embedded MB tags therefore goes to manual review — the intended safe
+behavior; ranking (`title_similarity`/`_title_similarity`) is unchanged.
 
-1. **Exact normalized title.** `title_similarity == 1.0` — the local file's normalized title
-   (including the matcher's controlled alias/feature/version variants) equals the target
-   track's normalized title. A merely similar title does not qualify.
+Per-track (the `is_deterministic_metadata_slot` / `_title_double_corroborated` half,
+`backend/matching/models.py`):
+
+1. **Title double-corroborated (version-preserving).** The version-preserving normalized
+   target title must equal a canonical form of BOTH:
+   - the **ORIGINAL pre-rename download name** (`original_name`; **never** the staged/renamed
+     filename, which the system set to the target and is therefore circular — the old bug at
+     `matching_service` that fed the renamed name), built from the name stem only; AND
+   - the file's **EMBEDDED title tag** (`embedded_title`), built from the title only.
+
+   F4: the two sources are kept independent in `canonical_title_identity_variants` (title-only
+   when a title is present; filename stem only as a fallback), so the track-number strip can no
+   longer launder a version-bearing authoritative title (`Song (Live 2019)`) down to a bare
+   name (`01 Song.flac`) and match a bare target. If **either** source is absent, or either
+   disagrees on a version/recording marker, the slot fails closed to review.
 2. **Exact release-track position.** `position_match is True` — the same disc **and** track
    number as the specific missing slot. A same-number-different-disc or near-position match
    does not qualify.
@@ -59,10 +79,17 @@ Album-level (the other half, `backend/matching/evidence.evaluate_release_group_c
 
 6. **Candidate Release Group == target Release Group** (`release_group_status == "validated"`),
    with no hard conflicts anywhere in the evaluation.
-7. **Artist matched.** Either an artist-MBID match (`artist_id_matches`) **or**, when neither
-   side carries an artist MBID, an artist-text similarity at or above the **HIGH artist-text
-   floor** `DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR` (**0.85**). A mismatched artist MBID is a
-   conflict and blocks the slot outright.
+7. **Embedded identity present and matching (Option C embedded half).** For every present
+   track that counts toward the slot, the file's **embedded Release-Group MBID AND embedded
+   artist MBID must both be present and equal** the target (candidate) RG / artist MBID
+   (`_row_embedded_corroborates`). A contradicting embedded RG/artist is a hard conflict
+   (`file_release_group_conflict` / `file_artist_conflict`, F7) and blocks the slot; an
+   *absent* embedded RG/artist means the slot cannot fire (fail-closed). The candidate artist
+   MBID is threaded from `_fetch_mb_release_tracklist`'s `release_artist_id` into the
+   recovery candidate dicts (B5/F7) so this check has a target to compare against. The
+   pre-existing album-level artist floor (`artist_id_matches`, or the HIGH artist-text floor
+   `DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR` = **0.85** when neither side has an artist MBID)
+   remains a prerequisite.
 
 Identity-proof tiering: when every present track is verified and at least one leaned on the
 metadata-slot half, `identity_proof = DETERMINISTIC_METADATA_SLOT`; if all present tracks are
@@ -116,8 +143,13 @@ outweigh.
 
 - The 112 intro/outro `NO_RESULT` recovery becomes auto-eligible at the contract level
   (`build_album_matching_decision` returns `action_allowed=True`, `identity_proof =
-  deterministic_metadata_slot`, `review_required=False`); a later step wires the advancer to
-  consume it.
+  deterministic_metadata_slot`, `review_required=False`) **only when integrations supplies the
+  double-corroboration**: a per-staged-path `file_original_names` map (original pre-rename
+  download basename) and a `file_embedded_ids` map keyed by the pinned contract field names
+  `{"title","mb_releasegroupid","mb_albumartistid","mb_artistid"}`, consumed by
+  `_missing_track_recording_proof`. A recovery with no readable embedded MB tags (or no known
+  original name) now fails closed to manual review — the USER-chosen safe behavior — rather
+  than auto-inserting on title/position/duration alone.
 - `no_result` vs `unavailable` are now reported with distinct, accurate messages; the
   "AcoustID not configured or not reachable" wording is used only for genuine `UNAVAILABLE`.
 - The matching-decision contract is bumped to `contract_version: 3` (backward-readable: all v2
