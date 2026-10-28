@@ -373,6 +373,10 @@
       "CANONICAL_FINAL_DECISION",
       "Applies decide_slot outcomes; non-destructive outcomes hold both rows."
     ],
+    "backend/matching/evidence.py::classify_candidate_relatedness": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Pure relatedness/veto predicate (target RG/artist vs a candidate): classifies related-RG / related-artist / unrelated using only RG-MBID, artist-MBID, or an artist-text floor, never title text. Veto-only -- a later step uses it to keep an unrelated candidate (FLEUR title collision) out of the primary-suggestion slot; it produces evidence and authorizes nothing. The 'similarity('/'floor' pattern hit is this artist-text comparison."
+    ],
     "backend/matching/evidence.py::evaluate_release_group_candidate": [
       "CANONICAL_FINAL_DECISION",
       "Canonical album evaluator."
@@ -624,6 +628,50 @@
     "backend/playlist_service.py::_playlist_query_match_variants": [
       "CANDIDATE_GENERATION_ONLY",
       "Builds (artist,title) query shapes (title split, dash-order variants) for playlist candidate scoring; makes no final decision and mutates no library data."
+    ],
+    "backend/recovery_carrier.py::contract_confidence": [
+      "DISPLAY_ONLY",
+      "Derives the single review-row confidence string from the already-computed matching_decision contract (reads action_allowed/identity_proof); decides nothing."
+    ],
+    "backend/recovery_carrier.py::review_identity": [
+      "DISPLAY_ONLY",
+      "Flattens the carrier into the Review packet (identity + matching_decision + display confidence + per-track status); decides nothing."
+    ],
+    "backend/pending_review_store.py::_refresh_recovery_stage": [
+      "DISPLAY_ONLY",
+      "Refreshes the Review item's recovery packet for display from the live carrier; decides nothing."
+    ],
+    "routes_import.py::_review_row_confidence": [
+      "DISPLAY_ONLY",
+      "Selects the Review row's display confidence from the canonical matching_decision contract; decides nothing."
+    ],
+    "routes_import.py::_review_rows_for_stuck_recovery_carriers": [
+      "DISPLAY_ONLY",
+      "Surfaces review_required recovery carriers in the Import Review queue, reading the canonical review_identity packet (identity + matching_decision + display confidence + per-track status) for display; decides nothing and never changes the gate or carrier state (F9)."
+    ],
+    "backend/recovery_service.py::<module>": [
+      "COMPATIBILITY_WRAPPER",
+      "Recovery lifecycle advancer; consumes canonical matching_decision.action_allowed to authorize verified insertion (can only narrow), never makes an identity decision."
+    ],
+    "backend/recovery_service.py::_reevaluate_carrier": [
+      "COMPATIBILITY_WRAPPER",
+      "Runs the canonical folder preflight and reads its action_allowed as a consume-only gate; decides nothing itself."
+    ],
+    "backend/recovery_service.py::_attach_decision": [
+      "DISPLAY_ONLY",
+      "Records the canonical matching_decision onto the carrier for the Review packet; decides nothing."
+    ],
+    "backend/import_service.py::_recovery_auto_insert_authorized": [
+      "COMPATIBILITY_WRAPPER",
+      "Consume-only gate for the unattended recovery auto-insert (ARCH-030 Step 4): resolves the carrier from the folder binding and reads the canonical matching_decision.action_allowed the advancer already attached. Can only narrow (fail-closed on missing/false decision or unbound folder); never recomputes a decision, computes no similarity/confidence, and makes no identity decision. On refusal returns the carrier to review_required with the contract's reason. The action_allowed pattern hits are its docstring and the boolean read."
+    ],
+    "backend/import_service.py::_recovery_slot_authorized": [
+      "COMPATIBILITY_WRAPPER",
+      "Consume-only read of the recovery carrier's gate decision (ARCH-030 B4): loads the carrier from the folder binding and returns matching_decision.action_allowed (True only). Never recomputes a decision, computes no similarity/confidence, makes no identity decision; fail-closed on missing carrier/decision or a store error. The action_allowed pattern hits are its docstring and the boolean read. Twin of _recovery_auto_insert_authorized."
+    ],
+    "backend/import_service.py::_validate_wanted_album_items_with_acoustid": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Post-import AcoustID evidence gate for merging downloaded missing-track files into an existing album: per file it defers the identity verdict to the canonical verify_audio_against_request (Recording-ID floor + ambiguity window) and refuses on mismatch/not_checked/unverified. ARCH-030 B4 adds a consume-only honor of the carrier's already-set matching_decision.action_allowed (slot_authorized) so an authorized NO_RESULT subset is not re-refused; it recomputes no matching decision and authorizes nothing itself. The action_allowed/VERIFIED_SUBSET pattern hits are its docstring and the slot_authorized flag."
     ]
   }
 }

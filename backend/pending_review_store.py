@@ -36,14 +36,17 @@ def _recovery_carrier_review_identity(carrier: Optional[Dict[str, Any]]) -> Dict
 
 
 def _refresh_recovery_stage(evidence: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Return a copy of a Review item's evidence with ``recovery_carrier.
-    recovery_stage`` recomputed FRESH from the live carrier (QA Finding 7).
+    """Return a copy of a Review item's evidence with the ``recovery_carrier``
+    packet recomputed FRESH from the live carrier (QA Finding 7 + Step 2).
 
-    The stage stored at queue time is a snapshot (taken by the non-auto
-    hand-off BEFORE the carrier advances to review_required), so the queue can
-    show a stale stage. Recomputing on read reflects the carrier's current
-    state+checkpoint. A missing/unreadable carrier keeps the stored snapshot
-    unchanged -- never crash, never fabricate a stage."""
+    The packet stored at queue time is a snapshot (taken by the non-auto
+    hand-off BEFORE the carrier advances / before the advancer computes the
+    matching contract), so the queue can show a stale stage AND a stale
+    confidence. Recomputing the whole ``review_identity`` on read reflects the
+    carrier's current state+checkpoint, its per-track download/verification
+    status, provenance and -- the Step-2 reconciliation -- the single
+    contract-derived confidence + matching_decision. A missing/unreadable
+    carrier keeps the stored snapshot unchanged -- never crash, never fabricate."""
     if not isinstance(evidence, dict):
         return evidence or {}
     rc = evidence.get("recovery_carrier")
@@ -54,11 +57,13 @@ def _refresh_recovery_stage(evidence: Optional[Dict[str, Any]]) -> Dict[str, Any
         carrier = recovery_carrier.get_carrier(carrier_id)
         if not carrier:
             return evidence  # carrier gone: keep the stored snapshot
-        fresh = recovery_carrier.workflow_stage(carrier)
+        fresh_packet = recovery_carrier.review_identity(carrier)
     except Exception:
         return evidence  # unreadable store: keep the stored snapshot
     evidence = dict(evidence)
-    evidence["recovery_carrier"] = {**rc, "recovery_stage": fresh}
+    # Merge the fresh packet over the stored snapshot so any queue-time-only
+    # keys are preserved while stage/confidence/tracks/matching_decision refresh.
+    evidence["recovery_carrier"] = {**rc, **fresh_packet}
     return evidence
 
 
@@ -732,6 +737,33 @@ def _pending_review_has_path(folder_path: str, *, unknown: bool = False) -> bool
         return key in _pending_review_path_set(_load_pending_reviews(strict=unknown))
     except Exception:
         return unknown
+
+
+def _pending_review_has_path_or_overlap(folder_path: str, *, unknown: bool = False) -> bool:
+    """Like ``_pending_review_has_path`` but also True when a Review row points
+    at an ANCESTOR or DESCENDANT of ``folder_path``, not only an exact match.
+
+    A caller about to DELETE ``folder_path`` (a staging-folder cleanup, or the
+    orphan-reconcile sweep over top-level staging folders) must keep it when any
+    queued Review download lives INSIDE it -- a row at ``<folder>/CD 02`` while
+    the sweep scans and would delete ``<folder>`` -- or CONTAINS it. Deleting
+    either loses a not-yet-imported download and/or orphans a Review row (#427,
+    ARCH-030 reconcile-overlap). Fail closed: an unreadable queue returns
+    ``unknown``, exactly like ``_pending_review_has_path``."""
+    key = _pending_review_path_key(folder_path)
+    if not key:
+        return False
+    try:
+        rows = _pending_review_path_set(_load_pending_reviews(strict=unknown))
+    except Exception:
+        return unknown
+    # Keys are resolved, forward-slashed and rstripped of "/", so a path
+    # boundary is exactly a "/" separator -- no false prefix match between
+    # sibling names like ".../album" and ".../album-2".
+    return any(
+        row == key or row.startswith(key + "/") or key.startswith(row + "/")
+        for row in rows
+    )
 
 
 def _pending_review_path_key(folder_path: str) -> str:

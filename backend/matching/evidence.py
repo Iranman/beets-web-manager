@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from .models import ConfidenceState, IdentityProof, ReleaseGroupMatchResult, ReleaseMatch, TrackAlignmentResult
+from .models import (
+    DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR,
+    CandidateRelatedness,
+    ConfidenceState,
+    IdentityProof,
+    ReleaseGroupMatchResult,
+    ReleaseMatch,
+    TrackAlignmentResult,
+)
 from .normalize import normalize_artist, normalize_title, similarity
 from .track_alignment import align_tracks_global
 
@@ -29,7 +37,18 @@ def _release_id(row: Dict[str, Any]) -> str:
 
 
 def _artist_id(row: Dict[str, Any]) -> str:
-    return _id(row.get("artist_id") or row.get("mb_artistid") or row.get("albumartist_id") or "")
+    # B5/F7 (ARCH-030): include mb_albumartistid. The canonical artist MBID a
+    # recovery candidate carries (threaded from _fetch_mb_release_tracklist's
+    # release_artist_id) lands here under mb_albumartistid; without it
+    # candidate_artist_id stayed empty and the F7 artist-contradiction / slot
+    # artist corroboration never fired.
+    return _id(
+        row.get("artist_id")
+        or row.get("mb_artistid")
+        or row.get("mb_albumartistid")
+        or row.get("albumartist_id")
+        or ""
+    )
 
 
 def _album_title(row: Dict[str, Any]) -> str:
@@ -49,6 +68,69 @@ def _candidate_identity(candidate: Dict[str, Any]) -> Dict[str, Any]:
         "release_title": release_title,
         "date": _s(candidate.get("date") or candidate.get("year") or ""),
     }
+
+
+def classify_candidate_relatedness(
+    candidate: Dict[str, Any],
+    *,
+    target_release_group_id: str = "",
+    target_artist_id: str = "",
+    target_artist: str = "",
+    artist_text_floor: float = DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR,
+) -> CandidateRelatedness:
+    """Pure relatedness/veto predicate for the suggestion candidate pool.
+
+    Classifies ``candidate`` against a target identity (the carrier's pinned
+    target Release Group and artist) WITHOUT consulting title text, so a
+    title collision alone can never make an unrelated release look related:
+
+    - RELATED_RELEASE_GROUP: candidate's Release Group MBID == target's.
+    - RELATED_ARTIST: candidate's artist MBID == target's, or (when an MBID
+      is unavailable on either side) artist text similarity >= the floor.
+    - UNRELATED: everything else -- a veto. A later step must never surface
+      an UNRELATED candidate as the primary suggestion.
+
+    Dependency-free and side-effect-free: only this module's existing
+    normalize/similarity helpers. Later steps wire it into the candidate
+    pool; this step just defines what "related" means."""
+    target_rg = _id(target_release_group_id)
+    cand_rg = _release_group_id(candidate)
+    if target_rg and cand_rg and target_rg == cand_rg:
+        return CandidateRelatedness.RELATED_RELEASE_GROUP
+
+    target_aid = _id(target_artist_id)
+    cand_aid = _artist_id(candidate)
+    if target_aid and cand_aid:
+        return (
+            CandidateRelatedness.RELATED_ARTIST
+            if target_aid == cand_aid
+            else CandidateRelatedness.UNRELATED
+        )
+
+    cand_artist = _s(candidate.get("artist") or candidate.get("albumartist") or candidate.get("release_artist") or "")
+    if target_artist and cand_artist:
+        if similarity(normalize_artist(target_artist), normalize_artist(cand_artist)) >= float(artist_text_floor):
+            return CandidateRelatedness.RELATED_ARTIST
+    return CandidateRelatedness.UNRELATED
+
+
+def candidate_is_unrelated(
+    candidate: Dict[str, Any],
+    *,
+    target_release_group_id: str = "",
+    target_artist_id: str = "",
+    target_artist: str = "",
+    artist_text_floor: float = DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR,
+) -> bool:
+    """Convenience veto: True when ``candidate`` is UNRELATED to the target
+    and must not be offered as the primary suggestion."""
+    return classify_candidate_relatedness(
+        candidate,
+        target_release_group_id=target_release_group_id,
+        target_artist_id=target_artist_id,
+        target_artist=target_artist,
+        artist_text_floor=artist_text_floor,
+    ) == CandidateRelatedness.UNRELATED
 
 
 def _candidate_metadata_mixed(candidate: Dict[str, Any], identity: Dict[str, Any]) -> bool:
@@ -217,6 +299,34 @@ def evaluate_release_group_candidate(
     if local_release_id and _release_id(candidate) and local_release_id == _release_id(candidate):
         positives.append("embedded_release_id_matches_candidate_release")
 
+    # F7 (ARCH-030): a downloaded file carrying its OWN embedded Release Group
+    # or artist identity that CONTRADICTS the target is a conflict, never a
+    # silent deterministic slot. The embedded tag is read ONLY to DETECT the
+    # contradiction and fail closed to review -- identity is never
+    # reconstructed from it, and a file with no embedded identity is left
+    # untouched (the common recovery case). A download must never silently
+    # change the destination Release Group (ADR-0002).
+    for track in local_tracks:
+        file_rgid = _id(
+            track.get("embedded_release_group_id")
+            or track.get("mb_releasegroupid")
+            or track.get("release_group_id")
+            or ""
+        )
+        if file_rgid and candidate_rgid and file_rgid != candidate_rgid:
+            conflicts.append("file_release_group_conflict")
+            review_reasons.append("file_release_group_conflict")
+        file_artist_id = _id(
+            track.get("embedded_artist_id")
+            or track.get("mb_albumartistid")
+            or track.get("mb_artistid")
+            or track.get("artist_id")
+            or ""
+        )
+        if file_artist_id and candidate_artist_id and file_artist_id != _id(candidate_artist_id):
+            conflicts.append("file_artist_conflict")
+            review_reasons.append("file_artist_conflict")
+
     local_album_title = _album_title(local_album)
     local_artist = _s(local_album.get("artist") or local_album.get("albumartist") or "")
     album_score = similarity(local_album_title, identity.get("release_group_title") or identity.get("release_title") or "")
@@ -256,7 +366,62 @@ def evaluate_release_group_candidate(
     # complete target coverage -- that's real identity for the tracks
     # present, not the same thing as a fully confirmed release.
     local_tracks_total = len(local_tracks)
-    local_tracks_verified = sum(1 for row in alignment.assignments if row.is_deterministic)
+    hard_verified = sum(1 for row in alignment.assignments if row.is_deterministic)
+
+    # DETERMINISTIC_METADATA_SLOT (docs/adr/0007): a file can verify its slot
+    # on strong deterministic metadata (exact title + duration tolerance +
+    # exact position + genuine AcoustID NO_RESULT -- the per-track half) ONLY
+    # when the album-level half holds too: candidate RG == target RG
+    # (release_group_status validated), no hard conflicts, and artist matched
+    # by MBID or, when neither side has an artist MBID, a high artist-text
+    # floor. This is deliberately VERIFIED_SUBSET-grade and never sets
+    # action_allowed (the FULL_RELEASE authorization), so it can only ever
+    # unlock can_auto_accept(VERIFIED_SUBSET), never a whole-release action.
+    artist_slot_ok = (
+        "artist_id_matches" in positives
+        or (
+            not (local_artist_id and candidate_artist_id)
+            and artist_score >= DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR
+        )
+    )
+    metadata_slot_album_ok = bool(
+        release_group_status == "validated"
+        and not conflicts
+        and artist_slot_ok
+    )
+
+    def _row_embedded_corroborates(row) -> bool:
+        """Option C embedded half (album-scoped identity, per present track):
+        the file's EMBEDDED Release-Group AND artist MBID must both be PRESENT
+        and equal the target (candidate) RG / artist MBID. A contradicting
+        embedded ID is already a hard conflict (F7 above) and blocks via
+        ``not conflicts``; this additionally requires PRESENCE, so a fresh
+        download carrying no embedded MB identity cannot slot-auto-insert."""
+        emb_rg = _id(
+            row.local_track.get("embedded_release_group_id")
+            or row.local_track.get("mb_releasegroupid")
+            or ""
+        )
+        emb_art = _id(
+            row.local_track.get("embedded_artist_id")
+            or row.local_track.get("mb_albumartistid")
+            or row.local_track.get("mb_artistid")
+            or ""
+        )
+        return bool(
+            emb_rg and candidate_rgid and emb_rg == candidate_rgid
+            and emb_art and candidate_artist_id and emb_art == _id(candidate_artist_id)
+        )
+
+    slot_verified = sum(
+        1
+        for row in alignment.assignments
+        if metadata_slot_album_ok
+        and not row.is_deterministic
+        and row.is_deterministic_metadata_slot()
+        and _row_embedded_corroborates(row)
+    )
+    local_tracks_verified = hard_verified + slot_verified
     local_coverage_complete = bool(local_tracks_total) and local_tracks_verified == local_tracks_total and not alignment.unmatched_local_count
     target_tracks_total = alignment.total_target_tracks
     target_tracks_matched = alignment.matched_count
@@ -274,7 +439,13 @@ def evaluate_release_group_candidate(
     elif release_complete:
         identity_proof = IdentityProof.CONFIRMED_RELEASE
     elif local_coverage_complete:
-        identity_proof = IdentityProof.DETERMINISTIC_TRACK_RECORDING_ID
+        # Hard per-track proof outranks metadata-slot proof: only label the
+        # weaker tier when at least one present track leaned on it.
+        identity_proof = (
+            IdentityProof.DETERMINISTIC_TRACK_RECORDING_ID
+            if slot_verified == 0
+            else IdentityProof.DETERMINISTIC_METADATA_SLOT
+        )
     else:
         identity_proof = IdentityProof.RELEASE_GROUP_ID
 

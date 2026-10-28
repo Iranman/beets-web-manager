@@ -38,9 +38,12 @@ def _read_file_media_tags(path: Any) -> Dict[str, Any]:
                 "albumartist": getattr(mf, "albumartist", "") or "",
                 "year": str(getattr(mf, "year", "") or ""),
                 "track": getattr(mf, "track", "") or "",
+                "disc": getattr(mf, "disc", "") or "",
                 "mb_trackid": getattr(mf, "mb_trackid", "") or "",
                 "mb_albumid": getattr(mf, "mb_albumid", "") or "",
                 "mb_releasegroupid": getattr(mf, "mb_releasegroupid", "") or "",
+                "mb_albumartistid": getattr(mf, "mb_albumartistid", "") or "",
+                "mb_artistid": getattr(mf, "mb_artistid", "") or "",
                 "genre": getattr(mf, "genre", "") or "",
             }
         except Exception:
@@ -56,11 +59,86 @@ def _read_file_media_tags(path: Any) -> Dict[str, Any]:
                 "albumartist": (f.get("albumartist") or [""])[0],
                 "year": (f.get("date") or [""])[0],
                 "track": (f.get("tracknumber") or [""])[0],
+                "disc": (f.get("discnumber") or [""])[0],
+                # MusicBrainz identity tags survive the slskd stage rename and are
+                # genuine embedded evidence (ARCH-030 B1). mutagen's easy map
+                # exposes them under the musicbrainz_* keys. ``musicbrainz_trackid``
+                # is the RECORDING MBID (F1-RECID): the PRODUCTION reader must read
+                # it so a contradicting embedded recording id can veto an otherwise
+                # corroborated NO_RESULT slot (ADR-0007 req-5).
+                "mb_trackid": (f.get("musicbrainz_trackid") or [""])[0],
+                "mb_releasegroupid": (f.get("musicbrainz_releasegroupid") or [""])[0],
+                "mb_albumartistid": (f.get("musicbrainz_albumartistid") or [""])[0],
+                "mb_artistid": (f.get("musicbrainz_artistid") or [""])[0],
                 "genre": (f.get("genre") or [""])[0],
             }
     except Exception:
         pass
     return {}
+
+
+def embedded_identity_for_file(path: Any) -> Dict[str, str]:
+    """ARCH-030 B1 producer: the embedded MusicBrainz identity of a staged file
+    for the Option-C slot-corroboration gate (music-identity consumes it).
+
+    Embedded tags survive slskd's ``_target_dest`` rename, so they are genuine
+    evidence that is INDEPENDENT of the (laundered) staged filename. Shape --
+    exactly as pinned for ``file_embedded_ids`` values::
+
+        {"title", "mb_releasegroupid", "mb_albumartistid", "mb_artistid",
+         "mb_recording_id", "track", "disc"}
+
+    ``mb_recording_id`` is the embedded RECORDING MBID (F1-RECID): a NO_RESULT
+    file whose RG+artist+title all corroborate the target but whose recording id
+    is a DIFFERENT recording (e.g. a deluxe/remaster take of a same-titled
+    intro/outro) must go to review, not auto-insert (ADR-0007 req-5). ``track``
+    and ``disc`` are the embedded position, an evidence source INDEPENDENT of the
+    circular staged filename (F1-POSITION).
+
+    Returns ``{}`` when the file carries NO readable MusicBrainz identity tag;
+    the gate treats an absent entry as "cannot corroborate" -> manual review.
+    A bare title with no MB id is not enough to corroborate, so it also yields
+    ``{}``."""
+    tags = _read_file_media_tags(path)
+    rgid = _s(tags.get("mb_releasegroupid")).strip().lower()
+    albumartistid = _s(tags.get("mb_albumartistid")).strip().lower()
+    artistid = _s(tags.get("mb_artistid")).strip().lower()
+    if not (rgid or albumartistid or artistid):
+        return {}
+    return {
+        "title": _s(tags.get("title")).strip(),
+        "mb_releasegroupid": rgid,
+        "mb_albumartistid": albumartistid,
+        "mb_artistid": artistid,
+        "mb_recording_id": _s(tags.get("mb_trackid")).strip().lower(),
+        "track": _s(tags.get("track")).strip(),
+        "disc": _s(tags.get("disc")).strip(),
+    }
+
+
+def embedded_identity_map_for_folder(folder: Any) -> Dict[str, Dict[str, str]]:
+    """ARCH-030 B1 producer: ``{staged_abs_path -> embedded_identity_for_file()}``
+    for every audio file in a staged recovery folder.
+
+    Each audio file gets an entry; a file with no readable MB tag maps to ``{}``
+    so the gate can see it cannot corroborate (-> manual). The recovery gate may
+    instead call ``embedded_identity_for_file`` per path it already iterates."""
+    out: Dict[str, Dict[str, str]] = {}
+    try:
+        base = Path(folder)
+        for p in sorted(base.rglob("*")):
+            # SEC-007/#325: refuse symlinked entries so untrusted staged/download
+            # content cannot redirect a tag read outside the scanned folder,
+            # mirroring the symlink-refusing staged copy (_staged_copy_nofollow).
+            # rglob already does not recurse into symlinked dirs (py3.12/3.13);
+            # this also drops a planted symlinked audio FILE at the leaf.
+            if p.is_symlink():
+                continue
+            if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+                out[str(p)] = embedded_identity_for_file(p)
+    except Exception:
+        return out
+    return out
 
 
 _ACOUSTID_FILE_CACHE_DIR = METADATA_CACHE_ROOT / "acoustid"
@@ -96,7 +174,13 @@ def _acoustid_lookup_cached_outcome(file_path: str) -> ProviderResult:
     if cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if isinstance(cached, list):
+            if isinstance(cached, dict):  # v2: {"data","duration"} (ADR-0007 slot tier)
+                data = cached.get("data") or []
+                ev = {"duration": cached["duration"]} if cached.get("duration") else {}
+                return ProviderResult("acoustid",
+                                      ProviderOutcome.CONFIRMED if data else ProviderOutcome.NO_RESULT,
+                                      data=data, from_cache=True, attempts=0, evidence=ev)
+            if isinstance(cached, list):  # legacy: bare list of hits
                 return ProviderResult("acoustid", ProviderOutcome.CONFIRMED if cached else ProviderOutcome.NO_RESULT,
                                       data=cached, from_cache=True, attempts=0)
         except Exception:
@@ -106,7 +190,8 @@ def _acoustid_lookup_cached_outcome(file_path: str) -> ProviderResult:
     if result.outcome in (ProviderOutcome.CONFIRMED, ProviderOutcome.NO_RESULT):
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(result.data or []), encoding="utf-8")
+            payload = {"data": result.data or [], "duration": (result.evidence or {}).get("duration")}
+            cache_path.write_text(json.dumps(payload), encoding="utf-8")
         except Exception:
             pass
     return result
@@ -389,6 +474,8 @@ def _acoustid_cached_fingerprint_ids(file_path: str, limit: int = 5) -> Optional
         cands = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if isinstance(cands, dict):  # v2 cache: {"data","duration"} (ADR-0007 slot tier); legacy bare list still read
+        cands = cands.get("data") or []
     # MI-5: same confirmed-only rule as _acoustid_fingerprint_ids.
     from backend.acoustid_service import _confirmed_recording_ids  # self-import: tests AST-extract this function
     return _confirmed_recording_ids(cands)

@@ -45,6 +45,10 @@ def _app_family_modules() -> frozenset:
     return frozenset(data.get("extracted_modules") or [])
 LIBRARY_CLEANUP_CLOSURE_PR = 99
 WAVE26_AI_IMPORT_PR = 101
+# ARCH-030 Step 4 (library-transaction) is on feat/recovery-identity-redesign;
+# its PR is not numbered/merged yet, so the owner classification carries a
+# pending (None) PR until the Step 6 independent security review records it.
+ARCH030_RECOVERY_REDESIGN_PR = None
 
 _ENGINE_FUNCTION_FAMILY = {
     "_execute_album_cleanup_apply_locked": "album_cleanup_v1",
@@ -252,6 +256,11 @@ _REVIEWED_RULE_DETAILS = {
         "domain": "import_reconciliation",
         "review_reason": "Wave 26 independent review: beets_client.move_file/delete_file called against a path explicitly verified (locally, before the call) to be outside MUSIC_ROOT and under an app-managed staging/download root -- cleanup of a rejected download, an already-imported staged source copy, or a disposable staged-subset working directory, never authoritative library media.",
         "reviewed_in_pr": WAVE26_AI_IMPORT_PR,
+    },
+    "reviewed-arch030-recovery-orphan-staging-cleanup": {
+        "domain": "import_reconciliation",
+        "review_reason": "ARCH-030 Step 4 (library-transaction) owner classification: recovery_service.reconcile_orphan_staging_folders cleans up ORPHANED staging folders under the validated <downloads>/_beets_missing_import staging root. The target is pre-verified fail-closed (realpath + commonpath containment inside that root, symlinked children skipped) and then handed to composite_workflows.delete_file (LT-13), which independently re-enforces SEC-007/#325 containment: inside a staging root, never a staging root itself, never MUSIC_ROOT or protected data, no symlink component, fd-relative, lstat-rechecked. A folder still bound to (or whose deterministic rec-<16hex> prefix matches) a live carrier is ADOPTED, never deleted; the live music library is never touched. Staging-containment surface flagged for the Step 6 independent security review.",
+        "reviewed_in_pr": ARCH030_RECOVERY_REDESIGN_PR,
     },
     "reviewed-wave26-pretracking-filename-repair": {
         "domain": "import_reconciliation",
@@ -563,6 +572,17 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             if sink.kind == "sql":
                 return "APP_STATE", "", "recovery-carrier-state-store-sqlite"
             return "APP_STATE", "", "recovery-carrier-state-store-filesystem"
+        if file == "backend/recovery_service.py":
+            # ARCH-030 Step 4 lifecycle owner. Its only mutation sink is the
+            # orphaned-staging-folder cleanup: the target is pre-verified
+            # fail-closed under the validated <downloads>/_beets_missing_import
+            # staging root and handed to composite_workflows.delete_file
+            # (LT-13), which re-enforces SEC-007/#325 containment. A folder
+            # owned by a live carrier is adopted (re-bound), never deleted; the
+            # live music library is never touched.
+            if func == "reconcile_orphan_staging_folders":
+                return "STAGING_ONLY", "", "reviewed-arch030-recovery-orphan-staging-cleanup"
+            return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
         if file == "backend/recover_service.py":
             if func == "_probe_file_duration":
                 return "READ_ONLY_FALSE_POSITIVE", "none", "recover-ffprobe-read-only-duration"
@@ -767,7 +787,8 @@ def generate(write: bool = True) -> dict:
                 entry["domain"] = _determine_domain(s, classification, family, rule)
                 entry["rule"] = rule
                 entry["review_reason"] = str(review["review_reason"])
-                entry["reviewed_in_pr"] = int(review["reviewed_in_pr"])
+                entry["reviewed_in_pr"] = (int(review["reviewed_in_pr"])
+                                           if review["reviewed_in_pr"] is not None else None)
             elif not entry.get("domain"):
                 entry["domain"] = _determine_domain(s, entry.get("classification") or "", family, rule)
             entries.append(entry)
@@ -790,7 +811,9 @@ def generate(write: bool = True) -> dict:
             "machine_classified": True,
             "human_reviewed": human_reviewed,
             "review_reason": str(review["review_reason"]) if review else ("individually investigated during SEC-002/ARCH-003 Wave 24 review (production caller search, route tracing, function-body read)" if human_reviewed else ""),
-            "reviewed_in_pr": int(review["reviewed_in_pr"]) if review else (98 if human_reviewed else None),
+            "reviewed_in_pr": (
+                (int(review["reviewed_in_pr"]) if review["reviewed_in_pr"] is not None else None)
+                if review else (98 if human_reviewed else None)),
         })
 
     counts = Counter(e["classification"] for e in entries)

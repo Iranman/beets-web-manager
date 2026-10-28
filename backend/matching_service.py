@@ -22,8 +22,9 @@ from helpers_mb import _resolve_release_group_to_release, acoustid_api_key
 from backend.beets_adapter import BeetsAdapter, BeetsUnavailableError, beets_adapter
 import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
-from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file,_album_item_abs_path, _album_track_fingerprint_check, _album_track_norm, _normalize_albumartist
+from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file,_album_item_abs_path, _album_track_fingerprint_check, _album_track_norm, _normalize_albumartist, embedded_identity_map_for_folder
 from backend.artwork_service import _get_album_item_dir
+from backend.slskd import original_download_names_for_folder
 from backend.slskd_service import _slskd_title_guess_from_name, _slskd_track_numbers_from_name, _strip_track_filename_id_suffix
 from backend.plex_service import _trigger_plex_refresh
 
@@ -147,14 +148,24 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
                                    release_group_id: str,
                                    release_title: str = "",
                                    release_artist: str = "",
-                                   unfingerprintable: Optional[set] = None) -> Dict[str, Any]:
+                                   release_artist_id: str = "",
+                                   unfingerprintable: Optional[set] = None,
+                                   file_durations: Optional[Dict[str, float]] = None,
+                                   file_original_names: Optional[Dict[str, str]] = None,
+                                   file_embedded_ids: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
     """Full per-track proof for a missing-track fill of an existing album.
 
-    Accepts only when the release is the existing album's own release (same
-    Release Group), every file's AcoustID lookup confirms one recording of
-    that release (canonical classifier and floor), that track was requested,
-    no recording is held twice, and the canonical evaluator authorizes the
-    files (VERIFIED_SUBSET). Release-level AcoustID hits are not needed.
+    Accepts a file as proven either by a confirmed AcoustID recording of the
+    target release, OR -- for a genuine AcoustID NO_RESULT file -- as a
+    DETERMINISTIC_METADATA_SLOT (ADR-0007): the shared contract's alignment
+    proves it fills one requested missing slot on exact title + position +
+    duration (``file_durations`` supplies the measured seconds) with a
+    validated Release Group and matching artist. The slot criteria are NOT
+    re-decided here; the proof path agrees with the contract's
+    ``action_allowed`` (VERIFIED_SUBSET), never a second looser definition, and
+    never authorizes a FULL_RELEASE. UNAVAILABLE/CONFLICT/AMBIGUOUS files are
+    still refused. In every accepted case the track must have been requested,
+    held only once, and the canonical evaluator must authorize the files.
     Anything else returns ok=False with a code from IMPORT_REFUSAL_REASONS."""
     from backend.matching import AcoustIDStatus as _Status, acoustid_evidence_from_hits
     from backend.slskd_service import _wanted_track_key
@@ -182,13 +193,75 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         return _fail("file_unfingerprintable" if all(p in per_file for p in unanswered)
                      else "acoustid_unavailable")
 
+    file_durations = file_durations or {}
+    file_original_names = file_original_names or {}
+    # Option C double-corroborate (USER-chosen gate): per staged path, the
+    # ORIGINAL pre-rename download basename (file_original_names) and the file's
+    # EMBEDDED MB tags (file_embedded_ids, keyed by the pinned contract field
+    # names {"title","mb_releasegroupid","mb_albumartistid","mb_artistid",
+    # "mb_recording_id","track","disc"}).
+    # Both halves must independently corroborate the target title, and the
+    # embedded Release-Group + artist MBID must be PRESENT and match, or the
+    # slot fails closed to review. A fresh download with no readable MB tags
+    # ({} here) therefore goes to manual review -- the intended safe behavior --
+    # and the F7 guard in backend.matching.evidence catches a contradicting
+    # embedded RG/artist as a hard conflict.
+    file_embedded_ids = file_embedded_ids or {}
     wanted_keys = {_wanted_track_key(t) for t in wanted_tracks}
     used = set(existing_recordings)
     rows: List[Dict[str, Any]] = []
+    # NO_RESULT files whose slot is resolved by the shared contract's own
+    # alignment below (ADR-0007), not re-decided here: {row_index: path}.
+    slot_pending: Dict[int, str] = {}
     for path, hits in file_hits:
+        original_name = _s(file_original_names.get(_s(path))).strip()
+        embedded = file_embedded_ids.get(_s(path)) or {}
+        # F1-POSITION: disc/track come from evidence INDEPENDENT of the staged
+        # filename (embedded tags + ORIGINAL download name), never from the
+        # circular staged name the system renamed to the target slot. A file with
+        # no independent position carries track 0 -> position_match is False ->
+        # the NO_RESULT slot cannot corroborate position and goes to review.
+        disc, num, _pos_ok = _independent_slot_position(original_name, embedded)
+        # The row ``title`` is the staged/renamed-name guess used only for
+        # alignment (which target slot this file maps to). The STRICT Option C
+        # title gate never reads it: it reads ``original_name`` (the pre-rename
+        # download name) and ``embedded_title`` instead, because the staged name
+        # was set by the system to the target and is circular.
+        row: Dict[str, Any] = {"title": _slskd_title_guess_from_name(Path(path).name) or Path(path).stem,
+                               "path": path, "disc": disc, "track": num, "acoustid_hits": hits}
+        measured = float(file_durations.get(_s(path)) or 0.0)
+        if measured > 0:
+            row["length"] = measured
+        if original_name:
+            row["original_name"] = original_name
+        if _s(embedded.get("title")).strip():
+            row["embedded_title"] = _s(embedded.get("title")).strip()
+        if _s(embedded.get("mb_releasegroupid")).strip():
+            row["embedded_release_group_id"] = _s(embedded.get("mb_releasegroupid")).strip().lower()
+        emb_artist = _s(embedded.get("mb_albumartistid") or embedded.get("mb_artistid")).strip()
+        if emb_artist:
+            row["embedded_artist_id"] = emb_artist.lower()
+        # F1-RECID: the embedded RECORDING MBID is top-tier identity evidence.
+        # Threading it onto the local row lets the EXISTING recording_id_conflict
+        # in track_alignment fire: an embedded recording id that contradicts the
+        # target recording is a conflict, which blocks is_deterministic_metadata_slot
+        # (``not self.conflicts``) and sends the file to review (ADR-0007 req-5).
+        emb_recording = _s(embedded.get("mb_recording_id") or embedded.get("mb_trackid")).strip().lower()
+        if emb_recording:
+            row["recording_id"] = emb_recording
         statuses = [(t, acoustid_evidence_from_hits(hits, t.get("mb_trackid"))) for t in mb_tracks if t.get("mb_trackid")]
         confirmed = [t for t, ev in statuses if ev.confirmed]
         if not confirmed:
+            # A genuine answered-empty AcoustID lookup (NO_RESULT, hits == [])
+            # may still fill its slot on deterministic metadata; defer it to the
+            # contract's slot authority. A non-empty but unconfirmed answer is
+            # AMBIGUOUS or an off-release CONFLICT -- never a slot -- and is
+            # refused here exactly as before (and UNAVAILABLE never reaches this
+            # loop; it was failed above as unanswered).
+            if not hits:
+                rows.append(row)
+                slot_pending[len(rows) - 1] = path
+                continue
             off_release = (not any(ev.status == _Status.AMBIGUOUS for _t, ev in statuses)
                            and acoustid_evidence_from_hits(hits, "").status == _Status.CONFLICT)
             return _fail("recording_not_on_release" if off_release else "file_unverified")
@@ -203,19 +276,45 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         used.add(track["mb_trackid"])
         out["files"].append({"path": path, "recording_id": track["mb_trackid"],
                              "disc": int(track.get("disc") or 1), "track": int(track.get("track") or 0)})
-        disc, num = _audio_position_from_path(path)
-        rows.append({"title": _slskd_title_guess_from_name(Path(path).name) or Path(path).stem,
-                     "path": path, "disc": disc, "track": num, "acoustid_hits": hits})
+        rows.append(row)
 
     decision = build_album_matching_decision(
         current={"album": _s(album_row.get("album")), "albumartist": _s(album_row.get("albumartist")),
                  "mb_releasegroupid": album_rgid},
         candidate={"mb_releasegroupid": release_group_id, "mb_albumid": rid,
-                   "album": release_title, "artist": release_artist},
+                   "album": release_title, "artist": release_artist,
+                   "mb_albumartistid": release_artist_id},
         items=rows,
         mb_tracks=mb_tracks,
     ).to_dict()
     out["matching_decision"] = decision
+
+    # Resolve each deferred NO_RESULT file from the contract's OWN alignment --
+    # the single slot definition. It counts only when its assignment is a
+    # deterministic_metadata_slot (exact title + position + duration tolerance +
+    # NO_RESULT, enforced in backend.matching), maps to a requested missing
+    # track, and that recording is not already held.
+    assignments = (((decision.get("evidence") or {}).get("canonical_match") or {})
+                   .get("track_alignment") or {}).get("assignments") or []
+    for row_index, path in slot_pending.items():
+        assignment = next((a for a in assignments
+                           if isinstance(a, dict) and int(a.get("local_index", -1)) == row_index), None)
+        if not assignment or assignment.get("status") != "matched" or not assignment.get("deterministic_metadata_slot"):
+            return _fail("file_unverified")
+        try:
+            target = mb_tracks[int(assignment.get("target_index"))]
+        except (TypeError, ValueError, IndexError):
+            return _fail("file_unverified")
+        tid = _s(target.get("mb_trackid")).strip().lower()
+        if not (("mbid", tid) in wanted_keys
+                or ("pos", int(target.get("disc") or 1), int(target.get("track") or 0)) in wanted_keys):
+            return _fail("track_not_requested")
+        if tid in used:
+            return _fail("duplicate_track")
+        used.add(tid)
+        out["files"].append({"path": path, "recording_id": tid,
+                             "disc": int(target.get("disc") or 1), "track": int(target.get("track") or 0)})
+
     if not decision.get("action_allowed"):
         return _fail("identity_conflict")
     out["ok"] = True
@@ -344,6 +443,30 @@ def _disc_number_from_path(path: str) -> int:
             except Exception:
                 return 0
     return 0
+
+
+def _parse_leading_int(value: Any) -> int:
+    """First run of digits in ``value`` (handles embedded ``"5/12"`` / ``"5"``)."""
+    m = re.match(r"\s*(\d+)", _s(value))
+    return int(m.group(1)) if m else 0
+
+
+def _independent_slot_position(original_name: str, embedded: Dict[str, Any]) -> Tuple[int, int, bool]:
+    """Disc/track from evidence INDEPENDENT of the circular staged filename
+    (F1-POSITION): the embedded disc/track tags and the ORIGINAL pre-rename
+    download basename. The staged name was set by the system to the target slot,
+    so a position read off it is trivially true and proves nothing.
+
+    Returns ``(disc, track, corroborated)``; ``corroborated`` is False when
+    NEITHER independent source carries a track number -- position then cannot be
+    corroborated and the NO_RESULT slot must fail closed to review (Option C)."""
+    emb_track = _parse_leading_int(embedded.get("track"))
+    emb_disc = _parse_leading_int(embedded.get("disc"))
+    nums = _slskd_track_numbers_from_name(original_name) if _s(original_name).strip() else []
+    name_disc, name_track = (nums[0] if nums else (0, 0))
+    track = emb_track or name_track
+    disc = emb_disc or name_disc
+    return (max(disc or 1, 1), max(track, 0), track > 0)
 
 
 def _audio_position_from_path(path: str) -> tuple:
@@ -746,7 +869,11 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     def _add_candidate(title: str, path: str = "", track: int = 0,
                        disc: int = 1, mb_trackid: str = "",
                        length: float = 0.0,
-                       acoustid_hits: Optional[List[Dict[str, Any]]] = None) -> None:
+                       acoustid_hits: Optional[List[Dict[str, Any]]] = None,
+                       embedded_release_group_id: str = "",
+                       embedded_artist_id: str = "",
+                       original_name: str = "",
+                       embedded_title: str = "") -> None:
         key = (_album_track_norm(title), _s(path), int(track or 0), int(disc or 1))
         if key in seen_keys:
             return
@@ -765,12 +892,38 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         # reads as UNAVAILABLE, never as negative evidence.
         if acoustid_hits is not None:
             row["acoustid_hits"] = acoustid_hits
+        # F5/C2 (ARCH-030): thread engine/tag-supplied embedded Release-Group
+        # and artist identity through so the F7 contradiction guard in
+        # backend.matching.evidence (which reads embedded_release_group_id /
+        # embedded_artist_id on each local track) is EFFECTIVE on the preflight
+        # slot path -- a mistagged file self-identifying as a different RG/
+        # artist must fail closed to review, never silently fill a slot. Absent
+        # embedded identity (the common fresh-download case) stays absent: it is
+        # neutral, never a positive, so it cannot by itself unlock auto-accept.
+        if _s(embedded_release_group_id).strip():
+            row["embedded_release_group_id"] = _s(embedded_release_group_id).strip().lower()
+        if _s(embedded_artist_id).strip():
+            row["embedded_artist_id"] = _s(embedded_artist_id).strip().lower()
+        # Option C: the ORIGINAL pre-rename download name and the EMBEDDED title
+        # tag, the two independent title corroborators for the slot gate. Absent
+        # => the slot cannot fire (fail closed), never laundered from the staged
+        # (renamed-to-target) filename.
+        if _s(original_name).strip():
+            row["original_name"] = _s(original_name).strip()
+        if _s(embedded_title).strip():
+            row["embedded_title"] = _s(embedded_title).strip()
         candidates.append(row)
 
     unfingerprintable: set = set()  # files fpcalc could not fingerprint (not an AcoustID failure)
+    # fpcalc-measured duration (SECONDS) per staged file, surfaced by the
+    # AcoustID answer. The only measured duration a genuine NO_RESULT file can
+    # offer the deterministic-metadata-slot tier (ADR-0007); fingerprint-
+    # derived, never a local media-tag read.
+    file_measured_durations: Dict[str, float] = {}
 
     def _file_acoustid_hits(path: Path) -> Optional[List[Dict[str, Any]]]:
         unfingerprintable.discard(str(path))  # only the latest outcome for a path counts
+        file_measured_durations.pop(str(path), None)
         try:
             outcome = _acoustid_lookup_cached_outcome(str(path))
         except Exception as ex:
@@ -778,6 +931,12 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 log.append(f"  [preflight] AcoustID lookup warning: {type(ex).__name__}")
             return None
         if outcome.answered:
+            try:
+                measured = float((outcome.evidence or {}).get("duration") or 0.0)
+            except (TypeError, ValueError):
+                measured = 0.0
+            if measured > 0:
+                file_measured_durations[str(path)] = measured
             return list(outcome.data or [])
         if (outcome.evidence or {}).get("fingerprintable") is False:
             unfingerprintable.add(str(path))
@@ -798,16 +957,55 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             title = _s(props.get("title")) or _slskd_title_guess_from_name(Path(rel_path).name) or Path(rel_path).stem
             mb_trackid = _s(props.get("mb_trackid"))
             length = float(props.get("length") or 0.0)
-            _add_candidate(title, rel_path, track=track, disc=disc, mb_trackid=mb_trackid, length=length)
+            # D2: thread real per-file AcoustID hits into the album-decision
+            # alignment so an answered-empty lookup is seen as NO_RESULT, not
+            # the fingerprint-blind UNAVAILABLE default (track_alignment.py).
+            # In the no-local-mount topology we cannot fpcalc here, so hits can
+            # only come pre-attached (engine inspection or, later, the recovery
+            # carrier); absent that they correctly stay UNAVAILABLE. A present
+            # key -- including [] for a genuine no_result -- is threaded as-is.
+            inspect_hits = entry.get("acoustid_hits")
+            if inspect_hits is None:
+                inspect_hits = props.get("acoustid_hits")
+            # F5/C2: engine inspection reads the staged file's own embedded MB
+            # tags. Thread any embedded Release-Group / artist identity so a
+            # mistagged file that contradicts the target is caught by the F7
+            # guard (backend.matching.evidence) instead of silently slotting.
+            embedded_rg = _s(entry.get("embedded_release_group_id")
+                             or props.get("mb_releasegroupid")
+                             or props.get("embedded_release_group_id"))
+            embedded_artist = _s(entry.get("embedded_artist_id")
+                                 or props.get("mb_albumartistid")
+                                 or props.get("mb_artistid")
+                                 or props.get("embedded_artist_id"))
+            # Option C corroborators from engine inspection: the embedded title
+            # tag (props.title is the file's own tag, authoritative, not the
+            # staged name) and the ORIGINAL pre-rename download name when the
+            # inspection/carrier supplied it. Absent original name => the slot
+            # fails closed (manual review), never laundered from the staged name.
+            original_name = _s(entry.get("original_name") or props.get("original_name"))
+            embedded_title = _s(props.get("title"))
+            _add_candidate(
+                title, rel_path, track=track, disc=disc, mb_trackid=mb_trackid, length=length,
+                acoustid_hits=inspect_hits if (fingerprint_evidence and inspect_hits is not None) else None,
+                embedded_release_group_id=embedded_rg,
+                embedded_artist_id=embedded_artist,
+                original_name=original_name,
+                embedded_title=embedded_title,
+            )
     else:
         for fpath in audio_files:
             disc, track = _audio_position_from_path(str(fpath))
+            # Fingerprint first so the fpcalc-measured duration is recorded
+            # before the candidate row is built (slot evidence, ADR-0007).
+            hits = _file_acoustid_hits(fpath) if fingerprint_evidence else None
             _add_candidate(
                 _slskd_title_guess_from_name(fpath.name) or fpath.stem,
                 str(fpath),
                 track=track,
                 disc=disc or 1,
-                acoustid_hits=_file_acoustid_hits(fpath) if fingerprint_evidence else None,
+                length=file_measured_durations.get(str(fpath), 0.0),
+                acoustid_hits=hits,
             )
 
     existing_recordings: set = set()
@@ -953,6 +1151,10 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             "mb_albumid": mb_albumid,
             "album": result.get("release_title"),
             "artist": result.get("release_artist"),
+            # B5/F7: the canonical album-artist MBID, so the F7 artist-
+            # contradiction check and the Option C embedded-artist
+            # corroboration have a target to compare against.
+            "mb_albumartistid": _s(mb.get("release_artist_id")),
         },
         items=candidates,
         mb_tracks=mb_tracks,
@@ -986,6 +1188,62 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 gate_ok = False
         elif existing_album_id and wanted_tracks:
             proof_file_hits = [(str(p), _file_acoustid_hits(p)) for p in audio_files]
+            # Measured per-file durations (SECONDS) for the deterministic-
+            # metadata-slot tier: engine/candidate length where present, else
+            # the fpcalc-measured duration captured during fingerprinting.
+            proof_durations: Dict[str, float] = {
+                _s(c.get("path")): float(c.get("length") or 0.0)
+                for c in candidates if float(c.get("length") or 0.0) > 0
+            }
+            proof_durations.update({p: d for p, d in file_measured_durations.items() if d > 0})
+            # Option C: the two independent corroborators are PRODUCED by the
+            # integrations folder readers -- the slskd sidecar's ORIGINAL pre-
+            # rename download names and each staged file's EMBEDDED MB tags --
+            # keyed to the SAME staged abs paths as proof_file_hits/audio_files.
+            # On the production local-scan recovery path nothing stamps these
+            # onto the candidate rows, so source them here from the readers
+            # (authoritative); the pinned contract field names
+            # ("title","mb_releasegroupid","mb_albumartistid","mb_artistid",
+            # "mb_recording_id","track","disc") are produced verbatim by
+            # acoustid_service. Any candidate-carried
+            # values (engine-inspection topology) only fill gaps. Both the
+            # original-name title and the embedded-tag set must corroborate the
+            # target for a NO_RESULT file to slot-auto-insert; the F7 guard
+            # still fails a contradicting embedded RG/artist closed to review.
+            # Absent evidence stays absent (fresh download, no tags / no
+            # sidecar) -> the slot cannot fire -> manual review.
+            proof_original_names: Dict[str, str] = dict(
+                original_download_names_for_folder(folder_path))
+            proof_embedded_ids: Dict[str, Dict[str, str]] = {
+                p: emb
+                for p, emb in embedded_identity_map_for_folder(folder_path).items()
+                if emb
+            }
+            for c in candidates:
+                cpath = _s(c.get("path"))
+                orig = _s(c.get("original_name")).strip()
+                if orig:
+                    proof_original_names.setdefault(cpath, orig)
+                if cpath in proof_embedded_ids:
+                    continue
+                emb: Dict[str, str] = {}
+                if _s(c.get("embedded_title")).strip():
+                    emb["title"] = _s(c.get("embedded_title")).strip()
+                if _s(c.get("embedded_release_group_id")).strip():
+                    emb["mb_releasegroupid"] = _s(c.get("embedded_release_group_id")).strip()
+                if _s(c.get("embedded_artist_id")).strip():
+                    emb["mb_albumartistid"] = _s(c.get("embedded_artist_id")).strip()
+                # F1-RECID / F1-POSITION: carry any engine-inspected recording id
+                # and embedded position so the same conflict/position gates apply
+                # on this gap-fill path too.
+                if _s(c.get("embedded_recording_id") or c.get("mb_recording_id")).strip():
+                    emb["mb_recording_id"] = _s(c.get("embedded_recording_id") or c.get("mb_recording_id")).strip().lower()
+                if _s(c.get("embedded_track")).strip():
+                    emb["track"] = _s(c.get("embedded_track")).strip()
+                if _s(c.get("embedded_disc")).strip():
+                    emb["disc"] = _s(c.get("embedded_disc")).strip()
+                if emb:
+                    proof_embedded_ids[cpath] = emb
             proof = _missing_track_recording_proof(
                 proof_file_hits,
                 mb_tracks=mb_tracks,
@@ -996,7 +1254,11 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 release_group_id=_s(result.get("release_group")),
                 release_title=_s(result.get("release_title")),
                 release_artist=_s(result.get("release_artist")),
+                release_artist_id=_s(mb.get("release_artist_id")),
                 unfingerprintable=unfingerprintable,
+                file_durations=proof_durations,
+                file_original_names=proof_original_names,
+                file_embedded_ids=proof_embedded_ids,
             )
             result["missing_track_proof"] = {k: v for k, v in proof.items() if k != "matching_decision"}
             if proof["ok"]:
@@ -1021,9 +1283,35 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             # or no existing album): cannot auto-verify -> keep for review.
             gate_ok = False
 
+    # req-5: name which preflight surface this actually is, so a targeted
+    # recovery is never read as a full-album incompleteness rejection. The
+    # four surfaces are distinct checks, not one "N/9 matched" headline:
+    #   - single_track_recovery : carrier-pinned missing-slot fill; authority
+    #     is the per-recording proof, judged against the expected missing
+    #     track(s), NOT the full release tracklist.
+    #   - existing_album_fill   : subset import into an existing album.
+    #   - new_full_album        : a whole release being identified fresh.
+    expected_missing = len(wanted_tracks or [])
+    if recovery_mode:
+        preflight_mode = "single_track_recovery"
+    elif existing_album_id and audio_files and len(audio_files) < expected:
+        preflight_mode = "existing_album_fill"
+    else:
+        preflight_mode = "new_full_album"
+    recovery_scope: Dict[str, Any] = {}
+    if recovery_mode:
+        proof_rec = result.get("missing_track_proof") or {}
+        recovery_scope = {
+            "expected_missing": expected_missing,
+            "staged_audio": len(audio_files),
+            "verified": len(proof_rec.get("files") or []),
+            "existing_album_id": int(existing_album_id or 0),
+        }
     result.update({
         "ok": gate_ok,
         "tracklist_ok": bool(tracklist_ok),
+        "preflight_mode": preflight_mode,
+        "recovery_scope": recovery_scope,
         "matches": matches,
         "min_required": min_required,
         "max_audio_allowed": max_audio_allowed,
@@ -1093,6 +1381,20 @@ def _preflight_review_reason(preflight: Optional[Dict[str, Any]],
         return (f"The folder tracklist matched the {release_label}, but it was refused: "
                 f"{_preflight_rejection_reason(preflight)}. Review the identity "
                 "evidence before importing.")
+
+    # req-5: a targeted missing-track recovery is judged against the expected
+    # missing slot(s), never the whole release tracklist. Do not lead with
+    # "only 2/9 matched" -- that framing is a full-album incompleteness
+    # rejection and is wrong for a recovery whose scope is the 2 missing tracks.
+    if preflight.get("preflight_mode") == "single_track_recovery":
+        scope = preflight.get("recovery_scope") or {}
+        want = int(scope.get("expected_missing") or 0)
+        got = int(scope.get("verified") or 0)
+        staged = int(scope.get("staged_audio") or audio_count)
+        head = (f"Missing-track recovery for the {release_label}: verified "
+                f"{got} of {want} expected missing track(s) from {staged} staged file(s).")
+        detail = _preflight_rejection_reason(preflight)
+        return f"{head} {('Held for review: ' + detail + '.') if detail else 'Held for review.'}".strip()
 
     parts: List[str] = []
     if preflight.get("oversized_subset_complete"):

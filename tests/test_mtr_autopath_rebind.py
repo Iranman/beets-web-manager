@@ -110,7 +110,12 @@ class AutoPathRebindTests(_JobHarness):
         rebound = rc.load_for_folder(self.staged_dir)
         self.assertIsNotNone(rebound, "carrier was not rebound to the restaged path")
         self.assertEqual(rebound["carrier_id"], cid)
-        self.assertIsNone(rc.load_for_folder(self.original_dir))
+        # Step-2 one-to-many (orphan-on-rebind fix): the ORIGINAL staged folder
+        # still resolves to the SAME carrier after the restage, instead of being
+        # orphaned to None. Every attempt's folder maps to the one carrier.
+        original = rc.load_for_folder(self.original_dir)
+        self.assertIsNotNone(original, "prior staged folder was orphaned by the rebind")
+        self.assertEqual(original["carrier_id"], cid)
 
         # Merge ran under carrier ownership and the Plex-sync leg advanced it.
         rec = rc.get_carrier(cid)

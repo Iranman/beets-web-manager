@@ -414,7 +414,16 @@ def health_detail():
     checks = _health_checks()
     ok = checks["app"] and (checks["beets_web"] or checks["beets_webmanager_plugin"])
     beets_status = beets_embedded.status()
-    return jsonify({"ok": ok and beets_status["ok"], "checks": checks, "beets": beets_status})
+    # ``checks`` reports CONFIGURED facts only (env-var PRESENCE): a present key
+    # reads True even when the provider rejected it. ``provider_health`` is the
+    # separate VALIDITY signal -- the last classified outcome per provider from
+    # the provider boundary (e.g. an AI/lidarr/discogs/slskd/plex key that was
+    # authenticated, rate-limited or rejected), already redacted (no keys, no
+    # URLs). The two are deliberately distinct fields so a present-but-rejected
+    # key no longer reads as healthy.
+    return jsonify({"ok": ok and beets_status["ok"], "checks": checks,
+                    "beets": beets_status,
+                    "provider_health": provider_boundary.provider_health()})
 
 try:
     _ai_batch_migration_result = _get_ai_batch_store().migrate_legacy_files(
@@ -434,6 +443,13 @@ except Exception as _ai_migration_ex:
 
 if _legacy_local_scan_enabled():
     start_auto_scan_schedule()  # jobs.every: stopped by jobs.close()
+
+
+# ARCH-030 F6: run the missing-track recovery advancer automatically on the job
+# scheduler so a downloaded/stuck carrier advances without a manual POST
+# (jobs.every; stopped by jobs.close()). No-op if disabled via env.
+import backend.recovery_service as _recovery_service  # noqa: E402
+_recovery_service.start_recovery_advance_schedule()
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────

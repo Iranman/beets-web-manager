@@ -84,7 +84,7 @@ class AcquisitionCarrierTests(unittest.TestCase):
             mock.patch.object(acq, "_ytdlp_missing_tracks_download", side_effect=_fake_ytdlp),
             mock.patch.object(acq, "_ytdlp_album_download", side_effect=_fake_ytdlp),
             mock.patch.object(acq, "_validate_wanted_download_identity_before_import",
-                              side_effect=lambda d, w, log, **k: (list(w), [])),
+                              side_effect=lambda d, w, log, **k: (list(w), [], [])),
             mock.patch.object(acq, "_validate_import_source_audio"),
             mock.patch.object(acq, "_start_reimport_disk_job_internal", return_value="imp-1"),
             mock.patch.object(acq, "_wait_for_child_job", return_value={"ok": True}),
@@ -134,8 +134,15 @@ class AcquisitionCarrierTests(unittest.TestCase):
         cid = res.metadata["recovery_carrier_id"]
         self.assertTrue(cid)
 
-        # (3) ONE guarded workflow keyed on the carrier -> resumable, not split.
-        self.assertEqual(res.workflow, recovery_carrier.recovery_workflow_id(cid))
+        # (3) ONE guarded workflow keyed on the STABLE server-derived identity
+        # (Step-2 dedup parity), not the ephemeral per-request carrier uuid, so
+        # two identical requests collide on one workflow lock -> resumable, not
+        # split. The slug hashes the identity key to a lock-safe 16-char slug.
+        expected_key = recovery_carrier.compute_identity_key(
+            42, RGID, [{"track": 6, "title": "Last Song", "recording_id": "rec-6"}])
+        self.assertEqual(
+            res.workflow,
+            recovery_carrier.recovery_workflow_id(job_contract.slug(expected_key)))
 
         carrier = recovery_carrier.get_carrier(cid)
         self.assertIsNotNone(carrier)
@@ -161,6 +168,41 @@ class AcquisitionCarrierTests(unittest.TestCase):
         # (2) checkpoints advanced in order; STAGED is the last this layer owns.
         self.assertEqual(res.checkpoints, ["DOWNLOADED", "STAGED"])
         self.assertEqual(carrier["checkpoint"], "STAGED")
+
+    def test_recovery_persists_discovery_and_result_provenance(self):
+        # Step-3 requirement 2: the carrier keeps a DURABLE provenance record --
+        # the discovery query + provider recorded at create, and the chosen
+        # result reference + per-file source recorded once the download lands.
+        wanted = [{"disc": 1, "track": 6, "title": "Last Song",
+                   "mb_trackid": "rec-6", "duration_ms": 190000}]
+        res = self._run(
+            {
+                "artist": "Artist", "album": "Album", "year": "2024",
+                "method": "ytdlp", "auto_import": True,
+                "existing_album_id": 42, "mb_releasegroupid": RGID,
+                "missing_tracks": [{"track": 6, "title": "Last Song", "recording_id": "rec-6"}],
+            },
+            wanted_from_mb=wanted,
+        )
+        carrier = recovery_carrier.get_carrier(res.metadata["recovery_carrier_id"])
+        src = carrier["source"]
+        # provider/method (requirement 2: provider)
+        self.assertEqual(src["provider"], "ytdlp")
+        self.assertEqual(src["method"], "ytdlp")
+        # the discovery QUERY the recovery was launched from (requirement 2: query)
+        dq = src["discovery_query"]
+        self.assertEqual(dq["artist"], "Artist")
+        self.assertEqual(dq["album"], "Album")
+        self.assertEqual(dq["mb_releasegroupid"], RGID)
+        self.assertEqual([t["track"] for t in dq["tracks"]], [6])
+        # the chosen result reference (requirement 2: result)
+        self.assertEqual(src["result"]["mb_release"], RELEASE)
+        self.assertEqual(src["result"]["mb_releasegroupid"], RGID)
+        self.assertTrue(src["result"]["staged_folder"])
+        # per-file source of what was delivered (requirement 2: per-file)
+        self.assertEqual([f["name"] for f in src["per_file"]], ["01.flac"])
+        # provenance rode the existing transitions -- no extra checkpoint-less write.
+        self.assertEqual(res.checkpoints, ["DOWNLOADED", "STAGED"])
 
     def _seed_victim(self, carrier_id, *, album_id, rgid):
         """A victim recovery already in flight: mid-workflow (STAGED) with

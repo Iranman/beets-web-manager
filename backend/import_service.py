@@ -12,7 +12,7 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT,
 from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
-from backend.pending_review_store import _pending_review_has_path, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
+from backend.pending_review_store import _pending_review_has_path_or_overlap, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
 import backend.recovery_carrier as recovery_carrier
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
@@ -84,11 +84,144 @@ def _wanted_tracks_not_in_album(existing_album_id: int, mb_albumid: str,
     return filtered
 
 
+def _recovery_stage_prefix_for(source_folder: str) -> Optional[str]:
+    """Best-effort DETERMINISTIC staging prefix for a recovery: the stable
+    recovery-identity key of the carrier bound to ``source_folder`` (never the
+    folder name). Threading it into the staging layer makes every retry of the
+    SAME recovery reuse one ``_beets_missing_import/rec-<hex>-<album>`` folder
+    instead of minting a fresh uuid family each attempt (the duplicate-folder
+    storm). Returns None (random uuid, unchanged behaviour) off the recovery
+    path or on any lookup failure -- a strict no-op when no carrier is bound.
+    The value is a fixed-length hex-of-a-hash; the staging layer still
+    re-sanitises it and re-checks containment (SEC-007/#325)."""
+    if not _s(source_folder).strip():
+        return None
+    try:
+        carrier = recovery_carrier.load_for_folder(source_folder)
+    except Exception:
+        return None
+    key = _s((carrier or {}).get("recovery_identity_key")).strip().lower()
+    return ("rec-" + key[:16]) if key else None
+
+
+def _recovery_auto_insert_authorized(folder_path: str, carrier_id: str,
+                                     *, client_releasegroupid: str = "",
+                                     client_existing_album_id: int = 0,
+                                     log: Optional[list] = None) -> Dict[str, Any]:
+    """ARCH-030 Step 4 (library-transaction): the matching contract's
+    ``action_allowed=True`` is the ONLY authorization to auto-insert a staged
+    recovery's files into the library.
+
+    ``carrier_id`` (set by the recovery advancer; a human Review confirm never
+    sets it) marks an UNATTENDED auto-insert. The authorization consumed here is
+    the SERVER-side ``matching_decision`` the advancer already attached to the
+    carrier -- this reads that boolean, it NEVER recomputes a more permissive one
+    -- and the carrier is resolved from the FOLDER binding (not the client id) so
+    a client cannot aim an authorized carrier at an arbitrary folder. On refusal
+    the carrier is kept in manual review with the contract's reason, and no job
+    is started / no file is touched. Fail-closed: a missing/empty decision or an
+    unbound folder refuses. A VERIFIED_SUBSET authorization only ever reaches the
+    existing-album missing-track merge, which acts on the carrier's wanted subset
+    -- never the whole release.
+
+    C3 (target binding): matching ``carrier_id`` to the folder is not enough --
+    ``start_folder_import_with_id`` would otherwise use the CLIENT payload's
+    ``mb_albumid``/release group/existing album, so a crafted request with a
+    valid authorized carrier + its folder but a DIFFERENT target could aim the
+    authorized insert elsewhere. The target is therefore refused when the
+    client's release group or existing album DIVERGES from the carrier's, and on
+    success the carrier record is returned so the caller RE-DERIVES the whole
+    target (RG / release / existing album / wanted subset) from the carrier --
+    never the client payload.
+
+    C7 (CAS): the refusal transition back to ``review_required`` is a
+    compare-and-set on a FRESH read, so a concurrent claim that moved the carrier
+    to ``importing`` (or any other state) is never clobbered back into review.
+    Mirrors the F9 fallback in ``recovery_service.advance_stuck_carriers``."""
+    try:
+        carrier = recovery_carrier.load_for_folder(folder_path)
+    except Exception:
+        carrier = None
+    if not carrier or _s(carrier.get("carrier_id")) != _s(carrier_id).strip():
+        return {"ok": False,
+                "reason": "recovery carrier is not bound to this folder; auto-insert refused"}
+    # C3: bind to the carrier's OWN canonical identity. Refuse a client target
+    # that diverges from it (the caller re-derives the rest from the carrier).
+    carrier_rg = _extract_mb_uuid(_s(carrier.get("mb_releasegroupid")))
+    req_rg = _extract_mb_uuid(_s(client_releasegroupid))
+    if req_rg and carrier_rg and req_rg != carrier_rg:
+        return {"ok": False, "code": "recovery_target_mismatch",
+                "reason": "recovery auto-insert target diverges from the authorizing "
+                          "carrier's release group; refused"}
+    try:
+        carrier_album = int(carrier.get("existing_album_id") or 0)
+    except Exception:
+        carrier_album = 0
+    try:
+        req_album = int(client_existing_album_id or 0)
+    except Exception:
+        req_album = 0
+    if req_album and carrier_album and req_album != carrier_album:
+        return {"ok": False, "code": "recovery_target_mismatch",
+                "reason": "recovery auto-insert target diverges from the authorizing "
+                          "carrier's existing album; refused"}
+    decision = carrier.get("matching_decision") if isinstance(carrier.get("matching_decision"), dict) else {}
+    if decision.get("action_allowed") is True:
+        return {"ok": True, "carrier": carrier}
+    reason = (_s(decision.get("reason")) or _s(decision.get("eligibility_reason"))
+              or _s(decision.get("explanation"))
+              or "matching contract did not authorize an auto-insert (identity not verified)")
+    try:
+        current = recovery_carrier.get_carrier(_s(carrier.get("carrier_id"))) or carrier
+        cur_state = _s(current.get("state"))
+        if cur_state in recovery_carrier.ADVANCER_STATES and cur_state != "review_required":
+            recovery_carrier.advance_state(
+                _s(current.get("carrier_id")), "review_required",
+                payload_extra={"advancer_reason": reason},
+                expected_revision=int(current.get("revision") or 0))
+    except recovery_carrier.RecoveryCarrierConflictError:
+        # A concurrent transition landed since the re-read; skip rather than
+        # overwrite -- the next sweep re-evaluates it fresh.
+        pass
+    except Exception:
+        pass
+    if log is not None:
+        log.append(f"[recovery] auto-insert refused by matching contract: {reason}")
+    return {"ok": False, "reason": reason}
+
+
+def _recovery_slot_authorized(folder_path: str) -> bool:
+    """True when the recovery carrier bound to ``folder_path`` carries a
+    gate-authorized slot decision (matching_decision.action_allowed is True).
+
+    This is the SAME server-side authorization the unattended auto-insert gate
+    consumes in ``_recovery_auto_insert_authorized`` -- it is only READ here, via
+    the folder binding (never the client, never recomputed, never relaxed).
+    Under the Option C double-corroboration policy (docs/adr/0007) a
+    VERIFIED_SUBSET / DETERMINISTIC_METADATA_SLOT decision can be
+    action_allowed=True yet still be routed to manual review, so both the
+    unattended advance and the human-confirmed merge of that same slot read it
+    here to let the fill complete. Fail closed: no carrier, a non-dict/empty
+    decision, or action_allowed!=True -> False (strict AcoustID gate)."""
+    try:
+        carrier = recovery_carrier.load_for_folder(folder_path)
+    except Exception:
+        return False
+    decision = (carrier or {}).get("matching_decision")
+    return isinstance(decision, dict) and decision.get("action_allowed") is True
+
+
 def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
                                 artist: str, album: str, log: list,
                                 force_stage: bool = False,
-                                target_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
-    """Copy a selected subset to a clean import folder when the source has extras."""
+                                target_tracks: Optional[List[Dict[str, Any]]] = None,
+                                stage_prefix: Optional[str] = None) -> str:
+    """Copy a selected subset to a clean import folder when the source has extras.
+
+    ``stage_prefix`` pins the staged-folder name deterministically so a recovery
+    reuses one folder across retries; when not supplied it is derived from a
+    recovery carrier bound to ``aldir`` (if any), so every call site gets the
+    reuse behaviour without threading identity through each of them."""
     # #427: a folder the app already staged that holds exactly the selected
     # files is imported in place; a second copy would leave the Review row and
     # the acquisition cleanup pointing at different folders.
@@ -104,12 +237,15 @@ def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
         if present and present == selected:
             log.append(f"  [import] Using staged folder in place: {aldir}")
             return aldir
+    if stage_prefix is None:
+        stage_prefix = _recovery_stage_prefix_for(aldir)
     # Validated root only; an unsafe DOWNLOADS_ROOT raises the setup-block
     # message instead of creating _beets_missing_import inside it (#268 S-2).
     return _stage_selected_audio_files_impl(
         validated_downloads_root(), AUDIO_EXT, aldir, audio_files, artist, album, log,
         force_stage=force_stage,
         target_tracks=target_tracks,
+        stage_prefix=stage_prefix,
     )
 
 
@@ -766,9 +902,10 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
         downloads_root = DOWNLOADS_ROOT.resolve(strict=False)
         if folder == downloads_root:
             return False
-        if _pending_review_has_path(str(folder), unknown=True):
-            # #427: the import queued this folder for Review; deleting it
-            # would leave the row dangling. An unreadable queue keeps it too.
+        if _pending_review_has_path_or_overlap(str(folder), unknown=True):
+            # #427: the import queued this folder (or a child/parent of it) for
+            # Review; deleting it would leave the row dangling or lose a queued
+            # download. An unreadable queue keeps it too.
             log.append(f"  [import] Kept staging folder queued for Review: {folder}")
             return False
         if folder.exists():
@@ -1628,7 +1765,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # (duplicate_action keep); merge them onto the existing album.
             if wanted_tracks:
                 fp_validation = _validate_wanted_album_items_with_acoustid(
-                    aid, mb_albumid, wanted_tracks, log, expected_artist=_guess_artist)
+                    aid, mb_albumid, wanted_tracks, log, expected_artist=_guess_artist,
+                    slot_authorized=_recovery_slot_authorized(aldir))
                 if not fp_validation.get("ok"):
                     _needs_review(fp_validation.get("reason") or "AcoustID did not verify the downloaded "
                                   "file(s) for the requested missing MusicBrainz track(s).")
@@ -1784,7 +1922,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
                                                wanted_tracks: List[Dict[str, Any]],
                                                log: list,
-                                               expected_artist: str = "") -> Dict[str, Any]:
+                                               expected_artist: str = "",
+                                               slot_authorized: bool = False) -> Dict[str, Any]:
     """Gate merging downloaded missing-track files into an existing album.
 
     Merging reassigns audio to the album, so it needs deterministic proof
@@ -1794,7 +1933,19 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
     a fingerprint with no AcoustID result (``no_result``) and a fingerprint
     that was never checked (``not_checked``: no key, rejected key, outage,
     fpcalc) all send the folder to review with ``reason``. Nothing here
-    ever deletes a download (#244 F2)."""
+    ever deletes a download (#244 F2).
+
+    ARCH-030 B4: ``slot_authorized`` is the recovery carrier's own
+    gate-authorized slot decision (matching_decision.action_allowed is True,
+    VERIFIED_SUBSET / DETERMINISTIC_METADATA_SLOT -- docs/adr/0007), read by
+    the caller from the folder-bound carrier and never recomputed here. When it
+    is set, a fingerprint that AcoustID has no result for (``no_result``) is
+    expected -- the gate already corroborated that slot deterministically under
+    the Option C policy -- so it no longer blocks the merge of the authorized
+    wanted subset. Everything stronger still refuses even when authorized: a
+    different-song ``mismatch``, an infra ``not_checked`` failure, and a file
+    that maps to no requested track (``unverified``, i.e. outside the authorized
+    subset) all keep the strict behavior."""
     wanted = _normalise_wanted_tracks(wanted_tracks)
     if not album_id or not mb_albumid or not wanted:
         return {"ok": True, "checked": 0, "mismatches": []}
@@ -1938,8 +2089,22 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         reason = ("The downloaded file(s) were not merged: "
                   f"{ACOUSTID_FAILURE_MESSAGES[not_checked[0]['status']]}")
     elif unverified or no_result or not confirmed:
-        reason = ("AcoustID did not confirm that the downloaded file(s) are the requested MusicBrainz "
-                  "recording(s), so they were not merged into the existing album.")
+        # ARCH-030 B4: honor an already gate-authorized NO_RESULT slot. A carrier
+        # whose matching_decision.action_allowed is True was deterministically
+        # corroborated (docs/adr/0007, Option C), so AcoustID having no result
+        # for its tracks is expected and no longer strands the fill as a separate
+        # album. ``unverified`` is never relaxed -- those files map to no
+        # requested track (outside the authorized subset) -- and mismatches /
+        # not_checked were already refused above.
+        if slot_authorized and not unverified:
+            log.append(
+                "  AcoustID missing-track validation: no AcoustID result for "
+                f"{no_result} authorized track(s); merge honored under the carrier's "
+                "deterministic-metadata-slot authorization (docs/adr/0007)."
+            )
+        else:
+            reason = ("AcoustID did not confirm that the downloaded file(s) are the requested MusicBrainz "
+                      "recording(s), so they were not merged into the existing album.")
     for mismatch in mismatches[:5]:
         cand = mismatch.get("candidate") or {}
         target = mismatch.get("target") or {}
@@ -2913,6 +3078,43 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if folder_error or trusted_folder is None:
         return {"ok": False, "error": folder_error or "Source path is not allowed."}, 400
     folder_path = str(trusted_folder)
+    # ARCH-030 Step 4: an UNATTENDED recovery auto-insert is marked by
+    # recovery_carrier_id (set by the advancer; a human Review confirm never
+    # sends it). The ONLY authorization to auto-insert the staged files is the
+    # matching contract's action_allowed=True, consumed from the carrier's
+    # server-side matching_decision -- never recomputed here. action_allowed!=True
+    # refuses synchronously, before any job starts or any file is touched, and
+    # keeps the carrier in manual review with the contract's reason.
+    _recovery_auto_insert_id = _s(payload.get("recovery_carrier_id")).strip()
+    if _recovery_auto_insert_id:
+        _gate = _recovery_auto_insert_authorized(
+            folder_path, _recovery_auto_insert_id,
+            client_releasegroupid=selected_releasegroupid or raw_mb_releasegroupid,
+            client_existing_album_id=existing_album_id)
+        if not _gate.get("ok"):
+            return {"ok": False,
+                    "error": _gate.get("reason") or "recovery auto-insert not authorized",
+                    "code": _gate.get("code") or "recovery_action_not_allowed"}, 409
+        # C3: an UNATTENDED auto-insert is bound to the carrier's OWN identity.
+        # The client payload only had to pass the divergence check above; the
+        # actual target (release group / representative release / existing album
+        # / wanted subset) is re-derived here from the carrier record, so a
+        # crafted payload can never redirect the authorized insert (e.g. via a
+        # bare release UUID in a different release group).
+        _auth_carrier = _gate.get("carrier") or {}
+        raw_mb_releasegroupid = _s(_auth_carrier.get("mb_releasegroupid")).strip() or raw_mb_releasegroupid
+        raw_mb_albumid = _s(_auth_carrier.get("release_id")).strip() or raw_mb_releasegroupid
+        raw_mb_input = raw_mb_albumid or raw_mb_releasegroupid
+        mb_albumid = _extract_mb_uuid(raw_mb_input)
+        selected_releasegroupid = _extract_mb_uuid(raw_mb_releasegroupid)
+        if not selected_releasegroupid and "release-group" in raw_mb_input.casefold():
+            selected_releasegroupid = mb_albumid
+        input_looks_like_release_group = (
+            bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid)
+        existing_album_id = int(_auth_carrier.get("existing_album_id") or 0)
+        wanted_tracks = _normalise_wanted_tracks(
+            _auth_carrier.get("expected_tracks")
+            or _auth_carrier.get("wanted_tracks") or wanted_tracks)
     # F16: the caller (the Review page, or the auto-import replaying a stored
     # suggestion) proposes an identity; its evidence is never kept. The review
     # paths below queue only this, and revalidation recomputes the evidence.

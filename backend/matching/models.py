@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from .normalize import canonical_title_identity_variants, normalize_title
+
 
 class AcoustIDStatus(str, Enum):
     CONFIRMED = "confirmed"
@@ -31,8 +33,38 @@ class IdentityProof(str, Enum):
 
     INSUFFICIENT = "insufficient"
     RELEASE_GROUP_ID = "release_group_id"
+    # Strong-deterministic-metadata slot proof: the file fills one specific
+    # release-track slot proven by exact normalized title + duration within
+    # canonical tolerance + exact release-track position, with the candidate
+    # Release Group == the target's and artist matched, AND the per-file
+    # AcoustID lookup genuinely answered empty (NO_RESULT, never UNAVAILABLE).
+    # Ranked below hard per-track recording-ID/fingerprint proof and above a
+    # bare Release-Group-ID match. VERIFIED_SUBSET-only -- it never authorizes
+    # a whole-release (FULL_RELEASE) action. See docs/adr/0007-*.
+    DETERMINISTIC_METADATA_SLOT = "deterministic_metadata_slot"
     DETERMINISTIC_TRACK_RECORDING_ID = "deterministic_track_recording_id"
     CONFIRMED_RELEASE = "confirmed_release"
+
+
+#: Canonical slot-proof thresholds (docs/adr/0007-deterministic-metadata-slot-gate.md).
+#: Deliberately tight: a wrong-recording file in the right slot must not pass.
+#: Duration tolerance is seconds between the local file and the target track;
+#: the artist-text floor applies only when neither side carries an artist MBID.
+DETERMINISTIC_SLOT_DURATION_TOLERANCE_S = 7.0
+DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR = 0.85
+
+
+class CandidateRelatedness(str, Enum):
+    """How a suggestion candidate relates to a target identity (target RG +
+    artist). Used as a veto predicate for the suggestion/review candidate
+    pool: an UNRELATED candidate (neither the target Release Group nor the
+    target artist) must never be offered as the primary suggestion, however
+    well its title string happens to collide (the FLEUR "FOREVER FOREVER" vs
+    112 "Forever" title-collision case)."""
+
+    RELATED_RELEASE_GROUP = "related_release_group"
+    RELATED_ARTIST = "related_artist"
+    UNRELATED = "unrelated"
 
 
 class ActionScope(str, Enum):
@@ -87,6 +119,81 @@ class TrackAssignment:
             )
         )
 
+    def is_deterministic_metadata_slot(
+        self,
+        duration_tolerance_s: float = DETERMINISTIC_SLOT_DURATION_TOLERANCE_S,
+    ) -> bool:
+        """True when this matched assignment is strong-deterministic-metadata
+        proof for its specific release-track slot: exact normalized title,
+        exact release-track position (disc+track), measured duration within
+        the canonical tolerance, no conflicts, AND the per-file AcoustID
+        lookup genuinely answered empty (NO_RESULT).
+
+        This is the per-track half of the DETERMINISTIC_METADATA_SLOT tier;
+        the album-level half (candidate RG == target RG, artist matched, no
+        hard conflicts) is enforced in evidence.evaluate_release_group_candidate.
+        It is intentionally NOT part of `is_deterministic` -- hard per-track
+        identity (embedded recording ID / confirmed fingerprint) stays a
+        strictly stronger, separate signal.
+
+        NO_RESULT is required, never UNAVAILABLE: an answered-but-empty
+        fingerprint lookup means the recording simply is not in the AcoustID
+        database, which is compatible with a correct match; a lookup that
+        never ran (UNAVAILABLE: no key/outage) is not evidence of anything
+        and must not unlock an auto action.
+
+        F4 (orchestrator-verified): the title test is a STRICT, version-
+        PRESERVING canonical identity comparison, NOT ``title_similarity`` --
+        that field is the variant-maximized ranking score from
+        ``_title_similarity``, which deliberately strips ``(Live)``/remaster/
+        alt-take/``feat.`` text so a wrong recording ("Song (Live 2019)") can
+        normalize to the bare target title and score 1.0. The auto-accept
+        precondition must not inherit that looseness: a live take, remaster,
+        alt-take, or edit title whose version marker is absent on the target
+        is a DIFFERENT recording and must fail closed to review. Ranking
+        behavior (``title_similarity``/``_title_similarity``) is unchanged.
+
+        Option C (hybrid double-corroborate, USER-chosen): the title is proven
+        only when TWO independent sources agree with the target version-
+        preservingly -- the ORIGINAL pre-rename download name (``original_name``;
+        never the staged/renamed filename, which the system set to the target
+        and is therefore circular) AND the file's EMBEDDED title tag
+        (``embedded_title``). If EITHER is absent, or either disagrees, the slot
+        fails closed to review. A fresh download with no embedded MB tags
+        therefore cannot auto-insert -- the intended safe behavior. The embedded
+        Release-Group / artist-MBID half of the double-corroboration is enforced
+        album-level in evidence.evaluate_release_group_candidate."""
+        return bool(
+            self.status == "matched"
+            and self.acoustid_status == AcoustIDStatus.NO_RESULT
+            and not self.conflicts
+            and self.position_match
+            and self._title_double_corroborated()
+            and self.duration_delta is not None
+            and self.duration_delta <= float(duration_tolerance_s)
+        )
+
+    def _title_double_corroborated(self) -> bool:
+        """Option C title half: the version-preserving target title must equal
+        a canonical form of BOTH the ORIGINAL download name AND the embedded
+        title tag. Either source absent or disagreeing => not proven (review).
+
+        The original-name form is built from the name stem only (no title), the
+        embedded form from the title only (no path): F4 keeps the two sources
+        independent so neither can launder a version marker off the other."""
+        target_norm = normalize_title(
+            self.target_track.get("title") or self.target_track.get("mb_title") or ""
+        )
+        if not target_norm:
+            return False
+        original_name = str(self.local_track.get("original_name") or "").strip()
+        embedded_title = str(self.local_track.get("embedded_title") or "").strip()
+        if not original_name or not embedded_title:
+            return False
+        name_forms = canonical_title_identity_variants("", original_name)
+        embedded_forms = canonical_title_identity_variants(embedded_title, "")
+        return target_norm in name_forms and target_norm in embedded_forms
+
     @property
     def target_recording_id(self) -> str:
         return str(
@@ -121,6 +228,8 @@ class TrackAssignment:
             "position_match": self.position_match,
             "status": self.status,
             "acoustid_status": self.acoustid_status.value,
+            "is_deterministic": self.is_deterministic,
+            "deterministic_metadata_slot": self.is_deterministic_metadata_slot(),
             "positives": list(self.positives),
             "warnings": list(self.warnings),
             "conflicts": list(self.conflicts),
