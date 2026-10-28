@@ -101,8 +101,12 @@ class ReconcilePendingReviewTests(_CarrierStateMixin):
             return True
 
         spy = mock.MagicMock()
+        # ARCH-030 reconcile-overlap: the sweep now uses the ancestor/descendant
+        # -aware check (a Review row that is a child/parent of a scanned
+        # top-level orphan is also protected), still with the fail-closed
+        # unknown=True flag.
         with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
-                mock.patch.object(pending_review_store, "_pending_review_has_path",
+                mock.patch.object(pending_review_store, "_pending_review_has_path_or_overlap",
                                   side_effect=fake_pending), \
                 mock.patch("backend.composite_workflows.delete_file", spy):
             summary = recovery_service.reconcile_orphan_staging_folders(log=[])

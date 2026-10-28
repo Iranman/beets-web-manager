@@ -739,6 +739,33 @@ def _pending_review_has_path(folder_path: str, *, unknown: bool = False) -> bool
         return unknown
 
 
+def _pending_review_has_path_or_overlap(folder_path: str, *, unknown: bool = False) -> bool:
+    """Like ``_pending_review_has_path`` but also True when a Review row points
+    at an ANCESTOR or DESCENDANT of ``folder_path``, not only an exact match.
+
+    A caller about to DELETE ``folder_path`` (a staging-folder cleanup, or the
+    orphan-reconcile sweep over top-level staging folders) must keep it when any
+    queued Review download lives INSIDE it -- a row at ``<folder>/CD 02`` while
+    the sweep scans and would delete ``<folder>`` -- or CONTAINS it. Deleting
+    either loses a not-yet-imported download and/or orphans a Review row (#427,
+    ARCH-030 reconcile-overlap). Fail closed: an unreadable queue returns
+    ``unknown``, exactly like ``_pending_review_has_path``."""
+    key = _pending_review_path_key(folder_path)
+    if not key:
+        return False
+    try:
+        rows = _pending_review_path_set(_load_pending_reviews(strict=unknown))
+    except Exception:
+        return unknown
+    # Keys are resolved, forward-slashed and rstripped of "/", so a path
+    # boundary is exactly a "/" separator -- no false prefix match between
+    # sibling names like ".../album" and ".../album-2".
+    return any(
+        row == key or row.startswith(key + "/") or key.startswith(row + "/")
+        for row in rows
+    )
+
+
 def _pending_review_path_key(folder_path: str) -> str:
     raw = _s(folder_path).strip()
     if not raw:
