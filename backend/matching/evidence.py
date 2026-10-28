@@ -37,7 +37,18 @@ def _release_id(row: Dict[str, Any]) -> str:
 
 
 def _artist_id(row: Dict[str, Any]) -> str:
-    return _id(row.get("artist_id") or row.get("mb_artistid") or row.get("albumartist_id") or "")
+    # B5/F7 (ARCH-030): include mb_albumartistid. The canonical artist MBID a
+    # recovery candidate carries (threaded from _fetch_mb_release_tracklist's
+    # release_artist_id) lands here under mb_albumartistid; without it
+    # candidate_artist_id stayed empty and the F7 artist-contradiction / slot
+    # artist corroboration never fired.
+    return _id(
+        row.get("artist_id")
+        or row.get("mb_artistid")
+        or row.get("mb_albumartistid")
+        or row.get("albumartist_id")
+        or ""
+    )
 
 
 def _album_title(row: Dict[str, Any]) -> str:
@@ -378,12 +389,37 @@ def evaluate_release_group_candidate(
         and not conflicts
         and artist_slot_ok
     )
+
+    def _row_embedded_corroborates(row) -> bool:
+        """Option C embedded half (album-scoped identity, per present track):
+        the file's EMBEDDED Release-Group AND artist MBID must both be PRESENT
+        and equal the target (candidate) RG / artist MBID. A contradicting
+        embedded ID is already a hard conflict (F7 above) and blocks via
+        ``not conflicts``; this additionally requires PRESENCE, so a fresh
+        download carrying no embedded MB identity cannot slot-auto-insert."""
+        emb_rg = _id(
+            row.local_track.get("embedded_release_group_id")
+            or row.local_track.get("mb_releasegroupid")
+            or ""
+        )
+        emb_art = _id(
+            row.local_track.get("embedded_artist_id")
+            or row.local_track.get("mb_albumartistid")
+            or row.local_track.get("mb_artistid")
+            or ""
+        )
+        return bool(
+            emb_rg and candidate_rgid and emb_rg == candidate_rgid
+            and emb_art and candidate_artist_id and emb_art == _id(candidate_artist_id)
+        )
+
     slot_verified = sum(
         1
         for row in alignment.assignments
         if metadata_slot_album_ok
         and not row.is_deterministic
         and row.is_deterministic_metadata_slot()
+        and _row_embedded_corroborates(row)
     )
     local_tracks_verified = hard_verified + slot_verified
     local_coverage_complete = bool(local_tracks_total) and local_tracks_verified == local_tracks_total and not alignment.unmatched_local_count

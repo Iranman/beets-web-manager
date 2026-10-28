@@ -27,6 +27,7 @@ from backend.matching_contract import build_album_matching_decision
 
 RG_112 = "37cb4a72-1111-1111-1111-111111111111"
 REL_112 = "083b9009-2222-2222-2222-222222222222"
+ART_112 = "a1b2c3d4-4444-4444-4444-444444444444"
 RG_FLEUR = "2da91738-3333-3333-3333-333333333333"
 
 SUBSET_POLICY = MatchPolicy(scope=ActionScope.VERIFIED_SUBSET)
@@ -60,7 +61,22 @@ def _mb_112():
     ]
 
 
-def _file(title, track, secs, *, disc=1, acoustid_hits=None, recording_id=""):
+_UNSET = object()
+
+
+def _file(title, track, secs, *, disc=1, acoustid_hits=None, recording_id="",
+          original_name=_UNSET, embedded_title=_UNSET,
+          embedded_rg=RG_112, embedded_artist=ART_112):
+    """A staged recovery file. Option C (USER-chosen gate): a genuine recovery
+    is corroborated by TWO independent sources -- the ORIGINAL pre-rename
+    download name and the file's EMBEDDED MB tags -- so both default to the
+    genuine identity here. A test models a non-genuine file by overriding
+    ``embedded_title``/``original_name``/``embedded_*`` to disagree, or passing
+    ``None`` to drop a source entirely (absent => fail closed to review)."""
+    if original_name is _UNSET:
+        original_name = f"{track:02d} {title}.flac"
+    if embedded_title is _UNSET:
+        embedded_title = title
     row = {
         "path": f"/staged/{track:02d}-{title}.flac",
         "title": title,
@@ -72,6 +88,14 @@ def _file(title, track, secs, *, disc=1, acoustid_hits=None, recording_id=""):
     }
     if acoustid_hits is not None:
         row["acoustid_hits"] = acoustid_hits
+    if original_name is not None:
+        row["original_name"] = original_name
+    if embedded_title is not None:
+        row["embedded_title"] = embedded_title
+    if embedded_rg is not None:
+        row["embedded_release_group_id"] = embedded_rg
+    if embedded_artist is not None:
+        row["embedded_artist_id"] = embedded_artist
     return row
 
 
@@ -84,7 +108,8 @@ def _recovered_intro_outro(acoustid_hits):
 
 
 def _112_current():
-    return {"album": "Forever", "artist": "112", "mb_releasegroupid": RG_112}
+    return {"album": "Forever", "artist": "112", "mb_releasegroupid": RG_112,
+            "mb_albumartistid": ART_112}
 
 
 def _112_candidate():
@@ -95,6 +120,7 @@ def _112_candidate():
         "release_id": REL_112,
         "album": "Forever",
         "artist": "112",
+        "mb_albumartistid": ART_112,
         "tracks": _mb_112(),
     }
 

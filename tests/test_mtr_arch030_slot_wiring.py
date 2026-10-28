@@ -33,6 +33,7 @@ from backend.provider_boundary import ProviderOutcome, ProviderResult
 
 RG_112 = "37cb4a72-1111-1111-1111-111111111111"
 REL_112 = "083b9009-2222-2222-2222-222222222222"
+ART_112 = "a1b2c3d4-4444-4444-4444-444444444444"
 RG_FLEUR = "2da91738-3333-3333-3333-333333333333"
 OTHER_REC = "d0000000-0000-0000-0000-00000000000d"
 
@@ -99,7 +100,7 @@ class RecoverySlotWiring(unittest.TestCase):
         if rid != REL_112:
             return {"ok": False, "error": "not found", "tracks": []}
         return {"ok": True, "tracks": _mb_tracks(), "release_title": "Forever",
-                "release_artist": "112", "release_group": RG_112}
+                "release_artist": "112", "release_artist_id": ART_112, "release_group": RG_112}
 
     def _lookup(self, path):
         return self.outcomes.get(str(path),
@@ -135,23 +136,22 @@ class RecoverySlotWiring(unittest.TestCase):
             for p in reversed(patches):
                 p.stop()
 
-    # ── F2: the bug this feature was supposed to fix ────────────────────────
-    def test_no_result_recovery_authorized_for_wanted_subset_only(self):
+    # ── Option C: a local-scan recovery with NO embedded tags fails closed ──
+    def test_no_result_local_scan_without_embedded_tags_goes_to_review(self):
+        # The pure local-scan path cannot read the files' embedded MB tags and
+        # does not know their ORIGINAL pre-rename download names, so Option C's
+        # double-corroboration is unmet: a genuine NO_RESULT recovery here must
+        # fail closed to manual review -- the intended safe behavior. Auto-
+        # accept on this feature now requires integrations to supply
+        # file_original_names + file_embedded_ids (see
+        # RecoverySlotWiringWithCorroboration below).
         self._make_carrier()
         pre = self._preflight()
         self.assertTrue(pre.get("recovery_mode"))
-        self.assertTrue(pre["ok"], pre.get("missing_track_proof"))
-        proof = pre["missing_track_proof"]
-        self.assertTrue(proof["ok"])
-        # ONLY the two wanted missing slots are authorized -- nothing else.
-        self.assertEqual(sorted(f["track"] for f in proof["files"]), [1, 9])
-        self.assertEqual(sorted(f["recording_id"] for f in proof["files"]),
-                         sorted([REC[0], REC[8]]))
-        # The proof agrees with the contract's VERIFIED_SUBSET authority and the
-        # new tier, and never claims a FULL_RELEASE.
-        decision = pre["matching_decision"]
-        self.assertTrue(decision["action_allowed"])
-        self.assertEqual(decision["identity_proof"], IdentityProof.DETERMINISTIC_METADATA_SLOT.value)
+        self.assertFalse(pre["ok"], pre.get("missing_track_proof"))
+        self.assertEqual(pre["missing_track_proof"]["reason_code"], "file_unverified")
+        self.assertNotEqual(pre["matching_decision"].get("identity_proof"),
+                            IdentityProof.DETERMINISTIC_METADATA_SLOT.value)
 
     def test_unavailable_still_refused(self):
         self._make_carrier()
@@ -240,7 +240,7 @@ class EmbeddedContradictionBlocksPreflightSlot(unittest.TestCase):
         if rid != REL_112:
             return {"ok": False, "error": "not found", "tracks": []}
         return {"ok": True, "tracks": _mb_tracks(), "release_title": "Forever",
-                "release_artist": "112", "release_group": RG_112}
+                "release_artist": "112", "release_artist_id": ART_112, "release_group": RG_112}
 
     def _make_carrier(self):
         return rc.create_carrier(
@@ -303,18 +303,132 @@ class EmbeddedContradictionBlocksPreflightSlot(unittest.TestCase):
                          (pre.get("matching_decision") or {}).get("conflicts") or [])
 
 
+class ProofDoubleCorroborationTests(unittest.TestCase):
+    """Option C (USER-chosen gate) at the proof level: `_missing_track_
+    recording_proof` auto-accepts a genuine NO_RESULT recovery for the wanted
+    subset ONLY when integrations supplies BOTH halves of the corroboration,
+    keyed by staged path under the pinned contract field names:
+
+      - file_original_names[path]            -> original pre-rename download basename
+      - file_embedded_ids[path]              -> {"title","mb_releasegroupid",
+                                                 "mb_albumartistid","mb_artistid"}
+
+    The original-name title AND the embedded title must both match the target,
+    and the embedded Release-Group + artist MBID must be present and match. If
+    either half is absent or disagrees, the slot fails closed to review; a
+    contradicting embedded artist MBID is a hard conflict. Synthetic data only.
+    """
+
+    ALBUM = {"mb_releasegroupid": RG_112, "mb_albumid": REL_112,
+             "album": "Forever", "albumartist": "112"}
+    INTRO = "/staged/112 - Forever/01 - Forever (Intro).flac"
+    OUTRO = "/staged/112 - Forever/09 - For Us (Outro).flac"
+
+    def _wanted(self):
+        return [{"mb_trackid": REC[0], "track": 1, "disc": 1},
+                {"mb_trackid": REC[8], "track": 9, "disc": 1}]
+
+    def _existing(self):
+        # The album already holds tracks 2..8.
+        return {REC[i] for i in range(1, 8)}
+
+    def _proof(self, *, file_original_names, file_embedded_ids):
+        return ms._missing_track_recording_proof(
+            [(self.INTRO, []), (self.OUTRO, [])],  # both answered empty => NO_RESULT
+            mb_tracks=_mb_tracks(),
+            wanted_tracks=self._wanted(),
+            existing_recordings=self._existing(),
+            album_row=dict(self.ALBUM),
+            release_id=REL_112,
+            release_group_id=RG_112,
+            release_title="Forever",
+            release_artist="112",
+            release_artist_id=ART_112,
+            file_durations={self.INTRO: 42.0, self.OUTRO: 55.0},
+            file_original_names=file_original_names,
+            file_embedded_ids=file_embedded_ids,
+        )
+
+    def _genuine_names(self):
+        return {self.INTRO: "Forever (Intro).flac", self.OUTRO: "For Us (Outro).flac"}
+
+    def _genuine_embedded(self):
+        return {
+            self.INTRO: {"title": "Forever (Intro)", "mb_releasegroupid": RG_112, "mb_albumartistid": ART_112},
+            self.OUTRO: {"title": "For Us (Outro)", "mb_releasegroupid": RG_112, "mb_albumartistid": ART_112},
+        }
+
+    def test_fully_corroborated_auto_accepts_wanted_subset(self):
+        proof = self._proof(file_original_names=self._genuine_names(),
+                            file_embedded_ids=self._genuine_embedded())
+        self.assertTrue(proof["ok"], proof)
+        self.assertEqual(sorted(f["track"] for f in proof["files"]), [1, 9])
+        self.assertEqual(sorted(f["recording_id"] for f in proof["files"]),
+                         sorted([REC[0], REC[8]]))
+        self.assertEqual(proof["matching_decision"]["identity_proof"],
+                         IdentityProof.DETERMINISTIC_METADATA_SLOT.value)
+
+    def test_absent_embedded_tags_go_to_review(self):
+        # Fresh download, no readable MB tags: the intended safe behavior.
+        proof = self._proof(file_original_names=self._genuine_names(), file_embedded_ids={})
+        self.assertFalse(proof["ok"])
+        self.assertEqual(proof["reason_code"], "file_unverified")
+
+    def test_absent_original_name_goes_to_review(self):
+        proof = self._proof(file_original_names={}, file_embedded_ids=self._genuine_embedded())
+        self.assertFalse(proof["ok"])
+        self.assertEqual(proof["reason_code"], "file_unverified")
+
+    def test_version_launder_bare_name_vs_live_embedded_blocked(self):
+        # F4: a bare ORIGINAL name but a version-bearing embedded/authoritative
+        # title -> the two corroborators disagree on the version marker -> the
+        # track-number strip cannot launder the live take into the bare slot.
+        names = dict(self._genuine_names())
+        names[self.INTRO] = "01 Forever.flac"  # bare, no version marker
+        embedded = dict(self._genuine_embedded())
+        embedded[self.INTRO] = {"title": "Forever (Intro) (Live 2019)",
+                                "mb_releasegroupid": RG_112, "mb_albumartistid": ART_112}
+        proof = self._proof(file_original_names=names, file_embedded_ids=embedded)
+        self.assertFalse(proof["ok"], "a version-marker disagreement must not auto-accept")
+        self.assertEqual(proof["reason_code"], "file_unverified")
+
+    def test_contradicting_embedded_artist_is_conflict(self):
+        embedded = dict(self._genuine_embedded())
+        embedded[self.INTRO] = {"title": "Forever (Intro)", "mb_releasegroupid": RG_112,
+                                "mb_albumartistid": "ffff9999-0000-0000-0000-000000000000"}
+        proof = self._proof(file_original_names=self._genuine_names(), file_embedded_ids=embedded)
+        self.assertFalse(proof["ok"])
+        self.assertEqual(proof["reason_code"], "identity_conflict")
+
+    def test_contradicting_embedded_rg_is_conflict(self):
+        embedded = dict(self._genuine_embedded())
+        embedded[self.INTRO] = {"title": "Forever (Intro)", "mb_releasegroupid": RG_FLEUR,
+                                "mb_albumartistid": ART_112}
+        proof = self._proof(file_original_names=self._genuine_names(), file_embedded_ids=embedded)
+        self.assertFalse(proof["ok"])
+        self.assertEqual(proof["reason_code"], "identity_conflict")
+
+
 class ContractIdentityGuards(unittest.TestCase):
     """Contract-level foils the recovery authority must agree with."""
 
     def _current(self):
-        return {"album": "Forever", "artist": "112", "mb_releasegroupid": RG_112}
+        return {"album": "Forever", "artist": "112", "mb_releasegroupid": RG_112,
+                "mb_albumartistid": ART_112}
 
     def _candidate(self, rg=RG_112, rel=REL_112):
-        return {"mb_releasegroupid": rg, "mb_albumid": rel, "album": "Forever", "artist": "112"}
+        return {"mb_releasegroupid": rg, "mb_albumid": rel, "album": "Forever",
+                "artist": "112", "mb_albumartistid": ART_112}
 
     def _intro_item(self, **extra):
+        # Option C: a genuine slot carries its ORIGINAL download name and
+        # embedded title/artist (embedded RG supplied per-test via extra's
+        # mb_releasegroupid), all corroborating the target.
         row = {"title": "Forever (Intro)", "artist": "112", "disc": 1, "track": 1,
-               "length": 42.0, "acoustid_hits": []}
+               "length": 42.0, "acoustid_hits": [],
+               "original_name": "01 Forever (Intro).flac",
+               "embedded_title": "Forever (Intro)",
+               "embedded_artist_id": ART_112}
         row.update(extra)
         return row
 

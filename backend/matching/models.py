@@ -151,31 +151,48 @@ class TrackAssignment:
         precondition must not inherit that looseness: a live take, remaster,
         alt-take, or edit title whose version marker is absent on the target
         is a DIFFERENT recording and must fail closed to review. Ranking
-        behavior (``title_similarity``/``_title_similarity``) is unchanged."""
+        behavior (``title_similarity``/``_title_similarity``) is unchanged.
+
+        Option C (hybrid double-corroborate, USER-chosen): the title is proven
+        only when TWO independent sources agree with the target version-
+        preservingly -- the ORIGINAL pre-rename download name (``original_name``;
+        never the staged/renamed filename, which the system set to the target
+        and is therefore circular) AND the file's EMBEDDED title tag
+        (``embedded_title``). If EITHER is absent, or either disagrees, the slot
+        fails closed to review. A fresh download with no embedded MB tags
+        therefore cannot auto-insert -- the intended safe behavior. The embedded
+        Release-Group / artist-MBID half of the double-corroboration is enforced
+        album-level in evidence.evaluate_release_group_candidate."""
         return bool(
             self.status == "matched"
             and self.acoustid_status == AcoustIDStatus.NO_RESULT
             and not self.conflicts
             and self.position_match
-            and self._exact_canonical_title()
+            and self._title_double_corroborated()
             and self.duration_delta is not None
             and self.duration_delta <= float(duration_tolerance_s)
         )
 
-    def _exact_canonical_title(self) -> bool:
-        """Strict version-preserving title identity for the slot gate: the
-        canonical (version-preserving) target title must equal one of the
-        local title's version-preserving canonical forms exactly."""
+    def _title_double_corroborated(self) -> bool:
+        """Option C title half: the version-preserving target title must equal
+        a canonical form of BOTH the ORIGINAL download name AND the embedded
+        title tag. Either source absent or disagreeing => not proven (review).
+
+        The original-name form is built from the name stem only (no title), the
+        embedded form from the title only (no path): F4 keeps the two sources
+        independent so neither can launder a version marker off the other."""
         target_norm = normalize_title(
             self.target_track.get("title") or self.target_track.get("mb_title") or ""
         )
         if not target_norm:
             return False
-        local_forms = canonical_title_identity_variants(
-            self.local_track.get("title") or "",
-            self.local_track.get("path") or self.local_track.get("filename") or "",
-        )
-        return target_norm in local_forms
+        original_name = str(self.local_track.get("original_name") or "").strip()
+        embedded_title = str(self.local_track.get("embedded_title") or "").strip()
+        if not original_name or not embedded_title:
+            return False
+        name_forms = canonical_title_identity_variants("", original_name)
+        embedded_forms = canonical_title_identity_variants(embedded_title, "")
+        return target_norm in name_forms and target_norm in embedded_forms
 
     @property
     def target_recording_id(self) -> str:
