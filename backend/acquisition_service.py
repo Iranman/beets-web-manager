@@ -216,7 +216,32 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         m = _rg_path_re.search(v)                    # a /release-group/<uuid> path
         return m.group(1).lower() if m else ""
 
-    _requested_rgid = _canonical_rgid(data.get("mb_releasegroupid")) or _canonical_rgid(mb_albumid)
+    def _resolve_release_rgid(value: Any) -> str:
+        """C9: resolve the canonical Release Group for the dedup/resume key.
+        A bare ``mb_albumid`` is usually a RELEASE id, but a release UUID and a
+        release-group UUID are indistinguishable by shape, so ``_canonical_rgid``
+        returns the release id as-if it were the RG. create_carrier instead keys
+        on the RESOLVED rgid (read from the release's release-group), so the two
+        diverge: get_by_identity misses the carrier created under the real RG and
+        a retry mints a DUPLICATE carrier/folder. Resolve the release's canonical
+        RG up front so the dedup key, the identity-match guard and create_carrier
+        all agree. Fail-open to the bare id when MusicBrainz cannot answer (worst
+        case: a lost resume optimisation -- never block the download)."""
+        raw = _canonical_rgid(value)
+        if not raw:
+            return ""
+        try:
+            from helpers_mb import _fetch_mb_release_group_strict
+            resolved = _s(_fetch_mb_release_group_strict(raw)).strip().lower()
+        except Exception:
+            return raw
+        return resolved or raw
+
+    # An explicit mb_releasegroupid is trusted as an RG (never resolved). Only a
+    # bare mb_albumid is ambiguous, and only a recovery keys on it, so resolve
+    # there (and nowhere else -- a non-recovery keeps the fast, network-free path).
+    _requested_rgid = _canonical_rgid(data.get("mb_releasegroupid")) or (
+        _resolve_release_rgid(mb_albumid) if _is_recovery else _canonical_rgid(mb_albumid))
 
     def _carrier_identity_matches(carrier: Optional[Dict[str, Any]]) -> bool:
         """Finding A / QA-2: a client-supplied recovery_carrier_id may only be
@@ -333,6 +358,17 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     _recovery_identity_key = (
         recovery_carrier.compute_identity_key(existing_album_id, _requested_rgid, wanted_tracks)
         if _is_recovery else "")
+    # C10 (residual race): this get_by_identity runs BEFORE the job's identity
+    # workflow lock, so two concurrent duplicate requests can both read "no
+    # carrier" and both mint a fresh uuid here. That is benign and NOT fixed in
+    # this layer: the guarded job workflow below is keyed on the SAME stable
+    # identity slug, so `fail_fast_in_process` refuses the second job before it
+    # runs -- only one `_do` executes and only one carrier is ever created. This
+    # lookup is an advisory resume optimisation; the workflow lock is the actual
+    # uniqueness guarantee. Moving it under that lock means reaching into
+    # job_engine's guard acquisition (backend-architecture's) -- not a small,
+    # safe change, and unnecessary given the lock already serialises creation.
+    # ponytail: advisory pre-lock read; job workflow lock enforces uniqueness.
     if _is_recovery and not _resume_carrier_id and _recovery_identity_key:
         try:
             _by_identity = recovery_carrier.get_by_identity(identity_key=_recovery_identity_key)
@@ -751,8 +787,11 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 else job_wanted_tracks
             )
             undelivered: List[Dict[str, Any]] = []
+            had_wanted_tracks = bool(active_wanted_tracks)
             if active_wanted_tracks:
-                # Only fingerprint-verified tracks import; the rest stay missing.
+                # Only fingerprint-accepted tracks import inline; the rest stay
+                # missing. A genuine AcoustID NO_RESULT / UNAVAILABLE file is kept
+                # staged (not deleted) for the slot-gate advancer (ARCH-030 C1).
                 active_wanted_tracks, undelivered = _validate_wanted_download_identity_before_import(
                     import_dir,
                     active_wanted_tracks,
@@ -764,6 +803,28 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # checkpoints (VERIFIED/IMPORTED/PLEX_SYNCED) are advanced by the
             # downstream import/verify/Plex owners.
             _recovery_advance("downloaded", "STAGED")
+            if had_wanted_tracks and not active_wanted_tracks:
+                # ARCH-030 C1: every requested-track file returned a genuine
+                # AcoustID NO_RESULT / UNAVAILABLE and was LEFT staged (not
+                # deleted). Do NOT run the inline Beets import on unverified
+                # audio -- leave the carrier STAGED (an advancer state) so the
+                # DETERMINISTIC_METADATA_SLOT advancer gate, the sole auto-insert
+                # authority, decides accept-vs-review on the staged folder
+                # downstream. (An empty active_wanted_tracks only reaches here
+                # when files were deferred: the validator fails closed and raises
+                # when nothing verified AND nothing was deferred.)
+                log.append(
+                    f"[import] No downloaded file fingerprint-accepted; "
+                    f"{len(undelivered)} requested track(s) left staged in "
+                    f"{import_dir} for the metadata-slot recovery gate to verify."
+                )
+                return {
+                    "imported": False,
+                    "staged_for_slot_gate": True,
+                    "existing_album_id": existing_album_id,
+                    "missing_track_count": len(undelivered),
+                    "undelivered_tracks": undelivered,
+                }
             log.append(f"[import] Starting Beets import/tag/move for {import_dir}")
             import_job_id = _start_reimport_disk_job_internal(
                 import_dir, resolved_mbid, albumartist=forced_albumartist,
@@ -1328,16 +1389,55 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     return {"ok": True, "job_id": job.job_id}, 200
 
 
+def _download_identity_deferral(match: Optional[Dict[str, Any]]) -> str:
+    """Classify a downloaded file that did NOT fingerprint-accept, for the
+    download-time recovery gate (ARCH-030 C1).
+
+    Returns a non-empty reason -- ``"no_result"`` or ``"unavailable"`` -- when
+    the file must be DEFERRED (kept staged) to the downstream
+    DETERMINISTIC_METADATA_SLOT advancer gate, or ``""`` when it is a CONFLICT /
+    wrong-audio that should be deleted now. The slot gate -- not this function --
+    remains the sole auto-insert authority; deferring only keeps the file alive
+    for it.
+
+      no_result    AcoustID ran and returned no candidate. Answered-but-empty is
+                   NOT negative identity evidence, and it is exactly what the
+                   slot gate requires (NO_RESULT, never UNAVAILABLE): the file
+                   may be the correct intro/outro, so keep it staged.
+      unavailable  AcoustID could not be asked (not configured, rejected key,
+                   outage, rate limit, timeout, fpcalc missing). Not evidence of
+                   anything -- never auto-import, but never delete either; retain
+                   staged for manual review.
+      ""           AcoustID returned a candidate that contradicts the requested
+                   recording/RG (mismatch / ambiguous / candidate): wrong audio,
+                   delete as before.
+    """
+    identity = match.get("identity") if isinstance(match, dict) else None
+    if not isinstance(identity, dict):
+        return ""
+    status = _s(identity.get("acoustid_status")).strip().lower()
+    if status == "no_result":
+        return "no_result"
+    if status in ("failed", "not_attempted"):
+        return "unavailable"
+    return ""
+
+
 def _validate_wanted_download_identity_before_import(import_dir: str,
                                                      wanted_tracks: List[Dict[str, Any]],
                                                      log: list,
                                                      fallback_artist: str = "") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Require downloaded wanted-track files to fingerprint-match before import.
 
-    Returns ``(verified_tracks, undelivered_tracks)``. Files that do not
-    verify are removed from the staging folder so only verified audio reaches
-    Beets; their tracks are reported as undelivered (still missing). Raises
-    only when no requested track verified.
+    Returns ``(verified_tracks, undelivered_tracks)``. A file that AcoustID
+    actively contradicts (wrong audio) or that fails format policy is removed
+    from the staging folder so only trustworthy audio reaches Beets. A file
+    whose AcoustID lookup genuinely answered empty (NO_RESULT) or could not run
+    (UNAVAILABLE) is NOT deleted: it is left STAGED so the downstream
+    DETERMINISTIC_METADATA_SLOT advancer gate can decide accept-vs-review on it
+    (ARCH-030 C1). Undelivered tracks (including deferred ones) are reported as
+    still missing. Raises only when no requested track verified AND nothing was
+    deferred -- i.e. every file was wrong-audio/format-rejected and deleted.
     """
     wanted = _normalise_wanted_tracks(wanted_tracks)
     if not wanted:
@@ -1350,6 +1450,7 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
 
     verified: List[Dict[str, Any]] = []
     failures: List[str] = []
+    deferred: List[str] = []
     remaining = list(wanted)
 
     def _identity_log(message: str) -> None:
@@ -1388,14 +1489,36 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
                 best_ok_score = score
                 best_idx = idx
 
-        if best_idx < 0 or not _playlist_download_audio_allowed(path_value, _identity_log):
+        format_ok = _playlist_download_audio_allowed(path_value, _identity_log)
+        if best_idx < 0 or not format_ok:
+            # ARCH-030 C1: a file that did not fingerprint-accept is NOT always
+            # wrong audio. A genuine AcoustID NO_RESULT (lookup answered empty) or
+            # an UNAVAILABLE lookup (AcoustID down / not configured) may still be
+            # the correct intro/outro, and the DETERMINISTIC_METADATA_SLOT
+            # advancer gate -- the sole auto-insert authority -- needs the file
+            # STAGED to decide accept-vs-review downstream. Deleting it here (as
+            # for wrong-audio) strands that gate and fails the recovery end to
+            # end. So defer such a file: keep it staged, leave its track
+            # undelivered for now. Only a CONFLICT (AcoustID returned a candidate
+            # that contradicts the wanted recording/RG) or a format-rejected file
+            # is still deleted. A format failure is never deferred -- the slot
+            # gate only resolves identity, not format policy.
+            deferral = (_download_identity_deferral(best_any_match)
+                        if best_idx < 0 and format_ok else "")
+            if deferral:
+                deferred.append(Path(path_value).name)
+                _identity_log(
+                    "deferred requested-track download to the metadata-slot gate "
+                    f"(acoustid {deferral}): {Path(path_value).name}"
+                )
+                continue
             if best_idx >= 0:
                 detail = "format rejected"
             else:
                 detail = _playlist_identity_log(best_any_match) if best_any_match else "no identity evidence"
-            # Unverified audio never reaches Beets: drop it from the staging
-            # folder so the verified files in the batch can still import.
-            # Fail closed: if it cannot be removed, nothing imports.
+            # Wrong-audio / format-rejected audio never reaches Beets: drop it
+            # from the staging folder so the verified files in the batch can
+            # still import. Fail closed: if it cannot be removed, nothing imports.
             try:
                 composite_workflows.delete_file(path_value)
             except Exception as ex:
@@ -1433,16 +1556,24 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
 
     missing = ", ".join(_wanted_track_label(track) for track in remaining[:5])
     details = "; ".join(failures[:5])
-    if not verified:
+    if not verified and not deferred:
+        # Nothing imported and nothing staged for the slot gate: every file was
+        # wrong-audio or format-rejected and was deleted. Fail closed.
         raise RuntimeError(
             "Downloaded audio did not fingerprint-verify as requested MusicBrainz track(s)"
             + (f": {missing}" if missing else "")
             + (f" ({details})" if details else "")
         )
-    if remaining:
+    if verified and remaining:
         _identity_log(
             f"importing {len(verified)}/{len(wanted)} fingerprint-verified requested track(s); "
             f"still missing: {missing}" + (f" ({details})" if details else "")
+        )
+    elif deferred and not verified:
+        # No inline import: the deferred file(s) stay staged for the slot gate.
+        _identity_log(
+            f"no file fingerprint-accepted inline; {len(deferred)} file(s) left "
+            f"staged for the metadata-slot gate; still missing: {missing}"
         )
     return verified, remaining
 
