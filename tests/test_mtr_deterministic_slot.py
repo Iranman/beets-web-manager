@@ -187,6 +187,75 @@ class DeterministicMetadataSlotTests(unittest.TestCase):
         self.assertNotEqual(res.identity_proof, IdentityProof.DETERMINISTIC_METADATA_SLOT)
 
 
+class VersionStrippedTitleCannotAutoPassTests(unittest.TestCase):
+    """F4 (orchestrator-verified): the slot gate must use a STRICT, version-
+    PRESERVING canonical-title comparison, not the variant-maximized
+    ``_title_similarity`` ranking score. A live take / remaster / alt-take /
+    edit whose version marker is ABSENT on the target normalizes to the bare
+    title under the fuzzy ranker and would otherwise score 1.0 >= 0.999; with
+    exact position + duration within tolerance + NO_RESULT that silently
+    unlocked an UNATTENDED import of the WRONG recording. It must fail closed.
+    """
+
+    def _slot_rows(self, items):
+        res = _evaluate(items)
+        return [a for a in res.track_alignment.assignments if a.is_deterministic_metadata_slot()], res
+
+    def test_live_variant_in_bare_slot_cannot_slot_or_subset_accept(self):
+        # Target #2 is bare "Only You"; the file is "Only You (Live 2019)" at
+        # the same position, duration within tolerance, genuine NO_RESULT.
+        bad = [_file("Only You (Live 2019)", 2, 255, acoustid_hits=[])]
+        slot_rows, res = self._slot_rows(bad)
+        self.assertEqual(slot_rows, [], "a live variant must not satisfy the slot")
+        self.assertFalse(res.local_coverage_complete)
+        self.assertNotEqual(res.identity_proof, IdentityProof.DETERMINISTIC_METADATA_SLOT)
+        self.assertFalse(res.can_auto_accept(SUBSET_POLICY))
+        self.assertFalse(res.action_allowed)
+
+    def test_remaster_variant_in_bare_slot_cannot_slot(self):
+        bad = [_file("Only You (Remastered)", 2, 255, acoustid_hits=[])]
+        slot_rows, res = self._slot_rows(bad)
+        self.assertEqual(slot_rows, [])
+        self.assertFalse(res.can_auto_accept(SUBSET_POLICY))
+
+    def test_alt_take_variant_in_bare_slot_cannot_slot(self):
+        bad = [_file("Only You (Take 2)", 2, 255, acoustid_hits=[])]
+        slot_rows, res = self._slot_rows(bad)
+        self.assertEqual(slot_rows, [])
+        self.assertFalse(res.can_auto_accept(SUBSET_POLICY))
+
+    def test_edit_variant_in_bare_slot_cannot_slot(self):
+        bad = [_file("Only You (Radio Edit)", 2, 255, acoustid_hits=[])]
+        slot_rows, res = self._slot_rows(bad)
+        self.assertEqual(slot_rows, [])
+        self.assertFalse(res.can_auto_accept(SUBSET_POLICY))
+
+    def test_full_version_variant_recovery_blocked_but_genuine_exact_passes(self):
+        # Two files in the intro/outro slots: the intro is a genuine exact
+        # title (passes), the outro is a live variant of the bare... here both
+        # target titles carry their own parenthetical, so a MISMATCHED version
+        # marker on the local file must still block that slot.
+        mixed = [
+            _file("Forever (Intro)", 1, 42, acoustid_hits=[]),          # genuine exact
+            _file("For Us (Outro) (Live)", 9, 55, acoustid_hits=[]),    # extra version marker
+        ]
+        res = _evaluate(mixed)
+        slot_titles = {a.target_index for a in res.track_alignment.assignments
+                       if a.is_deterministic_metadata_slot()}
+        self.assertIn(0, slot_titles, "genuine exact intro must still slot")
+        self.assertNotIn(8, slot_titles, "a version-marked outro must not slot")
+        self.assertFalse(res.local_coverage_complete)
+        self.assertFalse(res.can_auto_accept(SUBSET_POLICY))
+
+    def test_genuine_exact_intro_outro_still_slot_and_subset_accept(self):
+        # Regression guard: the strict gate must NOT break the real recovery.
+        good = _recovered_intro_outro(acoustid_hits=[])
+        res = _evaluate(good)
+        self.assertEqual(res.identity_proof, IdentityProof.DETERMINISTIC_METADATA_SLOT)
+        self.assertTrue(res.local_coverage_complete)
+        self.assertTrue(res.can_auto_accept(SUBSET_POLICY))
+
+
 class FleurTitleCollisionTests(unittest.TestCase):
     def _fleur_candidate(self):
         return {

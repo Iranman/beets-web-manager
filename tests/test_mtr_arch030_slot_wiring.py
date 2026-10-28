@@ -197,6 +197,112 @@ class RecoverySlotWiring(unittest.TestCase):
         self.assertEqual(pre["missing_track_proof"]["reason_code"], "file_unverified")
 
 
+class EmbeddedContradictionBlocksPreflightSlot(unittest.TestCase):
+    """F5/C2 (ARCH-030): the F7 embedded-contradiction guard must be EFFECTIVE
+    on the real preflight path, not just the contract. The preflight candidate
+    rows used to drop the file's embedded Release-Group/artist identity, so a
+    mistagged staged file self-identifying as a DIFFERENT Release Group could
+    never trip F7. With the IDs threaded into ``_add_candidate``, an engine-
+    inspected file whose embedded RG contradicts the carrier target is a
+    conflict and the preflight refuses to auto-accept (identity_conflict),
+    never a silent slot.
+
+    Driven through the engine-inspection branch (no local media mount), which
+    is where embedded tag identity is actually available; synthetic data only.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._prev_dir = os.environ.get("RECOVERY_CARRIER_STATE_DIR")
+        os.environ["RECOVERY_CARRIER_STATE_DIR"] = str(Path(self.tmp) / "rc")
+        rc._store_registry.clear()
+        # Folder OUTSIDE music/downloads roots => the local walk finds nothing
+        # and the preflight falls through to the engine-inspection branch.
+        self.empty_downloads = Path(self.tmp) / "downloads_empty"
+        self.empty_downloads.mkdir(parents=True)
+        self.folder = Path(self.tmp) / "staged" / "112 - Forever - yt missing 170"
+        self.folder.mkdir(parents=True)
+        self.album = {"id": ALBUM_ID, "album": "Forever", "albumartist": "112",
+                      "mb_albumid": REL_112, "mb_releasegroupid": RG_112}
+        self.items = [{"id": i + 1, "title": _112[i][0], "track": i + 1, "disc": 1,
+                       "mb_trackid": REC[i], "path": f"/music/112/{i + 1:02d}.flac"}
+                      for i in range(1, 8)]
+
+    def tearDown(self):
+        rc._store_registry.clear()
+        if self._prev_dir is None:
+            os.environ.pop("RECOVERY_CARRIER_STATE_DIR", None)
+        else:
+            os.environ["RECOVERY_CARRIER_STATE_DIR"] = self._prev_dir
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fetch(self, rid, log=None):
+        if rid != REL_112:
+            return {"ok": False, "error": "not found", "tracks": []}
+        return {"ok": True, "tracks": _mb_tracks(), "release_title": "Forever",
+                "release_artist": "112", "release_group": RG_112}
+
+    def _make_carrier(self):
+        return rc.create_carrier(
+            existing_album_id=ALBUM_ID, mb_releasegroupid=RG_112, release_id=REL_112,
+            staged_folder_path=str(self.folder),
+            expected_tracks=[
+                {"recording_id": REC[0], "track": 1, "disc": 1, "title": "Forever (Intro)", "duration": 42000},
+            ],
+            state="downloaded",
+        )["carrier_id"]
+
+    def _inspect(self, embedded_rg):
+        # Engine inspection of the staged intro file: a genuine NO_RESULT slot
+        # on title/position/duration, but the file carries an embedded RG tag.
+        return {
+            "ok": True,
+            "path": str(self.folder),
+            "audio_files": [
+                {"relative_path": "01 - Forever (Intro).flac",
+                 "acoustid_hits": [],
+                 "properties": {"title": "Forever (Intro)", "track": 1, "disc": 1,
+                                "length": 42.0, "mb_releasegroupid": embedded_rg}},
+            ],
+        }
+
+    def _preflight(self, embedded_rg):
+        cw = ms.composite_workflows
+        patches = [
+            mock.patch.object(ms, "DOWNLOADS_ROOT", self.empty_downloads),
+            mock.patch.object(ms, "_fetch_mb_release_tracklist", side_effect=self._fetch),
+            mock.patch.object(ms, "_acoustid_multi_file", return_value={}),
+            mock.patch.object(cw, "inspect_import_source",
+                              side_effect=lambda *a, **k: self._inspect(embedded_rg)),
+            mock.patch.object(cw, "get_album", side_effect=lambda aid: dict(self.album)),
+            mock.patch.object(cw, "find_all_items_by_album_id",
+                              side_effect=lambda aid: [dict(i) for i in self.items]),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            return ms._folder_release_preflight(str(self.folder), "", log=None)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+    def test_embedded_rg_contradiction_refuses_auto_accept(self):
+        self._make_carrier()
+        pre = self._preflight(embedded_rg=RG_FLEUR)
+        self.assertTrue(pre.get("recovery_mode"))
+        self.assertFalse(pre["ok"], "a file self-identifying as a foreign RG must not auto-accept")
+        self.assertIn("file_release_group_conflict",
+                      (pre.get("matching_decision") or {}).get("conflicts") or [])
+
+    def test_embedded_rg_agreement_is_not_a_conflict(self):
+        # Control: the SAME inspection with an AGREEING embedded RG does not
+        # manufacture a conflict (F7 detects contradiction only).
+        self._make_carrier()
+        pre = self._preflight(embedded_rg=RG_112)
+        self.assertNotIn("file_release_group_conflict",
+                         (pre.get("matching_decision") or {}).get("conflicts") or [])
+
+
 class ContractIdentityGuards(unittest.TestCase):
     """Contract-level foils the recovery authority must agree with."""
 

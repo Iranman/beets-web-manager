@@ -576,6 +576,40 @@ def track_title_variants_for_matching(title: Any, path: Any = "") -> List[str]:
     return variants
 
 
+def canonical_title_identity_variants(title: Any, path: Any = "") -> List[str]:
+    """Version/recording-PRESERVING normalized local-title forms for the strict
+    DETERMINISTIC_METADATA_SLOT auto-accept gate (docs/adr/0007).
+
+    Unlike ``title_variants`` (which strips ``(Live)``/remaster/``feat.``/
+    parenthetical text to MAXIMIZE a fuzzy ranking score), these keep every
+    version/recording marker, so a live take, remaster, alt-take, or edit never
+    collapses to the bare target title. Only non-identity cruft is removed: a
+    trailing Lidarr/slskd/hash source-ID suffix and an optional leading
+    track-number prefix. The slot is proven only when the version-preserving
+    normalized TARGET title is one of these forms exactly -- never via the
+    variant-maximized ``_title_similarity`` used for candidate ranking.
+    """
+    raws: List[str] = []
+    primary = _s(title).strip()
+    if primary:
+        raws.append(primary)
+    if path:
+        stem = Path(_s(path)).stem
+        if stem:
+            raws.append(stem)
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in raws:
+        cleaned = strip_track_filename_id_suffix(raw)
+        for base in (raw, cleaned):
+            for strip_num in (False, True):
+                norm = normalize_title(base, strip_track_number=strip_num)
+                if norm and norm not in seen:
+                    seen.add(norm)
+                    out.append(norm)
+    return out
+
+
 def title_variants(title: Any, path: Any = "") -> List[str]:
     """Extract canonical title variants, incorporating both token-based and track-matching variants."""
     variants: List[str] = []

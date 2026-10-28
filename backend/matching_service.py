@@ -148,7 +148,8 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
                                    release_title: str = "",
                                    release_artist: str = "",
                                    unfingerprintable: Optional[set] = None,
-                                   file_durations: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+                                   file_durations: Optional[Dict[str, float]] = None,
+                                   file_embedded_ids: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
     """Full per-track proof for a missing-track fill of an existing album.
 
     Accepts a file as proven either by a confirmed AcoustID recording of the
@@ -190,6 +191,15 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
                      else "acoustid_unavailable")
 
     file_durations = file_durations or {}
+    # F5/C2: embedded Release-Group/artist identity per staged path, when the
+    # engine/inspection supplied it. The common fresh-download recovery path is
+    # fingerprint-only (no tag read), so this is usually empty -- and empty is
+    # correct: absence is neutral, the slot is then held by the F4 strict title
+    # + exact position + duration + genuine NO_RESULT gate, never by a tag we
+    # never read. When embedded identity IS present and contradicts the target,
+    # the row carries it so the F7 guard in backend.matching.evidence fails the
+    # slot closed to review.
+    file_embedded_ids = file_embedded_ids or {}
     wanted_keys = {_wanted_track_key(t) for t in wanted_tracks}
     used = set(existing_recordings)
     rows: List[Dict[str, Any]] = []
@@ -203,6 +213,11 @@ def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict
         measured = float(file_durations.get(_s(path)) or 0.0)
         if measured > 0:
             row["length"] = measured
+        embedded = file_embedded_ids.get(_s(path)) or {}
+        if _s(embedded.get("release_group_id")).strip():
+            row["embedded_release_group_id"] = _s(embedded.get("release_group_id")).strip().lower()
+        if _s(embedded.get("artist_id")).strip():
+            row["embedded_artist_id"] = _s(embedded.get("artist_id")).strip().lower()
         statuses = [(t, acoustid_evidence_from_hits(hits, t.get("mb_trackid"))) for t in mb_tracks if t.get("mb_trackid")]
         confirmed = [t for t, ev in statuses if ev.confirmed]
         if not confirmed:
@@ -798,7 +813,9 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     def _add_candidate(title: str, path: str = "", track: int = 0,
                        disc: int = 1, mb_trackid: str = "",
                        length: float = 0.0,
-                       acoustid_hits: Optional[List[Dict[str, Any]]] = None) -> None:
+                       acoustid_hits: Optional[List[Dict[str, Any]]] = None,
+                       embedded_release_group_id: str = "",
+                       embedded_artist_id: str = "") -> None:
         key = (_album_track_norm(title), _s(path), int(track or 0), int(disc or 1))
         if key in seen_keys:
             return
@@ -817,6 +834,18 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         # reads as UNAVAILABLE, never as negative evidence.
         if acoustid_hits is not None:
             row["acoustid_hits"] = acoustid_hits
+        # F5/C2 (ARCH-030): thread engine/tag-supplied embedded Release-Group
+        # and artist identity through so the F7 contradiction guard in
+        # backend.matching.evidence (which reads embedded_release_group_id /
+        # embedded_artist_id on each local track) is EFFECTIVE on the preflight
+        # slot path -- a mistagged file self-identifying as a different RG/
+        # artist must fail closed to review, never silently fill a slot. Absent
+        # embedded identity (the common fresh-download case) stays absent: it is
+        # neutral, never a positive, so it cannot by itself unlock auto-accept.
+        if _s(embedded_release_group_id).strip():
+            row["embedded_release_group_id"] = _s(embedded_release_group_id).strip().lower()
+        if _s(embedded_artist_id).strip():
+            row["embedded_artist_id"] = _s(embedded_artist_id).strip().lower()
         candidates.append(row)
 
     unfingerprintable: set = set()  # files fpcalc could not fingerprint (not an AcoustID failure)
@@ -872,9 +901,22 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             inspect_hits = entry.get("acoustid_hits")
             if inspect_hits is None:
                 inspect_hits = props.get("acoustid_hits")
+            # F5/C2: engine inspection reads the staged file's own embedded MB
+            # tags. Thread any embedded Release-Group / artist identity so a
+            # mistagged file that contradicts the target is caught by the F7
+            # guard (backend.matching.evidence) instead of silently slotting.
+            embedded_rg = _s(entry.get("embedded_release_group_id")
+                             or props.get("mb_releasegroupid")
+                             or props.get("embedded_release_group_id"))
+            embedded_artist = _s(entry.get("embedded_artist_id")
+                                 or props.get("mb_albumartistid")
+                                 or props.get("mb_artistid")
+                                 or props.get("embedded_artist_id"))
             _add_candidate(
                 title, rel_path, track=track, disc=disc, mb_trackid=mb_trackid, length=length,
                 acoustid_hits=inspect_hits if (fingerprint_evidence and inspect_hits is not None) else None,
+                embedded_release_group_id=embedded_rg,
+                embedded_artist_id=embedded_artist,
             )
     else:
         for fpath in audio_files:
@@ -1075,6 +1117,15 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 for c in candidates if float(c.get("length") or 0.0) > 0
             }
             proof_durations.update({p: d for p, d in file_measured_durations.items() if d > 0})
+            # F5/C2: carry any embedded Release-Group/artist identity the
+            # candidate rows picked up (engine inspection) into the proof's own
+            # rows, so the F7 contradiction guard is effective on this path too.
+            proof_embedded_ids: Dict[str, Dict[str, str]] = {}
+            for c in candidates:
+                rg = _s(c.get("embedded_release_group_id")).strip()
+                art = _s(c.get("embedded_artist_id")).strip()
+                if rg or art:
+                    proof_embedded_ids[_s(c.get("path"))] = {"release_group_id": rg, "artist_id": art}
             proof = _missing_track_recording_proof(
                 proof_file_hits,
                 mb_tracks=mb_tracks,
@@ -1087,6 +1138,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 release_artist=_s(result.get("release_artist")),
                 unfingerprintable=unfingerprintable,
                 file_durations=proof_durations,
+                file_embedded_ids=proof_embedded_ids,
             )
             result["missing_track_proof"] = {k: v for k, v in proof.items() if k != "matching_decision"}
             if proof["ok"]:

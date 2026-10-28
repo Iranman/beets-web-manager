@@ -19,6 +19,8 @@ RG_112 = "37cb4a72-1111-1111-1111-111111111111"
 REL_112 = "083b9009-2222-2222-2222-222222222222"
 RG_FLEUR = "2da91738-3333-3333-3333-333333333333"
 REL_FLEUR = "4e4e4e4e-4444-4444-4444-444444444444"
+RG_COMPILATION = "5f5f5f5f-5555-5555-5555-555555555555"
+REL_COMPILATION = "6a6a6a6a-6666-6666-6666-666666666666"
 
 
 def _cand(rel, rg, album, artist):
@@ -159,9 +161,19 @@ class FolderTrackSearchScopesToReleaseGroupTests(unittest.TestCase):
 
         def opened(service, req, timeout=0):
             captured_queries.append(urllib.parse.unquote_plus(req.full_url))
+            # The matched recording appears on TWO releases: the target-RG
+            # "Forever" release AND a foreign compilation release in a DIFFERENT
+            # Release Group. A real MB recording search returns release-group
+            # per release; the rgid: filter scoped the recording, not the
+            # releases it lists.
             body = ('{"recordings": [{"artist-credit": [{"artist": {"name": "112"}}],'
-                    ' "releases": [{"id": "' + REL_112 + '", "title": "Forever",'
-                    ' "date": "1996", "country": "US"}]}]}').encode()
+                    ' "releases": ['
+                    '{"id": "' + REL_112 + '", "title": "Forever", "date": "1996",'
+                    ' "country": "US", "release-group": {"id": "' + RG_112 + '"}},'
+                    '{"id": "' + REL_COMPILATION + '", "title": "90s R&B Hits",'
+                    ' "date": "2005", "country": "US",'
+                    ' "release-group": {"id": "' + RG_COMPILATION + '"}}'
+                    ']}]}').encode()
             return _Resp(body)
 
         with mock.patch.object(msvc, "_folder_track_search_titles", return_value=["Forever (Intro)"]), \
@@ -177,6 +189,42 @@ class FolderTrackSearchScopesToReleaseGroupTests(unittest.TestCase):
         self.assertTrue(all(f"rgid:{RG_112}" in q for q in queries),
                         f"recording query not scoped to RG: {queries}")
         self.assertTrue(all(c["mb_releasegroupid"] == RG_112 for c in cands))
+
+    def test_foreign_compilation_release_is_not_surfaced_as_target_rg(self):
+        # C6: a recording that also appears on a compilation in another Release
+        # Group must NOT be surfaced (and never relabeled) as a target-RG
+        # candidate -- the exact "incorrect album suggestions" this fixes.
+        cands, _ = self._run(RG_112)
+        rel_ids = {c["mb_albumid"] for c in cands}
+        self.assertIn(REL_112, rel_ids)
+        self.assertNotIn(REL_COMPILATION, rel_ids)
+        self.assertFalse(any(c["mb_albumid"] == REL_COMPILATION for c in cands))
+
+    def test_release_without_verifiable_rg_is_dropped_when_scoped(self):
+        # Fail closed: a release whose own release-group id is missing cannot be
+        # verified as belonging to the target RG, so it is dropped (never
+        # fabricated into it).
+        class _Resp:
+            def __init__(self, body):
+                self._body = body
+            def read(self):
+                return self._body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        def opened(service, req, timeout=0):
+            body = ('{"recordings": [{"artist-credit": [{"artist": {"name": "112"}}],'
+                    ' "releases": [{"id": "' + REL_112 + '", "title": "Forever",'
+                    ' "date": "1996", "country": "US"}]}]}').encode()
+            return _Resp(body)
+
+        with mock.patch.object(msvc, "_folder_track_search_titles", return_value=["Forever (Intro)"]), \
+                mock.patch.object(msvc.provider_boundary, "opened", side_effect=opened):
+            cands = msvc._mb_release_search_by_folder_tracks(
+                "unused", existing_album_id=112, artist="112", release_group_id=RG_112)
+        self.assertEqual(cands, [], "an unverifiable release must be dropped under rgid scope")
 
     def test_no_rg_is_unchanged_generic_matching(self):
         cands, queries = self._run("")
