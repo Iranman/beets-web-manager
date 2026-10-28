@@ -230,12 +230,50 @@ def _staging_root() -> str:
     then equal that target, so the per-child realpath/commonpath containment
     check in ``reconcile_orphan_staging_folders`` would accept the target's aged,
     unowned top-level entries for cleanup (destroying not-yet-imported downloads).
-    Failing closed on a symlinked root (``lstat`` via ``islink``, which never
-    follows the final component) keeps ``root`` the genuine staging directory, so
-    cleanup can only ever touch entries truly inside it."""
+    Failing closed on a symlinked root keeps ``root`` the genuine staging
+    directory, so cleanup can only ever touch entries truly inside it.
+
+    F2 (TOCTOU): the old ``islink(path)`` then ``realpath(path)`` were two
+    syscalls -- a symlink swapped in on the final component between them would be
+    FOLLOWED by ``realpath``. Where the platform supports fd-relative ops the
+    staging dir is now resolved through a single ``O_NOFOLLOW`` open (a symlinked
+    final component is refused atomically at open, never followed) and the
+    canonical path is read back from the held fd, not re-resolved by name.
+    Platforms without ``O_NOFOLLOW``/``dir_fd`` (e.g. Windows dev) keep the
+    best-effort ``islink`` refusal; the destructive delete there still fails
+    closed via ``composite_workflows._require_dir_fd_support``."""
     try:
         from backend.app_runtime import validated_downloads_root
-        path = str(validated_downloads_root() / "_beets_missing_import")
+        base = str(validated_downloads_root())
+        name = "_beets_missing_import"
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory = getattr(os, "O_DIRECTORY", 0)
+        if nofollow and directory and os.open in os.supports_dir_fd:
+            try:
+                parent_fd = os.open(base, os.O_RDONLY | directory | nofollow)
+            except OSError:
+                return ""
+            try:
+                try:
+                    fd = os.open(name, os.O_RDONLY | directory | nofollow,
+                                 dir_fd=parent_fd)
+                except OSError:
+                    # ELOOP (symlinked root), ENOENT, ENOTDIR -> fail closed.
+                    return ""
+                try:
+                    # Canonical path of the exact opened inode (pinned by the
+                    # held fd), never a by-name re-resolution.
+                    return os.readlink(f"/proc/self/fd/{fd}")
+                except OSError:
+                    # No /proc read-back: the open already refused a symlinked
+                    # final component, so a plain realpath here cannot be
+                    # redirected by a root symlink (there is none).
+                    return os.path.realpath(os.path.join(base, name))
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(parent_fd)
+        path = os.path.join(base, name)
         if os.path.islink(path):
             return ""
         return os.path.realpath(path)
@@ -243,7 +281,16 @@ def _staging_root() -> str:
         return ""
 
 
-def _live_carrier_prefixes(limit: int = 500) -> Dict[str, str]:
+# The live-carrier set is read in a single pass (the carrier store has no
+# offset/pagination). A deployment's in-flight recoveries are far below this,
+# but if the live set ever exceeds it the read FAILS CLOSED (below) rather than
+# silently omitting carriers -- never a fail-open truncation.
+# ponytail: single-pass cap + fail-closed; add real pagination if the live set
+# ever approaches this.
+_LIVE_CARRIER_SCAN_LIMIT = 100_000
+
+
+def _live_carrier_prefixes(limit: Optional[int] = None) -> Dict[str, str]:
     """``rec-<identity_key[:16]>`` -> carrier_id for every NON-terminal carrier,
     so a Step-3-scheme orphan folder whose deterministic prefix matches a live
     carrier can be ADOPTED (re-bound) instead of re-minted. The identity comes
@@ -254,11 +301,25 @@ def _live_carrier_prefixes(limit: int = 500) -> Dict[str, str]:
     swallowed into an empty map. An empty return therefore means "store read OK,
     no live carriers", which is a trustworthy negative; a raise means "ownership
     UNKNOWN", which the caller treats as not-deletable (a folder matching an
-    unread live-carrier prefix must not be mistaken for unowned)."""
+    unread live-carrier prefix must not be mistaken for unowned).
+
+    F7sec/C11 (no fail-open past the cap): the old fixed 500 cap silently dropped
+    carriers beyond it, so their folders were treated as UNOWNED and could be
+    swept -- a fail-open that contradicts F8. The read now covers the whole live
+    set and, if it is larger than one pass can return (the store has no offset),
+    RAISES so the caller fails closed for the run rather than omitting owners."""
     out: Dict[str, str] = {}
+    cap = int(limit if limit is not None else _LIVE_CARRIER_SCAN_LIMIT)
     live_states = [s for s in recovery_carrier.CARRIER_STATES
                    if s not in recovery_carrier.TERMINAL_STATES]
-    for c in recovery_carrier.list_carriers_by_state(live_states, limit=limit):
+    rows = recovery_carrier.list_carriers_by_state(live_states, limit=cap)
+    if len(rows) >= cap:
+        # Truncated: there may be live carriers we did not see. Ownership is
+        # UNKNOWN for this run -> fail closed (caller skips every delete).
+        raise RuntimeError(
+            "live-carrier set exceeds the single-pass scan limit; "
+            "ownership unknown this run (fail closed)")
+    for c in rows:
         key = _s(c.get("recovery_identity_key")).strip().lower()
         if key:
             out.setdefault("rec-" + key[:16], _s(c.get("carrier_id")))
@@ -313,9 +374,13 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
         return summary
     now = time.time()
     cap = int(max(1, limit))
+    # C11: the cap bounds how many ORPHAN DELETES one run performs, not how many
+    # entries it examines. The old `scanned >= cap` top-break counted kept and
+    # adopted folders against the cap and stopped mid-directory, so orphans
+    # sitting behind a run of live/kept folders were never examined. Adoption and
+    # keep are cheap, idempotent store lookups; only the delete is bounded here.
+    cleanup_deletes = 0
     for entry in entries:
-        if summary["scanned"] >= cap:
-            break
         # Immediate child directories only; a symlinked child is never followed.
         try:
             if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
@@ -370,6 +435,17 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
             log.append(f"[recovery-reconcile] skipped {entry.name} "
                        f"(carrier-store unavailable: {store_err}).")
             continue
+        # F6/C4 (#427 parity): recovery AND ordinary review imports both stage
+        # into _beets_missing_import, so a staged folder can be queued for human
+        # Review with no carrier binding. Deleting it would lose a not-yet-
+        # imported download and leave a dangling Review row. Apply the SAME check
+        # import_service._delete_staged_import_folder uses: keep on a positive
+        # match AND fail closed on an unreadable queue (`unknown=True`).
+        from backend.pending_review_store import _pending_review_has_path
+        if _pending_review_has_path(child, unknown=True):
+            summary["kept"] += 1
+            log.append(f"[recovery-reconcile] kept {entry.name} (queued for Review).")
+            continue
         # CLEANUP: no carrier owns it. Age guard against an in-flight download.
         try:
             if now - os.stat(child).st_mtime < ORPHAN_MIN_AGE_S:
@@ -378,6 +454,11 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
         except OSError:
             summary["skipped"] += 1
             continue
+        # C11: only actual deletes count against the bounded cap; defer the rest
+        # to the next run rather than dragging the whole backlog into one sweep.
+        if cleanup_deletes >= cap:
+            break
+        cleanup_deletes += 1
         try:
             res = composite_workflows.delete_file(child)
             if res.get("deleted"):
