@@ -345,10 +345,9 @@ def index():
 @app.get("/assets/<path:filename>")
 def react_assets(filename):
     """Serve built frontend asset chunks at /assets/<file>."""
-    for base in (REACT_DIST_DIR / "assets",):
-        target = _safe_static_file(base, filename)
-        if target:
-            return send_file(target)
+    target = _safe_static_file(REACT_DIST_DIR / "assets", filename)
+    if target:
+        return send_file(target)
     abort(404)
 
 

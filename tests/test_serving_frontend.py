@@ -91,7 +91,14 @@ class ServingTests(_AppTestEnv):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.mimetype, "text/html")
         self.assertIn("SPA-TEST-ENTRYPOINT", resp.get_data(as_text=True))
-        self.assertIn("no-store", resp.headers.get("Cache-Control", ""))
+        # The entrypoint itself must never be cached: a stale shell after a
+        # deploy points at chunks the new build no longer has.
+        self.assertEqual(
+            resp.headers.get("Cache-Control"),
+            "no-store, no-cache, must-revalidate, max-age=0",
+        )
+        self.assertEqual(resp.headers.get("Pragma"), "no-cache")
+        self.assertEqual(resp.headers.get("Expires"), "0")
 
     def test_deep_link_fallback_serves_the_spa_entrypoint(self):
         with self._install_dist():
@@ -153,7 +160,8 @@ class ServingTests(_AppTestEnv):
         self.assertNotIn("<img", body)
         self.assertNotIn("src=", body)
         self.assertNotIn("href=", body)
-        self.assertIn("no-store", resp.headers.get("Cache-Control", ""))
+        # An operator who fixes the build must not have to defeat a cached 503.
+        self.assertEqual(resp.headers.get("Cache-Control"), "no-store")
 
     def test_empty_entrypoint_counts_as_a_missing_build(self):
         with self._install_dist(index_html=""):

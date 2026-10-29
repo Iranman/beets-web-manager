@@ -84,7 +84,7 @@ class SecurityHardeningTests(unittest.TestCase):
         self.assertIn("def _safe_static_file", APP)
         self.assertIn('".." in candidate.parts', APP)
         self.assertIn("target.relative_to(root)", APP)
-        self.assertIn("target = _safe_static_file(base, filename)", APP)
+        self.assertIn('target = _safe_static_file(REACT_DIST_DIR / "assets", filename)', APP)
         self.assertIn('target = _safe_static_file(REACT_DIST_DIR / "_next" / "static", filename)', APP)
         self.assertNotIn("target = base / filename", APP)
 
