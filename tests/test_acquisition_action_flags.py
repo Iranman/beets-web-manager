@@ -11,7 +11,10 @@ class AcquisitionActionFlagTests(unittest.TestCase):
         app_path = Path(__file__).resolve().parents[1] / "app.py"
         source = app_family_source()
 
-        self.assertIn("def _acq_can_import_disk", source)
+        # Acquire is a download surface: disk-import rows are hardcoded to
+        # False here (Review/Library cleanup own them), so the old
+        # _acq_can_import_disk helper had no caller left and was removed.
+        self.assertIn("can_import_disk = False", source)
         self.assertIn("def _acq_can_download", source)
         self.assertIn('"can_download": can_download', source)
         self.assertIn('"can_import_disk": can_import_disk', source)

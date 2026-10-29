@@ -2070,15 +2070,6 @@ def _acq_item_mbid(item: Dict[str, Any]) -> str:
               or _acq_release_group_url(wanted.get("mb_releasegroupid")) or "")
 
 
-def _acq_can_import_disk(item: Dict[str, Any]) -> bool:
-    local = item.get("local") or {}
-    health = local.get("health") or {}
-    if health.get("leftover_only_complete"):
-        return False
-    not_imported = int(health.get("not_imported") or 0)
-    return bool(local.get("aldir") and local.get("album_id") and _acq_item_mbid(item) and not_imported)
-
-
 def _acq_can_download(item: Dict[str, Any]) -> bool:
     mbid = _acq_item_mbid(item)
     if not mbid:
