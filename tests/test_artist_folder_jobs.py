@@ -34,7 +34,7 @@ class ArtistFolderJobsTests(unittest.TestCase):
             client_source.index("export function scanArtistFolders"):
             client_source.index("export function mergeArtistFolders")
         ]
-        clean_source = (root / "frontend" / "src" / "views" / "Clean.tsx").read_text(encoding="utf-8")
+        jobs_source = (root / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encoding="utf-8")
 
         self.assertIn("jobs.start_python(", scan_route)
         self.assertIn('"type": "artist-folder-scan"', scan_route)
@@ -94,9 +94,16 @@ class ArtistFolderJobsTests(unittest.TestCase):
         self.assertIn("navigate(jobsUrl(activeJobId))", panel_source)
         self.assertIn("JobStatusCard job={scanJob}", panel_source)
         self.assertIn("beets:jobs-changed", panel_source)
-        self.assertIn("CLEAN_JOB_TAB_RULES", clean_source)
-        self.assertIn("artist-folder-scan", clean_source)
-        self.assertIn("stamp-mbid-folders", clean_source)
+        # The panel is only useful if a routed view hosts it: Jobs is the only
+        # host now that the legacy Clean view (and its job-to-tab rule map) is
+        # gone. The job type strings themselves come from the backend job
+        # record the panel polls, so reachability plus the polling wiring
+        # above is the contract that has to hold.
+        self.assertIn(
+            "import { ArtistFoldersPanel } from '../features/artistfolders/ArtistFoldersPanel';",
+            jobs_source,
+        )
+        self.assertIn("<ArtistFoldersPanel />", jobs_source)
         self.assertIn("Same-ID folders merge", panel_source)
 
 
