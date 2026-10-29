@@ -58,6 +58,17 @@ Beets runs inside Web Manager, which checks it at startup. `GET /api/health` lis
 
 ---
 
+### 3a. Every page returns 503 "The web frontend build is missing"
+
+* **Cause**: `frontend/dist/index.html` is absent or empty in the container. The published image copies the build in (`COPY --from=frontend /src/frontend/dist ./frontend/dist`), so this normally means a source build that skipped the frontend stage, or a bind mount shadowing `/app/frontend`.
+* **Fix**:
+  1. Prefer the published image (`ghcr.io/iranman/beets-web-manager`); it always ships the build.
+  2. For a source build, run it through the Dockerfile (`docker compose -f docker-compose.dev.yml up -d --build`) rather than mounting a source checkout over `/app`; the frontend stage runs `npm ci && npm run build`.
+  3. Check your Compose file for a bind mount that lands on `/app/frontend` and remove or re-point it.
+* **What still works**: real API routes are served by their own handlers, so `/api/health` stays up and container healthchecks keep passing. Unknown `/api/*` paths answer 503 with `{"ok": false, "error": "frontend_missing", ...}` while the build is missing, and 404 once it is present.
+
+---
+
 ### 4. Setting up administrator password
 * **First Run**: Open `http://<server-ip>:8337` in your browser. The setup wizard lets you set your username and password directly.
 * **Reset Password**: You can set `BEETS_WEB_PASSWORD` in your Compose environment variables or remove `./web-manager/.browser_password` to re-trigger the initial setup.

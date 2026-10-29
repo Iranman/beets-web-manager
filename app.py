@@ -97,8 +97,12 @@ from backend.app_runtime import register_flask_app
 
 register_flask_app(app)
 APP_ROOT = Path(__file__).parent
+# The modern frontend is the only UI: the Next static export built into
+# frontend/dist (the Dockerfile's frontend stage copies it into the image).
+# There is no legacy static fallback: when the build is missing or empty, the
+# UI routes answer 503 (see the HTML section below) instead of silently
+# serving an old UI.
 REACT_DIST_DIR = APP_ROOT / "frontend" / "dist"
-LEGACY_STATIC_DIR = APP_ROOT / "static"
 _DEFAULT_MAX_CONTENT_LENGTH = 64 * 1024 * 1024
 
 _FLASK_SECRET_KEY_FILE = Path(os.environ["BEETS_WEB_SECRET_KEY_FILE"]) if os.environ.get("BEETS_WEB_SECRET_KEY_FILE", "").strip() else (WEB_MANAGER_DATA_DIR / ".flask_secret_key")
@@ -340,11 +344,10 @@ def index():
 
 @app.get("/assets/<path:filename>")
 def react_assets(filename):
-    """Serve Vite-built JS/CSS chunks at /assets/<file>."""
-    for base in (REACT_DIST_DIR / "assets", LEGACY_STATIC_DIR / "assets"):
-        target = _safe_static_file(base, filename)
-        if target:
-            return send_file(target)
+    """Serve built frontend asset chunks at /assets/<file>."""
+    target = _safe_static_file(REACT_DIST_DIR / "assets", filename)
+    if target:
+        return send_file(target)
     abort(404)
 
 
@@ -361,7 +364,6 @@ def react_next_static(filename):
 def favicon():
     for icon_path in (
         REACT_DIST_DIR / "favicon.ico",
-        LEGACY_STATIC_DIR / "favicon.ico",
         APP_ROOT / "favicon.ico",
     ):
         if icon_path.exists() and icon_path.is_file():
@@ -455,22 +457,41 @@ _recovery_service.start_recovery_advance_schedule()
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
 
+# The legacy single-file fallback UI is gone; the Next static export in
+# frontend/dist is the only UI. A missing or empty build is an operator error
+# that must be visible, not an invitation to silently serve something else:
+# UI routes answer 503 with this tiny inline page (no chrome, no external
+# assets), unknown /api/* paths reach the SPA catch-all with a 503 JSON body
+# and the same message. Real /api/* endpoints (health, setup, ...) are served
+# by their own routes and are unaffected by a missing build.
+_FRONTEND_MISSING_MESSAGE = "The web frontend build is missing. Rebuild or reinstall the application."
+_FRONTEND_MISSING_HTML = (
+    '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+    '<title>Web frontend build is missing</title></head><body>'
+    f'<p>{_FRONTEND_MISSING_MESSAGE}</p></body></html>'
+)
+
+
 def render_index():
-    import json
-    ef_js = json.dumps([[f, l] for f, l in EDITABLE_FIELDS])
-    for index_path in (
-        REACT_DIST_DIR / "index.html",
-        LEGACY_STATIC_DIR / "index.html",
-        APP_ROOT / "index.html",
-    ):
-        if index_path.exists():
-            template = index_path.read_text(encoding="utf-8")
-            return template.replace("__EDITABLE_FIELDS__", ef_js)
-    abort(404)
+    """The SPA entrypoint's HTML; None when the frontend build is absent/empty."""
+    index_path = REACT_DIST_DIR / "index.html"
+    try:
+        template = index_path.read_text(encoding="utf-8") if index_path.is_file() else None
+    except OSError:
+        template = None
+    if template is not None and not template.strip():
+        # An empty/blank entrypoint is as good as no build.
+        template = None
+    return template
 
 
 def react_index_response():
-    response = Response(render_index(), mimetype="text/html")
+    template = render_index()
+    if template is None:
+        response = Response(_FRONTEND_MISSING_HTML, status=503, mimetype="text/html")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    response = Response(template, mimetype="text/html")
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
@@ -480,7 +501,16 @@ def react_index_response():
 @app.get("/<path:spa_path>")
 def react_spa_fallback(spa_path):
     """Let direct browser loads of React routes resolve to the SPA entrypoint."""
-    if spa_path.startswith("api/") or spa_path.startswith("assets/") or spa_path.startswith("_next/"):
+    if spa_path.startswith("api/"):
+        # Unknown /api/* route. While the frontend build is present this stays
+        # the ordinary 404; with the build missing, the frontend_missing JSON
+        # (503) tells the caller why no UI is being served.
+        if render_index() is not None:
+            abort(404)
+        response = jsonify({"ok": False, "error": "frontend_missing", "message": _FRONTEND_MISSING_MESSAGE})
+        response.status_code = 503
+        return response
+    if spa_path.startswith("assets/") or spa_path.startswith("_next/"):
         abort(404)
     return react_index_response()
 
