@@ -665,20 +665,6 @@ def _art_repair_attach_last_run(report: Dict[str, Any],
     return out
 
 
-def _album_art_clear_pointer(aid: int, album, log: List[str]) -> None:
-    try:
-        composite_workflows.clear_album_artpath(aid)
-    except Exception as ex:
-        log.append(f"  artpath clear warning: {ex}")
-
-
-def _album_art_set_pointer(aid: int, path: str, log: List[str]) -> None:
-    try:
-        composite_workflows.set_album_artpath(aid, _s(path))
-    except Exception as ex:
-        log.append(f"  artpath restore warning: {ex}")
-
-
 def _album_art_quarantine_current(aid: int, album, trash_root: Path, log: List[str]) -> Dict[str, Any]:
     aldir = _album_dir_for_art(album)
     current = _album_stored_art_path(album)
@@ -842,23 +828,6 @@ def _fetch_album_art(artist: str, album: str) -> str:
     except Exception:
         pass
     return ""
-
-
-def _album_art_ext_for_bytes(data: bytes, content_type: str = "") -> str:
-    """Return a supported cover-art extension for validated bytes."""
-    ctype = (content_type or "").split(";", 1)[0].strip().lower()
-    if data.startswith(b"\xff\xd8\xff"):
-        return ".jpg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return ".png"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return ".webp"
-    return {
-        "image/jpeg": ".jpg",
-        "image/jpg": ".jpg",
-        "image/png": ".png",
-        "image/webp": ".webp",
-    }.get(ctype, "")
 
 
 _ALBUM_ART_UPLOAD_MAX_BYTES = 15 * 1024 * 1024

@@ -406,28 +406,6 @@ def _cleanup_initial_browser_password_if_replaced() -> None:
             pass
 
 
-def _prune_empty_review_dirs(folder: Path, touched_dirs: Iterable[Path]) -> None:
-    try:
-        folder = folder.resolve(strict=False)
-    except Exception:
-        pass
-    for directory in sorted(set(touched_dirs), key=lambda p: len(p.parts), reverse=True):
-        current = directory
-        for _ in range(12):
-            try:
-                resolved = current.resolve(strict=False)
-                if resolved == folder or not _path_is_under(resolved, folder):
-                    break
-                resolved.rmdir()
-                current = resolved.parent
-            except Exception:
-                break
-    try:
-        folder.rmdir()
-    except Exception:
-        pass
-
-
 def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str]:
     """Classify an Apply failure into (error_kind, user-facing message).
 
@@ -1949,18 +1927,6 @@ def _album_cleanup_folder_record(album_dir: Path, db_index: Dict[str, Any]) -> D
 def _album_cleanup_issue_id(paths: Iterable[str], canonical: str, issue_types: Iterable[str]) -> str:
     material = "|".join(sorted(_s(p) for p in paths)) + "|" + _s(canonical) + "|" + ",".join(sorted(issue_types))
     return hashlib.sha1(material.encode("utf-8", errors="ignore")).hexdigest()[:16]
-
-
-def _album_cleanup_artwork_to_move(records: List[Dict[str, Any]], canonical_path: str) -> int:
-    return len(_album_cleanup_merge_plan(records, canonical_path).get("artwork_files_to_move") or [])
-
-
-def _album_cleanup_source_audio_count(records: List[Dict[str, Any]], canonical_path: str) -> int:
-    plan = _album_cleanup_merge_plan(records, canonical_path)
-    return len(plan.get("audio_files_to_move") or []) + sum(
-        1 for item in plan.get("duplicate_files_to_quarantine") or []
-        if _s(item.get("reason")).endswith("audio")
-    )
 
 
 def _album_cleanup_canonical_candidates(records: List[Dict[str, Any]]) -> List[Dict[str, str]]:

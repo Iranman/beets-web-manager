@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import PLAYLIST_DOWNLOAD_ALLOWED_ROOTS
 from backend.app_runtime import _app_logger, AUDIO_EXT, LIB_PATH, MUSIC_ROOT, PLAYLIST_AUTO_SYNC_ENABLED, PLAYLIST_AUTO_SYNC_INTERVAL, PLAYLIST_LEGACY_IMPORT_DIR, PLAYLIST_DOWNLOAD_BATCH_SIZE, PLAYLIST_DOWNLOAD_METHODS, PLAYLIST_DOWNLOAD_ROOT, PLAYLIST_EXPORTS_DIR, PLAYLIST_JOB_STATE_DIR, PLAYLIST_MANIFESTS_DIR, PLAYLIST_MEMBERSHIP_DIR, PLAYLIST_MIN_DOWNLOAD_SECONDS, PLAYLIST_PIPELINE_STATES, PLAYLIST_STATE_ROOT, PLEX_API_TIMEOUT, PLEX_PLAYLIST_CHUNK_SIZE, PLEX_SCAN_TIMEOUT, PLEX_SYNC_MAX_UNMATCHED_REPLACE, PLEX_SYNC_MIN_MATCH_RATIO, _MB_UUID_RE, _s, _up, _ur, _ytdlp_ready
 from backend.ytdlp_service import _apply_ytdlp_netrc, _download_method_label, _spotiflac_missing_tracks_download, _ytdlp_js_runtime_options, _ytdlp_missing_tracks_download, _ytdlp_remote_components, _ytdlp_source_extractor_args
-from backend.app_runtime import _norm, _path_is_under, _redact_security_text, _safe_path_component
+from backend.app_runtime import _norm, _redact_security_text, _safe_path_component
 from backend.audio_preferences import load_music_format_preferences as _load_music_format_preferences, validate_audio_file as _validate_audio_file_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release
 from backend.beets_adapter import beets_adapter, lib, BeetsUnavailableError
@@ -1534,13 +1534,6 @@ def _playlist_ensure_stable_id(name: str,
         return pid
 
 
-def _playlist_stable_id(name: str,
-                        manifest: Optional[Dict[str, Any]] = None,
-                        provider_id: Optional[str] = None,
-                        playlist_id: Optional[str] = None) -> str:
-    return _playlist_ensure_stable_id(name, manifest=manifest, provider_id=provider_id, playlist_id=playlist_id)
-
-
 def _playlist_key(name: str,
                   manifest: Optional[Dict[str, Any]] = None,
                   provider_id: Optional[str] = None,
@@ -1645,20 +1638,12 @@ def _playlist_staging_root_arg(name: str, playlist_id: Optional[str] = None) -> 
     return {"name": name, "playlist_id": playlist_id} if playlist_id else name
 
 
-def _playlist_staging_dir(name: str, playlist_id: Optional[str] = None) -> Path:
-    return get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id))
-
-
 def _playlist_downloads_dir(name: str, playlist_id: Optional[str] = None) -> Path:
     return get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id)) / "downloads"
 
 
 def _playlist_imports_dir(name: str, playlist_id: Optional[str] = None) -> Path:
     return get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id)) / "imports"
-
-
-def _playlist_staging_manifest_path(name: str, playlist_id: Optional[str] = None) -> Path:
-    return get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id)) / "manifest.json"
 
 
 class PlaylistStagingUnavailableError(RuntimeError):
@@ -1709,132 +1694,6 @@ def _playlist_ensure_staging_dirs(name: str, playlist_id: Optional[str] = None) 
         raise PlaylistStagingUnavailableError(
             "Engine did not confirm playlist staging directories"
         )
-
-
-def _playlist_legacy_staging_dirs(name: str) -> List[Path]:
-    clean_name = _clean_playlist_name(name)
-    stable_root = get_playlist_staging_root(clean_name).resolve(strict=False)
-    if not PLAYLIST_DOWNLOAD_ROOT.exists():
-        return []
-    prefixes = {f"{clean_name} - "}
-    dirs: List[Path] = []
-    for path in PLAYLIST_DOWNLOAD_ROOT.iterdir():
-        if not path.is_dir():
-            continue
-        try:
-            if path.resolve(strict=False) == stable_root:
-                continue
-        except Exception:
-            pass
-        if any(path.name.startswith(prefix) for prefix in prefixes):
-            dirs.append(path)
-    return sorted(dirs, key=lambda item: item.name.lower())
-
-
-def _playlist_unique_staging_destination(dest_dir: Path, filename: str) -> Path:
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    base = dest_dir / filename
-    if not base.exists():
-        return base
-    stem = base.stem
-    suffix = base.suffix
-    for idx in range(2, 1000):
-        candidate = dest_dir / f"{stem} ({idx}){suffix}"
-        if not candidate.exists():
-            return candidate
-    return dest_dir / f"{stem}-{int(time.time())}{suffix}"
-
-
-def _playlist_normalize_staged_file(name: str, path: Path, log=None) -> Path:
-    source = Path(path)
-    downloads_dir = _playlist_downloads_dir(name)
-    try:
-        resolved = source.resolve(strict=False)
-        if _path_is_under(resolved, downloads_dir.resolve(strict=False)):
-            return source
-        if _path_is_under(resolved, MUSIC_ROOT.resolve(strict=False)):
-            return source
-        if not _path_is_under(resolved, PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)):
-            return source
-    except Exception:
-        return source
-    if not source.exists() or not source.is_file():
-        return source
-    destination = downloads_dir / source.name
-    if destination.exists():
-        try:
-            if destination.stat().st_size == source.stat().st_size:
-                if log:
-                    log(f"  Reconcile: skipped duplicate staged file already in downloads/: {source.name}")
-                return destination
-        except Exception:
-            pass
-        destination = _playlist_unique_staging_destination(downloads_dir, source.name)
-    try:
-        downloads_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(destination))
-        if log:
-            log(f"  Reconcile: moved staged file into stable downloads/: {destination.name}")
-        return destination
-    except Exception as exc:
-        if log:
-            log(f"  Reconcile: could not move staged file {source.name}: {exc}")
-        return source
-
-
-def _playlist_sync_staging_manifest(name: str, manifest: Dict[str, Any], *, log=None) -> None:
-    clean_name = _clean_playlist_name(name)
-    payload_manifest = dict(manifest or {})
-    states = payload_manifest.get("track_states") if isinstance(payload_manifest.get("track_states"), dict) else {}
-    desired = _playlist_clean_track_list(payload_manifest.get("desired_tracks") or [])
-    rows: Dict[str, Dict[str, Any]] = {}
-    for track in desired:
-        key = _playlist_status_id(track)
-        state = states.get(key) if isinstance(states.get(key), dict) else {}
-        row = {**_playlist_track_manifest_payload(track), **state}
-        row["id"] = key
-        row["status"] = _s(row.get("status") or "missing")
-        rows[key] = row
-    for key, state in states.items():
-        if isinstance(state, dict) and key not in rows:
-            row = dict(state)
-            row["id"] = _s(row.get("id") or key)
-            rows[key] = row
-    payload = {
-        "version": 1,
-        "playlist_id": _playlist_stable_id(clean_name, payload_manifest),
-        "playlist_name": clean_name,
-        "staging_root": str(get_playlist_staging_root(clean_name)),
-        "downloads_dir": str(_playlist_downloads_dir(clean_name)),
-        "imports_dir": str(_playlist_imports_dir(clean_name)),
-        "updated_at": time.time(),
-        "tracks": list(rows.values()),
-    }
-    try:
-        _playlist_ensure_staging_dirs(clean_name)
-        _playlist_atomic_json_replace(
-            _playlist_staging_manifest_path(clean_name),
-            payload,
-            save_key=f"{_playlist_slug(clean_name)}.staging",
-            label="playlist staging manifest",
-            indent=2,
-            sort_keys=True,
-        )
-    except Exception as exc:
-        if log is not None:
-            log.append(f"  [playlist] staging manifest save failed: {exc}")
-
-
-def _playlist_staging_payload(name: str, manifest: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    clean_name = _clean_playlist_name(name)
-    return {
-        "playlist_id": _playlist_stable_id(clean_name, manifest),
-        "staging_root": str(get_playlist_staging_root(clean_name)),
-        "staging_downloads": str(_playlist_downloads_dir(clean_name)),
-        "staging_imports": str(_playlist_imports_dir(clean_name)),
-        "staging_manifest": str(_playlist_staging_manifest_path(clean_name)),
-        "old_staging_folder_count": len(_playlist_legacy_staging_dirs(clean_name)),
-    }
 
 
 def _plex_playlist_uri(machine_id: str, keys: List[str]) -> str:
@@ -3273,14 +3132,6 @@ def _playlist_item_from_text(artist: str, title: str, index: Dict[str, Any]) -> 
     return None
 
 
-def _playlist_parse_extinf_label(line: str) -> tuple:
-    label = _s(line).split(",", 1)[1].strip() if "," in _s(line) else ""
-    if " - " in label:
-        artist, title = label.split(" - ", 1)
-        return artist.strip(), title.strip()
-    return "", label.strip()
-
-
 def _playlist_m3u_items(name: str, index: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
     clean_name = _clean_playlist_name(name)
     key = _playlist_existing_key(clean_name)
@@ -3437,19 +3288,6 @@ def _playlist_match_reference_tracks(tracks: Iterable[Dict[str, Any]],
         else:
             missing.append(track_payload)
     return matched, missing
-
-
-def _playlist_append_external_additions(primary: List[Dict[str, Any]],
-                                        external: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out = list(primary or [])
-    seen = {_playlist_item_identity(item) for item in out}
-    for item in external or []:
-        key = _playlist_item_identity(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(item)
-    return out
 
 
 _PLAYLIST_LEGACY_LEDGER = "legacy_imports.json"
@@ -5799,65 +5637,6 @@ def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     return {"ok": True, "job_id": jid, "jobs_job_id": job.job_id}, 200
 
 
-def _playlist_quality_row_payload(row: sqlite3.Row) -> Dict[str, Any]:
-    path_text = _s(row["path"])
-    item = type("PlaylistQualityRow", (), {})()
-    row_keys = set(row.keys())
-    for field in (
-        "id", "title", "artist", "album", "albumartist", "length", "bitrate",
-        "format", "path", "mb_trackid", "mb_albumid", "track", "disc", "year",
-        "added",
-    ):
-        try:
-            setattr(item, field, row[field] if field in row_keys else "")
-        except Exception:
-            setattr(item, field, "")
-    payload = {
-        "id": int(row["id"] or 0),
-        "title": _s(row["title"]),
-        "artist": _s(row["artist"]),
-        "album": _s(row["album"]),
-        "albumartist": _s(row["albumartist"]),
-        "path": path_text,
-    }
-    for field in ("mb_trackid", "mb_albumid"):
-        if field in row_keys:
-            payload[field] = _s(row[field]).strip()
-    for field in ("track", "disc", "year"):
-        if field in row_keys:
-            payload[field] = _playlist_int(row[field], 0)
-    if "added" in row_keys:
-        try:
-            payload["added"] = float(row["added"] or 0)
-        except Exception:
-            payload["added"] = 0.0
-    payload.update(_playlist_quality_for_item(item, path_text))
-    album_item_count = 0
-    if "album_item_count" in row_keys:
-        album_item_count = _playlist_int(row["album_item_count"], 0)
-        payload["album_item_count"] = album_item_count
-    flags = set(payload.get("quality_flags") or [])
-    if (
-        album_item_count > 0
-        and album_item_count <= 2
-        and _playlist_title_score(payload.get("album"), payload.get("title")) >= 0.96
-    ):
-        flags.add("track_title_album")
-        payload["quality_flags"] = sorted(flags)
-        if payload.get("quality") == "ok":
-            payload["quality"] = "review"
-    if "preview_risk" in flags:
-        payload["recommended_action"] = "delete_preview"
-        payload["repairable"] = False
-    elif flags:
-        payload["recommended_action"] = "repair"
-        payload["repairable"] = bool(payload.get("artist") and payload.get("title"))
-    else:
-        payload["recommended_action"] = "keep"
-        payload["repairable"] = False
-    return payload
-
-
 def _playlist_quality_cleanup_candidates(limit: int = 200,
                                          item_ids: Optional[List[int]] = None,
                                          filter_mode: str = "all") -> List[Dict[str, Any]]:
@@ -5974,10 +5753,6 @@ def _playlist_log(log: Optional[List[str]], message: str) -> None:
         log.append(message)
 
 
-def _playlist_artist_credit_text(credits: Any) -> str:
-    return _playlist_artist_credit_info(credits).get("albumartist", "")
-
-
 def _playlist_albumartist_info_from_values(albumartist: str,
                                            mb_albumartistid: str = "",
                                            mb_albumartistids: str = "") -> Dict[str, str]:
@@ -6072,24 +5847,6 @@ def _playlist_resolve_albumartist_info_for_release_group(
 
     _playlist_log(log, f"  [playlist-place] Missing album artist for release group ID: {rgid}")
     return info if info.get("albumartist") else {}
-
-
-def _playlist_resolve_albumartist_for_release_group(mb_releasegroupid: str,
-                                                    mb_release: Optional[Dict[str, Any]] = None,
-                                                    fallback_release_artist: str = "",
-                                                    *,
-                                                    year: str = "",
-                                                    track_count: int = 0,
-                                                    log: Optional[List[str]] = None) -> str:
-    info = _playlist_resolve_albumartist_info_for_release_group(
-        mb_releasegroupid,
-        mb_release=mb_release,
-        fallback_release_artist=fallback_release_artist,
-        year=year,
-        track_count=track_count,
-        log=log,
-    )
-    return _s(info.get("albumartist") or "")
 
 
 def _playlist_expected_album_path_hint(placement: Dict[str, Any]) -> str:
@@ -6220,20 +5977,6 @@ def _playlist_validate_final_album_path(path_text: str,
         "final_path": str(final_path),
         "expected_path": expected,
     }
-
-
-def _playlist_row_id(row: Any) -> int:
-    if row is None:
-        return 0
-    try:
-        if hasattr(row, "keys") and "id" in row.keys():
-            return int(row["id"] or 0)
-    except Exception:
-        pass
-    try:
-        return int(row[0] or 0)
-    except Exception:
-        return 0
 
 
 def _playlist_recording_search_candidates(title: str, artist: str,

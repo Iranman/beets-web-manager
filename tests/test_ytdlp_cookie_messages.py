@@ -13,7 +13,6 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         source = app_family_source()
 
         self.assertIn("def _ytdlp_cookie_rejected_help", source)
-        self.assertIn("def _ytdlp_cookie_rejection_seen", source)
         self.assertIn("_ytdlp_cookie_rejected_help(cookie_file)", source)
 
         stale_patterns = [
@@ -55,7 +54,6 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         self.assertIn("YTDLP_COOKIES_FROM_BROWSER", source)
         self.assertIn("YTDLP_COOKIES_FROM_BROWSER_FALLBACK", source)
         self.assertIn('YTDLP_COOKIES_FROM_BROWSER_FALLBACK",\n    "",', source)
-        self.assertIn("def _configured_ytdlp_cookie_auth", source)
         self.assertIn('ydl_opts["cookiefile"]', source)
         self.assertIn("Using --cookies", source)
         self.assertIn('ydl_opts["cookiesfrombrowser"]', source)

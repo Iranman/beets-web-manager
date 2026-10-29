@@ -13,7 +13,6 @@ from backend.composite_workflows import (
     apply_artist_folder_reconcile,
     apply_folder_cleanup,
     apply_track_replacement,
-    clean_empty_albums,
     clean_orphaned_items,
     delete_album_art,
     delete_playlist_m3u,
@@ -289,13 +288,6 @@ class TestCompositeWorkflows(unittest.TestCase):
             self.assertTrue(res_orph["ok"])
             self.mock_adapter.remove.assert_called_once_with(item_ids=[10], delete_files=False)
             self.assertFalse(clean_orphaned_items(dry_run=False, adapter=self.mock_adapter)["ok"])
-
-        self.mock_adapter.get_album.side_effect = lambda aid, expand=True: {"id": aid}
-        self.mock_adapter.find_all_items_by_album_id.return_value = []
-        res_empty = clean_empty_albums(album_ids=[99], dry_run=False, adapter=self.mock_adapter)
-        self.assertTrue(res_empty["ok"])
-        self.mock_adapter.remove.assert_called_with(album_ids=[99], delete_files=False)
-        self.assertFalse(clean_empty_albums(dry_run=False, adapter=self.mock_adapter)["ok"])
 
     def test_playlist_m3u_operations(self):
         items = [

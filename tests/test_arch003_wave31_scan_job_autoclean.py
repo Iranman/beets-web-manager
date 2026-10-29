@@ -2,7 +2,10 @@
 step migrated from raw SQLite queries onto structured BeetsClient methods:
 - get_library_stats()
 - sync_deleted_files()
-- clean_empty_albums()
+
+LT-2 later made the scan preview-only, so the workflow's clean_empty_albums()
+helper was unreachable and removed in the W2 dead-code sweep; the scan never
+removed rows or album records and still does not.
 """
 
 import unittest
@@ -42,14 +45,11 @@ class ScanJobAutoCleanTests(unittest.TestCase):
         ) as mock_stats, mock.patch.object(
             app_module.composite_workflows, "sync_deleted_files",
             return_value={"ok": True, "missing_count": 2, "removed_from_db": 0},
-        ) as mock_sync, mock.patch.object(
-            app_module.composite_workflows, "clean_empty_albums",
-        ) as mock_empty:
+        ) as mock_sync:
             log = self._run_scan()
 
         mock_stats.assert_called_once()
         mock_sync.assert_called_once_with(dry_run=True, limit=50000)
-        mock_empty.assert_not_called()
         self.assertTrue(any("phase:read-db rows:100" in line for line in log))
         self.assertFalse(any("cleaned:" in line for line in log))
         self.assertTrue(any("not removed" in line for line in log))
@@ -65,9 +65,6 @@ class ScanJobAutoCleanTests(unittest.TestCase):
         ), mock.patch.object(
             app_module.composite_workflows, "sync_deleted_files",
             return_value={"missing_count": 0, "removed_from_db": 0},
-        ), mock.patch.object(
-            app_module.composite_workflows, "clean_empty_albums",
-            return_value={"removed_count": 0},
         ):
             log = self._run_scan()
 

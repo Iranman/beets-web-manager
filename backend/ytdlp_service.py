@@ -672,14 +672,6 @@ def _ytdlp_apply_source_network_options(ydl_opts: Dict[str, Any], source: str,
         ydl_opts["impersonate"] = target
 
 
-def _spotiflac_list_from_env(value: str) -> List[str]:
-    return [
-        item.strip().lower()
-        for item in re.split(r"[\s,]+", _s(value))
-        if item.strip()
-    ]
-
-
 def _spotiflac_input_sources() -> List[str]:
     sources = []
     for item in _download_method_list(_SPOTIFLAC_INPUT_SOURCES):
@@ -1357,18 +1349,6 @@ def _direct_source_unavailable_reason(method: str) -> str:
     return "unknown source"
 
 
-def _run_version_probe(binary: str) -> str:
-    return _probe_js_runtime(binary).get("version", "")
-
-
-def _js_runtime_available(runtime_name: str) -> bool:
-    _prepend_ytdlp_runtime_path()
-    for _, path in _js_runtime_candidate_paths(runtime_name):
-        if _probe_js_runtime(path).get("ok"):
-            return True
-    return False
-
-
 def _cleanup_broken_managed_runtime(name: str) -> None:
     clean_name = Path(_s(name)).name
     if not clean_name or clean_name != _s(name) or clean_name in {".", ".."}:
@@ -1416,14 +1396,6 @@ def _install_ytdlp():
     _ytdlp_ready.set()
 
 
-def _ytdlp_cookie_rejection_seen(text: str) -> bool:
-    lowered = (text or "").lower()
-    return (
-        "youtube rejected the configured yt-dlp cookies" in lowered
-        or _yt_bot_check_message(text)
-    )
-
-
 def _ytdlp_netrc_machines(path: str) -> List[str]:
     machines: List[str] = []
     try:
@@ -1436,17 +1408,6 @@ def _ytdlp_netrc_machines(path: str) -> List[str]:
     except Exception:
         pass
     return machines
-
-
-def _configured_ytdlp_cookie_auth(log: Optional[list] = None) -> Dict[str, Any]:
-    auths = _configured_ytdlp_cookie_auths(log)
-    for auth in auths:
-        key = _ytdlp_cookie_auth_rejection_key(auth)
-        if key and not _ytdlp_cookie_rejection_state(key):
-            return auth
-    if auths:
-        return auths[0]
-    return {"mode": "none", "label": ""}
 
 
 def _ytdlp_auth_smoke_check(auth: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:

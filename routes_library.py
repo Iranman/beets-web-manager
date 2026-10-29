@@ -34,7 +34,7 @@ from backend.import_reconciliation_service import _run_artist_folder_reconcile_f
 from backend.import_review_service import _metadata_transaction_pending_fields, _redact_unmatched_draft_tracks
 from backend.import_service import _coerce_library_import_all_album, _library_import_all_read_last, _library_import_all_record, _library_import_all_write_last, _start_reimport_disk_job_internal, start_reimport_disk
 from backend.job_service import _wait_for_child_job
-from backend.library_service import AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _lastgenre_cmd, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _require_beet_ok, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _apply_folder_name_placeholders, _apply_folder_mbid_names, _rollback_folder_placeholder_apply, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
+from backend.library_service import AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _apply_folder_name_placeholders, _apply_folder_mbid_names, _rollback_folder_placeholder_apply, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _SCAN_STATE, _do_scan_job
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_mb_completeness, _album_mb_match_plan, _disc_cache, _disc_cache_discogs, _disc_cache_discogs_lock, _disc_cache_lock, _invalidate_lib_cache, _load_album_mb_suggestions, _match_tracks_from_mb, _remove_album_track_items
 from backend.musicbrainz_service import _discogs_artist_discography, _discogs_track_search, _ensure_release_group_art, _mb_release_group_for_release
@@ -4069,8 +4069,15 @@ def album_fix_genre(aid):
 
     def _do(log, cancel_event=None):
         log.append(f"[1/2] Running lastgenre for {album.albumartist or '?'} — {album.album or '?'}…")
-        r = _lastgenre_cmd(False, f"album_id:{aid}", log, cancel_event=cancel_event)
-        _require_beet_ok(r, "lastgenre", log)
+        try:
+            # Controlled engine op directly (wave 27): no fake beet-CLI
+            # return-code shim; exceptions are surfaced like a failed stage.
+            result = composite_workflows.repair_album_genre(int(aid), force=False, timeout=180.0)
+        except Exception as ex:
+            raise RuntimeError(f"lastgenre failed: {ex}") from ex
+        if not result.get("ok"):
+            raise RuntimeError(
+                str(result.get("error") or result.get("stderr") or "lastgenre failed"))
 
         _invalidate_lib_cache()
         updated = lib.get_album(aid)

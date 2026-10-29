@@ -197,58 +197,6 @@ def _ai_auto_import_allowed(use_case: str, confidence: str,
     if review_conf and _ai_conf_at_least(confidence, review_conf):
         return _preflight_match_ratio(preflight) >= medium_ratio
     return False
-
-
-def _track_ai_parse_duration_seconds(value: Any) -> Optional[float]:
-    if value in (None, ""):
-        return None
-    try:
-        number = float(value)
-        if number <= 0:
-            return None
-        return number / 1000.0 if number > 10000 else number
-    except Exception:
-        pass
-    text = _s(value).strip()
-    if not text:
-        return None
-    parts = text.split(":")
-    try:
-        if len(parts) == 2:
-            return float(parts[0]) * 60.0 + float(parts[1])
-        if len(parts) == 3:
-            return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
-    except Exception:
-        return None
-    return None
-
-
-def _track_ai_duration_seconds(current: Dict[str, Any]) -> Optional[float]:
-    return _track_ai_parse_duration_seconds(
-        current.get("duration_seconds")
-        or current.get("duration")
-        or current.get("length")
-    )
-
-
-def _track_ai_candidate_duration_seconds(candidate: Dict[str, Any], details: Dict[str, Any]) -> Optional[float]:
-    release = candidate.get("selected_release") or details.get("selected_release") or {}
-    return _track_ai_parse_duration_seconds(
-        release.get("duration_ms")
-        or candidate.get("duration_ms")
-        or details.get("recording_length_ms")
-        or candidate.get("duration")
-    )
-
-
-def _track_ai_match_status(score: float, strong: float = 0.82, fuzzy: float = 0.68) -> str:
-    if score >= strong:
-        return "yes"
-    if score >= fuzzy:
-        return "fuzzy"
-    return "no"
-
-
 def _compact_track_ai_candidate(candidate: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     c = candidate or {}
     # Use the sanitized score_breakdown written by the matching contract

@@ -1,6 +1,6 @@
 import unittest
 
-from backend.mb_alignment import summarize_mb_track_alignment
+from backend.matching.track_alignment import summarize_mb_track_alignment
 
 
 def _track(num, title, mbid=None):

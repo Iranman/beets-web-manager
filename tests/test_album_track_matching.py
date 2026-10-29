@@ -52,10 +52,6 @@ def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lo
             if isinstance(value, bytes)
             else str(value or "")
         ),
-        "_album_item_position_hints": lambda item: (
-            int(item.get("disc") or 1),
-            int(item.get("track") or 0),
-        ),
         # ARCH-002 Part 7 regression matrix: _album_track_fingerprint_check
         # calls these two free names. _album_item_abs_path only needs to be
         # a pass-through here (fixtures supply absolute-looking test
@@ -408,7 +404,6 @@ class AlbumTrackFingerprintCheckAcoustIDMatrixTests(unittest.TestCase):
             extra_ns = {
                 "AcoustIDStatus": AcoustIDStatus,
                 "_s": lambda value: str(value or ""),
-                "_album_item_position_hints": lambda item: (int(item.get("disc") or 1), int(item.get("track") or 0)),
                 "_album_item_abs_path": lambda raw_path: str(raw_path or ""),
                 "_acoustid_lookup_cached_outcome": lambda _path: _answer([
                     {"mb_trackid": "rec-a-totally-unrelated-song", "title": "A Totally Unrelated Song", "score": 95}

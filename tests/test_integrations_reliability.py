@@ -127,13 +127,6 @@ class MusicBrainzOutageTests(_BoundaryCase):
             with self.assertRaises(pb.ProviderError):
                 helpers_mb._mb_recording_search("Song", "Artist")
 
-    def test_tracklist_outage_is_reported_unavailable_once(self):
-        with mock.patch.object(urllib.request, "urlopen", side_effect=http_error(502)) as urlopen:
-            result = helpers_mb.fetch_mb_release_tracklist(REL, [])
-        self.assertEqual(urlopen.call_count, pb.POLICIES["musicbrainz"].max_attempts)
-        self.assertFalse(result["ok"])
-        self.assertTrue(result["unavailable"])
-
     def test_folder_track_search_outage_raises(self):
         with mock.patch.object(mbs, "_folder_track_search_titles", return_value=["One", "Two"]), \
                 module_time(mbs, sleep=mock.Mock()), \

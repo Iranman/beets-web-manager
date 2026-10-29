@@ -367,7 +367,6 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_run_beet_subcommand_locked": ("ENGINE_ADMIN_MUTATION", "admin_command_v1", "control-agent-admin-command-endpoint"),
     # Wave 28 Final Pass: Explicit non-media application state, cache, staging,
     # and template read-only classifications with sink-specific evidence.
-    "_artist_alias_write_rejected_map": ("APP_STATE", "app_state_v1", "web-manager-rejected-artist-alias-map-state"),
     # ARCH-002 final closure: atomic write of the import-reconciliation review queue 
     # (web-manager-data/import_reconciliation_reviews.json). Non-media app state;
     # media changes from a resolved review go through engine transactions only.
@@ -389,7 +388,6 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_stamp_staged_identity_tags": ("STAGING_ONLY", "staging_v1", "recover-staging-identity-tag-stamp"),
     "_recover_import_one": ("ENGINE_NATIVE_BEETS", "", "recover-verified-singleton-import"),
     "render_index": ("READ_ONLY_FALSE_POSITIVE", "none", "in-memory-template-string-replace"),
-    "_prune_empty_review_dirs": ("NON_MEDIA_FILESYSTEM", "infra_v1", "prune-empty-review-staging-dirs"),
     "_delete_no_audio_folders": ("NON_MEDIA_FILESYSTEM", "infra_v1", "delete-no-audio-staging-folders"),
     "_probe_js_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "js-runtime-version-probe"),
 }

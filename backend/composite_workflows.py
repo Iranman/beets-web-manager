@@ -1725,26 +1725,6 @@ def clean_orphaned_items(
     return {**out, "removed_count": len(targets), "operation_id": op_id}
 
 
-def clean_empty_albums(
-    album_ids: Optional[List[int]] = None,
-    dry_run: bool = True,
-    candidate_ids: Optional[List[int]] = None,
-    adapter: Optional[BeetsAdapter] = None,
-) -> Dict[str, Any]:
-    """Remove explicitly requested album rows that have no items (verified
-    live). An empty request is refused; files are never touched."""
-    ad = adapter or beets_adapter
-    ids = [int(x) for x in (album_ids if album_ids is not None else candidate_ids) or [] if int(x) > 0]
-    if not ids:
-        return {"ok": False, "code": "empty_selection", "error": "No album ids were given; nothing was removed.",
-                "dry_run": dry_run, "empty_albums_count": 0, "album_ids": [], "removed_count": 0}
-    empty = [aid for aid in sorted(set(ids)) if ad.get_album(aid) and not ad.find_all_items_by_album_id(aid)]
-    if not dry_run and empty:
-        ad.remove(album_ids=empty, delete_files=False)
-    return {"ok": True, "dry_run": dry_run, "empty_albums_count": len(empty), "album_ids": empty,
-            "removed_count": 0 if dry_run else len(empty)}
-
-
 def scan_library_integrity(adapter: Optional[BeetsAdapter] = None) -> Dict[str, Any]:
     """Counts-only integrity summary (see get_library_health for the report)."""
     report = get_library_health(adapter=adapter, orphan_sample_limit=0, duplicate_limit=0, empty_limit=0)
@@ -5894,19 +5874,6 @@ def inspect_import_source(
         "audio_file_count": len(audio_files),
         "audio_files": audio_files[:50],
     }
-
-
-def discover_import_sources(roots: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    target_roots = [Path(r) for r in roots] if roots else _get_staging_roots()
-    found = []
-    for root in target_roots:
-        if root.exists() and root.is_dir():
-            for child in sorted(root.iterdir()):
-                if child.is_dir() and not child.name.startswith("."):
-                    insp = inspect_import_source(str(child))
-                    if insp.get("audio_file_count", 0) > 0:
-                        found.append(insp)
-    return found
 
 
 def find_files_for_hardlink(

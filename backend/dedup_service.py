@@ -6,7 +6,7 @@ release-slot safeguards (backend.duplicate_identity).
 
 from __future__ import annotations
 
-import difflib, re, time, uuid
+import difflib, re, time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -32,7 +32,6 @@ from backend.acoustid_service import AUDIO_EXTS, _acoustid_fingerprint_ids, _aco
 from backend.matching_service import _album_mb_completeness
 from backend.app_runtime import jobs
 from backend.job_service import _running_job_of_type, _wait_for_child_job
-from backend.import_review_service import _import_review_cleanup_destination, _unique_import_review_cleanup_path
 from backend.serializers import _json_from_flask_response
 from backend.maintenance_service import _library_health_payload, _maintenance_extract_child_job_id, _maintenance_same_file_hash, _maintenance_save_last_report
 
@@ -1032,15 +1031,6 @@ def _resolver_parent(raw_path: str) -> str:
     return rel.rsplit("/", 1)[0]
 
 
-def _resolver_sql_like(value: str) -> str:
-    return (
-        value
-        .replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-    )
-
-
 def _resolver_compact_track(track: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "disc": int(track.get("disc") or 1),
@@ -1291,50 +1281,6 @@ def _album_duplicate_resolver_plan(album_id: int, mb_override: str = "",
     }
 
 
-def _filename_cleanup_duplicate_quarantine_path(old_path: Path) -> Path:
-    return _unique_import_review_cleanup_path(
-        _import_review_cleanup_destination(
-            Path("filename_cleanup") / uuid.uuid4().hex[:8] / old_path.name
-        )
-    )
-
-
-def _maintenance_duplicate_report(log: List[str], progress: Optional[Any] = None) -> Dict[str, Any]:
-    """Lightweight duplicate report for automatic maintenance.
-
-    The manual Duplicate Check UI still owns the full file-by-file duplicate
-    scan. The runner uses the DB-backed duplicate report so a recurring
-    background pass cannot monopolize filesystem walking or duplicate cleanup.
-    """
-    health = _library_health_payload(progress=progress)
-    duplicate_album_groups = int(health.get("duplicate_album_count") or 0)
-    release_group_groups = int(health.get("rgid_duplicate_group_count") or 0)
-    duplicate_candidates = duplicate_album_groups + release_group_groups
-    result = {
-        "kind": "maintenance_duplicate_report",
-        "duplicate_candidates": duplicate_candidates,
-        "duplicate_album_groups": duplicate_album_groups,
-        "same_release_group_id_groups": release_group_groups,
-        "file_duplicate_scan_started": False,
-        "deleted_files": 0,
-        "final_summary": {
-            "duplicate_candidates": duplicate_candidates,
-            "duplicate_album_groups": duplicate_album_groups,
-            "same_release_group_id_groups": release_group_groups,
-            "file_duplicate_scan_started": False,
-            "deleted_files": 0,
-        },
-    }
-    log.append(
-        "[Duplicate Finder] lightweight report refreshed: "
-        f"{duplicate_album_groups} duplicate album group(s), "
-        f"{release_group_groups} same Release Group ID group(s); "
-        "full file duplicate scan was not started."
-    )
-    _maintenance_save_last_report({"duplicates": result}, log)
-    return result
-
-
 def _maintenance_duplicate_plan(scan_result: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Rules live in backend/duplicate_identity.py (ARCH-009): audio proof
     # (fingerprint or identical bytes), same release slot, the best copy kept
@@ -1542,7 +1488,3 @@ def _maintenance_full_duplicate_scan(log: List[str], cancel_event: Optional[Any]
     )
     _maintenance_save_last_report({"duplicates": result}, log)
     return result
-
-
-def _album_cleanup_count_duplicate_files(records: List[Dict[str, Any]], canonical_path: str) -> int:
-    return len(_album_cleanup_merge_plan(records, canonical_path).get("duplicate_files_to_quarantine") or [])

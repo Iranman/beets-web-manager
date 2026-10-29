@@ -513,18 +513,6 @@
       "COMPATIBILITY_WRAPPER",
       "Serializer."
     ],
-    "backend/mb_alignment.py::<module>": [
-      "COMPATIBILITY_WRAPPER",
-      "Re-exports canonical scorers."
-    ],
-    "backend/mb_alignment.py::greedy_album_track_alignment": [
-      "COMPATIBILITY_WRAPPER",
-      "Delegates to align_tracks_global."
-    ],
-    "backend/mb_alignment.py::summarize_mb_track_alignment": [
-      "COMPATIBILITY_WRAPPER",
-      "Delegates to canonical best match."
-    ],
     "backend/recording_review.py::audio_identity_fields": [
       "DISPLAY_ONLY",
       "Maps the canonical verify_audio_against_request verdict onto the file-level result schema."
@@ -588,10 +576,6 @@
     "beetsplug/webmanager/operations.py::_pinned_partial_match": [
       "SAFE_SPECIALIZED_EVIDENCE",
       "Beets' own match of the one Release the confirmed import pinned (search_ids): only that Release can be accepted, under Beets' match.strong_rec_thresh, with no extra items; it sets aside data_source (and, for a repair, missing_tracks, and the artist penalty only with AcoustID proof on every file and the repaired album on that Release). The backend still verifies the release group after import."
-    ],
-    "helpers_mb.py::_acoustid_lookup": [
-      "CANDIDATE_GENERATION_ONLY",
-      "AcoustID provider lookup; classified canonically by consumers."
     ],
     "helpers_mb.py::_acoustid_parse_candidates": [
       "CANDIDATE_GENERATION_ONLY",
@@ -672,6 +656,10 @@
     "backend/import_service.py::_validate_wanted_album_items_with_acoustid": [
       "SAFE_SPECIALIZED_EVIDENCE",
       "Post-import AcoustID evidence gate for merging downloaded missing-track files into an existing album: per file it defers the identity verdict to the canonical verify_audio_against_request (Recording-ID floor + ambiguity window) and refuses on mismatch/not_checked/unverified. ARCH-030 B4 adds a consume-only honor of the carrier's already-set matching_decision.action_allowed (slot_authorized) so an authorized NO_RESULT subset is not re-refused; it recomputes no matching decision and authorizes nothing itself. The action_allowed/VERIFIED_SUBSET pattern hits are its docstring and the slot_authorized flag."
+    ],
+    "backend/matching/track_alignment.py::summarize_mb_track_alignment": [
+      "COMPATIBILITY_WRAPPER",
+      "Coverage summary moved from backend/mb_alignment.py; delegates to the canonical matcher via match_fn."
     ]
   }
 }

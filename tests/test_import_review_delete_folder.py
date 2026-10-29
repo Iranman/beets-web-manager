@@ -17,7 +17,10 @@ class ImportReviewDeleteFolderTests(unittest.TestCase):
         ]
         delete_source = app_source[
             app_source.index("def _pending_review_has_path"):
-            app_source.index("def _delete_album_ids_from_db")
+            # (was: def _delete_album_ids_from_db, an unreachable direct-SQL
+            # helper removed by the W2 dead-code sweep; its nearest family
+            # successor in the original app.py order is this helper)
+            app_source.index("def _strip_year_from_album_name")
         ]
         queue_source = app_source[
             app_source.index('@app.get("/api/import/review-queue")'):

@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, _MB_RELEASE_TRACKLIST_CACHE, _MB_RELEASE_TRACKLIST_CACHE_DIR, _MB_RELEASE_TRACKLIST_CACHE_LOCK, _MB_RELEASE_TRACKLIST_CACHE_TTL, _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _is_valid_mb_uuid, _s, _ur
 from backend.app_runtime import _path_is_under, _redact_security_text, _safe_inventory_error_message
 from backend.album_match import build_album_match_plan
-from backend.mb_alignment import summarize_mb_track_alignment
+from backend.matching.track_alignment import summarize_mb_track_alignment
 from backend.matching_contract import build_album_matching_decision
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
 from helpers_mb import _resolve_release_group_to_release, acoustid_api_key
