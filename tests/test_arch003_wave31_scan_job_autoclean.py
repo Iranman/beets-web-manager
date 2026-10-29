@@ -2,7 +2,10 @@
 step migrated from raw SQLite queries onto structured BeetsClient methods:
 - get_library_stats()
 - sync_deleted_files()
-- clean_empty_albums()
+
+LT-2 later made the scan preview-only, so the workflow's clean_empty_albums()
+helper was unreachable and removed in the W2 dead-code sweep; the scan never
+removed rows or album records and still does not.
 """
 
 import unittest
