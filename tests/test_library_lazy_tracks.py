@@ -14,7 +14,6 @@ class LibraryLazyTracksTests(unittest.TestCase):
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         library_page = (root / "frontend" / "src" / "views" / "Library.tsx").read_text(encoding="utf-8")
         library_health = (root / "frontend" / "src" / "lib" / "libraryHealth.ts").read_text(encoding="utf-8")
-        discography_panel = (root / "frontend" / "src" / "features" / "discography" / "DiscographyPanel.tsx").read_text(encoding="utf-8")
 
         self.assertIn("def _library_payload_for_response", app_source)
         self.assertIn('next_album["tracks_deferred"] = True', app_source)
@@ -33,8 +32,9 @@ class LibraryLazyTracksTests(unittest.TestCase):
         self.assertIn("await getAlbumTracks(albumId)", library_page)
         self.assertIn("if (album.tracks_deferred) return false;", library_health)
         self.assertIn("Exact MusicBrainz completeness gaps are not the same as local missing", library_health)
-        self.assertIn("mbEditionGap", discography_panel)
-        self.assertIn("Local files are not marked missing", discography_panel)
+        # The DiscographyPanel assertions that used to live here are gone with
+        # the panel itself: it was never imported or rendered, and its backend
+        # album-completeness endpoints survive untouched for future clients.
         self.assertIn("Track rows are deferred in the fast library payload.", library_page)
         self.assertIn("No passive issue evidence in the current library summary.", library_page)
         self.assertIn("function NextRepairPanel", library_page)

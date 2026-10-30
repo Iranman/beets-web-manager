@@ -24,13 +24,7 @@ import type {
   AutoEnqueueImportResponse,
   ImportReviewRevalidateResponse,
   AiSuggestResponse,
-  AlbumArtDeleteResponse,
   ArtRepairReportResponse,
-  AlbumDuplicateResolverAction,
-  AlbumDuplicateResolverPlan,
-  AlbumMbFormatResponse,
-  AlbumMbCompletenessResponse,
-  AlbumArtStatusResponse,
   AiBatchStatusResponse,
   ApiOkResponse,
   ArtistIdGroupsResponse,
@@ -42,17 +36,13 @@ import type {
   DeleteReviewFolderResponse,
   ImportReviewFileCleanupPayload,
   ImportReviewFileCleanupResponse,
-  DiscographyResponse,
-  GenreStatsResponse,
   HealthResponse,
   ImportWithIdPayload,
   JobResponse,
   JobStartResponse,
   UnattendedCleanupStatus,
   AttachRecordingResponse,
-  LibraryImportAllLastResponse,
   DownloadAlbumPayload,
-  LidarrArtistAlbumsResponse,
   LidarrCommandResponse,
   MbidStatusResponse,
   MusicFormatPreferences,
@@ -83,8 +73,6 @@ import type {
   PlaylistTrack,
   PlaylistRowsResponse,
   PreflightResponse,
-  QbitHardlinkRepairResponse,
-  QbitStatusResponse,
   RecentImportsResponse,
   ReimportDiskPayload,
   ReviewQueueParams,
@@ -117,7 +105,6 @@ import type {
   LoginRequest,
   LoginResponse,
   LogoutResponse,
-  WantedResponse,
   YtdlpStatusResponse,
   TransactionDetailResponse,
   TransactionListResponse,
@@ -542,27 +529,6 @@ export function startMbFullSync(opts?: {
   );
 }
 
-export interface SingletonsResponse {
-  ok: boolean;
-  total: number;
-  items: Array<{ id: number; title: string; artist: string; year: number; path: string }>;
-}
-
-export function getSingletons(): Promise<SingletonsResponse> {
-  return apiJson<SingletonsResponse>('/api/library/singletons');
-}
-
-export function rescueSingletons(opts?: { dryRun?: boolean; limit?: number }): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(
-    '/api/library/rescue-singletons',
-    jsonRequest('POST', { dry_run: opts?.dryRun ?? false, limit: opts?.limit ?? 100 }),
-  );
-}
-
-export function rescueItem(itemId: number): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(`/api/items/${itemId}/rescue`, jsonRequest('POST', {}));
-}
-
 export function startTemplateTokenCleanup(opts: {
   dryRun: boolean;
   albumId?: number;
@@ -627,33 +593,6 @@ export function sendRgidAlbumToRepair(albumId: number): Promise<JobStartResponse
   return apiJson<JobStartResponse>('/api/clean/rgid-group/send-to-repair', jsonRequest('POST', {
     album_id: albumId,
   }));
-}
-
-export function getQbitStatus(): Promise<QbitStatusResponse> {
-  return apiJson<QbitStatusResponse>('/api/qbittorrent/status');
-}
-
-export function startQbitHardlinkRepair(opts: {
-  dryRun: boolean;
-  category?: string;
-  filter?: string;
-  search?: string;
-  hashes?: string[];
-  limit?: number;
-  recheck?: boolean;
-}): Promise<QbitHardlinkRepairResponse> {
-  return apiJson<QbitHardlinkRepairResponse>(
-    '/api/qbittorrent/hardlink-missing',
-    jsonRequest('POST', {
-      dry_run: opts.dryRun,
-      category: opts.category,
-      filter: opts.filter,
-      search: opts.search,
-      hashes: opts.hashes ?? [],
-      limit: opts.limit ?? 0,
-      recheck: opts.recheck ?? true,
-    }),
-  );
 }
 
 export function restartApp(): Promise<ApiOkResponse> {
@@ -985,26 +924,8 @@ export function getJobResult<T>(jobResponse: { result?: unknown }): T | null {
   return (jobResponse.result as T) ?? null;
 }
 
-// ── Artist discography ────────────────────────────────────────────────────────
-
-export function getArtistDiscography(artist: string): Promise<DiscographyResponse> {
-  return apiJson<DiscographyResponse>(`/api/artist-discography?artist=${encodeURIComponent(artist)}`);
-}
-
-export function getReleaseArt(mbid: string, artist?: string, album?: string): Promise<{ ok: boolean; url?: string; error?: string }> {
-  const params = new URLSearchParams({ mbid });
-  if (artist) params.set('artist', artist);
-  if (album) params.set('album', album);
-  return apiJson(`/api/release-art?${params.toString()}`);
-}
-
 export function getArtistImageUrl(artist: string): Promise<{ ok: boolean; url?: string; source?: string }> {
   return apiJson(`/api/artist-image-url?artist=${encodeURIComponent(artist)}`);
-}
-
-export function getAlbumMbCompleteness(albumId: number, mbAlbumId?: string): Promise<AlbumMbCompletenessResponse> {
-  const qs = mbAlbumId ? `?mb_albumid=${encodeURIComponent(mbAlbumId)}` : '';
-  return apiJson<AlbumMbCompletenessResponse>(`/api/albums/${albumId}/mb-completeness${qs}`);
 }
 
 export function getAlbumTracks(albumId: number): Promise<{ ok: boolean; album_id: number; tracks: LibraryTrack[] }> {
@@ -1020,33 +941,6 @@ export function mergeSplitAlbum(
     `/api/albums/${targetAlbumId}/merge-split-album`,
     jsonRequest('POST', { source_album_id: sourceAlbumId, item_ids: itemIds }),
   );
-}
-
-export function getAlbumDuplicateResolver(albumId: number, mbAlbumId?: string): Promise<AlbumDuplicateResolverPlan> {
-  const qs = mbAlbumId ? `?mb_albumid=${encodeURIComponent(mbAlbumId)}` : '';
-  return apiJson<AlbumDuplicateResolverPlan>(`/api/albums/${albumId}/duplicate-resolver${qs}`);
-}
-
-export function applyAlbumDuplicateResolver(
-  albumId: number,
-  payload: {
-    mb_albumid?: string;
-    actions: AlbumDuplicateResolverAction[];
-    dry_run?: boolean;
-    delete_files?: boolean;
-    write_tags?: boolean;
-  },
-): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(
-    `/api/albums/${albumId}/duplicate-resolver/apply`,
-    jsonRequest('POST', payload),
-  );
-}
-
-// ── Lidarr Wanted ─────────────────────────────────────────────────────────────
-
-export function getWantedLidarr(): Promise<WantedResponse> {
-  return apiJson<WantedResponse>('/api/wanted/lidarr');
 }
 
 /** One page of the cached Find Music list. Never asks the server to rebuild it. */
@@ -1084,10 +978,6 @@ export function startAcquisitionDownloadAll(
 
 export function getAcquisitionDownloadAllActive(): Promise<AcquisitionDownloadAllActiveResponse> {
   return apiJson<AcquisitionDownloadAllActiveResponse>('/api/acquisition/download-all/active');
-}
-
-export function getLidarrArtistAlbumsByName(name: string): Promise<LidarrArtistAlbumsResponse> {
-  return apiJson<LidarrArtistAlbumsResponse>(`/api/lidarr/artist-albums-by-name?name=${encodeURIComponent(name)}`);
 }
 
 export function runLidarrAlbumSearch(albumId: number): Promise<LidarrCommandResponse> {
@@ -1160,29 +1050,8 @@ export function syncDeleted(opts: { dryRun?: boolean; confirmed?: boolean } = {}
   });
 }
 
-export function startMoveAll(): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>('/api/library/move-all', { method: 'POST' });
-}
-
 export function startMbsyncAll(): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>('/api/library/mbsync-all', { method: 'POST' });
-}
-
-export function libraryImportAll(albums: Array<{
-  aldir: string;
-  mb_albumid: string;
-  existing_album_id?: number;
-  albumartist?: string;
-}>): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>('/api/library/import-all', jsonRequest('POST', { albums }));
-}
-
-export function getLibraryImportAllLast(): Promise<LibraryImportAllLastResponse> {
-  return apiJson<LibraryImportAllLastResponse>('/api/library/import-all/last');
-}
-
-export function retryLibraryImportAllFailed(): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>('/api/library/import-all/retry-failed', { method: 'POST' });
 }
 
 export function scanLeakedDbPaths(): Promise<JobStartResponse> {
@@ -1281,10 +1150,6 @@ export function getLibraryArtRepairReport(): Promise<ArtRepairReportResponse> {
   return apiJson<ArtRepairReportResponse>('/api/library/art-repair');
 }
 
-export function getAlbumArtStatus(albumId: number): Promise<AlbumArtStatusResponse> {
-  return apiJson<AlbumArtStatusResponse>(`/api/albums/${albumId}/art/status`);
-}
-
 export function fetchAlbumArt(albumId: number): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/fetch-art`, { method: 'POST' });
 }
@@ -1293,61 +1158,13 @@ export function reconcileArtwork(batchJobId: string, folderId: string, artworkJo
   return apiJson<AiBatchStatusResponse>('/api/ai-batch/reconcile-artwork', jsonRequest('POST', { batch_job_id: batchJobId, folder_id: folderId, artwork_job_id: artworkJobId }));
 }
 
-export function moveAlbumToLibrary(albumId: number): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(`/api/albums/${albumId}/move-to-library`, { method: 'POST' });
-}
-
-export function replaceAlbumArtFromUrl(albumId: number, url: string): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(`/api/albums/${albumId}/art/url`, jsonRequest('POST', { url }));
-}
-
-export function uploadAlbumArt(albumId: number, file: File): Promise<JobStartResponse> {
-  const form = new FormData();
-  form.append('file', file);
-  // No Content-Type header here — the browser sets it (with the correct
-  // multipart boundary) automatically for a FormData body. apiJson still
-  // adds X-Beets-CSRF for this POST.
-  return apiJson<JobStartResponse>(`/api/albums/${albumId}/art/upload`, {
-    method: 'POST',
-    body: form,
-  });
-}
-
-export function deleteAlbumArt(albumId: number): Promise<AlbumArtDeleteResponse> {
-  return apiJson<AlbumArtDeleteResponse>(`/api/albums/${albumId}/art`, { method: 'DELETE' });
-}
-
 // ── Genre ─────────────────────────────────────────────────────────────────────
-
-export function getGenreStats(): Promise<GenreStatsResponse> {
-  return apiJson<GenreStatsResponse>('/api/library/genre-stats');
-}
 
 export function fixGenres(opts: { force?: boolean; useAi?: boolean }): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(
     '/api/library/fix-genres',
     jsonRequest('POST', { force: opts.force ?? false, use_ai: opts.useAi ?? false }),
   );
-}
-
-export function fixAlbumGenre(albumId: number): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(`/api/albums/${albumId}/fix-genre`, { method: 'POST' });
-}
-
-export function repairAlbumMbTracks(albumId: number, mbAlbumId?: string): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(
-    `/api/albums/${albumId}/repair-mb-tracks`,
-    jsonRequest('POST', { mb_albumid: mbAlbumId || undefined }),
-  );
-}
-
-export function fixAlbumMetadata(albumId: number, opts: {
-  mb_albumid?: string;
-  album?: string;
-  albumartist?: string;
-  year?: number;
-}): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(`/api/albums/${albumId}/fix-metadata`, jsonRequest('POST', opts));
 }
 
 // ── Plex ──────────────────────────────────────────────────────────────────────
@@ -1399,10 +1216,6 @@ export function suggestAlbum(albumId: number): Promise<AiSuggestResponse> {
 
 export function suggestFolder(path: string): Promise<AiSuggestResponse> {
   return apiJson<AiSuggestResponse>('/api/folders/ai-suggest', jsonRequest('POST', { path }));
-}
-
-export function batchSuggestAlbums(limit = 50): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>('/api/albums/batch-ai-suggest', jsonRequest('POST', { limit }));
 }
 
 export function matchAlbum(albumId: number, mbId: string): Promise<JobStartResponse> {
@@ -1459,10 +1272,6 @@ export function importWithId(payload: ImportWithIdPayload): Promise<JobStartResp
 
 export function autoEnqueueImport(payload: AutoEnqueueImportPayload): Promise<AutoEnqueueImportResponse> {
   return apiJson<AutoEnqueueImportResponse>('/api/import-review/auto-enqueue', jsonRequest('POST', payload));
-}
-
-export function reconcileAutoEnqueueImport(payload: AutoEnqueueImportPayload): Promise<AutoEnqueueImportResponse> {
-  return apiJson<AutoEnqueueImportResponse>('/api/import-review/auto-enqueue/reconcile', jsonRequest('POST', payload));
 }
 
 export function revalidateImportReview(payload: ImportReviewRevalidatePayload): Promise<ImportReviewRevalidateResponse> {
@@ -1618,10 +1427,6 @@ export function albumMbsubmit(albumId: number): Promise<JobStartResponse> {
 
 export function itemMbsubmit(itemId: number): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(`/api/items/${itemId}/mbsubmit`, jsonRequest('POST'));
-}
-
-export function getAlbumMbFormat(albumId: number): Promise<AlbumMbFormatResponse> {
-  return apiJson<AlbumMbFormatResponse>(`/api/albums/${albumId}/mb-format`);
 }
 
 export function albumAcoustidSubmit(albumId: number): Promise<JobStartResponse> {
