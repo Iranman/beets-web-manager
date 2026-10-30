@@ -22,6 +22,7 @@ import app as app_module
 import backend.provider_boundary as provider_boundary
 import backend.slskd as slskd
 import routes_library
+from backend import item_ai_suggest_service
 
 AUDIO = {".flac"}
 _CSRF = {"Origin": "http://localhost", "X-Beets-CSRF": "1"}
@@ -155,9 +156,9 @@ class AiSuggestStatusTests(unittest.TestCase):
     def test_rejected_key_emits_ai_status_and_no_ai_confidence(self):
         http401 = urllib.error.HTTPError("https://api.openai.test", 401, "Unauthorized", {}, None)
         with mock.patch.object(routes_library.lib, "get_item", return_value=self._fake_item()), \
-             mock.patch.object(routes_library, "_ai_api_key", return_value="sk-present-but-bad"), \
-             mock.patch.object(routes_library, "_mb_recording_search", return_value=[]), \
-             mock.patch.object(routes_library, "_discogs_track_search", return_value=[]), \
+             mock.patch.object(item_ai_suggest_service, "_ai_api_key", return_value="sk-present-but-bad"), \
+             mock.patch.object(item_ai_suggest_service, "_mb_recording_search", return_value=[]), \
+             mock.patch.object(item_ai_suggest_service, "_discogs_track_search", return_value=[]), \
              mock.patch.object(routes_library.provider_boundary, "opened", side_effect=http401):
             resp = app_module.app.test_client().post("/api/items/7/ai-suggest", headers=_CSRF)
         body = resp.get_json()

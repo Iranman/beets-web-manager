@@ -16,9 +16,9 @@ from unittest import mock
 
 import app as app_module
 import routes_library
-from backend import provider_boundary as pb
+from backend import item_ai_suggest_service, provider_boundary as pb
 
-_TARGET = routes_library
+_TARGET = item_ai_suggest_service
 _GOLDEN = Path(__file__).parent / "fixtures" / "item_ai_suggest_golden.json"
 _CSRF = {"X-Requested-With": "XMLHttpRequest"}
 _REC = "11111111-1111-1111-1111-111111111111"
