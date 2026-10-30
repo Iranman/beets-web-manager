@@ -234,7 +234,8 @@ class AudioIdentityPipelineStaticTests(unittest.TestCase):
         self.assertIn("fingerprint_validation", body)
 
     def test_ai_suggest_prompt_and_evidence_include_fingerprint_conflict_rule(self):
-        self.assertIn("Do not silently override strong contradictory fingerprint evidence", APP_SOURCE)
+        service = (ROOT / "backend" / "item_ai_suggest_service.py").read_text(encoding="utf-8")
+        self.assertIn("Do not silently override strong contradictory fingerprint evidence", service)
         body = self.function_source("_track_ai_evidence_packet")
         self.assertIn('"fingerprint"', body)
         self.assertIn('"acoustid_id"', body)

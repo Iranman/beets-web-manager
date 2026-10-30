@@ -660,6 +660,38 @@
     "backend/matching/track_alignment.py::summarize_mb_track_alignment": [
       "COMPATIBILITY_WRAPPER",
       "Coverage summary moved from backend/mb_alignment.py; delegates to the canonical matcher via match_fn."
+    ],
+    "backend/ai_service.py::_ai_bind_selected_release": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Binds the AI's candidate_index to that candidate's Release and Release Group; an out-of-range index selects nothing and is downgraded. Decides nothing automatic."
+    ],
+    "backend/item_ai_suggest_service.py::suggest_for_item": [
+      "COMPATIBILITY_WRAPPER",
+      "Recording candidate orchestration moved from the ai_suggest route; every decision field comes from the canonical serializer."
+    ],
+    "backend/item_ai_suggest_service.py::_build_prompt": [
+      "DISPLAY_ONLY",
+      "Text of the AI prompt; the confidence hits are instructions to the untrusted AI."
+    ],
+    "backend/item_ai_suggest_service.py::_fallback_suggestion": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Suggests the top candidate when AI is unavailable, with reported confidence only; authorizes nothing."
+    ],
+    "backend/item_ai_suggest_service.py::_normalize_fields": [
+      "DISPLAY_ONLY",
+      "Defaults a missing reported confidence for the response."
+    ],
+    "backend/item_ai_suggest_service.py::_validate_identity": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Can only distrust or downgrade a suggestion that is outside the candidate list or malformed; never grants an action."
+    ],
+    "backend/item_ai_suggest_service.py::_attach_candidate_evidence": [
+      "DISPLAY_ONLY",
+      "Copies canonical serializer fields into the response."
+    ],
+    "backend/item_ai_suggest_service.py::_stamp_ai_status": [
+      "DISPLAY_ONLY",
+      "Reports which source the displayed confidence came from."
     ]
   }
 }
