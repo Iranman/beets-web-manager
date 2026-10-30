@@ -1,0 +1,10696 @@
+{
+ "batched": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 2,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": 0,
+   "matched_after_import": 3,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 0,
+   "round": 2,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "PLAYLIST_DOWNLOAD_BATCH_SIZE=1: downloading 1 of 2 missing track(s); 1 remain queued",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 2 matched, 1 still missing",
+   "Syncing M3U/Plex playlist after round 1 (2 matched tracks)...",
+   "",
+   "========================================\nMissing-track round 2/8: 1 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - B",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-B.flac",
+   "  downloaded via SLSKD",
+   "Round 2 download complete: 1 downloaded, 0 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 2 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 2: 3 matched, 0 still missing",
+   "Syncing M3U/Plex playlist after round 2 (3 matched tracks)...",
+   "Final Beets match: 3 matched, 0 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "A",
+   "B",
+   "C"
+  ],
+  "missing": [],
+  "result": {
+   "done": 2,
+   "failed": 0,
+   "matched_after_import": 3,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1: 1 of 2",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1: 1 of 2",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1: 1 of 2",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1: 1 of 2",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    0,
+    2,
+    2,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    0,
+    2,
+    2,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 2",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 2",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 2",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    2,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    2,
+    0,
+    2,
+    2,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "imported",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-B.flac",
+    "status": "imported",
+    "title": "B"
+   },
+   "artist|c": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/C.flac",
+    "status": "available",
+    "title": "C"
+   }
+  }
+ },
+ "batched_max_rounds": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 1,
+   "download_batch_remaining": 1,
+   "failed": 0,
+   "import_returncode": 0,
+   "matched_after_import": 2,
+   "matched_initial": 0,
+   "max_rounds": 1,
+   "missing_after_import": 1,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 0,
+   "round": 1,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/1: 2 track(s) still missing",
+   "PLAYLIST_DOWNLOAD_BATCH_SIZE=1: downloading 1 of 2 missing track(s); 1 remain queued",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 2 matched, 1 still missing",
+   "Syncing M3U/Plex playlist after round 1 (2 matched tracks)...",
+   "Reached PLAYLIST_DOWNLOAD_MAX_ROUNDS=1; 1 track(s) still missing.",
+   "Final Beets match: 2 matched, 1 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "A",
+   "C"
+  ],
+  "missing": [
+   "B"
+  ],
+  "result": {
+   "done": 1,
+   "failed": 0,
+   "matched_after_import": 2,
+   "missing_after_import": 1,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1: 1 of 2",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1: 1 of 2",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1: 1 of 2",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1: 1 of 2",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "syncing M3U + Plex after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    1,
+    0,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "imported",
+    "title": "A"
+   },
+   "artist|b": {
+    "message": "not available in Beets",
+    "method": "",
+    "path": "",
+    "status": "missing",
+    "title": "B"
+   },
+   "artist|c": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/C.flac",
+    "status": "available",
+    "title": "C"
+   }
+  }
+ },
+ "cancel_before": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "stopped"
+    }
+   ]
+  ],
+  "final": {
+   "current": "stopped by user",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 2,
+   "phase": "stopped",
+   "resumed": false,
+   "review_required": null,
+   "round": 0,
+   "status": "stopped",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "Playlist pipeline stopped by user."
+  ],
+  "matched": [],
+  "missing": [
+   "A",
+   "B"
+  ],
+  "result": {
+   "playlist": "Mix",
+   "status": "stopped"
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "stopped",
+    "stopped",
+    "stopped by user",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "stopped",
+    "stopped",
+    "stopped by user",
+    0,
+    0,
+    2,
+    0,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "message": "not in Beets",
+    "method": "",
+    "path": "",
+    "status": "missing",
+    "title": "A"
+   },
+   "artist|b": {
+    "message": "not in Beets",
+    "method": "",
+    "path": "",
+    "status": "missing",
+    "title": "B"
+   }
+  }
+ },
+ "contract_refused": {
+  "error": "RuntimeError: held elsewhere",
+  "events": [],
+  "final": {
+   "current": "held elsewhere",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 0,
+   "missing_after_import": 0,
+   "missing_initial": 0,
+   "phase": "error",
+   "resumed": false,
+   "review_required": null,
+   "round": 0,
+   "status": "error",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [],
+  "matched": [],
+  "missing": [],
+  "result": {},
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "error",
+    "error",
+    "held elsewhere",
+    0,
+    0,
+    2,
+    0,
+    0
+   ]
+  ],
+  "statuses": {}
+ },
+ "download_only": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "pipeline",
+    {
+     "action": "download",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 2,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": null,
+   "round": 1,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-B.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 2 downloaded, 0 not downloaded",
+   "Download Missing complete; staged files are ready for Import Downloaded."
+  ],
+  "matched": [],
+  "missing": [
+   "A",
+   "B"
+  ],
+  "result": {
+   "done": 2,
+   "failed": 0,
+   "matched_after_import": 0,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "downloaded",
+    "downloaded files are ready to import",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    2,
+    0,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "fingerprint verified; waiting for Beets import",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "waiting_import",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "fingerprint verified; waiting for Beets import",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-B.flac",
+    "status": "waiting_import",
+    "title": "B"
+   }
+  }
+ },
+ "full": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    "mbid-a"
+   ],
+   [
+    "validate",
+    "A",
+    "mbid-a"
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 2,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": 0,
+   "matched_after_import": 3,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 0,
+   "round": 1,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-B.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 2 downloaded, 0 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 2 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 3 matched, 0 still missing",
+   "Syncing M3U/Plex playlist after round 1 (3 matched tracks)...",
+   "Final Beets match: 3 matched, 0 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "A",
+   "B",
+   "C"
+  ],
+  "missing": [],
+  "result": {
+   "done": 2,
+   "failed": 0,
+   "matched_after_import": 3,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    2
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    2
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    2,
+    0,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "source_artist": "Uploader",
+    "status": "imported",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-B.flac",
+    "status": "imported",
+    "title": "B"
+   },
+   "artist|c": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/C.flac",
+    "status": "available",
+    "title": "C"
+   }
+  }
+ },
+ "locked": {
+  "error": "RuntimeError: A pipeline is already running for this playlist.",
+  "events": [],
+  "final": {
+   "current": "A pipeline is already running for this playlist.",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 0,
+   "missing_after_import": 0,
+   "missing_initial": 0,
+   "phase": "error",
+   "resumed": false,
+   "review_required": null,
+   "round": 0,
+   "status": "error",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [],
+  "matched": [],
+  "missing": [],
+  "result": {},
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "error",
+    "error",
+    "A pipeline is already running for this playlist.",
+    0,
+    0,
+    2,
+    0,
+    0
+   ]
+  ],
+  "statuses": {}
+ },
+ "no_match": {
+  "error": "RuntimeError: No playlist tracks matched the Beets library after import",
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "error": "No playlist tracks matched the Beets library after import",
+     "status": "failed"
+    }
+   ]
+  ],
+  "final": {
+   "current": "sync playlist",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 2,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 3,
+   "missing_initial": 2,
+   "phase": "error",
+   "resumed": false,
+   "review_required": 0,
+   "round": 1,
+   "status": "error",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 1 download complete: 0 downloaded, 2 not downloaded",
+   "No new files were downloaded in this round; stopping missing-track loop.",
+   "No missing tracks were downloaded; syncing existing library matches only",
+   "Final Beets match: 0 matched, 3 still missing",
+   "Fatal: No playlist tracks matched the Beets library after import"
+  ],
+  "matched": [],
+  "missing": [
+   "A",
+   "B",
+   "C"
+  ],
+  "result": {},
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    2,
+    2,
+    1,
+    0
+   ],
+   [
+    "error",
+    "error",
+    "sync playlist",
+    0,
+    2,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "message": "not available in Beets",
+    "method": "SLSKD",
+    "path": "",
+    "status": "missing",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "message": "not available in Beets",
+    "method": "SLSKD",
+    "path": "",
+    "status": "missing",
+    "title": "B"
+   },
+   "artist|c": {
+    "message": "not available in Beets",
+    "method": "",
+    "path": "",
+    "status": "missing",
+    "title": "C"
+   }
+  }
+ },
+ "no_progress": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 2,
+   "download_batch_remaining": 0,
+   "failed": 2,
+   "import_returncode": 0,
+   "matched_after_import": 1,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 2,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 0,
+   "round": 2,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 1 download complete: 1 downloaded, 1 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 1 matched, 2 still missing",
+   "Syncing M3U/Plex playlist after round 1 (1 matched tracks)...",
+   "",
+   "========================================\nMissing-track round 2/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 2 download complete: 1 downloaded, 1 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 2 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 2: 1 matched, 2 still missing",
+   "Syncing M3U/Plex playlist after round 2 (1 matched tracks)...",
+   "Import did not reduce the missing list; stopping to avoid retrying the same unresolved tracks forever.",
+   "Final Beets match: 1 matched, 2 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "C"
+  ],
+  "missing": [
+   "A",
+   "B"
+  ],
+  "result": {
+   "done": 2,
+   "failed": 2,
+   "matched_after_import": 1,
+   "missing_after_import": 2,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    2,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    2,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    2,
+    2,
+    2,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    2,
+    2,
+    2,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 2",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 2",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 2",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 2",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 2",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "syncing M3U + Plex after round 2",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    2,
+    2,
+    2,
+    2,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 2,
+    "file_size": 123,
+    "message": "not available in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "missing",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 2,
+    "message": "not available in Beets",
+    "method": "SLSKD",
+    "path": "",
+    "status": "missing",
+    "title": "B"
+   },
+   "artist|c": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/C.flac",
+    "status": "available",
+    "title": "C"
+   }
+  }
+ },
+ "only_review": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [],
+    [
+     "A",
+     "B"
+    ],
+    [
+     "A",
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 2,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 2,
+   "round": 1,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  review required: unable to verify downloaded audio (AcoustID unknown, no score): review-A.flac",
+   "  review required before import: review-A.flac",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  review required: unable to verify downloaded audio (AcoustID unknown, no score): review-B.flac",
+   "  review required before import: review-B.flac",
+   "Round 1 download complete: 0 fingerprint-verified, 2 held for review, 0 not downloaded",
+   "2 downloaded file(s) require review before import; stopping automatic import for this round.",
+   "2 downloaded file(s) are held for review; syncing existing library matches only",
+   "Final Beets match: 0 matched, 2 still missing",
+   "No playlist tracks matched Beets yet; 2 downloaded file(s) are waiting for manual review.",
+   "Playlist sync complete"
+  ],
+  "matched": [],
+  "missing": [
+   "A",
+   "B"
+  ],
+  "result": {
+   "done": 0,
+   "failed": 0,
+   "matched_after_import": 0,
+   "missing_after_import": 2,
+   "playlist": "Mix",
+   "review_required": 2
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "review",
+    "2 downloaded file(s) need review before import",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "review",
+    "2 downloaded file(s) need review before import",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "review",
+    "2 downloaded file(s) need review before import",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "message": "fingerprint unclear",
+    "method": "SLSKD",
+    "path": "<TMP>/review-A.flac",
+    "status": "review_required",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "message": "fingerprint unclear",
+    "method": "SLSKD",
+    "path": "<TMP>/review-B.flac",
+    "status": "review_required",
+    "title": "B"
+   }
+  }
+ },
+ "parse_error": {
+  "error": "RuntimeError: source gone",
+  "events": [
+   [
+    "parse",
+    "url",
+    "https://example.test/list"
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "error": "source gone",
+     "status": "failed"
+    }
+   ]
+  ],
+  "final": {
+   "current": "reading playlist track list",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 0,
+   "missing_after_import": 0,
+   "missing_initial": 0,
+   "phase": "error",
+   "resumed": false,
+   "review_required": null,
+   "round": 0,
+   "status": "error",
+   "total": 0,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Reading playlist track list and matching against Beets...",
+   "Fatal: source gone"
+  ],
+  "matched": [],
+  "missing": [],
+  "result": {},
+  "saves": [
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "error",
+    "error",
+    "reading playlist track list",
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  ],
+  "statuses": {}
+ },
+ "parse_fresh": {
+  "error": null,
+  "events": [
+   [
+    "parse",
+    "url",
+    "https://example.test/list"
+   ],
+   [
+    "write_manifest",
+    [
+     "Kept",
+     "Want"
+    ],
+    "url",
+    "https://example.test/list"
+   ],
+   [
+    "slskd",
+    "Want"
+   ],
+   [
+    "validate",
+    "Want",
+    ""
+   ],
+   [
+    "validate",
+    "Want",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "Kept",
+     "Want"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "Kept",
+     "Want"
+    ],
+    [
+     "Kept",
+     "Want"
+    ],
+    [],
+    "url",
+    "https://example.test/list",
+    true
+   ],
+   [
+    "match",
+    [
+     "Kept",
+     "Want"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "Kept",
+     "Want"
+    ],
+    [
+     "Kept",
+     "Want"
+    ],
+    [],
+    "url",
+    "https://example.test/list",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 1,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": 0,
+   "matched_after_import": 2,
+   "matched_initial": 1,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 1,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 0,
+   "round": 1,
+   "status": "done",
+   "total": 1,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Reading playlist track list and matching against Beets...",
+   "Playlist read: 2 track(s), 1 matched, 1 missing",
+   "",
+   "========================================\nMissing-track round 1/8: 1 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - Want",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-Want.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 2 matched, 0 still missing",
+   "Syncing M3U/Plex playlist after round 1 (2 matched tracks)...",
+   "Final Beets match: 2 matched, 0 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "Kept",
+   "Want"
+  ],
+  "missing": [],
+  "result": {
+   "done": 1,
+   "failed": 0,
+   "matched_after_import": 2,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    0,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    1,
+    0,
+    1,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|kept": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/Kept.flac",
+    "status": "available",
+    "title": "Kept"
+   },
+   "artist|want": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-Want.flac",
+    "status": "imported",
+    "title": "Want"
+   }
+  }
+ },
+ "parse_resume": {
+  "error": null,
+  "events": [
+   [
+    "slskd",
+    "Want"
+   ],
+   [
+    "validate",
+    "Want",
+    ""
+   ],
+   [
+    "validate",
+    "Want",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "Kept",
+     "Want"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "Kept",
+     "Want"
+    ],
+    [
+     "Kept",
+     "Want"
+    ],
+    [],
+    "url",
+    "https://example.test/list",
+    true
+   ],
+   [
+    "match",
+    [
+     "Kept",
+     "Want"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "Kept",
+     "Want"
+    ],
+    [
+     "Kept",
+     "Want"
+    ],
+    [],
+    "url",
+    "https://example.test/list",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 1,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": 0,
+   "matched_after_import": 2,
+   "matched_initial": 1,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 1,
+   "phase": "done",
+   "resumed": true,
+   "review_required": 0,
+   "round": 1,
+   "status": "done",
+   "total": 1,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Reading playlist track list and matching against Beets...",
+   "Playlist read: 2 track(s), 1 matched, 1 missing",
+   "",
+   "========================================\nMissing-track round 1/8: 1 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - Want",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 1 download complete: 0 downloaded, 1 not downloaded",
+   "No new files were downloaded in this round; stopping missing-track loop.",
+   "No missing tracks were downloaded; syncing existing library matches only",
+   "Final Beets match: 1 matched, 1 still missing",
+   "Playlist sync complete",
+   "Resuming previous playlist download checkpoint",
+   "Resume: reading track list from manifest (skipping YouTube fetch and library match)...",
+   "Resume: 1 already available, 1 still need download",
+   "Resume: reconciling staged downloads from previous checkpoint...",
+   "Resume: no staged downloads found; starting fresh download round",
+   "",
+   "========================================\nMissing-track round 1/8: 1 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - Want",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-Want.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 2 matched, 0 still missing",
+   "Syncing M3U/Plex playlist after round 1 (2 matched tracks)...",
+   "Final Beets match: 2 matched, 0 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "Kept",
+   "Want"
+  ],
+  "missing": [],
+  "result": {
+   "done": 1,
+   "failed": 0,
+   "matched_after_import": 2,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - Want",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    1,
+    0,
+    1,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|kept": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/Kept.flac",
+    "status": "available",
+    "title": "Kept"
+   },
+   "artist|want": {
+    "download_attempt_count": 2,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-Want.flac",
+    "status": "imported",
+    "title": "Want"
+   }
+  }
+ },
+ "parse_resume_empty": {
+  "error": null,
+  "events": [
+   [
+    "parse",
+    "url",
+    "https://example.test/list"
+   ],
+   [
+    "write_manifest",
+    [
+     "X"
+    ],
+    "url",
+    "https://example.test/list"
+   ],
+   [
+    "slskd",
+    "X"
+   ],
+   [
+    "pipeline",
+    {
+     "action": "download_import",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 1,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 1,
+   "phase": "done",
+   "resumed": true,
+   "review_required": null,
+   "round": 1,
+   "status": "done",
+   "total": 1,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Reading playlist track list and matching against Beets...",
+   "Playlist read: 1 track(s), 0 matched, 1 missing",
+   "",
+   "========================================\nMissing-track round 1/8: 1 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - X",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 1 download complete: 0 downloaded, 1 not downloaded",
+   "No new files were downloaded in this round; stopping missing-track loop.",
+   "No missing tracks were downloaded; syncing existing library matches only",
+   "Resuming previous playlist download checkpoint",
+   "Resume: reading track list from manifest (skipping YouTube fetch and library match)...",
+   "Resume: manifest empty \u2014 falling back to full playlist fetch...",
+   "Playlist read: 1 track(s), 0 matched, 1 missing",
+   "Resume: reconciling staged downloads from previous checkpoint...",
+   "Resume: no staged downloads found; starting fresh download round",
+   "",
+   "========================================\nMissing-track round 1/8: 1 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - X",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 1 download complete: 0 downloaded, 1 not downloaded",
+   "No new files were downloaded in this round; stopping missing-track loop.",
+   "No missing tracks were downloaded; syncing existing library matches only"
+  ],
+  "matched": [],
+  "missing": [
+   "X"
+  ],
+  "result": {
+   "done": 0,
+   "failed": 1,
+   "matched_after_import": 0,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "parse",
+    "reading playlist track list",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    0,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    1,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    1,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    1,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    1,
+    1,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - X",
+    0,
+    1,
+    1,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    0,
+    1,
+    1,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|x": {
+    "download_attempt_count": 1,
+    "message": "not downloaded",
+    "method": "SLSKD",
+    "path": "",
+    "status": "failed",
+    "title": "X"
+   }
+  }
+ },
+ "partial": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A"
+    ],
+    [
+     "A",
+     "B"
+    ],
+    [
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A"
+    ],
+    [
+     "A",
+     "B"
+    ],
+    [
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 1,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": 0,
+   "matched_after_import": 1,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 1,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 1,
+   "round": 1,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  review required: unable to verify downloaded audio (AcoustID unknown, no score): review-B.flac",
+   "  review required before import: review-B.flac",
+   "Round 1 download complete: 1 fingerprint-verified, 1 held for review, 0 not downloaded",
+   "1 fingerprint-verified file(s) will be imported now; 1 other downloaded file(s) require review and are held back. Stopping further rounds until review is resolved.",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 1 matched, 1 still missing",
+   "Syncing M3U/Plex playlist after round 1 (1 matched tracks)...",
+   "Stopping further download rounds until this round's review-required file(s) are resolved.",
+   "Final Beets match: 1 matched, 1 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "A"
+  ],
+  "missing": [
+   "B"
+  ],
+  "result": {
+   "done": 1,
+   "failed": 0,
+   "matched_after_import": 1,
+   "missing_after_import": 1,
+   "playlist": "Mix",
+   "review_required": 1
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "review",
+    "1 downloaded file(s) need review before import",
+    1,
+    0,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "review",
+    "1 downloaded file(s) need review before import",
+    1,
+    0,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "syncing M3U + Plex after round 1",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    1,
+    0,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "imported",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "message": "fingerprint unclear",
+    "method": "SLSKD",
+    "path": "<TMP>/review-B.flac",
+    "status": "review_required",
+    "title": "B"
+   }
+  }
+ },
+ "pause_first": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "paused"
+    }
+   ]
+  ],
+  "final": {
+   "current": "resume from checkpoint",
+   "done": 1,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 2,
+   "phase": "paused",
+   "resumed": false,
+   "review_required": null,
+   "round": 1,
+   "status": "paused",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Playlist pipeline paused at checkpoint."
+  ],
+  "matched": [],
+  "missing": [
+   "A",
+   "B"
+  ],
+  "result": {
+   "playlist": "Mix",
+   "status": "paused"
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "paused",
+    "paused",
+    "resume from checkpoint",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "paused",
+    "paused",
+    "resume from checkpoint",
+    1,
+    0,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "fingerprint verified; waiting for Beets import",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "waiting_import",
+    "title": "A"
+   },
+   "artist|b": {
+    "message": "not in Beets",
+    "method": "",
+    "path": "",
+    "status": "missing",
+    "title": "B"
+   }
+  }
+ },
+ "pause_resume": {
+  "error": null,
+  "events": [
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "slskd",
+    "C"
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 1,
+   "download_batch_remaining": 0,
+   "failed": 1,
+   "import_returncode": 0,
+   "matched_after_import": 3,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 3,
+   "phase": "done",
+   "resumed": true,
+   "review_required": 0,
+   "round": 1,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Playlist pipeline paused at checkpoint.",
+   "Resuming previous playlist download checkpoint",
+   "Resume: 0 already available, 3 still need download",
+   "Pre-download requested-track check: 0 already available, 3 still need download",
+   "Resume: reconciling staged downloads from previous checkpoint...",
+   "Resume: found 1 previously downloaded file(s); importing before continuing downloads",
+   "Resume: pre-download import of 1 staged file(s) complete",
+   "Resume: 1 track(s) imported from checkpoint, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - B",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-B.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - C",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 1 download complete: 1 downloaded, 1 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 3 matched, 0 still missing",
+   "Syncing M3U/Plex playlist after round 1 (3 matched tracks)...",
+   "Final Beets match: 3 matched, 0 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "A",
+   "B",
+   "C"
+  ],
+  "missing": [],
+  "result": {
+   "done": 1,
+   "failed": 1,
+   "matched_after_import": 3,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    3,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    1,
+    1,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "matched in Beets",
+    "method": "SLSKD",
+    "path": "/lib/A.flac",
+    "status": "available",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-B.flac",
+    "status": "imported",
+    "title": "B"
+   },
+   "artist|c": {
+    "download_attempt_count": 1,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "",
+    "status": "imported",
+    "title": "C"
+   }
+  }
+ },
+ "plex_error": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "C"
+    ],
+    [
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 1,
+   "matched_initial": 1,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 0,
+   "phase": "done",
+   "resumed": true,
+   "review_required": 0,
+   "round": 0,
+   "status": "done",
+   "total": 0,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking playlist tracks against Beets before sync...",
+   "Pre-sync Beets check: 1 matched, 0 missing",
+   "Final Beets match: 1 matched, 0 still missing",
+   "Playlist files saved; Plex sync partial",
+   "Resuming previous playlist download checkpoint",
+   "Resume: 1 already available, 0 still need download",
+   "Pre-download requested-track check: 1 already available, 0 still need download",
+   "Final Beets match: 1 matched, 0 still missing",
+   "Playlist files saved; Plex sync failed"
+  ],
+  "matched": [
+   "C"
+  ],
+  "missing": [],
+  "result": {
+   "done": 0,
+   "failed": 0,
+   "matched_after_import": 1,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    1,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    1,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    1,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    1,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|c": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/C.flac",
+    "status": "available",
+    "title": "C"
+   }
+  }
+ },
+ "plex_partial": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "C"
+    ],
+    false
+   ],
+   [
+    "match",
+    [
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "C"
+    ],
+    [
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 1,
+   "matched_initial": 1,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 0,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 0,
+   "round": 0,
+   "status": "done",
+   "total": 0,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking playlist tracks against Beets before sync...",
+   "Pre-sync Beets check: 1 matched, 0 missing",
+   "Final Beets match: 1 matched, 0 still missing",
+   "Playlist files saved; Plex sync partial"
+  ],
+  "matched": [
+   "C"
+  ],
+  "missing": [],
+  "result": {
+   "done": 0,
+   "failed": 0,
+   "matched_after_import": 1,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|c": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/C.flac",
+    "status": "available",
+    "title": "C"
+   }
+  }
+ },
+ "provider_boom": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "B",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "A"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 1,
+   "download_batch_remaining": 0,
+   "failed": 2,
+   "import_returncode": 0,
+   "matched_after_import": 2,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 1,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 0,
+   "round": 2,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  SLSKD failed: provider down",
+   "  not downloaded",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-B.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 1 downloaded, 1 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 2 matched, 1 still missing",
+   "Syncing M3U/Plex playlist after round 1 (2 matched tracks)...",
+   "",
+   "========================================\nMissing-track round 2/8: 1 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - A",
+   "  trying SLSKD",
+   "  SLSKD failed: provider down",
+   "  not downloaded",
+   "Round 2 download complete: 0 downloaded, 1 not downloaded",
+   "No new files were downloaded in this round; stopping missing-track loop.",
+   "Final Beets match: 2 matched, 1 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "B",
+   "C"
+  ],
+  "missing": [
+   "A"
+  ],
+  "result": {
+   "done": 1,
+   "failed": 2,
+   "matched_after_import": 2,
+   "missing_after_import": 1,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    0,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    1,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    2,
+    2,
+    2,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    1,
+    2,
+    2,
+    2,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 2,
+    "message": "not available in Beets",
+    "method": "SLSKD",
+    "path": "",
+    "status": "missing",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-B.flac",
+    "status": "imported",
+    "title": "B"
+   },
+   "artist|c": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/C.flac",
+    "status": "available",
+    "title": "C"
+   }
+  }
+ },
+ "resume_cancel_in_import": {
+  "error": null,
+  "events": [
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "stopped"
+    }
+   ]
+  ],
+  "final": {
+   "current": "stopped by user",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 0,
+   "missing_after_import": 0,
+   "missing_initial": 3,
+   "phase": "stopped",
+   "resumed": true,
+   "review_required": null,
+   "round": 1,
+   "status": "stopped",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Playlist pipeline stopped by user.",
+   "Resuming previous playlist download checkpoint",
+   "Resume: 0 already available, 3 still need download",
+   "Pre-download requested-track check: 0 already available, 3 still need download",
+   "Resume: reconciling staged downloads from previous checkpoint...",
+   "Resume: found 1 previously downloaded file(s); importing before continuing downloads",
+   "Resume: pre-download import of 1 staged file(s) complete",
+   "Resume: 1 track(s) imported from checkpoint, 2 still need download"
+  ],
+  "matched": [
+   "A"
+  ],
+  "missing": [
+   "B",
+   "C"
+  ],
+  "result": {
+   "playlist": "Mix",
+   "status": "stopped"
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    3,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "stopped",
+    "stopped",
+    "stopped by user",
+    0,
+    0,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported from previous checkpoint",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "available",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "message": "not in Beets",
+    "method": "SLSKD",
+    "path": "",
+    "status": "missing",
+    "title": "B"
+   },
+   "artist|c": {
+    "message": "not in Beets",
+    "method": "",
+    "path": "",
+    "status": "missing",
+    "title": "C"
+   }
+  }
+ },
+ "resume_import_warning": {
+  "error": "RuntimeError: import busy",
+  "events": [
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "slskd",
+    "C"
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "error": "import busy",
+     "status": "failed"
+    }
+   ]
+  ],
+  "final": {
+   "current": "importing stable staged downloads after round 1",
+   "done": 1,
+   "download_batch_remaining": 0,
+   "failed": 2,
+   "import_returncode": null,
+   "matched_after_import": 0,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 3,
+   "phase": "error",
+   "resumed": true,
+   "review_required": null,
+   "round": 1,
+   "status": "error",
+   "total": 3,
+   "waiting_for_import": 1
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Playlist pipeline stopped by user.",
+   "Resuming previous playlist download checkpoint",
+   "Resume: 0 already available, 3 still need download",
+   "Pre-download requested-track check: 0 already available, 3 still need download",
+   "Resume: reconciling staged downloads from previous checkpoint...",
+   "Resume: found 1 previously downloaded file(s); importing before continuing downloads",
+   "Resume: pre-download import warning \u2014 import busy",
+   "",
+   "========================================\nMissing-track round 1/8: 3 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/3] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/3] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "[3/3] Artist - C",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 1 download complete: 1 downloaded, 2 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Fatal: import busy"
+  ],
+  "matched": [],
+  "missing": [
+   "A",
+   "B",
+   "C"
+  ],
+  "result": {},
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    3,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing 1 staged file(s) from previous run",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    1
+   ],
+   [
+    "error",
+    "error",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    1
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 2,
+    "file_size": 123,
+    "message": "fingerprint verified; waiting for Beets import",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "waiting_import",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 2,
+    "message": "not downloaded",
+    "method": "SLSKD",
+    "path": "",
+    "status": "failed",
+    "title": "B"
+   },
+   "artist|c": {
+    "download_attempt_count": 1,
+    "message": "not downloaded",
+    "method": "SLSKD",
+    "path": "",
+    "status": "failed",
+    "title": "C"
+   }
+  }
+ },
+ "resume_stale_staged": {
+  "error": null,
+  "events": [
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "slskd",
+    "C"
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A",
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 1,
+   "download_batch_remaining": 0,
+   "failed": 3,
+   "import_returncode": 0,
+   "matched_after_import": 2,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 1,
+   "missing_initial": 3,
+   "phase": "done",
+   "resumed": true,
+   "review_required": 0,
+   "round": 2,
+   "status": "done",
+   "total": 3,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "Round 1 download complete: 1 downloaded, 0 not downloaded",
+   "Playlist pipeline stopped by user.",
+   "Resuming previous playlist download checkpoint",
+   "Resume: 0 already available, 3 still need download",
+   "Pre-download requested-track check: 0 already available, 3 still need download",
+   "Resume: reconciling staged downloads from previous checkpoint...",
+   "  Reconcile: 1 staged file(s) missing on resume - will re-download",
+   "Resume: no staged downloads found; starting fresh download round",
+   "",
+   "========================================\nMissing-track round 1/8: 3 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/3] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/3] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "[3/3] Artist - C",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 1 download complete: 1 downloaded, 2 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 1 staged file(s)",
+   "No new playlist singleton rows needed album placement",
+   "After round 1: 2 matched, 1 still missing",
+   "Syncing M3U/Plex playlist after round 1 (2 matched tracks)...",
+   "",
+   "========================================\nMissing-track round 2/8: 1 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/1] Artist - B",
+   "  trying SLSKD",
+   "  SLSKD produced no new file",
+   "  not downloaded",
+   "Round 2 download complete: 0 downloaded, 1 not downloaded",
+   "No new files were downloaded in this round; stopping missing-track loop.",
+   "Final Beets match: 2 matched, 1 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "A",
+   "C"
+  ],
+  "missing": [
+   "B"
+  ],
+  "result": {
+   "done": 1,
+   "failed": 3,
+   "matched_after_import": 2,
+   "missing_after_import": 1,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "reconcile",
+    "reconciling staged files",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - C",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    1
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    1,
+    2,
+    3,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    2,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    2,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 2",
+    1,
+    2,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    2,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    2,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    2,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    2,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    2,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    3,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    3,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    3,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    3,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    3,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    3,
+    3,
+    2,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    1,
+    3,
+    3,
+    2,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    1,
+    3,
+    3,
+    2,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 2,
+    "file_size": 123,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "imported",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 3,
+    "message": "not available in Beets",
+    "method": "SLSKD",
+    "path": "",
+    "status": "missing",
+    "title": "B"
+   },
+   "artist|c": {
+    "download_attempt_count": 1,
+    "message": "imported and matched in Beets",
+    "method": "SLSKD",
+    "path": "",
+    "status": "imported",
+    "title": "C"
+   }
+  }
+ },
+ "review_after_import": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "slskd",
+    "A"
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "validate",
+    "A",
+    ""
+   ],
+   [
+    "slskd",
+    "B"
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "validate",
+    "B",
+    ""
+   ],
+   [
+    "import",
+    "Mix",
+    "pl_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "C"
+    ],
+    [
+     "A",
+     "B",
+     "C"
+    ],
+    [],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 2,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": 0,
+   "matched_after_import": 3,
+   "matched_initial": 0,
+   "max_rounds": 8,
+   "missing_after_import": 0,
+   "missing_initial": 2,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 2,
+   "round": 1,
+   "status": "done",
+   "total": 2,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking requested missing playlist tracks against Beets before download...",
+   "Pre-download requested-track check: 0 already available, 2 still need download",
+   "",
+   "========================================\nMissing-track round 1/8: 2 track(s) still missing",
+   "Downloading missing playlist tracks via sources: SLSKD",
+   "[1/2] Artist - A",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-A.flac",
+   "  downloaded via SLSKD",
+   "[2/2] Artist - B",
+   "  trying SLSKD",
+   "  accepted fingerprint-verified download (AcoustID unknown, no score): ok-B.flac",
+   "  downloaded via SLSKD",
+   "Round 1 download complete: 2 downloaded, 0 not downloaded",
+   "Starting Beets singleton import from stable playlist staging (<TMP>\\imports) ...",
+   "Beets singleton import round 1 complete: 2 staged file(s)",
+   "Playlist import placement found candidates but none could be safely resolved to a MusicBrainz album",
+   "After round 1: 3 matched, 0 still missing",
+   "Syncing M3U/Plex playlist after round 1 (3 matched tracks)...",
+   "Final Beets match: 3 matched, 0 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "A",
+   "B",
+   "C"
+  ],
+  "missing": [],
+  "result": {
+   "done": 2,
+   "failed": 0,
+   "matched_after_import": 3,
+   "missing_after_import": 0,
+   "playlist": "Mix",
+   "review_required": 2
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    2,
+    0,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "download round 1",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    0,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - A",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    1,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "download",
+    "Artist - B",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    2
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    2
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "import",
+    "importing stable staged downloads after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "matching after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "syncing M3U + Plex after round 1",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    2,
+    0,
+    2,
+    1,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    2,
+    0,
+    2,
+    1,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported but AcoustID fingerprint does not match expected track",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-A.flac",
+    "status": "review_required",
+    "title": "A"
+   },
+   "artist|b": {
+    "download_attempt_count": 1,
+    "file_size": 123,
+    "message": "imported, but no MusicBrainz release-group match reached 70% confidence",
+    "method": "SLSKD",
+    "path": "<TMP>/ok-B.flac",
+    "status": "review_required",
+    "title": "B"
+   },
+   "artist|c": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/C.flac",
+    "status": "available",
+    "title": "C"
+   }
+  }
+ },
+ "sync_only": {
+  "error": null,
+  "events": [
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    false
+   ],
+   [
+    "match",
+    [
+     "A",
+     "B"
+    ],
+    true
+   ],
+   [
+    "outputs",
+    [
+     "A"
+    ],
+    [
+     "A",
+     "B"
+    ],
+    [
+     "B"
+    ],
+    "",
+    "",
+    true
+   ],
+   [
+    "pipeline",
+    {
+     "action": "full",
+     "status": "done"
+    }
+   ]
+  ],
+  "final": {
+   "current": "",
+   "done": 0,
+   "download_batch_remaining": 0,
+   "failed": 0,
+   "import_returncode": null,
+   "matched_after_import": 1,
+   "matched_initial": 1,
+   "max_rounds": 8,
+   "missing_after_import": 1,
+   "missing_initial": 1,
+   "phase": "done",
+   "resumed": false,
+   "review_required": 0,
+   "round": 0,
+   "status": "done",
+   "total": 0,
+   "waiting_for_import": 0
+  },
+  "http": [
+   {
+    "jobs_job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "log": [
+   "Checking playlist tracks against Beets before sync...",
+   "Pre-sync Beets check: 1 matched, 1 missing",
+   "Final Beets match: 1 matched, 1 still missing",
+   "Playlist sync complete"
+  ],
+  "matched": [
+   "A"
+  ],
+  "missing": [
+   "B"
+  ],
+  "result": {
+   "done": 0,
+   "failed": 0,
+   "matched_after_import": 1,
+   "missing_after_import": 1,
+   "playlist": "Mix",
+   "review_required": 0
+  },
+  "saves": [
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "queued",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "match",
+    "checking Beets before download",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "running",
+    "sync",
+    "sync playlist",
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   [
+    "done",
+    "done",
+    "",
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  ],
+  "statuses": {
+   "artist|a": {
+    "message": "matched in Beets",
+    "method": "",
+    "path": "/lib/A.flac",
+    "status": "available",
+    "title": "A"
+   },
+   "artist|b": {
+    "message": "not available in Beets",
+    "method": "",
+    "path": "",
+    "status": "missing",
+    "title": "B"
+   }
+  }
+ }
+}
