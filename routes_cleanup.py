@@ -25,7 +25,7 @@ from backend.maintenance_service import _ALBUM_FOLDER_CLEANUP_LOCK, _ROOT_FOLDER
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _invalidate_lib_cache, _remove_album_track_items, _repair_album_mbid_sticking_once, _scan_album_track_integrity
 from backend.musicbrainz_service import _mb_release_group_for_release
 from backend.playlist_service import _PLAYLIST_DUPLICATE_JOB_MESSAGE
-from backend.serializers import json_route_result
+from backend.serializers import beets_auth_failed_response, beets_offline_response, json_route_result
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 
 import backend.dedup_authorization as _dedup_authorization
@@ -591,18 +591,10 @@ def clean_library_health():
         ))
     except BeetsUnavailableError as ex:
         _app_logger.warning("Library health scan failed: Beets engine unavailable")
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine is unavailable.",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response("Beets engine is unavailable.")
     except BeetsAuthError as ex:
         _app_logger.error("Library health scan failed: Control agent authentication failed (%s)", type(ex).__name__)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine authentication failed.",
-            "error_code": "ENGINE_AUTH_FAILED",
-        }), 503
+        return beets_auth_failed_response()
     except BeetsError as ex:
         status_code = getattr(ex, "status_code", 0) or 500
         error_code = getattr(ex, "error_code", "")
