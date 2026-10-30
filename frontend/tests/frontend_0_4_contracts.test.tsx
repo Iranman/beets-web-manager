@@ -10,7 +10,6 @@ import {
   fingerprintNotCheckedLabel,
 } from '../src/components/MusicBrainzUnavailableNotice';
 import { PlaylistSyncSummary, playlistSyncStatusLabel } from '../src/features/playlists/PlaylistSyncSummary';
-import { qbitHealthProblem } from '../src/features/torrent/TorrentRepairPanel';
 import { versionLabel } from '../src/views/System';
 import { rollbackSuccessMessage } from '../src/views/LibraryChanges';
 import type { Job } from '../src/types/api';
@@ -211,10 +210,4 @@ describe('System, transactions and qBittorrent', () => {
     expect(rollbackSuccessMessage({})).toBe('Rollback finished.');
   });
 
-  it('turns a qBittorrent auth failure into an actionable message', () => {
-    expect(qbitHealthProblem('authentication_error')).toMatch(/QBITTORRENT_USERNAME and QBITTORRENT_PASSWORD/);
-    expect(qbitHealthProblem('unavailable')).toMatch(/QBITTORRENT_URL/);
-    expect(qbitHealthProblem('confirmed')).toBe('');
-    expect(qbitHealthProblem(null)).toBe('');
-  });
 });

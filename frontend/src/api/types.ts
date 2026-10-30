@@ -971,16 +971,6 @@ export interface SetupEnvSavePayload {
   clear?: string[];
 }
 
-export interface AlbumMbFormatResponse extends ApiOkResponse {
-  track_text: string;
-  mb_url: string;
-  album: string;
-  albumartist: string;
-  year: number | string;
-  track_count: number;
-}
-
-
 export interface SubmissionReadiness {
   plugins: Record<string, boolean>;
   fpcalc_available: boolean;
@@ -1319,72 +1309,6 @@ export interface AiBatchStatusResponse extends ApiOkResponse {
   state: AiBatchState;
 }
 
-export interface QbitStatusResponse extends ApiOkResponse {
-  configured: boolean;
-  url?: string;
-  username_configured?: boolean;
-  password_configured?: boolean;
-  category?: string;
-  filter?: string;
-  path_aliases?: string;
-  repair_allowed_roots?: string[];
-  torrent_source_roots?: string[];
-  /** Provider health record of the last qBittorrent calls; null before any. */
-  health?: ProviderHealth | null;
-}
-
-export interface ProviderHealth {
-  provider?: string;
-  calls?: number;
-  failures?: number;
-  /** confirmed, no_result, unavailable, rate_limited, authentication_error,
-   * transient_error, rejected, not_configured, ... */
-  last_outcome?: string | null;
-  last_status_code?: number | null;
-  last_message?: string | null;
-  last_success_at?: number | null;
-  last_failure_at?: number | null;
-}
-
-export interface QbitHardlinkRepairResult {
-  dry_run: boolean;
-  torrents: number;
-  category?: string;
-  filter?: string;
-  search?: string;
-  checked: number;
-  already_present: number;
-  linked: number;
-  would_link: number;
-  size_mismatch?: number;
-  skipped: number;
-  errors: number;
-  rechecked_hashes?: number;
-  actions?: Array<Record<string, unknown>>;
-}
-
-export interface QbitHardlinkRepairResponse extends ApiOkResponse {
-  dry_run: boolean;
-  job_id?: string;
-  result?: QbitHardlinkRepairResult;
-  log?: string[];
-}
-
-export interface LibraryImportAllLastResponse extends ApiOkResponse {
-  updated_at?: number;
-  album_count?: number;
-  repaired_count?: number;
-  queued_count?: number;
-  failed_count?: number;
-  failures?: Array<{
-    label?: string;
-    message?: string;
-    child_job_id?: string;
-    wanted_track_count?: number;
-  }>;
-  failed_albums?: Array<Record<string, unknown>>;
-}
-
 export type JobStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'recovery_required' | 'killed' | 'missing';
 
 export interface JobResponse extends ApiOkResponse {
@@ -1395,33 +1319,6 @@ export interface JobResponse extends ApiOkResponse {
   result?: Record<string, unknown>;
   /** Structured progress a Python job publishes (job_engine update_state). */
   state?: { progress?: { done?: number; total?: number } } & Record<string, unknown>;
-}
-
-export interface AlbumArtCandidate {
-  name: string;
-  path: string;
-  size: number;
-  usable?: boolean;
-}
-
-export interface AlbumArtStatusResponse extends ApiOkResponse {
-  album_id: number;
-  album: string;
-  albumartist: string;
-  album_dir: string;
-  art_url: string;
-  artpath: string;
-  art_exists: boolean;
-  local_art_path: string;
-  has_local_art: boolean;
-  has_removable_art?: boolean;
-  broken_art_count?: number;
-  candidates: AlbumArtCandidate[];
-}
-
-export interface AlbumArtDeleteResponse extends ApiOkResponse {
-  removed: string[];
-  removed_count: number;
 }
 
 export type ArtRepairIssue = 'missing' | 'broken' | 'unresolved';
@@ -2103,11 +2000,6 @@ export interface LidarrWantedAlbum {
   monitored: boolean;
 }
 
-export interface WantedResponse extends ApiOkResponse {
-  missing: LidarrWantedAlbum[];
-  total: number;
-}
-
 export type AcquisitionQueueSource = 'beets' | 'lidarr';
 
 export interface AcquisitionQueueHealth {
@@ -2333,30 +2225,6 @@ export interface SpotiflacStatus {
   services?: string[];
 }
 
-export interface LidarrArtistAlbum {
-  lidarr_id: number;
-  title: string;
-  year: string;
-  album_type: string;
-  monitored: boolean;
-  track_file_count: number;
-  total_track_count: number;
-  percent: number;
-  /** Lidarr foreignAlbumId. Despite the name this is a MusicBrainz release
-   * group ID, not a Release ID (routes_lidarr._album_payload). */
-  mb_albumid: string;
-  cover_url: string;
-  disk_path: string;
-  aldir: string;
-}
-
-export interface LidarrArtistAlbumsResponse extends ApiOkResponse {
-  albums: LidarrArtistAlbum[];
-  found?: boolean;
-  lidarr_artist?: string;
-  artist_path?: string;
-}
-
 export interface LidarrCommandResponse extends ApiOkResponse {
   command_id?: number;
   status?: string;
@@ -2410,22 +2278,6 @@ export interface YtdlpStatusResponse extends ApiOkResponse {
   cookie_rejected?: boolean;
   cookie_rejection?: YtdlpCookieRejection | null;
   message: string;
-}
-
-// ── Genre stats ───────────────────────────────────────────────────────────────
-
-export interface GenreStatsAlbum {
-  id: number;
-  album: string;
-  albumartist: string;
-  year: number | string;
-}
-
-export interface GenreStatsResponse extends ApiOkResponse {
-  total: number;
-  with_genre: number;
-  without_genre: number;
-  missing: GenreStatsAlbum[];
 }
 
 // ── Plex ─────────────────────────────────────────────────────────────────────
@@ -3137,158 +2989,6 @@ export interface ArtistIdGroup {
 export interface ArtistIdGroupsResponse extends ApiOkResponse {
   groups: ArtistIdGroup[];
   hidden_count?: number;
-}
-
-// ── Artist discography (MusicBrainz) ─────────────────────────────────────────
-
-export interface DiscographyAlbum {
-  album: string;
-  year: string;
-  type: string;
-  subtypes: string[];
-  mbid: string;
-  mb_url: string;
-  on_disk: boolean;
-  match_reason: string;
-}
-
-export interface DiscographyResponse extends ApiOkResponse {
-  mb_artist?: string;
-  mbid?: string;
-  have?: DiscographyAlbum[];
-  missing?: DiscographyAlbum[];
-  total?: number;
-  status?: 'running';
-  job_id?: string;
-}
-
-export interface AlbumMbCompletenessTrack {
-  disc: number;
-  track: number;
-  title: string;
-  mb_trackid: string;
-  duration_ms?: number;
-  ok: boolean;
-  missing: boolean;
-  item?: Record<string, unknown>;
-}
-
-export interface AlbumMbCompletenessExtraItem {
-  id: number;
-  title: string;
-  track: number;
-  disc: number;
-  path: string;
-  mb_trackid: string;
-  length?: number;
-  score?: number;
-}
-
-export interface AlbumMbDuplicateRecordingItem {
-  id: number;
-  album_id?: number;
-  album?: string;
-  albumartist?: string;
-  title: string;
-  track: number;
-  disc: number;
-  path: string;
-  filename?: string;
-  mb_trackid: string;
-  mb_albumid?: string;
-  length?: number;
-  in_selected_album?: boolean;
-  selected_release?: boolean;
-  matched_to_selected_release?: boolean;
-}
-
-export interface AlbumMbDuplicateRecordingExpectedTrack {
-  disc: number;
-  track: number;
-  title: string;
-  mb_trackid: string;
-}
-
-export interface AlbumMbDuplicateRecordingGroup {
-  mb_trackid: string;
-  count: number;
-  expected_count: number;
-  duplicate_count: number;
-  items: AlbumMbDuplicateRecordingItem[];
-  expected_tracks: AlbumMbDuplicateRecordingExpectedTrack[];
-}
-
-export interface AlbumMbCompletenessResponse extends ApiOkResponse {
-  album_id: number;
-  album: string;
-  artist: string;
-  year: number;
-  mb_albumid: string;
-  mb_url: string;
-  expected_count: number;
-  actual_count: number;
-  extra_count: number;
-  extra_track_count?: number;
-  in_library: number;
-  missing_count: number;
-  mb_missing_count?: number;
-  mb_trackid_missing_count?: number;
-  mb_trackid_mismatch_count?: number;
-  mb_duplicate_recording_id_count?: number;
-  duplicate_recording_groups?: AlbumMbDuplicateRecordingGroup[];
-  mb_repairable_count?: number;
-  mb_health_source?: string;
-  percent: number;
-  tracks: AlbumMbCompletenessTrack[];
-  missing: AlbumMbCompletenessTrack[];
-  extra_items?: AlbumMbCompletenessExtraItem[];
-  release_title: string;
-}
-
-export interface AlbumDuplicateResolverTrack {
-  disc: number;
-  track: number;
-  title: string;
-  mb_trackid: string;
-  score?: number;
-}
-
-export interface AlbumDuplicateResolverItem extends AlbumMbDuplicateRecordingItem {
-  default_action?: 'skip' | 'delete' | 'retag';
-  default_target?: AlbumDuplicateResolverTrack | null;
-  retag_candidates?: AlbumDuplicateResolverTrack[];
-}
-
-export interface AlbumDuplicateResolverGroup {
-  key: string;
-  mb_trackid: string;
-  count: number;
-  duplicate_count: number;
-  expected_count: number;
-  expected_tracks: AlbumDuplicateResolverTrack[];
-  keep_items: AlbumDuplicateResolverItem[];
-  action_items: AlbumDuplicateResolverItem[];
-}
-
-export interface AlbumDuplicateResolverPlan extends ApiOkResponse {
-  album_id: number;
-  mb_albumid: string;
-  album: string;
-  artist: string;
-  expected_count: number;
-  actual_count: number;
-  missing_count: number;
-  missing_tracks: AlbumDuplicateResolverTrack[];
-  groups: AlbumDuplicateResolverGroup[];
-  group_count: number;
-  action_item_count: number;
-  message?: string;
-}
-
-export interface AlbumDuplicateResolverAction {
-  action: 'skip' | 'delete' | 'retag';
-  item_id: number;
-  target_mb_trackid?: string;
 }
 
 export interface MbidStatusExample {
