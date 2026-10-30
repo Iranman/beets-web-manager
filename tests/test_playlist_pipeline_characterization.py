@@ -550,6 +550,116 @@ class Locks(PipelineCase):
         lock.release()
 
 
+class SummaryPayloads(unittest.TestCase):
+    """Exact list/detail payloads, so consolidating their builders changes no key."""
+
+    ZERO = {"quality_bad": 0, "quality_review": 0, "downloaded": 0, "imported": 0, "failed": 0,
+            "review_required": 0, "removed": 0, "excluded": 0, "plex_synced_count": 0}
+    MANIFEST = {
+        "desired_tracks": [_t("A"), _t("B"), _t("C"), _t("D")],
+        "track_states": {
+            "a": {"status": "available"}, "b": {"status": "waiting_import"},
+            "c": {"status": "review_required"}, "d": {"status": "plex_synced"},
+            "e": {"status": "downloaded"}, "f": {"status": "failed"}, "g": {"status": "imported"},
+            "h": "not a row",
+        },
+        "removed_tracks": [_t("X")],
+        "excluded_tracks": [_t("Y"), _t("Z")],
+        "source": "url",
+        "content": "https://example.test/list",
+        "last_plex": {"status": "partial"},
+        "last_pipeline": {"status": "done"},
+    }
+
+    def setUp(self):
+        patcher = mock.patch.multiple(
+            ps,
+            _playlist_apply_tombstones=lambda name, tracks, manifest=None: tracks,
+            _playlist_existing_key=lambda *_a, **_k: "pkey",
+            _playlist_manifest_path=lambda *_a, **_k: Path("/state/mix.playlist.json"),
+            _playlist_manifest_exists_no_create=lambda *_a, **_k: True,
+            _playlist_latest_job_state_summary=lambda *_a, **_k: {},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_manifest_list_summary(self):
+        self.assertEqual(ps._playlist_manifest_list_summary("Mix", self.MANIFEST), {
+            **self.ZERO, "tracks": 4, "available": 3, "missing": 1, "quality_review": 1, "m3u_tracks": 4,
+            "desired_source": "url", "downloaded": 2, "imported": 2, "failed": 1, "review_required": 1,
+            "removed": 1, "excluded": 2, "plex_synced_count": 1,
+        })
+
+    def test_manifest_list_summary_keeps_stored_counts(self):
+        manifest = {**self.MANIFEST, "matched_count": 9, "missing_count": 1}
+        summary = ps._playlist_manifest_list_summary("Mix", manifest)
+        self.assertEqual((summary["tracks"], summary["available"], summary["missing"]), (10, 9, 1))
+
+    def test_checkpoint_list_summary(self):
+        checkpoint = {"checkpoint_tracks": 5, "checkpoint_missing": 2, "checkpoint_waiting_for_import": 1}
+        with mock.patch.object(ps, "_playlist_latest_job_state_summary", return_value=checkpoint), \
+                mock.patch.object(ps.composite_workflows, "read_playlist_m3u", return_value={"ok": True, "exists": False}):
+            summary = ps._playlist_checkpoint_list_summary("Mix")
+        self.assertEqual(summary, {
+            **self.ZERO, **checkpoint, "tracks": 5, "available": 3, "missing": 2, "m3u_tracks": 0,
+            "desired_source": "checkpoint", "downloaded": 1,
+        })
+
+    def test_engine_m3u_count_summary(self):
+        with mock.patch.object(ps.composite_workflows, "read_playlist_m3u",
+                               return_value={"ok": True, "exists": True, "items": [{}, {}, "bad"]}):
+            self.assertEqual(ps._playlist_engine_m3u_count_summary("Mix"), {
+                **self.ZERO, "tracks": 2, "available": 0, "missing": 2, "m3u_tracks": 2, "desired_source": "m3u",
+            })
+
+    def test_m3u_row_summary(self):
+        rows = {"tracks": [_t("A"), _t("B"), _t("C")], "m3u_tracks": 3, "desired_source": "m3u",
+                "matched": [dict(_t("A"), quality="bad"), dict(_t("B"), quality="review")], "missing": [_t("C")]}
+        counts = {"downloaded": 1, "waiting_import": 1, "imported": 1, "plex_synced": 1, "failed": 1,
+                  "review_required": 1, "removed": 1, "excluded": 1}
+        with mock.patch.object(ps, "_playlist_rows_for_saved_playlist", return_value=rows), \
+                mock.patch.object(ps, "_playlist_pipeline_counts", return_value=counts), \
+                mock.patch.object(ps.composite_workflows, "read_playlist_m3u", return_value={"ok": True, "exists": True}):
+            summary = ps._playlist_m3u_summary("Mix", {"loaded": True}, manifest={})
+        self.assertEqual(summary, {
+            **self.ZERO, "tracks": 3, "available": 2, "missing": 1, "quality_bad": 1, "quality_review": 1,
+            "m3u_tracks": 3, "desired_source": "m3u", "downloaded": 2, "imported": 2, "failed": 1,
+            "review_required": 1, "removed": 1, "excluded": 1, "plex_synced_count": 1,
+        })
+
+    def common(self, **over):
+        return {
+            "ok": True, "name": "Mix", "m3u": "engine:pkey.m3u", "manifest": str(Path("/state/mix.playlist.json")),
+            "manifest_tracks": 4, "source": "url", "source_content": "https://example.test/list",
+            "last_plex": {"status": "partial"}, "last_pipeline": {"status": "done"}, "last_sync_status": "partial",
+            **over,
+        }
+
+    def test_detail_summary_payload(self):
+        with mock.patch.object(ps, "_playlist_read_manifest", return_value=self.MANIFEST):
+            payload = ps._playlist_detail_summary_payload("Mix")
+        counts = payload.pop("counts")
+        self.assertEqual((counts["waiting_import"], counts["removed"], counts["excluded"]), (1, 1, 2))
+        self.assertEqual(payload, self.common(
+            m3u_tracks=4, desired_source="url", tracks=[], matched=[], missing=[], removed_excluded=[],
+            available=3, missing_count=1, total=4, detail_mode="summary", tracks_loaded=False))
+
+    def test_detail_full_payload(self):
+        rows = {"tracks": [_t("A"), _t("B")], "m3u_tracks": 2, "desired_source": "manifest",
+                "matched": [_t("A")], "missing": [_t("B")]}
+        with mock.patch.object(ps, "_playlist_read_manifest", return_value=self.MANIFEST), \
+                mock.patch.object(ps, "_playlist_rows_for_saved_playlist", return_value=rows), \
+                mock.patch.object(ps, "_playlist_manifest_track_states", return_value={}), \
+                mock.patch.object(ps, "_playlist_track_with_state", side_effect=lambda n, row, *_a: row), \
+                mock.patch.object(ps, "_playlist_tombstone_rows", return_value=[]), \
+                mock.patch.object(ps, "_playlist_pipeline_counts", return_value={"failed": 1}):
+            payload = ps._playlist_detail_payload("Mix", {"loaded": True})
+        self.assertEqual(payload, self.common(
+            m3u_tracks=2, desired_source="manifest", tracks=rows["tracks"], matched=[_t("A")], missing=[_t("B")],
+            removed_excluded=[], counts={"failed": 1}, available=1, missing_count=1, total=2,
+            detail_mode="full", tracks_loaded=True))
+
+
 def trace_output_titles(trace):
     outputs = [row for row in trace["events"] if row[0] == "outputs"]
     return sorted(outputs[-1][1])
