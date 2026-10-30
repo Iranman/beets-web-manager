@@ -62,6 +62,11 @@ class SettingItem(unittest.TestCase):
                 self.assertTrue(item["secret"])
                 self.assertIsNone(item["effective_value"])
 
+    def test_auth_token_placeholder_does_not_reveal_length(self):
+        for raw in ("short-token-1", "a-much-longer-token-value-" * 4):
+            item = self._item("BEETS_WEB_AUTH_TOKEN", env=raw)
+            self.assertEqual((item["value"], item["runtime_value"]), ("********", "********"))
+
     def test_override_message_keeps_its_noun(self):
         item = self._item("TZ", env="Europe/Paris", persisted={"TZ": "UTC"})
         self.assertEqual(item["status_message"], "Docker environment overrides saved timezone (UTC)")

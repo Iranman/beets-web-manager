@@ -5028,12 +5028,6 @@ def rollback_folder_mbid_names_job():
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
-def _replacement_unavailable_response(exc: BeetsUnavailableError):
-    # error_code is a short fixed identifier, never raw engine text.
-    err_code = "beets_unavailable" if not exc.error_code or exc.error_code in ("BEETS_UNREACHABLE", "BEETS_TIMEOUT", "BEETS_ADAPTER_ERROR") else exc.error_code
-    return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": err_code}), 503
-
-
 @app.post("/api/items/<int:iid>/replacement/plan")
 def item_replacement_plan(iid: int):
     """Plan replacing this album item's file with another tracked item's
@@ -5057,7 +5051,9 @@ def item_replacement_plan(iid: int):
         res = _item_replacement.plan_verified_replacement(
             iid, candidate_item_id, reason=_s(payload.get("reason") or "Manual track replacement"))
     except BeetsUnavailableError as exc:
-        return _replacement_unavailable_response(exc)
+        # error_code is a short fixed identifier, never raw engine text.
+        err_code = "beets_unavailable" if not exc.error_code or exc.error_code in ("BEETS_UNREACHABLE", "BEETS_TIMEOUT", "BEETS_ADAPTER_ERROR") else exc.error_code
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": err_code}), 503
     except BeetsError as exc:
         return jsonify({"ok": False, "error": "Track replacement planning failed.", "code": exc.error_code or "beets_error"}), 400
     except Exception:
@@ -5087,7 +5083,8 @@ def item_replacement_apply(iid: int):
         status_code = 200 if res.get("ok") else 400
         return jsonify(res), status_code
     except BeetsUnavailableError as exc:
-        return _replacement_unavailable_response(exc)
+        err_code = "beets_unavailable" if not exc.error_code or exc.error_code in ("BEETS_UNREACHABLE", "BEETS_TIMEOUT", "BEETS_ADAPTER_ERROR") else exc.error_code
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": err_code}), 503
     except BeetsError as exc:
         return jsonify({"ok": False, "error": "Track replacement apply failed.", "code": exc.error_code or "beets_error"}), 400
     except Exception:
