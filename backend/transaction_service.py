@@ -227,10 +227,23 @@ def _install_transaction_job_hooks() -> None:
             raise
         if tx_id:
             transactions.attach_job(tx_id, job.job_id)
+            # The write point for job -> transaction state: once, when the job
+            # ends. Reading a transaction never writes it.
+            job.add_done_callback(lambda done: transactions.update_from_job(tx_id, done))
         return job
 
     jobs.start_python = start_python_with_transaction
     jobs._transaction_hooks_installed = True
+
+    # A job the last process died in never reaches its done callback.
+    for row in list(jobs.recovered):
+        job = jobs.get(row["job_id"])
+        tx_id = (getattr(job, "metadata", None) or {}).get("transaction_id")
+        if tx_id:
+            try:
+                transactions.update_from_job(str(tx_id), job)
+            except Exception as ex:
+                _app_logger.debug("transaction sync failed for %s: %s", tx_id, ex)
 
 
 #: Statuses POST /api/transactions/<id>/cancel cancels outright (compare-and-set).

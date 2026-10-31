@@ -22,6 +22,7 @@ import time
 import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from backend.json_state import atomic_write_json
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 LOG = logging.getLogger("beets_web.transaction_engine")
@@ -388,6 +389,19 @@ _ROOT_LOCKS: Dict[str, Any] = {}
 _ROOT_LOCKS_GUARD = threading.Lock()
 
 
+def _job_sync_changes(current: Dict[str, Any], updates: Dict[str, Any]) -> bool:
+    """Whether ``update_from_job`` would change the stored record. Metadata and
+    counts merge key by key; every other field is replaced."""
+    for key, value in _safe_json(updates).items():
+        if key in ("metadata", "counts"):
+            stored = current.get(key) or {}
+            if any(stored.get(k) != v for k, v in value.items()):
+                return True
+        elif current.get(key) != value:
+            return True
+    return False
+
+
 class TransactionStore:
     def __init__(self, root: Optional[str] = None):
         base = (
@@ -435,10 +449,10 @@ class TransactionStore:
         self._ensure()
         tx["updated_at"] = _now()
         payload = _safe_json(tx)
-        path = self._path(payload["id"])
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
+        # Fsynced: a rollback claim or apply marker must survive power loss,
+        # not only a process crash. Callers hold self._lock, which orders the
+        # compare-and-set around this write.
+        atomic_write_json(self._path(payload["id"]), payload, indent=2, sort_keys=True)
         return payload
 
     def create(
@@ -524,10 +538,7 @@ class TransactionStore:
             settings = self.settings()
             settings.update(values)
             self._ensure()
-            path = self._settings_path()
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
-            tmp.replace(path)
+            atomic_write_json(self._settings_path(), settings, indent=2, sort_keys=True)
             return settings
     def get(self, transaction_id: str, *, offset: int = 0, limit: Optional[int] = None) -> Dict[str, Any]:
         with self._lock:
@@ -708,6 +719,14 @@ class TransactionStore:
                 updates["logs"] = (updates.get("logs") or list(current.get("logs") or [])) + [
                     "Recovered after restart: the job was interrupted, so whether it changed the library "
                     "cannot be proven; check the library before retrying."]
+            if "logs" in updates:
+                # The job's log is the base; lines the transaction recorded
+                # itself (cancel notes, step errors) are audit and stay.
+                job_lines = set(updates["logs"])
+                updates["logs"] = (updates["logs"] + [line for line in current.get("logs") or []
+                                                      if line not in job_lines])[-500:]
+            if not _job_sync_changes(current, updates):
+                return current  # idempotent: re-syncing a settled job rewrites nothing
             return self.update(transaction_id, **updates)
 
     def rollback(self, transaction_id: str) -> Dict[str, Any]:

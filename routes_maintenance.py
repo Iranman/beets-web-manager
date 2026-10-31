@@ -707,7 +707,6 @@ def api_transactions_list():
     # in its own Plan/Apply responses -- so it was unused, unjustified
     # attack surface (unbounded server-side path/metadata exposure for no
     # product benefit). Kept local-only until a real feature needs it.
-    _sync_transactions_from_jobs()
     rows, total = transactions.list(
         offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
         limit=_transaction_int_arg("limit", 50, 1, 500),
@@ -729,7 +728,6 @@ def api_transaction_detail(transaction_id):
     # applyResult directly from the Plan/Apply responses, never a separate
     # GET). Kept local-only; add a properly scoped fallback if a real
     # feature needs to poll a specific known engine transaction by ID.
-    _sync_transactions_from_jobs()
     try:
         tx = transactions.get(
             transaction_id,

@@ -8,6 +8,7 @@ Orchestrates multi-step, user-confirmed workflows across Beets:
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_text as _write_text_atomic
 
 import base64
 import contextlib
@@ -5436,22 +5437,6 @@ def read_playlist_m3u(playlist_key: str, fallback_name: str = "") -> Dict[str, A
     # only) is kept for older callers.
     return {"ok": True, "exists": True, "playlist_key": playlist_key, "items": items,
             "tracks": [it["path"] for it in items], "count": len(items)}
-
-
-def _write_text_atomic(p: Path, text: str) -> None:
-    """Write ``text`` to ``p`` through a same-directory temp file that is
-    removed on every failure path, including a refused replace."""
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        with open(tmp, "x", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, p)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
 
 
 def export_playlist_m3u(playlist_key: str, display_name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:

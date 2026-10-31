@@ -2,6 +2,7 @@
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
 import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
@@ -819,9 +820,7 @@ def _record_ai_match(original_path: str, suggestion: dict):
             existing = []
         existing.insert(0, entry)
         # A crash mid-write must not leave a torn file the next read discards.
-        tmp = _AI_MATCH_HISTORY_FILE.with_name(_AI_MATCH_HISTORY_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(existing[:200], indent=2))
-        os.replace(tmp, _AI_MATCH_HISTORY_FILE)
+        atomic_write_json(_AI_MATCH_HISTORY_FILE, existing[:200], indent=2)
 
 
 _CANDIDATE_COUNTRY_RANK = {"US": 0, "XW": 1, "GB": 2, "CA": 3, "AU": 4}
