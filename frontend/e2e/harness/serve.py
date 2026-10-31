@@ -71,6 +71,15 @@ def configure(root: Path, port: int) -> dict:
         "BEETS_TRANSACTION_DIR": str(paths["transactions"]),
         "AI_BATCH_STATE_DIR": str(paths["data"] / "ai_batch_jobs"),
         "YTDLP_RUNTIME_BIN_DIR": str(paths["data"] / "yt-dlp"),
+        # These default to /config, outside the root, whatever BEETSDIR says.
+        "YTDLP_NETRC_FILE": str(paths["config"] / ".netrc"),
+        "SLSKD_API_KEY_FILE": str(paths["config"] / "slskd_api_key"),
+        "MUSIC_FORMAT_PREFS_FILE": str(paths["config"] / "music_format_preferences.json"),
+        "MUSIC_FORMAT_REPLACEMENT_STATUS_FILE": str(paths["config"] / "music_format_replacements.json"),
+        "MUSIC_FORMAT_QUARANTINE_DIR": str(paths["config"] / "music_format_quarantine"),
+        "BEETS_SUBMISSION_DRAFTS": str(paths["config"] / "submission_drafts.json"),
+        "IMPORT_REVIEW_QUARANTINE_DIR": str(paths["config"] / "import_review_quarantine"),
+        "IMPORT_REVIEW_AUTO_IMPORTS_FILE": str(paths["config"] / "import_review_auto_imports.json"),
         "WEBCONTROL_PORT": str(port),
         "BEETS_WEB_USERNAME": "admin",
         "BEETS_WEB_PASSWORD": PASSWORD,
@@ -156,7 +165,7 @@ def install_network_stubs(root: Path, fixture) -> None:
         parsed = urllib.parse.urlsplit(url)
         with calls_log.open("a", encoding="utf-8") as f:
             f.write(f"{parsed.hostname}{parsed.path}\n")  # no query: it can carry keys
-        if parsed.hostname and parsed.hostname.endswith("musicbrainz.org"):
+        if parsed.hostname == "musicbrainz.org":
             return CannedResponse(url, json.dumps(musicbrainz_answer(parsed.path, fixture)).encode())
         raise urllib.error.URLError("E2E harness: provider stubbed as unreachable")
 
