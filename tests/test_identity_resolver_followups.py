@@ -191,12 +191,12 @@ class EvidenceFingerprintStatusTests(unittest.TestCase):
     def test_suggest_routes_pass_the_status(self):
         import inspect
         import backend.ai_service as ai
-        import routes_library
+        import backend.item_ai_suggest_service as item_suggest
         for fn in (ai._ai_suggest_album_internal, ai._ai_suggest_folder_internal):
             src = inspect.getsource(fn)
             self.assertEqual(src.count("_ai_match_evidence_packet("), src.count("acoustid_status=acoustid_status,"),
                              fn.__name__)
-        self.assertIn("acoustid_status=acoustid_status,", inspect.getsource(routes_library))
+        self.assertIn("acoustid_status=evidence.acoustid_status,", inspect.getsource(item_suggest))
 
 
 class AcoustIDUnavailableReviewReasonTests(unittest.TestCase):

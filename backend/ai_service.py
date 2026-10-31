@@ -20,7 +20,7 @@ from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_QUEUED_FOLDER_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE
-from backend.app_runtime import _extract_mb_uuid, _path_is_under
+from backend.app_runtime import _MB_UUID_RE, _extract_mb_uuid, _path_is_under
 from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid_api_key
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
@@ -329,6 +329,55 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
             "trusted_for_apply": bool(selected_candidate),
         },
     }
+
+
+def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str, Any]]) -> tuple:
+    """Resolve the suggestion's candidate_index to that candidate's Release and
+    Release Group, in place; returns (selected candidate or None, release id).
+
+    The AI only picks an index, so the identity always comes from the evidence.
+    An out-of-range index selects nothing and cannot stay high confidence. The
+    selected candidate's Release is surfaced as is: never swapped for a Release
+    in another Release Group (a single stays a single).
+    """
+    cand_idx = int(sug.get("candidate_index", -1))
+    selected_candidate = None
+    if 0 <= cand_idx < len(mb_candidates):
+        selected_candidate = mb_candidates[cand_idx]
+        mb_id = _s(selected_candidate.get("mb_albumid", "")).strip()
+    else:
+        mb_id = ""
+        if sug.get("confidence") == "high":
+            sug["confidence"] = "low"
+        sug["reason"] = sug.get("reason") or "No matching candidate selected"
+        cand_idx = -1
+    sug["candidate_index"] = cand_idx
+    sug["mb_albumid"] = mb_id
+    sug["representative_mb_albumid"] = mb_id
+    rg_id = _s((selected_candidate or {}).get("mb_releasegroupid", "")).strip().lower()
+    rg_url = _s((selected_candidate or {}).get("mb_releasegroupurl", "")).strip()
+    rg_type = _s((selected_candidate or {}).get("release_group_primary_type", "")).strip()
+    if mb_id and (
+        not rg_id
+        or mb_id != _s((selected_candidate or {}).get("mb_albumid", "")).strip().lower()
+    ):
+        mb_meta = _fetch_mb_release_tracklist(mb_id, [])
+        if mb_meta.get("ok"):
+            rg_id = _s(mb_meta.get("release_group", "")).strip().lower()
+            rg_type = _s(mb_meta.get("release_group_primary_type", "")).strip()
+    sug["mb_releasegroupid"] = rg_id
+    sug["mb_releasegroupurl"] = rg_url or (
+        f"https://musicbrainz.org/release-group/{rg_id}" if rg_id else ""
+    )
+    sug["release_group_primary_type"] = rg_type
+    sug["mb_valid"] = bool(_MB_UUID_RE.match(mb_id))
+    if sug["mb_valid"]:
+        sug["mb_url"] = f"https://musicbrainz.org/release/{mb_id}"
+    if not sug.get("confidence"):
+        sug["confidence"] = "medium"
+    if not sug.get("reason"):
+        sug["reason"] = ""
+    return selected_candidate, mb_id
 
 
 def _classify_openai_error(exc: Exception) -> str:
@@ -661,46 +710,7 @@ def _ai_suggest_album_internal(
         }
 
     try:
-        cand_idx = int(sug.get("candidate_index", -1))
-        selected_candidate = None
-        if 0 <= cand_idx < len(mb_candidates):
-            selected_candidate = mb_candidates[cand_idx]
-            mb_id = _s(selected_candidate.get("mb_albumid", "")).strip()
-        else:
-            mb_id = ""
-            if sug.get("confidence") == "high":
-                sug["confidence"] = "low"
-            sug["reason"] = sug.get("reason") or "No matching candidate selected"
-            cand_idx = -1
-        sug["candidate_index"] = cand_idx
-        # The selected candidate's Release is surfaced as is: never swapped for
-        # a Release in another Release Group (a single stays a single).
-        sug["mb_albumid"] = mb_id
-        sug["representative_mb_albumid"] = mb_id
-        rg_id = _s((selected_candidate or {}).get("mb_releasegroupid", "")).strip().lower()
-        rg_url = _s((selected_candidate or {}).get("mb_releasegroupurl", "")).strip()
-        rg_type = _s((selected_candidate or {}).get("release_group_primary_type", "")).strip()
-        if mb_id and (
-            not rg_id
-            or mb_id != _s((selected_candidate or {}).get("mb_albumid", "")).strip().lower()
-        ):
-            mb_meta = _fetch_mb_release_tracklist(mb_id, [])
-            if mb_meta.get("ok"):
-                rg_id = _s(mb_meta.get("release_group", "")).strip().lower()
-                rg_type = _s(mb_meta.get("release_group_primary_type", "")).strip()
-        sug["mb_releasegroupid"] = rg_id
-        sug["mb_releasegroupurl"] = rg_url or (
-            f"https://musicbrainz.org/release-group/{rg_id}" if rg_id else ""
-        )
-        sug["release_group_primary_type"] = rg_type
-        _MB_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-        sug["mb_valid"] = bool(re.match(_MB_RE, mb_id, re.I))
-        if sug["mb_valid"]:
-            sug["mb_url"] = f"https://musicbrainz.org/release/{mb_id}"
-        if not sug.get("confidence"):
-            sug["confidence"] = "medium"
-        if not sug.get("reason"):
-            sug["reason"] = ""
+        selected_candidate, mb_id = _ai_bind_selected_release(sug, mb_candidates)
         selected_preflight = None
         if sug["mb_valid"]:
             selected_preflight = _run_ai_release_preflight(
@@ -1515,45 +1525,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         }
 
     try:
-        # Map candidate_index → mb_albumid
-        cand_idx = int(sug.get("candidate_index", -1))
-        selected_candidate = None
-        if 0 <= cand_idx < len(mb_candidates):
-            selected_candidate = mb_candidates[cand_idx]
-            mb_id = _s(selected_candidate.get("mb_albumid", "")).strip()
-        else:
-            mb_id = ""
-            if sug.get("confidence") == "high":
-                sug["confidence"] = "low"
-            sug["reason"] = sug.get("reason") or "No matching candidate selected"
-            cand_idx = -1
-        sug["candidate_index"] = cand_idx
-        sug["mb_albumid"] = mb_id
-        sug["representative_mb_albumid"] = mb_id
-        rg_id = _s((selected_candidate or {}).get("mb_releasegroupid", "")).strip().lower()
-        rg_url = _s((selected_candidate or {}).get("mb_releasegroupurl", "")).strip()
-        rg_type = _s((selected_candidate or {}).get("release_group_primary_type", "")).strip()
-        if mb_id and (
-            not rg_id
-            or mb_id != _s((selected_candidate or {}).get("mb_albumid", "")).strip().lower()
-        ):
-            mb_meta = _fetch_mb_release_tracklist(mb_id, [])
-            if mb_meta.get("ok"):
-                rg_id = _s(mb_meta.get("release_group", "")).strip().lower()
-                rg_type = _s(mb_meta.get("release_group_primary_type", "")).strip()
-        sug["mb_releasegroupid"] = rg_id
-        sug["mb_releasegroupurl"] = rg_url or (
-            f"https://musicbrainz.org/release-group/{rg_id}" if rg_id else ""
-        )
-        sug["release_group_primary_type"] = rg_type
-        _MB_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-        sug["mb_valid"] = bool(re.match(_MB_RE, mb_id, re.I))
-        if sug["mb_valid"]:
-            sug["mb_url"] = f"https://musicbrainz.org/release/{mb_id}"
-        if not sug.get("confidence"):
-            sug["confidence"] = "medium"
-        if not sug.get("reason"):
-            sug["reason"] = ""
+        selected_candidate, mb_id = _ai_bind_selected_release(sug, mb_candidates)
         selected_preflight = None
         if sug["mb_valid"]:
             selected_preflight = _run_ai_release_preflight(folder_path, mb_id)

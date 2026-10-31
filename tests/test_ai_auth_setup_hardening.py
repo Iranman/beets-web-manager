@@ -196,9 +196,7 @@ class AlbumAiSuggestFallbackSourceTests(unittest.TestCase):
 class ItemAiSuggestFallbackSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.fn = _function_source(
-            APP_SOURCE, "def ai_suggest(iid):", "\n\ndef _discogs_track_search("
-        )
+        cls.fn = (ROOT / "backend" / "item_ai_suggest_service.py").read_text(encoding="utf-8")
 
     def test_does_not_return_early_on_missing_api_key(self):
         self.assertNotRegex(
