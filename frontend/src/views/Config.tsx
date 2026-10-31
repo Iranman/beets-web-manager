@@ -1,3 +1,5 @@
+import { formatEpochDateTime } from '../lib/dates';
+import { errorMessage } from '../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import LinearProgress from '@mui/material/LinearProgress';
@@ -207,7 +209,7 @@ export default function Config() {
       setStats(s);
       setMbStatus(m);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -225,7 +227,7 @@ export default function Config() {
       setSavedFormatPrefs(prefs.preferences);
       setReplacementRows(statuses.tracks ?? []);
     } catch (err) {
-      setFormatError(err instanceof Error ? err.message : String(err));
+      setFormatError(errorMessage(err));
     } finally {
       setFormatLoading(false);
     }
@@ -246,7 +248,7 @@ export default function Config() {
       setSavedFormatPrefs(saved.preferences);
       setFormatMsg('Saved Music Format Preferences.');
     } catch (err) {
-      setFormatError(err instanceof Error ? err.message : String(err));
+      setFormatError(errorMessage(err));
     } finally {
       setFormatBusy(false);
     }
@@ -260,7 +262,7 @@ export default function Config() {
       const job = await startMusicFormatScan();
       setFormatMsg(`Music format scan queued in Jobs: ${job.job_id}`);
     } catch (err) {
-      setFormatError(err instanceof Error ? err.message : String(err));
+      setFormatError(errorMessage(err));
     } finally {
       setFormatBusy(false);
     }
@@ -274,7 +276,7 @@ export default function Config() {
       const job = await startMusicFormatReplacement();
       setFormatMsg(`Music format replacement retry queued in Jobs: ${job.job_id}`);
     } catch (err) {
-      setFormatError(err instanceof Error ? err.message : String(err));
+      setFormatError(errorMessage(err));
     } finally {
       setFormatBusy(false);
     }
@@ -541,7 +543,7 @@ export default function Config() {
                     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[0.7rem] text-zinc-500">
                       {row.failure_stage ? <span>Stage: {row.failure_stage.replace(/_/g, ' ')}</span> : null}
                       {row.attempt_count ? <span>Attempts: {row.attempt_count}</span> : null}
-                      {row.next_retry_at ? <span>Retry: {new Date(row.next_retry_at * 1000).toLocaleString()}</span> : null}
+                      {row.next_retry_at ? <span>Retry: {formatEpochDateTime(row.next_retry_at)}</span> : null}
                     </div>
                   ) : null}
                 </div>

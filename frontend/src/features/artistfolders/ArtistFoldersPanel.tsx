@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -135,7 +136,7 @@ export function ArtistFoldersPanel() {
       setScanJobId(r.job_id);
       window.dispatchEvent(new Event('beets:jobs-changed'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setScanStarting(false);
     }
@@ -165,7 +166,7 @@ export function ArtistFoldersPanel() {
         window.dispatchEvent(new Event('beets:jobs-changed'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 
@@ -188,7 +189,7 @@ export function ArtistFoldersPanel() {
         setStampMsg('Stamp job did not return a job id.');
       }
     } catch (err) {
-      setStampMsg(err instanceof Error ? err.message : String(err));
+      setStampMsg(errorMessage(err));
     } finally {
       setStampBusy(false);
     }

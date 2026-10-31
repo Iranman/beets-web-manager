@@ -1,3 +1,5 @@
+import { useInterval } from '../../lib/hooks';
+import { errorMessage } from '../../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -418,28 +420,17 @@ function JobLog({
         onJobIdChange(result.state.job_id);
       }
     } catch (err) {
-      setStatusError(err instanceof Error ? err.message : String(err));
+      setStatusError(errorMessage(err));
     } finally {
       setStatusLoaded(true);
       if (manual) setRefreshing(false);
     }
   }, [jobId, onJobIdChange]);
 
-  useEffect(() => {
-    let active = true;
-    const poll = async () => {
-      if (!active) return;
-      await loadStatus(false);
-    };
-    void poll();
-    const intervalId = window.setInterval(() => {
-      if (!document.hidden) void poll();
-    }, 2500);
-    return () => {
-      active = false;
-      window.clearInterval(intervalId);
-    };
-  }, [loadStatus]);
+  useEffect(() => { void loadStatus(false); }, [loadStatus]);
+  useInterval(() => {
+    if (!document.hidden) void loadStatus(false);
+  }, 2500);
 
   const log = job?.log ?? [];
   const batchDone = isAiBatchTerminal(batchState?.status);
@@ -500,7 +491,7 @@ function JobLog({
       setSkipNotice(folderId ? 'Folder skip requested.' : 'Skip requested for active folder(s).');
       await loadStatus(true);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      setActionError(errorMessage(err));
     }
   };
 
@@ -525,7 +516,7 @@ function JobLog({
         const result = await reconcileArtwork(jobId, artworkRetryFolderId, artworkRetryJobId);
         if (active) setBatchState(result.state);
       } catch (err) {
-        if (active) setActionError(err instanceof Error ? err.message : String(err));
+        if (active) setActionError(errorMessage(err));
       } finally {
         if (active) {
           setArtworkRetryJobId(null);
@@ -547,7 +538,7 @@ function JobLog({
       setArtworkRetryJobId(started.job_id);
       setArtworkRetryFolderId(folderId);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      setActionError(errorMessage(err));
       setRetryingArtworkAlbumId(null);
     }
   };
@@ -560,7 +551,7 @@ function JobLog({
       setBatchState(result.state);
       setSkipNotice('Pause requested. Active folder work can finish or time out.');
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      setActionError(errorMessage(err));
     } finally {
       setPausing(false);
     }
@@ -585,7 +576,7 @@ function JobLog({
       );
       setRetryDialogOpen(false);
     } catch (err) {
-      setActionError(`Could not start the retry: ${err instanceof Error ? err.message : String(err)}. Nothing was retried.`);
+      setActionError(`Could not start the retry: ${errorMessage(err)}. Nothing was retried.`);
       setRetryDialogOpen(false);
     } finally {
       setRecovering(false);
@@ -603,7 +594,7 @@ function JobLog({
       setBatchState(result.state);
       setSkipNotice('Stop requested. The batch was marked canceled safely.');
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err));
+      setActionError(errorMessage(err));
     } finally {
       setStopping(false);
     }
@@ -962,7 +953,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       setPreflight(result);
       setPath(result.path || nextPath);
     } catch (err) {
-      setPreflightError(err instanceof Error ? err.message : String(err));
+      setPreflightError(errorMessage(err));
     } finally {
       setScanning(false);
     }
@@ -1029,7 +1020,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       const result = await getAiBatchStatus();
       setRetryState(result.state?.batch_job_id || result.state?.job_id ? result.state : null);
     } catch (err) {
-      setRetryError(err instanceof Error ? err.message : String(err));
+      setRetryError(errorMessage(err));
     } finally {
       setRetryLoading(false);
     }
@@ -1050,7 +1041,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       if (outcome === 'started') await onJobStarted?.();
     } catch (err) {
       setRetryDialogOpen(false);
-      setRetryError(`Could not start the retry: ${err instanceof Error ? err.message : String(err)}. Nothing was retried.`);
+      setRetryError(`Could not start the retry: ${errorMessage(err)}. Nothing was retried.`);
     } finally {
       setRetryingFailed(false);
     }
@@ -1065,7 +1056,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       rememberJobId(result.state?.job_id || result.job_id);
       setConfirmOpen(false);
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : String(err));
+      setImportError(errorMessage(err));
     } finally {
       setImporting(false);
     }

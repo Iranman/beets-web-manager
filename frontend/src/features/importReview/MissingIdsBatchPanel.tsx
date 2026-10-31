@@ -1,6 +1,7 @@
 // Library > Missing IDs: batch fix of proven matches (#399). The server proves
 // each row and decides what may be written; this panel only selects rows, shows
 // that decision, asks for confirmation and follows the jobs.
+import { errorMessage } from '../../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -106,7 +107,7 @@ function plural(count: number, word: string) {
 export function previewErrorMessage(err: unknown) {
   const body = apiErrorBody(err);
   const code = body?.error_code || body?.code || '';
-  const detail = body?.error || (err instanceof Error ? err.message : String(err));
+  const detail = body?.error || (errorMessage(err));
   if (code === 'NO_ROWS') return 'Nothing was previewed: none of the selected rows are still missing IDs. Click Refresh to reload the list.';
   if (code === 'INVALID_PARAM') return `Nothing was previewed: the selection was refused (${detail}). Select 1 to ${MISSING_IDS_BATCH_MAX} rows and try again.`;
   if (code === 'ENGINE_UNAVAILABLE') return 'Nothing was previewed: Beets is unavailable. Check the Beets status on the System page, then try again.';
@@ -225,7 +226,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
         if (cancelled) return;
         failures += 1;
         if (failures >= 3) {
-          setError(`Could not check the ${job.kind} job (${job.job_id}): ${err instanceof Error ? err.message : String(err)}. It may still be running; check the Jobs page.`);
+          setError(`Could not check the ${job.kind} job (${job.job_id}): ${errorMessage(err)}. It may still be running; check the Jobs page.`);
           finish();
         }
       } finally {
@@ -304,7 +305,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
       follow({ kind: 'apply', job_id: started.job_id });
     } catch (err) {
       const body = apiErrorBody(err);
-      setError(applyErrorMessage(body?.code || body?.error_code || '', body?.error || (err instanceof Error ? err.message : String(err))));
+      setError(applyErrorMessage(body?.code || body?.error_code || '', body?.error || (errorMessage(err))));
     } finally {
       setBusy(false);
     }
@@ -318,7 +319,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
         ? 'Cancel requested: the batch stops after the row it is writing now.'
         : 'Cancel requested: the preview stops; nothing was written.');
     } catch (err) {
-      setError(`Could not cancel the ${job.kind} job: ${err instanceof Error ? err.message : String(err)}. Check the Jobs page.`);
+      setError(`Could not cancel the ${job.kind} job: ${errorMessage(err)}. Check the Jobs page.`);
     }
   };
 

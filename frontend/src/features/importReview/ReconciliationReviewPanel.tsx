@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import { useCallback, useEffect, useState } from 'react';
 
 import { getReconciliationReviews, resolveReconciliationReview } from '../../api/client';
@@ -41,7 +42,7 @@ export function ReconciliationReviewPanel() {
       setReviews(res.reviews || []);
       setError('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load reconciliation reviews.');
+      setError(errorMessage(err, 'Could not load reconciliation reviews.'));
     }
   }, []);
 
@@ -62,7 +63,7 @@ export function ReconciliationReviewPanel() {
       await resolveReconciliationReview(review.review_id, choice);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not apply the decision.');
+      setError(errorMessage(err, 'Could not apply the decision.'));
     } finally {
       setBusy('');
     }

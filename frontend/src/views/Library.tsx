@@ -1,3 +1,4 @@
+import { errorMessage } from '../lib/errors';
 import {
   Dialog,
   DialogBackdrop,
@@ -342,7 +343,7 @@ type AlbumAction = {
   variant: 'primary' | 'warning';
 };
 
-function albumPrimaryAction(album: LibraryAlbum, artRepairItemMap: Map<number, ArtRepairItem>): AlbumAction | null {
+export function albumPrimaryAction(album: LibraryAlbum, artRepairItemMap: Map<number, ArtRepairItem>): AlbumAction | null {
   const health = getAlbumHealth(album);
   if (album.pending_review) return {
     label: 'In review queue',
@@ -365,7 +366,7 @@ function albumPrimaryAction(album: LibraryAlbum, artRepairItemMap: Map<number, A
   if (health.notImported > 0) {
     if (album.not_imported_is_extra) return {
       label: 'Track Cleanup',
-      path: '/clean?tab=album-tracks',
+      path: '/jobs?tab=album-tracks',
       title: `${health.notImported} extra file(s) on disk beyond expected tracklist — use Album Track Cleanup`,
       variant: 'warning',
     };
@@ -378,7 +379,7 @@ function albumPrimaryAction(album: LibraryAlbum, artRepairItemMap: Map<number, A
   }
   if (health.duplicateRecordingIds > 0) return {
     label: 'Merge split album',
-    path: '/clean?tab=library-db',
+    path: '/jobs?tab=library-db',
     title: `${health.duplicateRecordingIds} duplicate recording ID row(s) — possible split album in Library DB`,
     variant: 'warning',
   };
@@ -1177,7 +1178,7 @@ export default function Library() {
       const next = await apiGet<LibraryResponse>(`/api/library?include_disk_only=1${suffix}`);
       setData(next);
     } catch (err) {
-      if (!background) setError(err instanceof Error ? err.message : String(err));
+      if (!background) setError(errorMessage(err));
     } finally {
       if (!background) setLoading(false);
     }
@@ -1226,7 +1227,7 @@ export default function Library() {
         const report = await getLibraryArtRepairReport();
         if (!cancelled) setArtRepairReport(report);
       } catch (err) {
-        if (!cancelled) setArtRepairError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) setArtRepairError(errorMessage(err));
       }
     }
     void loadArtRepair();
@@ -1248,7 +1249,7 @@ export default function Library() {
         const next = await apiGet<LibraryResponse>('/api/library?include_disk_only=1&include_tracks=1');
         if (!cancelled) setData(next);
       } catch (err) {
-        if (!cancelled) setTrackSearchError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) setTrackSearchError(errorMessage(err));
       } finally {
         if (!cancelled) setTrackSearchLoading(false);
       }
@@ -1280,7 +1281,7 @@ export default function Library() {
         if (!cancelled) setDetailsTracks(result.tracks ?? []);
       } catch (err) {
         if (!cancelled) {
-          setDetailsError(err instanceof Error ? err.message : String(err));
+          setDetailsError(errorMessage(err));
           setDetailsTracks(fallbackTracks);
         }
       } finally {

@@ -1,3 +1,4 @@
+import { errorMessage } from '../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -231,7 +232,7 @@ export default function Submissions() {
       const data = await getReviewQueue({ limit: REVIEW_LIMIT });
       setItems(data.items ?? []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -295,7 +296,7 @@ export default function Submissions() {
           setSaveState('idle');
         }
       })
-      .catch((err) => { if (!cancelled) { setTarget(null); setTargetError(err instanceof Error ? err.message : String(err)); } })
+      .catch((err) => { if (!cancelled) { setTarget(null); setTargetError(errorMessage(err)); } })
       .finally(() => { if (!cancelled) setTargetLoading(false); });
     return () => { cancelled = true; };
   }, [activeAlbumId, activeItemId, sourcePath, refreshNonce]);
@@ -307,7 +308,7 @@ export default function Submissions() {
     saveTimer.current = window.setTimeout(() => {
       void saveSubmissionDraft({ target_type: target.target_type, target_id: target.target_id, draft })
         .then(() => { setDirty(false); setSaveState('saved'); })
-        .catch((err) => { setSaveState('error'); setMessage(err instanceof Error ? err.message : String(err)); });
+        .catch((err) => { setSaveState('error'); setMessage(errorMessage(err)); });
     }, 800);
     return () => { if (saveTimer.current) window.clearTimeout(saveTimer.current); };
   }, [dirty, draft, target]);
@@ -350,7 +351,7 @@ export default function Submissions() {
       if (result.reference.status === 'error') setRefUrlError(result.reference.error || 'Could not parse that URL.');
       else setRefUrlInput('');
     } catch (err) {
-      setRefUrlError(err instanceof Error ? err.message : String(err));
+      setRefUrlError(errorMessage(err));
     } finally {
       setRefUrlBusy(false);
     }
@@ -389,7 +390,7 @@ export default function Submissions() {
         setSaveState('saved');
       }
     } catch (err) {
-      setMbRun({ status: 'error', message: err instanceof Error ? err.message : String(err), output: '' });
+      setMbRun({ status: 'error', message: errorMessage(err), output: '' });
     }
   }
 
@@ -406,7 +407,7 @@ export default function Submissions() {
         setSaveState('saved');
       }
     } catch (err) {
-      setValidation({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      setValidation({ ok: false, error: errorMessage(err) });
     }
   }
 
@@ -432,7 +433,7 @@ export default function Submissions() {
         void getSubmissionTarget({ albumId: activeAlbumId }).then(setTarget);
       }
     } catch (err) {
-      setApplyRun({ status: 'error', message: err instanceof Error ? err.message : String(err), output: '' });
+      setApplyRun({ status: 'error', message: errorMessage(err), output: '' });
     }
   }
 
@@ -453,7 +454,7 @@ export default function Submissions() {
         setSaveState('saved');
       }
     } catch (err) {
-      setAcoustidRun({ status: 'error', message: err instanceof Error ? err.message : String(err), output: '' });
+      setAcoustidRun({ status: 'error', message: errorMessage(err), output: '' });
     }
   }
 
@@ -846,7 +847,7 @@ export default function Submissions() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button component={Link} to="/import?tab=review" size="small" variant="outlined">Back</Button>
-            <Button size="small" variant="outlined" disabled={!target} onClick={() => { if (!target) return; setSaveState('saving'); void saveSubmissionDraft({ target_type: target.target_type, target_id: target.target_id, draft }).then(() => { setDirty(false); setSaveState('saved'); }).catch((err) => { setSaveState('error'); setMessage(err instanceof Error ? err.message : String(err)); }); }}>Save Draft</Button>
+            <Button size="small" variant="outlined" disabled={!target} onClick={() => { if (!target) return; setSaveState('saving'); void saveSubmissionDraft({ target_type: target.target_type, target_id: target.target_id, draft }).then(() => { setDirty(false); setSaveState('saved'); }).catch((err) => { setSaveState('error'); setMessage(errorMessage(err)); }); }}>Save Draft</Button>
             <Button size="small" variant="outlined" disabled={!target} onClick={(event) => setMoreMenuAnchor(event.currentTarget)}>More actions</Button>
             <Menu anchorEl={moreMenuAnchor} open={Boolean(moreMenuAnchor)} onClose={() => setMoreMenuAnchor(null)}>
               <MenuItem onClick={() => { setMoreMenuAnchor(null); void resetDraft(); }}>Reset draft…</MenuItem>
