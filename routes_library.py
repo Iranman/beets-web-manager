@@ -20,8 +20,7 @@ import backend.composite_workflows as composite_workflows
 import backend.missing_mb_batch as missing_mb_batch
 import backend.recording_review as recording_review
 from backend.identity_contract import verify_album_identity as _verify_album_identity
-from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached_outcome, acoustid_failure_status, _normalize_albumartist, same_recording_proof
-import backend.duplicate_cleanup as _duplicate_cleanup
+from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached_outcome, acoustid_failure_status, _normalize_albumartist
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.ai_evidence_service import _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
 from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _classify_openai_error, _compact_track_ai_candidate, _track_ai_evidence_packet, find_match_slot
@@ -29,7 +28,7 @@ from backend.app_runtime import ARTIST_IMAGE_CACHE_DIR, AUDIO_EXT, DOWNLOADS_ROO
 from backend.artwork_service import AlbumArtRequestError, _ALBUM_ART_UPLOAD_MAX_BYTES, _RELEASE_ART_MBID_RE, _album_art_cache, _album_art_cache_lock, _album_art_expected_release_group, _album_art_repair_entry, _album_art_status, _album_dir_for_art, _art_repair_attach_last_run, _art_repair_build_report, _art_repair_save_last, _artist_image_cache_url, _artist_local_art_url, _cache_artist_image, _fetch_album_art, _fetch_artist_image, _repair_album_art, _replace_album_art_bytes, _replace_album_art_from_url, _resolve_album_art_request_album, _save_art_to_disk, _usable_album_art_file, _validate_album_art_bytes
 from backend.auth_service import _sanitize_confirmation_reason
 from backend.cleanup_service import album_cleanup_apply_response, _cleanup_artist_alias_source_dirs, _cleanup_template_token_files, _cleanup_template_tokens_for_album
-from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_duplicate_resolver_plan
+from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_dedup_quarantine_proven, _album_duplicate_resolver_plan
 from backend.import_reconciliation_service import _run_artist_folder_reconcile_for_alias_merge
 from backend.import_review_service import _metadata_transaction_pending_fields, _redact_unmatched_draft_tracks
 from backend.import_service import _coerce_library_import_all_album, _library_import_all_read_last, _library_import_all_record, _library_import_all_write_last, _start_reimport_disk_job_internal, start_reimport_disk
@@ -2014,8 +2013,6 @@ def album_deduplicate(aid):
     label = f"Dedup: {_s(getattr(album,'albumartist',''))} — {_s(getattr(album,'album',''))}"
 
     def _do(log, cancel_event=None):
-        _MROOT   = str(MUSIC_ROOT)
-
         # Resolve which MB album ID to use
         mb_albumid = mb_override
         if not mb_albumid:
@@ -2049,24 +2046,7 @@ def album_deduplicate(aid):
         else:
             log.append("  No MB ID — skipping MB re-match (track numbers may be 0)")
 
-        # ── Step 2: Load all items and group by track number ──────────────────
-        def _abs(p):
-            if isinstance(p, bytes):
-                p = p.decode("utf-8", errors="replace")
-            return (_MROOT + "/" + p) if (p and not p.startswith("/")) else (p or "")
-
-        def _pstr(raw) -> str:
-            """Decode bytes path to str."""
-            if isinstance(raw, bytes):
-                return raw.decode("utf-8", errors="replace")
-            return str(raw or "")
-
-        def _collision_rank(raw_path) -> int:
-            """0 = primary (no .N suffix), 1+ = collision copy number."""
-            stem = Path(_pstr(raw_path)).stem
-            m = re.search(r'\.(\d+)$', stem)
-            return int(m.group(1)) if m else 0
-
+        # ── Steps 2-4: group by slot; quarantine only proven duplicates ───────
         try:
             raw_items = composite_workflows.find_all_items_by_album_id(int(aid))
             sorted_items = sorted(
@@ -2079,99 +2059,7 @@ def album_deduplicate(aid):
         except Exception as ex:
             log.append(f"ERROR loading items: {ex}")
             return
-
-        # Normalise rows to plain dicts with string paths
-        all_items = []
-        for it in sorted_items:
-            all_items.append({
-                "id":    int(it["id"]),
-                "track": int(it.get("track") or 0),
-                "disc":  int(it.get("disc") or 1),
-                "title": _pstr(it.get("title")),
-                "path":  _pstr(it.get("path")),
-                "mb_trackid": _pstr(it.get("mb_trackid")).strip().lower(),
-            })
-
-        log.append(f"Items in DB: {len(all_items)}")
-
-        # MI-3: a slot is (disc, track) -- track 3 of disc 1 and of disc 2
-        # are different songs.
-        by_slot = defaultdict(list)
-        for it in all_items:
-            by_slot[(it["disc"], it["track"])].append(it)
-
-        # ── Step 3: Decide what to remove -- only with positive proof ─────────
-        # A copy is a duplicate only when BOTH files fingerprint (AcoustID) as
-        # CONFIRMED for one recording. Unknown/unavailable/conflicting
-        # evidence spares the copy and reports it; unmatched (track 0) items
-        # are never removed here (keep_extras is ignored for removal).
-        pairs = []
-        spared = []
-        summary = []
-        for (disc, trk), group in sorted(by_slot.items()):
-            if trk == 0:
-                summary.append(f"  [00] Kept {len(group)} unmatched item(s) for review")
-                spared.extend({"item_id": it["id"], "reason": "unmatched_track_number"} for it in group)
-                continue
-            if len(group) == 1:
-                summary.append(f"  [{disc}-{trk:02d}] OK — {Path(group[0]['path']).name[:60]}")
-                continue
-            group.sort(key=lambda x: (_collision_rank(x["path"]), x["id"]))
-            kept = group[0]
-            kept_abs = _abs(kept["path"])
-            for d in group[1:]:
-                proof = same_recording_proof(_abs(d["path"]), kept_abs, kept.get("mb_trackid") or "")
-                if proof["proven"]:
-                    pairs.append({"delete_item_id": d["id"], "keep_item_id": kept["id"]})
-                    summary.append(f"  [{disc}-{trk:02d}] Duplicate proven ({proof['recording_id']}): "
-                                   f"{Path(d['path']).name[:40]} (keep {Path(kept['path']).name[:40]})")
-                else:
-                    spared.append({"item_id": d["id"], "reason": proof["reason"],
-                                   "drop_status": proof["drop_status"], "keep_status": proof["keep_status"]})
-                    summary.append(f"  [{disc}-{trk:02d}] SPARED (no same-recording proof: {proof['reason']}): "
-                                   f"{Path(d['path']).name[:40]}")
-
-        for line in summary:
-            log.append(line)
-
-        # ── Step 4: Reviewed duplicate cleanup (quarantine, rollbackable) ─────
-        dedup_result = {"proven_pairs": len(pairs), "spared": spared, "operation_id": None,
-                        "applied": False, "quarantined": 0}
-        if not pairs:
-            log.append("Nothing proven duplicate — nothing removed.")
-        else:
-            try:
-                plan = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=f"Album {aid} deduplicate")
-            except (BeetsUnavailableError, BeetsError) as ex:
-                log.append(f"  Engine unavailable planning duplicate cleanup: {ex}")
-                raise RuntimeError(f"Duplicate cleanup planning failed: {ex}")
-            for skipped in plan.get("skipped") or []:
-                log.append(f"  Kept item {skipped.get('delete_item_id')}: "
-                           f"{', '.join(skipped.get('reasons') or [])}")
-            if plan.get("ok"):
-                dedup_result["operation_id"] = plan["operation_id"]
-                if confirm_apply:
-                    store = composite_workflows.get_default_store()
-                    if store.transition(plan["operation_id"], "Preview", "Approved",
-                                        metadata={"approved_by": "operator confirmed album deduplicate"}) is None:
-                        raise RuntimeError(f"Duplicate cleanup {plan['operation_id']} changed state before it "
-                                           "could be approved; nothing was quarantined.")
-                    applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
-                    if not applied.get("ok"):
-                        raise RuntimeError(f"Duplicate cleanup {plan['operation_id']} did not apply "
-                                           f"({applied.get('status') or applied.get('code')}): "
-                                           f"{applied.get('error') or 'see transaction log'}")
-                    dedup_result.update(applied=bool(applied.get("ok")),
-                                        quarantined=len(applied.get("removed") or []))
-                    log.append(f"  Quarantined {dedup_result['quarantined']} proven duplicate(s) "
-                               f"({applied.get('status')}); rollback via transaction {plan['operation_id']}.")
-                else:
-                    log.append(f"  Preview transaction {plan['operation_id']} created; approve and apply it "
-                               "to quarantine the proven duplicates (nothing removed yet).")
-            else:
-                log.append("  No pair passed duplicate re-verification; nothing removed.")
-        if spared:
-            log.append(f"  {len(spared)} item(s) kept for review (no positive same-recording proof).")
+        dedup_result = _album_dedup_quarantine_proven(aid, sorted_items, confirm_apply, log)
 
         # ── Step 5: Strip year suffix from album name (anti-double-year) ──────
         _strip_year_from_album_name(aid, log)
