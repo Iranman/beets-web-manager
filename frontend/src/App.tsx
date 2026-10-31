@@ -1,7 +1,7 @@
 import CssBaseline from '@mui/material/CssBaseline';
 import { ThemeProvider } from '@mui/material/styles';
 import { useEffect, useState } from 'react';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { BrowserRouter, Navigate, Route, Routes, useSearchParams } from 'react-router';
 import { getAuthMe, logout } from './api/client';
 import FirstRunSetup from './components/FirstRunSetup';
 import Shell from './components/layout/Shell';
@@ -24,6 +24,13 @@ interface AppRoutesProps {
   username?: string;
   onLogout?: () => void;
   onLoginSuccess?: () => void;
+}
+
+/** The Clean page moved to Jobs; old links keep naming their panel with ?tab=. */
+function CleanRedirect() {
+  const [params] = useSearchParams();
+  const tab = params.get('tab');
+  return <Navigate to={tab ? `/jobs?tab=${encodeURIComponent(tab)}` : '/jobs'} replace />;
 }
 
 export function AppRoutes({
@@ -76,7 +83,7 @@ export function AppRoutes({
         <Route path="library/missing-ids" element={<LibraryMissingIds />} />
         <Route path="changes" element={<LibraryChanges />} />
         <Route path="import" element={<Import />} />
-        <Route path="clean" element={<Navigate to="/jobs" replace />} />
+        <Route path="clean" element={<CleanRedirect />} />
         <Route path="playlists" element={<Playlists />} />
         <Route path="jobs" element={<Jobs />} />
         <Route path="config" element={<Config />} />

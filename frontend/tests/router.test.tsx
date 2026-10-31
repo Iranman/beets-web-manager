@@ -40,7 +40,12 @@ function MockImportPage() {
 }
 vi.mock('../src/views/Import', () => ({ default: MockImportPage }));
 vi.mock('../src/views/Playlists', () => ({ default: () => <div>PLAYLISTS_PAGE</div> }));
-vi.mock('../src/views/Jobs', () => ({ default: () => <div>JOBS_PAGE</div> }));
+function MockJobsPage() {
+  const [params] = useSearchParams();
+  const tab = params.get('tab');
+  return <div>{tab ? `JOBS_PAGE tab=${tab}` : 'JOBS_PAGE'}</div>;
+}
+vi.mock('../src/views/Jobs', () => ({ default: MockJobsPage }));
 vi.mock('../src/views/Config', () => ({ default: () => <div>CONFIG_PAGE</div> }));
 vi.mock('../src/views/System', () => ({ default: () => <div>SYSTEM_PAGE</div> }));
 vi.mock('../src/views/Submissions', () => ({ default: () => <div>SUBMISSIONS_PAGE</div> }));
@@ -71,6 +76,11 @@ describe('AppRoutes (react-router v8)', () => {
   it('redirects / to /library', async () => {
     renderAt('/');
     await waitFor(() => expect(screen.getByText('LIBRARY_PAGE')).toBeTruthy());
+  });
+
+  it.each(['album-tracks', 'library-db'])('keeps ?tab=%s when redirecting /clean', async (tab) => {
+    renderAt(`/clean?tab=${tab}`);
+    await waitFor(() => expect(screen.getByText(`JOBS_PAGE tab=${tab}`)).toBeTruthy());
   });
 
   it('redirects /clean to /jobs', async () => {

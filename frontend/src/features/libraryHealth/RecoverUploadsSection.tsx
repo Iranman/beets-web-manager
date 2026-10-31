@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -189,7 +190,7 @@ export const RecoverUploadsSection: React.FC = () => {
       setRuns(res.runs ?? []);
     } catch (err) {
       setRuns([]);
-      setMessage({ severity: 'info', text: err instanceof Error ? err.message : 'Could not load recovery runs.' });
+      setMessage({ severity: 'info', text: errorMessage(err, 'Could not load recovery runs.') });
     }
   }, []);
 
@@ -203,7 +204,7 @@ export const RecoverUploadsSection: React.FC = () => {
     try {
       await fn();
     } catch (err) {
-      setMessage({ severity: 'error', text: err instanceof Error ? err.message : 'Request failed' });
+      setMessage({ severity: 'error', text: errorMessage(err, 'Request failed') });
     } finally {
       setBusy(false);
     }

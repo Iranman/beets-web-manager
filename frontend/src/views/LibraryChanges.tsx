@@ -1,3 +1,5 @@
+import { formatEpochDateTime } from '../lib/dates';
+import { errorMessage } from '../lib/errors';
 import { Description, Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -96,7 +98,7 @@ function approveErrorMessage(ex: unknown) {
   if (code === 'not_preview') {
     return 'Approval refused: this transaction is no longer in Preview (it changed state, for example in another tab or job). Nothing was approved by this request. Review its current status below before acting.';
   }
-  const detail = ex instanceof Error ? ex.message : String(ex);
+  const detail = errorMessage(ex);
   return `Approval failed: ${detail}. Review the transaction status below before retrying.`;
 }
 
@@ -104,7 +106,7 @@ function approveErrorMessage(ex: unknown) {
 // refused before any mutation. Apply can fail after mutating (mutated: true,
 // partial_mutation), or with an unknown outcome (5xx, timeout, network loss).
 function actionErrorMessage(verb: 'Cancel' | 'Apply' | 'Rollback', ex: unknown) {
-  const raw = ex instanceof Error ? ex.message : String(ex);
+  const raw = errorMessage(ex);
   const reason = /[.!?]$/.test(raw) ? raw : `${raw}.`;
   const status = (ex as { httpStatus?: number } | null)?.httpStatus;
   const body = apiErrorBody(ex) as { code?: string; mutated?: boolean; partial_mutation?: boolean; status?: string } | undefined;
@@ -184,7 +186,7 @@ function DeleteFilesApproveDialog({ open, busy, onCancel, onConfirm }: {
 
 function formatDate(value?: number) {
   if (!value) return '-';
-  return new Date(value * 1000).toLocaleString();
+  return formatEpochDateTime(value);
 }
 
 function pct(value?: number | null) {
@@ -299,7 +301,7 @@ export default function LibraryChanges() {
       setTotal(response.total);
       if (!selectedId && response.transactions[0]) setSelectedId(response.transactions[0].id);
     } catch (ex) {
-      setError(ex instanceof Error ? ex.message : String(ex));
+      setError(errorMessage(ex));
     } finally {
       setLoading(false);
     }
@@ -314,7 +316,7 @@ export default function LibraryChanges() {
       const response = await getTransaction(id, { limit: 100 });
       setDetail(response.transaction);
     } catch (ex) {
-      setError(ex instanceof Error ? ex.message : String(ex));
+      setError(errorMessage(ex));
     }
   }, []);
 
@@ -339,7 +341,7 @@ export default function LibraryChanges() {
       setSettings(response.settings);
     } catch (ex) {
       setSettings(previous);
-      setError(`Setting not saved: ${ex instanceof Error ? ex.message : String(ex)} The previous value is kept.`);
+      setError(`Setting not saved: ${errorMessage(ex)} The previous value is kept.`);
     }
   };
 

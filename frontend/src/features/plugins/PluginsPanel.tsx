@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import { Disclosure, DisclosureButton, DisclosurePanel } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -142,7 +143,7 @@ function PlexPlugin() {
         setStatusColor('error');
       }
     } catch (err) {
-      setStatusMsg(err instanceof Error ? err.message : String(err));
+      setStatusMsg(errorMessage(err));
       setStatusColor('error');
     }
   }
@@ -154,7 +155,7 @@ function PlexPlugin() {
       const { job_id } = await refreshPlex();
       setRefreshJobId(job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   }
 
@@ -193,7 +194,7 @@ function LastgenrePlugin() {
       const { job_id } = await fixGenres(opts);
       setJobId(job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   }
 
@@ -232,7 +233,7 @@ function FetchartPlugin() {
       const { job_id } = await fetchMissingArt();
       setJobId(job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   }
 
@@ -268,7 +269,7 @@ function YtImportPlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }
       const { job_id } = await runPlugin(args, label);
       setJobId(job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   }
 
@@ -330,7 +331,7 @@ function WlgPlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }) {
       const { job_id } = await runPlugin(args, label);
       setJobId(job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   }
 
@@ -396,7 +397,7 @@ function AisaucePlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus })
       const { job_id } = await runPlugin(args, label);
       setJobId(job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   }
 
@@ -444,7 +445,7 @@ function YtUpdatePlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }
       const { job_id } = await runPlugin(['ytupdate'], 'ytupdate: sync view counts');
       setJobId(job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   }
 
@@ -493,7 +494,7 @@ export function PluginsPanel() {
       setPluginStatus(status);
       setInstallLog(log.log ?? []);
     } catch (err) {
-      setStatusError(err instanceof Error ? err.message : String(err));
+      setStatusError(errorMessage(err));
     }
   }, []);
 

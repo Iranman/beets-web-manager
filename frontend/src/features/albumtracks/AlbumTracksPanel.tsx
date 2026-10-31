@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle, Disclosure, DisclosureButton, DisclosurePanel, Switch } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -188,7 +189,7 @@ export function AlbumTracksPanel() {
       });
       setJobId(r.job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 
@@ -209,7 +210,7 @@ export function AlbumTracksPanel() {
       setBatchJobId(r.job_id);
     } catch (err) {
       setBatchRemoving(false);
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 

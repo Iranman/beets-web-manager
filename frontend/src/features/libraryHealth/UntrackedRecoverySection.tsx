@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -74,7 +75,7 @@ export const UntrackedRecoverySection: React.FC = () => {
     } catch (err) {
       setRows([]);
       setTotal(0);
-      setMessage({ severity: 'info', text: err instanceof Error ? err.message : 'Run the inventory first.' });
+      setMessage({ severity: 'info', text: errorMessage(err, 'Run the inventory first.') });
     }
   }, [category]);
 
@@ -91,7 +92,7 @@ export const UntrackedRecoverySection: React.FC = () => {
     try {
       await fn();
     } catch (err) {
-      setMessage({ severity: 'error', text: err instanceof Error ? err.message : 'Request failed' });
+      setMessage({ severity: 'error', text: errorMessage(err, 'Request failed') });
     } finally {
       setBusy(false);
     }
@@ -110,7 +111,7 @@ export const UntrackedRecoverySection: React.FC = () => {
     } catch (err) {
       setRollbackState({
         allowed: false,
-        reason: `Could not check whether this plan can be rolled back: ${err instanceof Error ? err.message : 'request failed'}. Open it in Library Changes to review its status.`,
+        reason: `Could not check whether this plan can be rolled back: ${errorMessage(err, 'request failed')}. Open it in Library Changes to review its status.`,
       });
     }
   };

@@ -1,3 +1,6 @@
+import { formatShortDateTime, formatShortTime } from '../lib/dates';
+import { useInterval } from '../lib/hooks';
+import { errorMessage } from '../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -588,7 +591,7 @@ function formatPlaylistTime(value?: number): string {
   if (!value) return 'not updated';
   const date = new Date(value * 1000);
   if (Number.isNaN(date.getTime())) return 'not updated';
-  return `updated ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  return `updated ${formatShortTime(value)}`;
 }
 
 function statusIn(value: string | undefined | null, statuses: string[]): boolean {
@@ -1284,7 +1287,7 @@ export default function Playlists() {
       const response = await getPlaylists();
       setPlaylists(response.playlists ?? []);
     } catch (err) {
-      setPlaylistError(err instanceof Error ? err.message : String(err));
+      setPlaylistError(errorMessage(err));
     } finally {
       setLoadingPlaylists(false);
     }
@@ -1303,12 +1306,7 @@ export default function Playlists() {
     void loadPlaylistSyncStatus();
   }, [loadPlaylists, loadPlaylistSyncStatus]);
 
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void loadPlaylistSyncStatus();
-    }, PLAYLIST_SYNC_STATUS_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [loadPlaylistSyncStatus]);
+  useInterval(() => { void loadPlaylistSyncStatus(); }, PLAYLIST_SYNC_STATUS_POLL_MS);
 
   // Follow the sync job this page started (or joined) until it ends.
   useEffect(() => {
@@ -1349,7 +1347,7 @@ export default function Playlists() {
           : 'Playlist sync started.',
       });
     } catch (err) {
-      setPlaylistSyncNotice({ severity: 'error', message: `Playlist sync did not start: ${err instanceof Error ? err.message : String(err)}` });
+      setPlaylistSyncNotice({ severity: 'error', message: `Playlist sync did not start: ${errorMessage(err)}` });
     } finally {
       setStartingPlaylistSync(false);
     }
@@ -1441,7 +1439,7 @@ export default function Playlists() {
         timer = window.setTimeout(poll, playlistPollDelay(PLAYLIST_DOWNLOAD_POLL_MS));
       } catch (err) {
         if (cancelled) return;
-        setDownloadError(err instanceof Error ? err.message : String(err));
+        setDownloadError(errorMessage(err));
         if (err instanceof Error && err.message.toLowerCase().includes('job not found')) {
           setDownloadJobId('');
           localStorage.removeItem(PLAYLIST_JOB_STORAGE_KEY);
@@ -1503,7 +1501,7 @@ export default function Playlists() {
           });
         }
       } catch (err) {
-        if (!cancelled) setPlaylistDetailsError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) setPlaylistDetailsError(errorMessage(err));
       }
     };
     void poll();
@@ -1546,7 +1544,7 @@ export default function Playlists() {
         setName(fallback);
       }
     } catch (err) {
-      setParseError(err instanceof Error ? err.message : String(err));
+      setParseError(errorMessage(err));
     } finally {
       setParsing(false);
     }
@@ -1566,7 +1564,7 @@ export default function Playlists() {
         severity: 'error',
         message: noTracks
           ? 'Nothing was saved: this playlist has no tracks. Add or paste at least one track, then save again.'
-          : err instanceof Error ? err.message : String(err),
+          : errorMessage(err),
       });
     } finally {
       setSaving(false);
@@ -1596,7 +1594,7 @@ export default function Playlists() {
       }
       await loadPlaylists();
     } catch (err) {
-      setPlaylistDetailsError(err instanceof Error ? err.message : String(err));
+      setPlaylistDetailsError(errorMessage(err));
     }
   };
 
@@ -1631,7 +1629,7 @@ export default function Playlists() {
         message: `${result.name || playlist.name}: ${(result.available ?? result.matched.length).toLocaleString()} available, ${(result.missing_count ?? result.missing.length).toLocaleString()} missing.${m3uNote}${checkpointNote}`,
       });
     } catch (err) {
-      setPlaylistDetailsError(err instanceof Error ? err.message : String(err));
+      setPlaylistDetailsError(errorMessage(err));
     } finally {
       setLoadingPlaylistDetails('');
     }
@@ -1692,7 +1690,7 @@ export default function Playlists() {
           : `No ${TRACK_GROUP_LABELS[group].toLowerCase()} rows found.`,
       });
     } catch (err) {
-      setPlaylistDetailsError(err instanceof Error ? err.message : String(err));
+      setPlaylistDetailsError(errorMessage(err));
     } finally {
       setLoadingPlaylistRows('');
     }
@@ -1733,7 +1731,7 @@ export default function Playlists() {
         setParseResult(detail);
       }
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      setNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setPipelineActionBusy('');
     }
@@ -1768,7 +1766,7 @@ export default function Playlists() {
       });
       await loadPlaylists();
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      setNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setTrackActionKey('');
     }
@@ -1815,7 +1813,7 @@ export default function Playlists() {
         setNotice({ severity: 'info', message: 'Resumed the existing playlist download job.' });
       }
     } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : String(err));
+      setDownloadError(errorMessage(err));
     } finally {
       setStartingDownload(false);
     }
@@ -1874,7 +1872,7 @@ export default function Playlists() {
       });
       await loadPlaylists();
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      setNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setResolvingKey('');
     }
@@ -1894,7 +1892,7 @@ export default function Playlists() {
         message: `${result.safe_count.toLocaleString()} safe suggestion(s) found for ${result.total_missing.toLocaleString()} missing track(s).`,
       });
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      setNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setLoadingSuggestions(false);
     }
@@ -1917,7 +1915,7 @@ export default function Playlists() {
       });
       await loadPlaylists();
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      setNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setApplyingSuggestions(false);
     }
@@ -1956,7 +1954,7 @@ export default function Playlists() {
       }
       await loadPlaylists();
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      setNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setRepairingQuality(false);
     }
@@ -2005,7 +2003,7 @@ export default function Playlists() {
       });
       await loadPlaylists();
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      setNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setPlacingQuality(false);
     }
@@ -2053,21 +2051,8 @@ export default function Playlists() {
   const hasResumablePipeline = playlistHasResumableCheckpoint(savedDetail, activePlaylist);
   const mainPipelineAction: PlaylistPipelineAction = hasResumablePipeline ? 'resume' : 'run-full';
   const mainPipelineLabel = hasResumablePipeline ? 'Resume Pipeline' : 'Run Pipeline';
-  const lastCheckpointLabel = savedDetail?.checkpoint_updated_at
-    ? new Date(savedDetail.checkpoint_updated_at * 1000).toLocaleString([], {
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    })
-    : activePlaylist?.checkpoint_updated_at
-      ? new Date((activePlaylist?.checkpoint_updated_at || 0) * 1000).toLocaleString([], {
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-      })
-      : '-';
+  const lastCheckpointAt = savedDetail?.checkpoint_updated_at || activePlaylist?.checkpoint_updated_at;
+  const lastCheckpointLabel = lastCheckpointAt ? formatShortDateTime(lastCheckpointAt * 1000) : '-';
   const nextPipelineAction = pipelineIsActive
     ? (downloadState?.current || pipelineAction.replace(/_/g, ' '))
     : hasResumablePipeline
@@ -2260,7 +2245,7 @@ export default function Playlists() {
       }
       await loadPlaylists();
     } catch (err) {
-      setPlaylistSyncNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      setPlaylistSyncNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setSavedRowActionBusy('');
     }
