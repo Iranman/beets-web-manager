@@ -181,8 +181,7 @@ class RgidPersistenceHelpersTests(unittest.TestCase):
     def test_save_uses_atomic_write_pattern(self):
         save_fn = self._src[self._src.index("def _save_rgid_resolutions("):
                              self._src.index("def _set_rgid_resolution(")]
-        self.assertIn(".tmp", save_fn)
-        self.assertIn(".replace(RGID_RESOLUTION_STATE_FILE)", save_fn)
+        self.assertIn("atomic_write_json(RGID_RESOLUTION_STATE_FILE,", save_fn)
 
 
 class LibraryHealthPayloadSplitTests(unittest.TestCase):

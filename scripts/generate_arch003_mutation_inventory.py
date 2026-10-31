@@ -305,6 +305,8 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_artwork_fsync_commit": ("TRANSACTION_STATE", "album_artwork_v1", "artwork-fsync-helper"),
     "_replace_or_copy_unlink": ("TRANSACTION_STATE", "infra_v1", "replace-or-copy-unlink-helper"),
     "_create_exclusive_temp_file": ("TRANSACTION_STATE", "infra_v1", "infra-temp-file-helper"),
+    "atomic_write_text": ("TRANSACTION_STATE", "infra_v1", "infra-atomic-state-helper"),
+    "atomic_write_json": ("TRANSACTION_STATE", "infra_v1", "infra-atomic-state-helper"),
     "acquire_os_lock": ("TRANSACTION_STATE", "infra_v1", "infra-os-lock-helper"),
     # Wave 25 round (independent review): reimport_source_atomic() and
     # preserve_import_source() were previously claimed as
