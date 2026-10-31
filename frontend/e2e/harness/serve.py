@@ -49,7 +49,7 @@ def configure(root: Path, port: int) -> dict:
     (paths["config"] / "config.yaml").write_text(yaml.safe_dump({
         "directory": str(paths["music"]),
         "library": str(db),
-        "plugins": ["ftintitle"],  # one enabled stock plugin for the plugin-status specs
+        "plugins": ["musicbrainz", "ftintitle"],  # the matcher, and one stock plugin for the plugin-status specs
         "webmanager": {"import_roots": [str(paths["downloads"])],
                        "allowed_roots": [str(paths["music"]), str(paths["downloads"])]},
     }), encoding="utf-8")
@@ -98,17 +98,28 @@ class CannedResponse(io.BytesIO):
 
 
 def musicbrainz_answer(path: str, fixture):
-    artist = {"id": "dddddddd-1111-4111-8111-111111111111", "name": "Review Artist"}
+    artist = {"id": "dddddddd-1111-4111-8111-111111111111", "name": "Review Artist", "sort-name": "Review Artist",
+              "disambiguation": "", "aliases": [], "type": "Group"}
+    credit = [{"name": "Review Artist", "joinphrase": "", "artist": artist}]
+
+    def track(n, title):
+        recording = {"id": f"eeeeeeee-{n}{n}{n}{n}-4{n}{n}{n}-8{n}{n}{n}-{str(n) * 12}", "title": title, "length": 1000,
+                     "disambiguation": "", "aliases": [], "artist-credit": credit, "isrcs": [], "relations": [],
+                     "video": False, "first-release-date": "2010-01-01"}
+        return {"id": f"ffffffff-{n}{n}{n}{n}-4{n}{n}{n}-8{n}{n}{n}-{str(n) * 12}", "position": n, "number": str(n),
+                "title": title, "length": 1000, "artist-credit": credit, "recording": recording}
+
     release = {
         "id": fixture.REVIEW_RELEASE_ID, "title": "Review Album", "status": "Official", "date": "2010-01-01",
-        "country": "XW", "artist-credit": [{"name": "Review Artist", "artist": artist}],
-        "release-group": {"id": fixture.REVIEW_GROUP_ID, "title": "Review Album", "primary-type": "Album"},
-        "media": [{"position": 1, "track-count": 2, "format": "Digital Media", "tracks": [
-            {"position": 1, "number": "1", "title": "Review One", "length": 1000,
-             "recording": {"id": "eeeeeeee-1111-4111-8111-111111111111", "title": "Review One", "length": 1000}},
-            {"position": 2, "number": "2", "title": "Review Two", "length": 1000,
-             "recording": {"id": "eeeeeeee-2222-4222-8222-222222222222", "title": "Review Two", "length": 1000}},
-        ]}],
+        "country": "XW", "artist-credit": credit, "asin": None, "barcode": None, "disambiguation": "",
+        "packaging": None, "quality": "normal", "aliases": [], "label-info": [], "relations": [], "genres": [], "tags": [],
+        "release-events": [{"date": "2010-01-01", "area": None}],
+        "text-representation": {"language": "eng", "script": "Latn"},
+        "release-group": {"id": fixture.REVIEW_GROUP_ID, "title": "Review Album", "primary-type": "Album",
+                          "secondary-types": [], "disambiguation": "", "first-release-date": "2010-01-01",
+                          "artist-credit": credit, "aliases": [], "genres": [], "tags": []},
+        "media": [{"position": 1, "track-count": 2, "format": "Digital Media", "title": "",
+                   "tracks": [track(1, "Review One"), track(2, "Review Two")]}],
     }
     path = path.rstrip("/")
     if path.endswith("/release"):
@@ -152,6 +163,22 @@ def install_network_stubs(root: Path, fixture) -> None:
     urllib.request.urlopen = stub_urlopen
     from backend import provider_boundary
     provider_boundary.open_public_url = lambda url, **kw: stub_urlopen(url)
+
+    # Embedded Beets' own MusicBrainz client uses requests, not provider_boundary.
+    import requests
+
+    def stub_send(self, request, **kwargs):
+        try:
+            canned = stub_urlopen(request.url)
+        except urllib.error.URLError as exc:
+            raise requests.ConnectionError(str(exc), request=request) from exc
+        response = requests.Response()
+        response.status_code, response.url, response.request = 200, request.url, request
+        response.headers["Content-Type"] = "application/json"
+        response._content = canned.read()
+        return response
+
+    requests.adapters.HTTPAdapter.send = stub_send
 
 
 def install_clean_all_hold(root: Path) -> None:

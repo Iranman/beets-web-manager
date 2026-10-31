@@ -1,15 +1,11 @@
 """Synthetic, throwaway library for the Playwright E2E suite.
 
-Everything lives under the temp root handed in by serve.py. Audio is one
-second of silence in a tagged WAV: stdlib plus mutagen, so no ffmpeg needed.
+Everything lives under the temp root handed in by serve.py. Audio is one second
+of a tagged stereo FLAC tone, which the default Music Format Preferences accept.
 The database is written through Beets' own Library API, never sqlite3.
 """
-import struct
-import wave
+import subprocess
 from pathlib import Path
-
-import mutagen.id3
-import mutagen.wave
 
 # (artist, album, year, mb_releasegroupid, mb_albumid, tracks). Fixed fake MBIDs.
 ALBUMS = [
@@ -33,20 +29,14 @@ REVIEW_GROUP_ID = "cccccccc-1111-4111-8111-111111111111"
 IMPORT_FOLDER = "Import Artist - Import Album"
 
 
-def write_wav(path: Path, artist: str, album: str, title: str, track: int) -> None:
+def write_flac(path: Path, artist: str, album: str, title: str, track: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "w") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(8000)
-        w.writeframes(struct.pack("<h", 0) * 8000)
-    tagged = mutagen.wave.WAVE(str(path))
-    tagged.add_tags()
-    for frame in (mutagen.id3.TIT2(encoding=3, text=[title]), mutagen.id3.TPE1(encoding=3, text=[artist]),
-                  mutagen.id3.TPE2(encoding=3, text=[artist]), mutagen.id3.TALB(encoding=3, text=[album]),
-                  mutagen.id3.TRCK(encoding=3, text=[str(track)])):
-        tagged.tags.add(frame)
-    tagged.save()
+    tags = {"artist": artist, "album_artist": artist, "album": album, "title": title, "track": track}
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1",
+         "-ac", "2", "-c:a", "flac", *[arg for k, v in tags.items() for arg in ("-metadata", f"{k}={v}")], str(path)],
+        check=True,
+    )
 
 
 def build(music: Path, downloads: Path, db_path: Path) -> None:
@@ -57,8 +47,8 @@ def build(music: Path, downloads: Path, db_path: Path) -> None:
         for artist, album, year, rgid, mbid, titles in ALBUMS:
             items = []
             for n, title in enumerate(titles, 1):
-                path = music / artist / album / f"{n:02d} {title}.wav"
-                write_wav(path, artist, album, title, n)
+                path = music / artist / album / f"{n:02d} {title}.flac"
+                write_flac(path, artist, album, title, n)
                 item = Item.from_path(str(path))
                 item.update({"track": n, "year": year, "mb_albumid": mbid, "mb_releasegroupid": rgid,
                              "mb_trackid": f"{rgid[:-4]}{n:04d}" if rgid else "", "albumartist": artist})
@@ -70,5 +60,5 @@ def build(music: Path, downloads: Path, db_path: Path) -> None:
         lib._close()
 
     for n, title in enumerate(["Review One", "Review Two"], 1):
-        write_wav(downloads / REVIEW_FOLDER / f"{n:02d} {title}.wav", "Review Artist", "Review Album", title, n)
-    write_wav(downloads / IMPORT_FOLDER / "01 Import One.wav", "Import Artist", "Import Album", "Import One", 1)
+        write_flac(downloads / REVIEW_FOLDER / f"{n:02d} {title}.flac", "Review Artist", "Review Album", title, n)
+    write_flac(downloads / IMPORT_FOLDER / "01 Import One.flac", "Import Artist", "Import Album", "Import One", 1)

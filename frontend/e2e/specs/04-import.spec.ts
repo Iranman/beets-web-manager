@@ -21,7 +21,9 @@ test('previewing the music root offers nothing to import: its folders are alread
   const source = page.getByRole('tabpanel', { name: /Import Source/ });
   await source.getByRole('textbox', { name: 'Import/source path' }).fill(root('music'));
   await source.getByRole('button', { name: 'Preview Import All' }).click();
-  await expect(source.getByText('In library', { exact: true })).toHaveCount(4);
+  // One label per library folder, plus the summary tile's.
+  const albums = (await libraryAlbums(page)).length;
+  await expect(source.getByText('In library', { exact: true })).toHaveCount(albums + 1);
   await expect(source.getByText(FOLDER, { exact: true })).toHaveCount(0);
   await expect(source.getByRole('button', { name: 'Import All', exact: true }).last()).toBeDisabled();
 });
@@ -40,13 +42,13 @@ test('Import All asks first; cancelling starts nothing', async ({ page }) => {
   expect(fs.existsSync(root('downloads', FOLDER))).toBe(true);
 });
 
-test('confirmed Import All runs as a job and the folder ends up imported or held for review', async ({ page }) => {
+test('confirmed Import All runs as a job; an unverifiable folder goes to review, not the library', async ({ page }) => {
   await page.goto('/import');
   const source = page.getByRole('tabpanel', { name: /Import Source/ });
   await source.getByRole('button', { name: 'Preview Import All' }).click();
   await expect(source.getByText(FOLDER, { exact: true })).toBeVisible();
   await source.getByRole('button', { name: 'Import All', exact: true }).last().click();
-  const started = page.waitForResponse((r) => r.url().includes('/api/import') && r.request().method() === 'POST' && !r.url().includes('preflight'));
+  const started = page.waitForResponse((r) => r.url().includes('/api/ai-batch-import') && r.request().method() === 'POST');
   await page.getByRole('dialog', { name: 'Run Import All?' }).getByRole('button', { name: 'Import eligible only' }).click();
   expect((await started).ok()).toBeTruthy();
 
@@ -56,6 +58,9 @@ test('confirmed Import All runs as a job and the folder ends up imported or held
 
   // The stubbed lookup does not confirm this album, so a safe import leaves it unimported.
   const imported = (await libraryAlbums(page)).some((album) => album.album === 'Import Album');
-  const inQueue = (await (await page.request.get('/api/import/review-queue')).text()).includes(FOLDER);
-  expect(imported || inQueue || fs.existsSync(root('downloads', FOLDER))).toBe(true);
+  expect(imported).toBe(false);
+  expect(filesUnder(root('downloads', FOLDER))).toHaveLength(1);
+  await expect
+    .poll(async () => (await (await page.request.get('/api/import/review-queue')).text()).includes(FOLDER))
+    .toBe(true);
 });

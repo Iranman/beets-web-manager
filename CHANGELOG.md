@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Testing
+
+- **Playwright end-to-end suite (#505).** `frontend/e2e` runs the real app against a synthetic library in a temp directory, with non-loopback network refused and providers stubbed. It covers the library overview, browsing, import and review, jobs, Clean All, playlists, settings, plugins, deep links and the missing-build 503 page. It runs in the new `e2e` workflow; see `frontend/e2e/README.md` for the local command. No production code changed.
+
 ### Upgrade Notes
 
 - **Removed: the legacy single-file fallback UI and its serving fallback.** Root `index.html` (~366 KB of inline legacy UI, served only when the built frontend in `frontend/dist` was absent) is deleted, and `app.py` no longer tries anywhere else: the SPA comes from `frontend/dist` alone, which is also all the image ever shipped. While the build exists, `/`, deep-link refreshes, `/assets/…` and `/_next/static/…` behave exactly as before. **When the build is missing or empty, the UI routes now answer `503`** with a small inline `text/html` page ("The web frontend build is missing. Rebuild or reinstall the application." — no application chrome or external assets, `no-store`), and an unknown `/api/*` path that falls through to the SPA catch-all answers `503 {"ok": false, "error": "frontend_missing", "message": …}` (`application/json`) instead of a bare 404 — so a broken or absent frontend build is visible instead of silently serving an old UI. Real `/api/*` endpoints (liveness, health, setup, jobs, …) keep answering without the build; `/api/health`, `/health/live`, `/health/ready` and `/health` are unchanged, and with the build present unknown `/api/*` paths keep their ordinary 404. Tests: `tests/test_serving_frontend.py` (serving behavior with and without the build), and the surviving playlist-platform CodeQL coverage now tests the live `frontend/src/views/Playlists.tsx` (`tests/test_frontend_hostname_parsing.py`); the protections that existed only inside the deleted legacy file (folder-browse inline `onclick` containment, manual-MBID `href` validation) expire with it.

@@ -39,5 +39,5 @@ test('history search finds jobs by name and hides the rest', async ({ page }) =>
   await expect(page.getByRole('button', { name: /^Cancelled Clean All/ }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /^Completed Library disk reconciliation/ })).toHaveCount(0);
   await search.fill('');
-  await expect(page.getByRole('button', { name: /^Completed Library disk reconciliation/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Completed Library disk reconciliation/ }).first()).toBeVisible();
 });

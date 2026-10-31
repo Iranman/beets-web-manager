@@ -3,8 +3,8 @@ import { expect, test } from '../fixtures';
 test('System reports the plugin enabled in config.yaml and the ones that are not', async ({ page }) => {
   await page.goto('/system');
   const main = page.getByRole('main');
-  // ftintitle from config.yaml, plus the web and webmanager plugins the app always loads.
-  await expect(main).toContainText('Enabled plugins: 3');
+  // musicbrainz and ftintitle from config.yaml, plus the web and webmanager plugins the app always loads.
+  await expect(main).toContainText('Enabled plugins: 4');
   await expect(main).toContainText(/zero\W*Installed but disabled/);
   await expect(main).toContainText(/ftintitle\W*Configured/);
 });

@@ -47,7 +47,7 @@ test('nav tabs and the system menu reach every section, and System reports the r
   await expect(page).toHaveURL(/\/system/);
   const version = fs.readFileSync('../VERSION', 'utf8').trim();
   await expect(page.getByRole('main').getByText(`Version ${version}`)).toBeVisible();
-  await expect(page.getByRole('main').getByText('Beets 2.14.1')).toBeVisible();
+  await expect(page.getByRole('main')).toContainText(/Beets\s*2\.14\.1/);
 });
 
 test('signing out ends the session; a deep link then asks for login', async ({ browser, baseURL }) => {
