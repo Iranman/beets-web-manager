@@ -2,6 +2,7 @@
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json, load_json_object
 
 import backend.provider_boundary as provider_boundary
 import base64, hashlib, io, json, mimetypes, os, re, threading, time
@@ -585,19 +586,12 @@ def _album_art_repair_entry(album, status: Optional[Dict[str, Any]] = None,
 
 
 def _art_repair_load_last() -> Dict[str, Any]:
-    try:
-        data = json.loads(ART_REPAIR_LAST_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return load_json_object(ART_REPAIR_LAST_FILE)
 
 
 def _art_repair_save_last(report: Dict[str, Any]) -> None:
     try:
-        ART_REPAIR_LAST_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = ART_REPAIR_LAST_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, default=str), encoding="utf-8")
-        tmp.replace(ART_REPAIR_LAST_FILE)
+        atomic_write_json(ART_REPAIR_LAST_FILE, report, ensure_ascii=False, sort_keys=True, default=str)
     except Exception:
         pass
 

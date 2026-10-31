@@ -305,6 +305,8 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_artwork_fsync_commit": ("TRANSACTION_STATE", "album_artwork_v1", "artwork-fsync-helper"),
     "_replace_or_copy_unlink": ("TRANSACTION_STATE", "infra_v1", "replace-or-copy-unlink-helper"),
     "_create_exclusive_temp_file": ("TRANSACTION_STATE", "infra_v1", "infra-temp-file-helper"),
+    "atomic_write_text": ("TRANSACTION_STATE", "infra_v1", "infra-atomic-state-helper"),
+    "atomic_write_json": ("TRANSACTION_STATE", "infra_v1", "infra-atomic-state-helper"),
     "acquire_os_lock": ("TRANSACTION_STATE", "infra_v1", "infra-os-lock-helper"),
     # Wave 25 round (independent review): reimport_source_atomic() and
     # preserve_import_source() were previously claimed as
@@ -639,8 +641,6 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
                 return "STAGING_ONLY", "", "reviewed-wave26-staging-cleanup-move-delete"
             if func in ("reimport_disk._do", "start_reimport_disk._do") and any(k in text for k in ("beets_client.move_file", "composite_workflows.move_file")):
                 return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-pretracking-filename-repair"
-            if func == "_maintenance_safe_folder_renames":
-                return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-orphan-folder-rename"
         if "BEET_BIN" in text or re.search(r"\bbase(_import)?\s*\+", text) or "beet" in text:
             verbs_hit = {v for v in _BEET_MUTATING_VERBS if f'"{v}"' in text or f"'{v}'" in text}
             if verbs_hit:

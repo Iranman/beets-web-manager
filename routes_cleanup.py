@@ -18,7 +18,6 @@ from backend.acoustid_service import AUDIO_EXTS, _acoustid_fingerprint_match, _a
 from backend.app_runtime import ALBUM_FOLDER_CLEANUP_LAST_FILE, METADATA_CACHE_ROOT, MUSIC_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, _LITERAL_PLACEHOLDER_RE, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _app_logger, _path_under, _s, _ur, jobs
 from backend.cleanup_service import _album_cleanup_apply_issue, _album_cleanup_running_job, _album_cleanup_save_report, _album_folder_cleanup_apply_safe, _album_folder_cleanup_plan, _clean_remove_empty_albums, _clean_remove_orphaned_items, _clear_rgid_resolution, _delete_no_audio_folders, _folder_clean_root, _folder_cleanup_db_items, _folder_cleanup_is_approved_root, _folder_cleanup_merge_preview, _folder_cleanup_path, _folder_cleanup_review_for, _load_rgid_resolutions, _scan_no_audio_folder_candidates, _set_rgid_resolution
 from backend.dedup_service import _dedup_final_summary, _dedup_job_result, _dedup_raise_if_cancelled, _dedup_resolve_source_scan, _dedup_scans, _dedup_state_response, _dedup_structured_state, _library_duplicate_merge_safety, run_dedup_cleanup, start_dedup_scan
-from backend.import_reconciliation_service import _apply_artist_folder_reconcile_resilient
 from backend.job_service import _root_folder_repair_running_job
 from backend.library_service import _album_source_folder, _append_stamp_candidate_log, _append_stamp_skipped_log, _apply_artist_folder_groups, _artist_folder_repair_root, _resolve_album_release_for_import, _rgid_group_albums, _root_folder_repair_apply_safe, _root_folder_repair_save_report, _root_folder_repair_scan, _scan_artist_folder_groups, _scan_folder_name_placeholders, _stamp_artist_folder_scan
 from backend.maintenance_service import _ALBUM_FOLDER_CLEANUP_LOCK, _ROOT_FOLDER_REPAIR_LOCK, _library_health_payload
@@ -33,7 +32,7 @@ from backend.app_runtime import WEB_MANAGER_DATA_DIR
 from backend.auth_service import _transaction_user_label
 from backend.dedup_service import _maintenance_full_duplicate_scan
 from backend.job_service import _running_job_of_type
-from backend.maintenance_service import _maintenance_load_last_report
+from backend.maintenance_service import _maintenance_artist_folder_merge_step, _maintenance_load_last_report
 import backend.duplicate_cleanup as _duplicate_cleanup
 import backend.library_integrity_service as _library_integrity
 import backend.album_row_merge as _album_row_merge
@@ -2054,71 +2053,14 @@ def clean_artist_folders_stamp_mbid():
                         "candidates": len(candidates), "skipped_total": len(skipped), "log": log})
 
     def _do(log, cancel_event=None):
-        scan = _stamp_artist_folder_scan(root_path)
-        if not scan.get("ok", True):
-            # Independent review finding: an engine inventory failure must
-            # never be reported as "No artist folders need MB ID stamping" --
-            # that message asserts a genuine, successful zero-candidate scan.
-            # Raise so the job is reported failed (fail closed, resumable on
-            # retry) instead of silently succeeding with nothing done.
-            log.append(f"Artist folder MBID stamping: engine inventory scan failed ({scan.get('error')}); nothing was performed.")
-            raise RuntimeError(f"Engine inventory scan failed: {scan.get('error')}")
-        candidates = scan["candidates"]
-        skipped = scan["skipped"]
-        if not candidates:
-            log.append("No artist folders need MB ID stamping.")
-            _append_stamp_skipped_log(log, skipped, include_examples=False)
-            return {"renamed": 0, "merged": 0, "skipped": 0}
-        # Formerly performed direct disk merge via _merge_artist_dir_contents(; now delegated to composite_workflows.plan_artist_folder_reconcile
-        log.append(f"Stamping MB IDs on {len(candidates)} artist folder(s)…")
-        payload = {
-            "root": str(root_path),
-            "mode": "stamp_mbid",
-        }
-        # SEC-002 Wave 21 final review: no local in-process fallback -- see
-        # the identical correction and rationale in _apply_artist_folder_groups.
-        try:
-            plan_res = composite_workflows.plan_artist_folder_reconcile(payload)
-        except (BeetsUnavailableError, BeetsError) as ex:
-            log.append("Engine unavailable; MBID stamping was not performed.")
-            _app_logger.error("MBID stamping: engine unavailable: %s", ex)
-            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
-        except Exception as ex:
-            log.append("Engine communication failed; MBID stamping was not performed.")
-            _app_logger.error("MBID stamping: unexpected engine communication failure: %s", ex)
-            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
-
-        if not plan_res.get("ok"):
-            log.append(f"Refusing to operate: {plan_res.get('error')}")
-            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
-
-        op_id = plan_res["operation_id"]
-        apply_res = _apply_artist_folder_reconcile_resilient(
-            op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping",
-            _acceptance_failpoint=acceptance_failpoint,
-        )
-
-        if not apply_res.get("ok"):
-            log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
-            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
-
-        _invalidate_lib_cache()
-        log.append(f"  [stamp] Delegated MBID stamping to engine (op_id={op_id})")
-        summary = {
-            "renamed": apply_res.get("moved_files", 0),
-            "merged": apply_res.get("quarantined_files", 0),
-            "skipped": len(skipped),
-            "files_moved": apply_res.get("moved_files", 0),
-            "duplicate_files_removed": apply_res.get("quarantined_files", 0),
-            "artwork_collisions_resolved": 0,
-            "filename_conflicts_preserved": 0,
-            "folders_removed": apply_res.get("removed_dirs", 0),
-        }
-        log.append(
-            f"Done: {summary['renamed']} renamed, {summary['merged']} merged, {summary['skipped']} skipped; "
-            f"{summary['files_moved']} file(s) moved, {summary['duplicate_files_removed']} duplicate file(s) removed."
-        )
-        return summary
+        result = _maintenance_artist_folder_merge_step(
+            log, cancel_event, root_str, acceptance_failpoint=acceptance_failpoint)
+        # Nothing was planned, so there is nothing to recover: fail the job
+        # (retryable) instead of reporting a scan failure as "nothing to do". A
+        # failure after planning returns its operation_id on a failed job.
+        if not result["ok"] and not result.get("operation_id"):
+            raise RuntimeError(f"MBID stamping was not performed: {result.get('error')}")
+        return result
 
     job = jobs.start_python(
         _do,
