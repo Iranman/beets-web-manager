@@ -5,3 +5,7 @@ dist
 vite-dev.*.log
 .next
 out
+
+# Playwright E2E output
+e2e/report/
+e2e/test-results/

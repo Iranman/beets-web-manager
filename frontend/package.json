@@ -9,7 +9,8 @@
     "preview": "next dev",
     "typecheck": "tsc -b --pretty",
     "lint": "eslint src",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
@@ -31,6 +32,7 @@
     "sharp": "0.35.5"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.1",
     "@testing-library/react": "16.3.3",
     "@types/node": "26.6.4",
     "@types/react": "19.3.0",
