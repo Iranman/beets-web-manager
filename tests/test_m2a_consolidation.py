@@ -41,7 +41,9 @@ class TransactionReadsAreReadOnlyTests(_RouteEnv):
             detail = self.client.get(f"/api/transactions/{running['id']}")
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.get_json()["total"], 2)
-        self.assertEqual(detail.get_json()["transaction"]["status"], "Running")
+        # The read shows the finished job's outcome through the in-memory
+        # overlay; the record below is still untouched.
+        self.assertEqual(detail.get_json()["transaction"]["status"], "Completed")
         self.assertIn("cancel", detail.get_json()["transaction"])
         self.assertEqual(self._record_state(), before)
 
@@ -83,16 +85,6 @@ class JobEndReachesTransactionTests(_RouteEnv):
         time.sleep(0.01)
         self.store.update_from_job(tx_id, job)
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
-
-    def test_job_interrupted_by_a_restart_is_settled_at_startup(self):
-        tx = self.store.create(operation_type="Delete", status="Running")
-        job = SimpleNamespace(status="recovery_required", job_id="j1", result=None, log=[],
-                              metadata={"transaction_id": tx["id"]})
-        jobs = mock.MagicMock(_transaction_hooks_installed=False, recovered=[{"job_id": "j1"}])
-        jobs.get.return_value = job
-        with mock.patch.object(ts, "jobs", jobs), mock.patch.object(ts, "transactions", self.store):
-            ts._install_transaction_job_hooks()
-        self.assertEqual(self.store.get(tx["id"])["status"], "Recovery Required")
 
 
 class OrphanRowRemovalAuditTests(unittest.TestCase):

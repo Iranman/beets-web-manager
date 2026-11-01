@@ -30448,8 +30448,8 @@
    "name": "_word",
    "module": "backend/transaction_service.py",
    "lines": [
-    31,
-    33
+    32,
+    34
    ],
    "size": 3,
    "body_lines": 1,
@@ -30468,8 +30468,8 @@
    "name": "_transaction_operation_from_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    36,
-    75
+    37,
+    76
    ],
    "size": 40,
    "body_lines": 39,
@@ -30490,8 +30490,8 @@
    "name": "_transaction_create_for_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    78,
-    117
+    79,
+    118
    ],
    "size": 40,
    "body_lines": 39,
@@ -30509,14 +30509,103 @@
    ]
   },
   {
+   "name": "_jobs_by_transaction",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    125,
+    132
+   ],
+   "size": 8,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "TRANSACTIONS",
+   "desired_owner": "backend/transaction_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_reconcile_running_transactions",
+    "overlay_running_jobs"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_speaking_job",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    135,
+    137
+   ],
+   "size": 3,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_reconcile_running_transactions",
+    "overlay_running_jobs"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "overlay_running_jobs",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    140,
+    152
+   ],
+   "size": 13,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "JOBS",
+   "desired_owner": "backend/job_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "api_transaction_detail",
+    "api_transactions_list"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_jobs_by_transaction",
+    "_speaking_job"
+   ]
+  },
+  {
+   "name": "_reconcile_running_transactions",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    155,
+    195
+   ],
+   "size": 41,
+   "body_lines": 34,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_RECONCILIATION",
+   "desired_owner": "backend/import_reconciliation_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_install_transaction_job_hooks"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_jobs_by_transaction",
+    "_speaking_job"
+   ]
+  },
+  {
    "name": "_install_transaction_job_hooks",
    "module": "backend/transaction_service.py",
    "lines": [
-    120,
-    246
+    198,
+    348
    ],
-   "size": 127,
-   "body_lines": 126,
+   "size": 151,
+   "body_lines": 150,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -30526,6 +30615,7 @@
    "caller_count": 0,
    "dependencies": [
     "_call_job_fn",
+    "_reconcile_running_transactions",
     "_transaction_create_for_job"
    ]
   },
@@ -30533,8 +30623,8 @@
    "name": "transaction_cancel_eligibility",
    "module": "backend/transaction_service.py",
    "lines": [
-    253,
-    270
+    355,
+    372
    ],
    "size": 18,
    "body_lines": 12,
@@ -30554,8 +30644,8 @@
    "name": "_sync_transactions_from_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    273,
-    282
+    375,
+    384
    ],
    "size": 10,
    "body_lines": 9,
@@ -30574,8 +30664,8 @@
    "name": "_item_transaction_fields",
    "module": "backend/transaction_service.py",
    "lines": [
-    287,
-    298
+    389,
+    400
    ],
    "size": 12,
    "body_lines": 11,
@@ -30596,8 +30686,8 @@
    "name": "_item_metadata_transaction_payload",
    "module": "backend/transaction_service.py",
    "lines": [
-    301,
-    331
+    403,
+    433
    ],
    "size": 31,
    "body_lines": 30,
@@ -30619,8 +30709,8 @@
    "name": "_start_metadata_apply_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    334,
-    388
+    436,
+    490
    ],
    "size": 55,
    "body_lines": 54,
@@ -36778,10 +36868,10 @@
    "module": "routes_maintenance.py",
    "lines": [
     700,
-    720
+    721
    ],
-   "size": 21,
-   "body_lines": 11,
+   "size": 22,
+   "body_lines": 12,
    "route": {
     "method": "GET",
     "path": "/api/transactions"
@@ -36794,18 +36884,19 @@
    "caller_count": 0,
    "dependencies": [
     "_rollback_fields",
-    "_transaction_int_arg"
+    "_transaction_int_arg",
+    "overlay_running_jobs"
    ]
   },
   {
    "name": "api_transaction_detail",
    "module": "routes_maintenance.py",
    "lines": [
-    724,
-    741
+    725,
+    743
    ],
-   "size": 18,
-   "body_lines": 11,
+   "size": 19,
+   "body_lines": 12,
    "route": {
     "method": "GET",
     "path": "/api/transactions/<transaction_id>"
@@ -36819,6 +36910,7 @@
    "dependencies": [
     "_rollback_fields",
     "_transaction_int_arg",
+    "overlay_running_jobs",
     "transaction_cancel_eligibility"
    ]
   },
@@ -36826,8 +36918,8 @@
    "name": "api_transaction_approve",
    "module": "routes_maintenance.py",
    "lines": [
-    745,
-    774
+    747,
+    776
    ],
    "size": 30,
    "body_lines": 21,
@@ -36847,8 +36939,8 @@
    "name": "api_transaction_cancel",
    "module": "routes_maintenance.py",
    "lines": [
-    778,
-    795
+    780,
+    797
    ],
    "size": 18,
    "body_lines": 15,
@@ -36871,8 +36963,8 @@
    "name": "_cancel_engine_mbsync",
    "module": "routes_maintenance.py",
    "lines": [
-    798,
-    812
+    800,
+    814
    ],
    "size": 15,
    "body_lines": 11,
@@ -36891,8 +36983,8 @@
    "name": "_item_file_replacement_response",
    "module": "routes_maintenance.py",
    "lines": [
-    815,
-    836
+    817,
+    838
    ],
    "size": 22,
    "body_lines": 16,
@@ -36915,8 +37007,8 @@
    "name": "_rollback_evidence_available",
    "module": "routes_maintenance.py",
    "lines": [
-    911,
-    936
+    913,
+    938
    ],
    "size": 26,
    "body_lines": 19,
@@ -36935,8 +37027,8 @@
    "name": "rollback_eligibility",
    "module": "routes_maintenance.py",
    "lines": [
-    958,
-    1054
+    960,
+    1056
    ],
    "size": 97,
    "body_lines": 76,
@@ -36958,8 +37050,8 @@
    "name": "_rollback_fields",
    "module": "routes_maintenance.py",
    "lines": [
-    1057,
-    1061
+    1059,
+    1063
    ],
    "size": 5,
    "body_lines": 2,
@@ -36981,8 +37073,8 @@
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    1065,
-    1087
+    1067,
+    1089
    ],
    "size": 23,
    "body_lines": 22,
@@ -37006,8 +37098,8 @@
    "name": "_rollback_dispatch_body",
    "module": "routes_maintenance.py",
    "lines": [
-    1090,
-    1110
+    1092,
+    1112
    ],
    "size": 21,
    "body_lines": 17,
@@ -37026,8 +37118,8 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    1114,
-    1323
+    1116,
+    1325
    ],
    "size": 210,
    "body_lines": 209,
@@ -37054,8 +37146,8 @@
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    1327,
-    1336
+    1329,
+    1338
    ],
    "size": 10,
    "body_lines": 9,
@@ -37075,8 +37167,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    1339,
-    1344
+    1341,
+    1346
    ],
    "size": 6,
    "body_lines": 5,

@@ -19,7 +19,7 @@ from backend.transaction_engine import RECOVER_IMPORT_FAMILY, validated_settings
 from backend.job_service import _running_job_of_type, _wait_for_child_job
 from backend.library_service import _artist_id_alias_groups, _folder_placeholder_summary, _run_item_metadata_restore, _run_item_recording_id_restore, _scan_folder_name_placeholders, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _library_health_payload, _maintenance_artist_folder_merge_step, _maintenance_clean_all_counts, _maintenance_extract_child_job_id, _maintenance_final_verification, _maintenance_initial_task_state, _maintenance_load_last_report, _maintenance_release_group_merge, _maintenance_remove_missing_file_rows, _maintenance_resume_from_report, _maintenance_resume_summary, _maintenance_root_folder_repair, _maintenance_running_job, _maintenance_save_last_report, _maintenance_task_result_summary
-from backend.transaction_service import CANCELLABLE_STATUSES, _start_metadata_apply_transaction, _sync_transactions_from_jobs, transaction_cancel_eligibility
+from backend.transaction_service import CANCELLABLE_STATUSES, _start_metadata_apply_transaction, _sync_transactions_from_jobs, overlay_running_jobs, transaction_cancel_eligibility
 from backend.cleanup_service import album_cleanup_apply_response, controlled_apply_error, controlled_rollback_error
 from backend.playlist_service import playlist_sync_status_payload
 from app import app  # noqa: E402  (route modules load after app.py defines app)
@@ -717,6 +717,7 @@ def api_transactions_list():
         # A list row omits rollback.operations; judge from the full record.
         rollback_fields=_rollback_fields,
     )
+    overlay_running_jobs(rows, keys=("status", "counts"))
     return jsonify({"ok": True, "transactions": rows, "total": total})
 
 
@@ -734,6 +735,7 @@ def api_transaction_detail(transaction_id):
             offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
             limit=_transaction_int_arg("limit", 100, 1, 1000),
         )
+        overlay_running_jobs([tx])
         tx.setdefault("rollback", {}).update(_rollback_fields(tx))
         tx["cancel"] = transaction_cancel_eligibility(tx)  # #356
         return jsonify({"ok": True, "transaction": tx})

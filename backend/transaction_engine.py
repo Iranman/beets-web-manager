@@ -402,6 +402,71 @@ def _job_sync_changes(current: Dict[str, Any], updates: Dict[str, Any]) -> bool:
     return False
 
 
+def job_sync_updates(current: Dict[str, Any], job: Any) -> Optional[Dict[str, Any]]:
+    """What ``job`` says about the transaction record ``current``. Pure: the
+    write (``update_from_job``) and the read overlay (``job_overlay``) share it.
+    None when the job ended before the transaction's current Running claim: a
+    finished apply job says nothing about the rollback that claimed it later."""
+    finished_at = getattr(job, "finished_at", None)
+    if (current.get("status") == "Running" and isinstance(finished_at, (int, float))
+            and finished_at < (current.get("running_since") or 0)):
+        return None
+    status = getattr(job, "status", "")
+    metadata = getattr(job, "metadata", {}) or {}
+    dry_run = bool(metadata.get("dry_run") or metadata.get("preview"))
+    if status == "running":
+        next_status = "Running"
+    elif status == "success":
+        next_status = "Preview" if dry_run else "Completed"
+    elif status in {"cancelled", "killed"}:
+        next_status = "Cancelled"
+    elif status == "recovery_required":
+        # The process stopped mid-job: completion cannot be proven (#344 a).
+        next_status = "Recovery Required"
+    else:
+        next_status = "Failed"
+
+    result = getattr(job, "result", None)
+    updates: Dict[str, Any] = {
+        "status": next_status,
+        "originating_job": getattr(job, "job_id", None),
+        "metadata": {"job_id": getattr(job, "job_id", None), **metadata},
+    }
+    counts = _result_counts(result)
+    if counts:
+        updates["counts"] = counts
+    result_summary = _summarize_result(result)
+    if result_summary is not None:
+        updates["result_summary"] = result_summary
+    if getattr(job, "log", None):
+        updates["logs"] = list(getattr(job, "log"))[-500:]
+    # Job state only advances a transaction that is already Running (claimed
+    # before its job started). It never claims an Approved one, nor rewrites
+    # Cancelled or another final status (#217).
+    if current.get("status") != "Running":
+        updates.pop("status")
+    elif next_status == "Recovery Required":  # the audit says why, once
+        updates["logs"] = (updates.get("logs") or list(current.get("logs") or [])) + [
+            "Recovered after restart: the job was interrupted, so whether it changed the library "
+            "cannot be proven; check the library before retrying."]
+    if "logs" in updates:
+        # The job's log is the base; lines the transaction recorded itself
+        # (cancel notes, step errors) are audit and stay.
+        job_lines = set(updates["logs"])
+        updates["logs"] = (updates["logs"] + [line for line in current.get("logs") or []
+                                              if line not in job_lines])[-500:]
+    return updates
+
+
+def job_overlay(tx: Dict[str, Any], job: Any) -> Dict[str, Any]:
+    """A copy of ``tx`` as ``update_from_job`` would leave it. Writes nothing."""
+    updates = job_sync_updates(tx, job)
+    merged = dict(tx)
+    for key, value in _safe_json(updates or {}).items():
+        merged[key] = {**(tx.get(key) or {}), **value} if key in ("metadata", "counts") else value
+    return merged
+
+
 class TransactionStore:
     def __init__(self, root: Optional[str] = None):
         base = (
@@ -633,9 +698,12 @@ class TransactionStore:
     def update(self, transaction_id: str, **updates: Any) -> Dict[str, Any]:
         with self._lock:
             tx = self._read(transaction_id)
+            previous_status = tx.get("status")
             for key, value in updates.items():
                 if key == "status":
                     tx[key] = _status(str(value))
+                    if tx[key] == "Running" and previous_status != "Running":
+                        tx["running_since"] = _now()  # job_sync_updates: older jobs no longer speak for it
                 elif key == "operation_type":
                     tx[key] = _operation_type(str(value))
                 elif key == "counts" and isinstance(value, dict):
@@ -678,54 +746,10 @@ class TransactionStore:
             return self._write(tx)
 
     def update_from_job(self, transaction_id: str, job: Any) -> Dict[str, Any]:
-        status = getattr(job, "status", "")
-        dry_run = False
-        metadata = getattr(job, "metadata", {}) or {}
-        dry_run = bool(metadata.get("dry_run") or metadata.get("preview"))
-        if status == "running":
-            next_status = "Running"
-        elif status == "success":
-            next_status = "Preview" if dry_run else "Completed"
-        elif status in {"cancelled", "killed"}:
-            next_status = "Cancelled"
-        elif status == "recovery_required":
-            # The process stopped mid-job: completion cannot be proven (#344 a).
-            next_status = "Recovery Required"
-        else:
-            next_status = "Failed"
-
-        result = getattr(job, "result", None)
-        updates: Dict[str, Any] = {
-            "status": next_status,
-            "originating_job": getattr(job, "job_id", None),
-            "metadata": {"job_id": getattr(job, "job_id", None), **metadata},
-        }
-        counts = _result_counts(result)
-        if counts:
-            updates["counts"] = counts
-        result_summary = _summarize_result(result)
-        if result_summary is not None:
-            updates["result_summary"] = result_summary
-        if getattr(job, "log", None):
-            updates["logs"] = list(getattr(job, "log"))[-500:]
         with self._lock:
-            # Job state only advances a transaction that is already Running
-            # (claimed before its job started). It never claims an Approved
-            # one, nor rewrites Cancelled or another final status (#217).
             current = self._read(transaction_id)
-            if current.get("status") != "Running":
-                updates.pop("status")
-            elif next_status == "Recovery Required":  # the audit says why, once
-                updates["logs"] = (updates.get("logs") or list(current.get("logs") or [])) + [
-                    "Recovered after restart: the job was interrupted, so whether it changed the library "
-                    "cannot be proven; check the library before retrying."]
-            if "logs" in updates:
-                # The job's log is the base; lines the transaction recorded
-                # itself (cancel notes, step errors) are audit and stay.
-                job_lines = set(updates["logs"])
-                updates["logs"] = (updates["logs"] + [line for line in current.get("logs") or []
-                                                      if line not in job_lines])[-500:]
-            if not _job_sync_changes(current, updates):
+            updates = job_sync_updates(current, job)
+            if updates is None or not _job_sync_changes(current, updates):
                 return current  # idempotent: re-syncing a settled job rewrites nothing
             return self.update(transaction_id, **updates)
 
