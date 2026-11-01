@@ -1,3 +1,4 @@
+import { ENGINE_AUTH_MESSAGE, ENGINE_OFFLINE_MESSAGE, SESSION_EXPIRED_MESSAGE, classifyHttpFailure, fetchFailure, prepareRequestHeaders } from '../lib/api';
 import type {
   UntrackedCandidatesResponse,
   UntrackedInventorySummaryResponse,
@@ -119,7 +120,7 @@ import type {
   ReconciliationReviewsResponse,
 } from './types';
 import type { LibraryTrack } from '../types/api';
-import { beginIdempotentRequest, followedJobStart, idempotencyErrorMessage } from '../lib/jobStart';
+import { followedJobStart, idempotencyErrorMessage } from '../lib/jobStart';
 
 type ApiErrorBody = {
   ok?: boolean;
@@ -137,8 +138,6 @@ type ApiErrorBody = {
   unavailable?: boolean;
 };
 
-const _CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-
 /** Reads the structured error body (code, sanitized candidate, ...) a
  * backend rejection attached to its thrown Error -- e.g. distinguishing
  * `review_confirmation_required` from other failures without parsing
@@ -150,30 +149,15 @@ export function apiErrorBody(err: unknown): ApiErrorBody | undefined {
 
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase();
-  let headers = init?.headers;
-  let settle = () => {};
-  if (!_CSRF_EXEMPT_METHODS.has(method)) {
-    // Every mutating request must carry X-Beets-CSRF, regardless of which
-    // call site built the RequestInit — centralized here so a call site
-    // forgetting the header (or a future one) can't silently skip it.
-    const merged = new Headers(headers);
-    if (!merged.has('X-Beets-CSRF')) merged.set('X-Beets-CSRF', '1');
-    // Job starts are deduplicated by this key (#344); harmless elsewhere.
-    if (!merged.has('Idempotency-Key')) {
-      const action = beginIdempotentRequest(method, path, init?.body);
-      merged.set('Idempotency-Key', action.key);
-      settle = action.settle;
-    }
-    headers = merged;
-  }
+  // Every mutating request must carry X-Beets-CSRF, regardless of which call
+  // site built the RequestInit. Job starts are deduplicated by the key (#344).
+  const { headers, settle } = prepareRequestHeaders(method, path, init?.body, init?.headers);
 
   let response: Response;
   try {
     response = await fetch(path, { ...init, headers });
   } catch (err: unknown) {
-    const name = (err as Error)?.name || '';
-    const isTimeout = name === 'AbortError' || name === 'TimeoutError';
-    const message = isTimeout ? 'Request timed out.' : 'Could not reach Beets Web Manager.';
+    const { message, isTimeout } = fetchFailure(err);
     const netErr = new Error(message) as Error & { body?: ApiErrorBody; isNetworkError?: boolean; isTimeout?: boolean; httpStatus?: number };
     netErr.isNetworkError = !isTimeout;
     netErr.isTimeout = isTimeout;
@@ -192,23 +176,15 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     let errorCode = body?.error_code || body?.code || '';
-    // Classification must rest on the structured error_code/status contract
-    // only -- never on matching substrings in the free-text `error` message
-    // (a message can be rephrased at any time without that being a transport
-    // contract change). An uncoded 503 is treated as engine-offline the same
-    // way lib/api.ts's apiFetch() does; ENGINE_AUTH_FAILED is carried in
-    // errorCode by every route that returns it, so it never reaches here.
-    let isEngineOffline = errorCode === 'ENGINE_OFFLINE' || (response.status === 503 && !errorCode && body?.unavailable !== true);
-    let isEngineAuthError = errorCode === 'ENGINE_AUTH_FAILED';
-    let isAuthError = (response.status === 401 || response.status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && !isEngineAuthError;
+    const { isEngineOffline, isEngineAuthError, isAuthError } = classifyHttpFailure(response.status, errorCode, body?.unavailable === true);
     let message = idempotencyErrorMessage(errorCode) || body?.error || `HTTP ${response.status}`;
 
     if (isAuthError) {
-      message = 'Your session expired. Sign in again.';
+      message = SESSION_EXPIRED_MESSAGE;
     } else if (isEngineOffline) {
-      message = 'Beets engine is unavailable.';
+      message = ENGINE_OFFLINE_MESSAGE;
     } else if (isEngineAuthError) {
-      message = 'Beets engine authentication failed.';
+      message = ENGINE_AUTH_MESSAGE;
     }
 
     const err = new Error(message) as Error & { body?: ApiErrorBody; isAuthError?: boolean; isEngineOffline?: boolean; isEngineAuthError?: boolean; httpStatus?: number };
@@ -225,9 +201,9 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     let isEngineOffline = body.error_code === 'ENGINE_OFFLINE';
     let isEngineAuthError = body.error_code === 'ENGINE_AUTH_FAILED';
     if (isEngineOffline) {
-      message = 'Beets engine is unavailable.';
+      message = ENGINE_OFFLINE_MESSAGE;
     } else if (isEngineAuthError) {
-      message = 'Beets engine authentication failed.';
+      message = ENGINE_AUTH_MESSAGE;
     }
 
     const err = new Error(message) as Error & { body?: ApiErrorBody; isEngineOffline?: boolean; isEngineAuthError?: boolean };

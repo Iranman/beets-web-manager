@@ -1,3 +1,5 @@
+import { formatScanTime } from '../../lib/dates';
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -127,11 +129,6 @@ const BUCKET_ORDER: FolderActionBucket[] = [
 const AUTO_APPLY_KEY = 'beets_folder_placeholder_auto_apply_safe';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function formatScanTime(timestamp: number | null) {
-  if (!timestamp) return 'Not scanned this session';
-  return new Date(timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-}
 
 function folderIssue(row: FolderPlaceholderRow) {
   if (row.placeholder_type === 'literal_placeholder') return 'Unresolved {Album MbId} placeholder in folder name';
@@ -734,7 +731,7 @@ export function FolderPlaceholdersPanel() {
       const res = await scanFolderPlaceholders();
       setScanJobId(res.job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
       setBusy(false);
     }
   }, []);
@@ -747,7 +744,7 @@ export function FolderPlaceholdersPanel() {
       const res = await applySafeFolderPlaceholderRenames(sourcePaths);
       setApplyJobId(res.job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
       setBusy(false);
     }
   }, []);

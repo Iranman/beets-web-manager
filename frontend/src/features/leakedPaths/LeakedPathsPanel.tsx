@@ -1,3 +1,5 @@
+import { formatScanTime } from '../../lib/dates';
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -31,11 +33,6 @@ const LEAKED_SORTS: Array<{ value: LeakedSort; label: string }> = [
   { value: 'source_exists', label: 'Source exists' },
   { value: 'target_exists', label: 'Target exists' },
 ];
-
-function formatScanTime(timestamp: number | null) {
-  if (!timestamp) return 'Not scanned this session';
-  return new Date(timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-}
 
 function basename(p: string): string {
   return p.split('/').filter(Boolean).at(-1) ?? p;
@@ -180,7 +177,7 @@ export function LeakedPathsPanel() {
       setScanJobId(res.job_id);
       setFixJobId(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
       setBusy(false);
     }
   }, []);
@@ -198,7 +195,7 @@ export function LeakedPathsPanel() {
       setFixJobId(res.job_id);
       setScanJobId(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
       setBusy(false);
     }
   }, [selectedIds]);

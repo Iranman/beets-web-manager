@@ -33,30 +33,59 @@ export function formatTransportErrorMessage(err: unknown): string {
 
 const CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+/** Adds the CSRF header and Idempotency-Key every mutating request carries.
+ * `settle` forgets the key once the outcome is known. */
+export function prepareRequestHeaders(
+  method: string,
+  url: string,
+  body: RequestInit['body'],
+  headers: RequestInit['headers'],
+): { headers: RequestInit['headers']; settle: () => void } {
+  if (CSRF_EXEMPT_METHODS.has(method)) return { headers, settle: () => {} };
+  const merged = new Headers(headers);
+  if (!merged.has('X-Beets-CSRF')) merged.set('X-Beets-CSRF', '1');
+  let settle = () => {};
+  if (!merged.has('Idempotency-Key')) {
+    const action = beginIdempotentRequest(method, url, body);
+    merged.set('Idempotency-Key', action.key);
+    settle = action.settle;
+  }
+  return { headers: merged, settle };
+}
+
+/** What a rejected fetch() means for the user. */
+export function fetchFailure(err: unknown): { message: string; isTimeout: boolean } {
+  const name = (err as Error)?.name || '';
+  const isTimeout = name === 'AbortError' || name === 'TimeoutError';
+  return { message: isTimeout ? 'Request timed out.' : 'Could not reach Beets Web Manager.', isTimeout };
+}
+
+export const SESSION_EXPIRED_MESSAGE = 'Your session expired. Sign in again.';
+export const ENGINE_OFFLINE_MESSAGE = 'Beets engine is unavailable.';
+export const ENGINE_AUTH_MESSAGE = 'Beets engine authentication failed.';
+
+/** Classifies a non-2xx answer from its status and structured error code only,
+ * never its free text. A provider outage (e.g. MusicBrainz) is a 503 with
+ * unavailable:true and is not a Beets engine outage. */
+export function classifyHttpFailure(status: number, errorCode: string, unavailable: boolean) {
+  const isEngineAuthError = errorCode === 'ENGINE_AUTH_FAILED';
+  return {
+    isEngineAuthError,
+    isAuthError: (status === 401 || status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && !isEngineAuthError,
+    isEngineOffline: errorCode === 'ENGINE_OFFLINE' || (status === 503 && !errorCode && !unavailable),
+  };
+}
+
 async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
   const method = (opts.method ?? 'GET').toUpperCase();
-  let headers = opts.headers;
-  let settle = () => {};
-  if (!CSRF_EXEMPT_METHODS.has(method)) {
-    const merged = new Headers(headers);
-    if (!merged.has('X-Beets-CSRF')) merged.set('X-Beets-CSRF', '1');
-    if (!merged.has('Idempotency-Key')) {
-      const action = beginIdempotentRequest(method, url, opts.body);
-      merged.set('Idempotency-Key', action.key);
-      settle = action.settle;
-    }
-    headers = merged;
-  }
+  const { headers, settle } = prepareRequestHeaders(method, url, opts.body, opts.headers);
 
   let res: Response;
   try {
     res = await fetch(url, { ...opts, headers });
   } catch (err: unknown) {
-    const name = (err as Error)?.name || '';
-    if (name === 'AbortError' || name === 'TimeoutError') {
-      throw new ApiError(0, 'Request timed out.', 'timeout');
-    }
-    throw new ApiError(0, 'Could not reach Beets Web Manager.', 'network');
+    const { message, isTimeout } = fetchFailure(err);
+    throw new ApiError(0, message, isTimeout ? 'timeout' : 'network');
   }
   // A 5xx may still have started the job server-side: keep the key so the
   // retry follows that job instead of starting a second one (#344).
@@ -73,8 +102,6 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
       // Same job already running, or this key already started it: follow it.
       const followed = followedJobStart(res.status, body);
       if (followed) return followed as T;
-      // A provider outage (e.g. MusicBrainz) is a 503 with unavailable:true and
-      // fixed user-safe text; it is not a Beets engine outage.
       providerUnavailable = body?.unavailable === true;
       if (typeof body?.error === 'string' && body.error) {
         serverMessage = body.error;
@@ -87,15 +114,10 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
       // ignore JSON parse failure
     }
 
-    if (errorCode === 'ENGINE_AUTH_FAILED') {
-      throw new ApiError(res.status, 'Beets engine authentication failed.', 'engine_auth');
-    }
-    if ((res.status === 401 || res.status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && errorCode !== 'ENGINE_AUTH_FAILED') {
-      throw new ApiError(res.status, 'Your session expired. Sign in again.', 'auth');
-    }
-    if (errorCode === 'ENGINE_OFFLINE' || (res.status === 503 && !errorCode && !providerUnavailable)) {
-      throw new ApiError(res.status, 'Beets engine is unavailable.', 'engine_offline');
-    }
+    const failure = classifyHttpFailure(res.status, errorCode, providerUnavailable);
+    if (failure.isEngineAuthError) throw new ApiError(res.status, ENGINE_AUTH_MESSAGE, 'engine_auth');
+    if (failure.isAuthError) throw new ApiError(res.status, SESSION_EXPIRED_MESSAGE, 'auth');
+    if (failure.isEngineOffline) throw new ApiError(res.status, ENGINE_OFFLINE_MESSAGE, 'engine_offline');
     throw new ApiError(res.status, serverMessage, 'http_error');
   }
 
