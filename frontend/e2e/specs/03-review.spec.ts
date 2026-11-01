@@ -26,7 +26,8 @@ test('a manual ID that is not a UUID is refused', async ({ page }) => {
   await expect(field).toBeVisible();
   await field.fill('not-a-musicbrainz-id');
   await panel.getByRole('button', { name: 'Validate ID' }).click();
-  await expect(panel.getByText(/valid MusicBrainz|UUID/i).first()).toBeVisible();
+  await expect(panel.getByText('MusicBrainz ID rejected', { exact: true })).toBeVisible();
+  await expect(panel.getByText('This is not a valid MusicBrainz UUID or URL.').first()).toBeVisible();
   await expect(panel.getByText('Valid MusicBrainz ID')).toHaveCount(0);
 });
 

@@ -16,7 +16,13 @@ test('a track list previews against the library and marks what is already owned'
   await page.getByRole('textbox', { name: 'Track list' }).fill('Synthetic Aurora - First Light\nNobody Real - Not In Library');
   const parsed = page.waitForResponse((r) => r.url().includes('/api/playlist/parse'));
   await page.getByRole('button', { name: 'Preview Matches' }).click();
-  expect((await parsed).ok()).toBeTruthy();
-  await expect(page.getByRole('main')).toContainText('First Light');
-  await expect(page.getByRole('main')).toContainText('Not In Library');
+  const response = await parsed;
+  expect(response.ok()).toBeTruthy();
+  const body = (await response.json()) as { matched: { title: string; album: string }[]; missing: { title: string }[] };
+  expect(body.matched.map((track) => [track.title, track.album])).toEqual([['First Light', 'Glass Horizons']]);
+  expect(body.missing.map((track) => track.title)).toEqual(['Not In Library']);
+
+  const main = page.getByRole('main');
+  await expect(main.getByRole('button', { name: 'Available 1' })).toBeVisible();
+  await expect(main.getByRole('button', { name: 'Missing 1' })).toBeVisible();
 });

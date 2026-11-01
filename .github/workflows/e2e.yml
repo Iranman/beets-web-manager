@@ -30,7 +30,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run build
-      - run: npx playwright test
+      # Empty network namespace: only loopback exists for the app, the browser and anything they start.
+      - run: sudo unshare -n sh -c "ip link set lo up && exec sudo -u $USER env PATH=$PATH HOME=$HOME CI=$CI npx playwright test"
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
