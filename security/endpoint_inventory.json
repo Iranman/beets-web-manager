@@ -5677,7 +5677,7 @@
       "route": "/api/transactions/<transaction_id>",
       "endpoint": "api_transaction_detail",
       "source_file": "routes_maintenance.py",
-      "line": 723,
+      "line": 724,
       "auth_required": true,
       "public_pre_setup_only": false,
       "changes_state": false,
@@ -5702,7 +5702,7 @@
       "route": "/api/transactions/<transaction_id>/approve",
       "endpoint": "api_transaction_approve",
       "source_file": "routes_maintenance.py",
-      "line": 744,
+      "line": 746,
       "auth_required": true,
       "public_pre_setup_only": false,
       "changes_state": true,
@@ -5726,7 +5726,7 @@
       "route": "/api/transactions/<transaction_id>/cancel",
       "endpoint": "api_transaction_cancel",
       "source_file": "routes_maintenance.py",
-      "line": 777,
+      "line": 779,
       "auth_required": true,
       "public_pre_setup_only": false,
       "changes_state": true,
@@ -5750,7 +5750,7 @@
       "route": "/api/transactions/<transaction_id>/apply",
       "endpoint": "api_transaction_apply",
       "source_file": "routes_maintenance.py",
-      "line": 1064,
+      "line": 1066,
       "auth_required": true,
       "public_pre_setup_only": false,
       "changes_state": true,
@@ -5775,7 +5775,7 @@
       "route": "/api/transactions/<transaction_id>/rollback",
       "endpoint": "api_transaction_rollback",
       "source_file": "routes_maintenance.py",
-      "line": 1113,
+      "line": 1115,
       "auth_required": true,
       "public_pre_setup_only": false,
       "changes_state": true,
@@ -5800,7 +5800,7 @@
       "route": "/api/transactions/<transaction_id>/export",
       "endpoint": "api_transaction_export",
       "source_file": "routes_maintenance.py",
-      "line": 1326,
+      "line": 1328,
       "auth_required": true,
       "public_pre_setup_only": false,
       "changes_state": false,
@@ -7448,5 +7448,5 @@
       ]
     }
   ],
-  "generated_at": "2026-10-31"
+  "generated_at": "2026-11-01"
 }
