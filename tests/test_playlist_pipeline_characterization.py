@@ -240,7 +240,7 @@ class Pipeline:
             "matched": [t.get("title") for t in state.get("matched") or []],
             "missing": [t.get("title") for t in state.get("missing") or []],
         }, sort_keys=True, default=str)
-        return json.loads(text.replace(self.tmp.replace("\\", "\\\\"), "<TMP>").replace(self.tmp, "<TMP>"))
+        return json.loads(text.replace(self.tmp.replace("\\", "\\\\"), "<TMP>").replace(self.tmp, "<TMP>").replace("<TMP>\\\\", "<TMP>/"))
 
 
 class PipelineCase(unittest.TestCase):

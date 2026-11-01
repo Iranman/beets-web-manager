@@ -415,11 +415,6 @@ def _playlist_stamp_download_tags(path_value: str, artist: str, title: str, log)
         log(f"  warning: could not stamp playlist tags on {Path(path_value).name}: {ex}")
 
 
-def _write_playlist_import_beets_config(temp_path: str) -> str:
-    """Use the project single-track path format for playlist download imports."""
-    return "/config/config.yaml"
-
-
 def _playlist_identity_status_fields(match: Dict[str, Any]) -> Dict[str, Any]:
     evidence = match.get("identity") if isinstance(match.get("identity"), dict) else {}
     if not evidence:
@@ -1956,13 +1951,6 @@ def _plex_delete_playlist_by_title_unambiguous(title: str, log=None) -> Tuple[in
 
     pl, key = candidates[0]
     return _plex_delete_playlist_by_rating_key(key, log=log), ""
-
-
-def _plex_delete_playlist_by_title(title, log=None):
-    """Legacy/fallback authority only -- deletes a single matching Plex playlist by title
-    only if exactly one exists on Plex (SEC-002 Wave 11)."""
-    deleted, _ = _plex_delete_playlist_by_title_unambiguous(title, log=log)
-    return deleted
 
 
 def _playlist_other_live_pids_with_name(clean_name: str, exclude_pid: str = "") -> List[str]:
@@ -5860,12 +5848,6 @@ def _playlist_release_group_albumartist_info(mb_releasegroupid: str,
     return {}
 
 
-def _playlist_release_group_albumartist(mb_releasegroupid: str,
-                                        log: Optional[List[str]] = None) -> str:
-    return _playlist_release_group_albumartist_info(
-        mb_releasegroupid, log=log).get("albumartist", "")
-
-
 def _playlist_resolve_albumartist_info_for_release_group(
         mb_releasegroupid: str,
         mb_release: Optional[Dict[str, Any]] = None,
@@ -7361,44 +7343,51 @@ def _playlist_count_value(value: Any) -> int:
         return 0
 
 
+def _playlist_empty_list_summary(**values: Any) -> Dict[str, Any]:
+    """A playlist list summary: every count zero unless given."""
+    return {
+        "tracks": 0, "available": 0, "missing": 0,
+        "quality_bad": 0, "quality_review": 0, "m3u_tracks": 0,
+        "downloaded": 0, "imported": 0, "failed": 0, "review_required": 0,
+        "removed": 0, "excluded": 0, "plex_synced_count": 0,
+        **values,
+    }
+
+
+def _playlist_list_summary_counts(counts: Dict[str, int]) -> Dict[str, int]:
+    """The list summary's pipeline fields, from per-status counts."""
+    return {
+        "downloaded": counts.get("downloaded", 0) + counts.get("waiting_import", 0),
+        "imported": counts.get("imported", 0) + counts.get("plex_synced", 0),
+        "failed": counts.get("failed", 0),
+        "review_required": counts.get("review_required", 0),
+        "removed": counts.get("removed", 0),
+        "excluded": counts.get("excluded", 0),
+        "plex_synced_count": counts.get("plex_synced", 0),
+    }
+
+
 def _playlist_manifest_list_summary(name: str,
                                     manifest: Dict[str, Any]) -> Optional[Dict[str, int]]:
     desired_raw = manifest.get("desired_tracks") if isinstance(manifest, dict) else []
     if not isinstance(desired_raw, list) or not desired_raw:
         return None
     desired = _playlist_apply_tombstones(name, _playlist_clean_track_list(desired_raw), manifest)
-    states_raw = manifest.get("track_states") if isinstance(manifest.get("track_states"), dict) else {}
-    counts = {status: 0 for status in PLAYLIST_PIPELINE_STATES}
-    for row in states_raw.values():
-        if not isinstance(row, dict):
-            continue
-        status = _s(row.get("status") or "").strip().lower()
-        if status in counts:
-            counts[status] += 1
-    removed = len(manifest.get("removed_tracks") or [])
-    excluded = len(manifest.get("excluded_tracks") or [])
+    counts = _playlist_manifest_state_counts(manifest)
     matched = _playlist_count_value(manifest.get("matched_count"))
     missing = _playlist_count_value(manifest.get("missing_count"))
     if matched == 0 and missing == 0:
         matched = counts.get("available", 0) + counts.get("imported", 0) + counts.get("plex_synced", 0)
         missing = max(0, len(desired) - matched)
-    total = max(len(desired), matched + missing)
-    return {
-        "tracks": total,
-        "available": matched,
-        "missing": missing,
-        "quality_bad": 0,
-        "quality_review": counts.get("review_required", 0),
-        "m3u_tracks": len(desired),
-        "desired_source": _s(manifest.get("source") or "manifest"),
-        "downloaded": counts.get("downloaded", 0) + counts.get("waiting_import", 0),
-        "imported": counts.get("imported", 0) + counts.get("plex_synced", 0),
-        "failed": counts.get("failed", 0),
-        "review_required": counts.get("review_required", 0),
-        "removed": removed,
-        "excluded": excluded,
-        "plex_synced_count": counts.get("plex_synced", 0),
-    }
+    return _playlist_empty_list_summary(
+        tracks=max(len(desired), matched + missing),
+        available=matched,
+        missing=missing,
+        quality_review=counts.get("review_required", 0),
+        m3u_tracks=len(desired),
+        desired_source=_s(manifest.get("source") or "manifest"),
+        **_playlist_list_summary_counts(counts),
+    )
 
 
 def _playlist_summary_waiting_count(summary: Dict[str, Any]) -> int:
@@ -7487,22 +7476,13 @@ def _playlist_checkpoint_list_summary(name: str,
     if checkpoint_tracks <= 0:
         return None
     checkpoint_missing = _playlist_count_value(checkpoint.get("checkpoint_missing"))
-    summary: Dict[str, Any] = {
-        "tracks": checkpoint_tracks,
-        "available": max(0, checkpoint_tracks - checkpoint_missing),
-        "missing": checkpoint_missing,
-        "quality_bad": 0,
-        "quality_review": 0,
-        "m3u_tracks": 0,
-        "desired_source": "checkpoint",
-        "downloaded": _playlist_count_value(checkpoint.get("checkpoint_waiting_for_import")),
-        "imported": 0,
-        "failed": 0,
-        "review_required": 0,
-        "removed": 0,
-        "excluded": 0,
-        "plex_synced_count": 0,
-    }
+    summary = _playlist_empty_list_summary(
+        tracks=checkpoint_tracks,
+        available=max(0, checkpoint_tracks - checkpoint_missing),
+        missing=checkpoint_missing,
+        desired_source="checkpoint",
+        downloaded=_playlist_count_value(checkpoint.get("checkpoint_waiting_for_import")),
+    )
     _playlist_apply_checkpoint_summary(summary, checkpoint)
     return summary
 
@@ -7521,22 +7501,7 @@ def _playlist_engine_m3u_count_summary(name: str,
         return None
     raw_items = res.get("items") if isinstance(res.get("items"), list) else []
     tracks = sum(1 for row in raw_items if isinstance(row, dict))
-    return {
-        "tracks": tracks,
-        "available": 0,
-        "missing": tracks,
-        "quality_bad": 0,
-        "quality_review": 0,
-        "m3u_tracks": tracks,
-        "desired_source": "m3u",
-        "downloaded": 0,
-        "imported": 0,
-        "failed": 0,
-        "review_required": 0,
-        "removed": 0,
-        "excluded": 0,
-        "plex_synced_count": 0,
-    }
+    return _playlist_empty_list_summary(tracks=tracks, missing=tracks, m3u_tracks=tracks, desired_source="m3u")
 
 
 def _playlist_m3u_summary(name: str,
@@ -7563,25 +7528,14 @@ def _playlist_m3u_summary(name: str,
         raise
     matched = rows.get("matched") or []
     missing = rows.get("missing") or []
-    summary = {
-        "tracks": len(rows.get("tracks") or []),
-        "available": len(matched),
-        "missing": len(missing),
-        "quality_bad": 0,
-        "quality_review": 0,
-        "m3u_tracks": int(rows.get("m3u_tracks") or 0),
-        "desired_source": _s(rows.get("desired_source") or "m3u"),
-    }
-    counts = _playlist_pipeline_counts(name, matched, missing)
-    summary.update({
-        "downloaded": counts.get("downloaded", 0) + counts.get("waiting_import", 0),
-        "imported": counts.get("imported", 0) + counts.get("plex_synced", 0),
-        "failed": counts.get("failed", 0),
-        "review_required": counts.get("review_required", 0),
-        "removed": counts.get("removed", 0),
-        "excluded": counts.get("excluded", 0),
-        "plex_synced_count": counts.get("plex_synced", 0),
-    })
+    summary = _playlist_empty_list_summary(
+        tracks=len(rows.get("tracks") or []),
+        available=len(matched),
+        missing=len(missing),
+        m3u_tracks=int(rows.get("m3u_tracks") or 0),
+        desired_source=_s(rows.get("desired_source") or "m3u"),
+        **_playlist_list_summary_counts(_playlist_pipeline_counts(name, matched, missing)),
+    )
     checkpoint = _playlist_latest_job_state_summary(name, checkpoint_states)
     _playlist_apply_checkpoint_summary(summary, checkpoint)
     for item in matched:
@@ -7937,6 +7891,25 @@ def _playlist_manifest_state_counts(manifest: Dict[str, Any]) -> Dict[str, int]:
     return counts
 
 
+def _playlist_detail_common(clean_name: str, manifest: Dict[str, Any],
+                            m3u: str, manifest_tracks: int) -> Dict[str, Any]:
+    """What the summary and full playlist detail payloads share."""
+    last_plex = manifest.get("last_plex") if isinstance(manifest.get("last_plex"), dict) else {}
+    last_pipeline = manifest.get("last_pipeline") if isinstance(manifest.get("last_pipeline"), dict) else {}
+    return {
+        "ok": True,
+        "name": clean_name,
+        "m3u": m3u,
+        "manifest": str(_playlist_manifest_path(clean_name, allocate=False)) if _playlist_manifest_exists_no_create(clean_name) else "",
+        "manifest_tracks": manifest_tracks,
+        "source": _s(manifest.get("source") or "local_m3u"),
+        "source_content": _s(manifest.get("content") or ""),
+        "last_plex": last_plex,
+        "last_pipeline": last_pipeline,
+        "last_sync_status": _s(last_plex.get("status") or "not_run"),
+    }
+
+
 def _playlist_detail_summary_payload(clean_name: str) -> Dict[str, Any]:
     manifest = _playlist_read_manifest(clean_name)
     manifest_tracks = _playlist_clean_track_list(manifest.get("desired_tracks") or [])
@@ -7959,14 +7932,8 @@ def _playlist_detail_summary_payload(clean_name: str) -> Dict[str, Any]:
         available = max(0, total - missing_count)
     key = _playlist_existing_key(clean_name)
     m3u = f"engine:{key}.m3u" if key else ""
-    last_plex = manifest.get("last_plex") if isinstance(manifest.get("last_plex"), dict) else {}
-    last_pipeline = manifest.get("last_pipeline") if isinstance(manifest.get("last_pipeline"), dict) else {}
     return {
-        "ok": True,
-        "name": clean_name,
-        "m3u": str(m3u),
-        "manifest": str(_playlist_manifest_path(clean_name, allocate=False)) if _playlist_manifest_exists_no_create(clean_name) else "",
-        "manifest_tracks": len(manifest_tracks),
+        **_playlist_detail_common(clean_name, manifest, m3u, len(manifest_tracks)),
         "m3u_tracks": _playlist_count_value(summary.get("m3u_tracks")),
         "desired_source": _s(summary.get("desired_source") or manifest.get("source") or "manifest"),
         "tracks": [],
@@ -7974,11 +7941,6 @@ def _playlist_detail_summary_payload(clean_name: str) -> Dict[str, Any]:
         "missing": [],
         "removed_excluded": [],
         "counts": counts,
-        "source": _s(manifest.get("source") or "local_m3u"),
-        "source_content": _s(manifest.get("content") or ""),
-        "last_plex": last_plex,
-        "last_pipeline": last_pipeline,
-        "last_sync_status": _s(last_plex.get("status") or "not_run"),
         "available": available,
         "missing_count": missing_count,
         "total": total,
@@ -8163,14 +8125,8 @@ def _playlist_detail_payload(clean_name: str, index: Optional[Dict[str, Any]] = 
         "downloaded": counts.get("downloaded", 0) + counts.get("waiting_import", 0) + counts.get("importing", 0),
         "counts": counts,
     }, checkpoint)
-    last_plex = manifest.get("last_plex") if isinstance(manifest.get("last_plex"), dict) else {}
-    last_pipeline = manifest.get("last_pipeline") if isinstance(manifest.get("last_pipeline"), dict) else {}
     return {
-        "ok": True,
-        "name": clean_name,
-        "m3u": m3u,
-        "manifest": str(_playlist_manifest_path(clean_name, allocate=False)) if _playlist_manifest_exists_no_create(clean_name) else "",
-        "manifest_tracks": len(manifest_tracks),
+        **_playlist_detail_common(clean_name, manifest, m3u, len(manifest_tracks)),
         "m3u_tracks": int(rows.get("m3u_tracks") or 0),
         "desired_source": _s(rows.get("desired_source") or "m3u"),
         "tracks": tracks,
@@ -8178,11 +8134,6 @@ def _playlist_detail_payload(clean_name: str, index: Optional[Dict[str, Any]] = 
         "missing": missing,
         "removed_excluded": removed,
         "counts": counts,
-        "source": _s(manifest.get("source") or "local_m3u"),
-        "source_content": _s(manifest.get("content") or ""),
-        "last_plex": last_plex,
-        "last_pipeline": last_pipeline,
-        "last_sync_status": _s(last_plex.get("status") or "not_run"),
         "available": len(matched),
         "missing_count": len(missing),
         "total": len(tracks),

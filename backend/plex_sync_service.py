@@ -245,15 +245,6 @@ def _classify_dir_name(name: str) -> Dict[str, Any]:
     return {"status": status, "guid_suffix": guid, "name": text}
 
 
-_DIR_NAME_SEVERITY = {"literal_token": 3, "unresolved_token": 2, "malformed_stamp": 1, "ok": 0}
-
-
-def _worse_name_status(current: str, candidate: str) -> str:
-    if _DIR_NAME_SEVERITY.get(candidate, 0) > _DIR_NAME_SEVERITY.get(current, 0):
-        return candidate
-    return current
-
-
 # ── filesystem walk ──
 
 def _iter_child_dirs(path: Path) -> List[Path]:
@@ -739,11 +730,3 @@ def apply_plex_sync_heal(log: Optional[List[str]] = None, *,
         log.append("[plex-sync] heal executed; %s" %
                    {k: v for k, v in results.items() if k != "failures"})
     return results
-
-
-def plex_sync_heal_job(log: List[str], cancel: Any = None) -> Dict[str, Any]:
-    """Job entry for ``jobs.start_python``. Every action inside is opt-in
-    (env or route); with all disabled it still returns the report of what
-    WOULD happen, so the UI can show a plan first."""
-    del cancel
-    return {"heal": apply_plex_sync_heal(log)}
