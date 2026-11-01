@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Fixed
+
+- **Clean All no longer stalls for up to 600 seconds on artist folders that need an MBID stamp.** The apply call passed `acceptance_failpoint` and `timeout`, arguments left over from the removed HTTP engine, so every call raised `TypeError`. That error was logged as a lost response and a never-applied transaction was polled until the deadline. The call now matches the function, and an unexpected error fails at once as an internal error. Artist-folder MBID stamping and scan merge still do nothing, as they have since the old engine was removed: they now report that immediately and change no folders, instead of timing out. In Clean All, the artist folder merge task shows as failed when folders need stamping.
+
 ### Testing
 
 - **Playwright end-to-end suite (#505).** `frontend/e2e` runs the real app against a synthetic library in a temp directory, with non-loopback network refused and providers stubbed. It covers the library overview, browsing, import and review, jobs, Clean All, playlists, settings, plugins, deep links and the missing-build 503 page. It runs in the new `e2e` workflow; see `frontend/e2e/README.md` for the local command. No production code changed.

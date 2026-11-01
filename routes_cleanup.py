@@ -2028,11 +2028,6 @@ def clean_artist_folders_stamp_mbid():
     root_str = str(root_path)
     dry_run = bool(payload.get("dry_run", True))
     compact_log = bool(payload.get("compact_log", False))
-    # Test-only acceptance failpoint passthrough (hotfix v0.1.17 pattern,
-    # see composite_workflows.apply_artist_folder_reconcile()'s docstring): a
-    # no-op in real deployments, since the engine only honors it when that
-    # container was booted with BEETS_ACCEPTANCE_MODE=1.
-    acceptance_failpoint = _s(payload.get("_acceptance_failpoint")) or None
 
     if dry_run:
         log: List[str] = []
@@ -2095,7 +2090,6 @@ def clean_artist_folders_stamp_mbid():
         op_id = plan_res["operation_id"]
         apply_res = _apply_artist_folder_reconcile_resilient(
             op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping",
-            _acceptance_failpoint=acceptance_failpoint,
         )
 
         if not apply_res.get("ok"):

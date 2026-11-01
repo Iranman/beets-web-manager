@@ -1109,6 +1109,11 @@ def plan_artist_folder_reconcile(
     ad = adapter or beets_adapter
     st = _get_store(store)
     payload = payload_or_root if isinstance(payload_or_root, dict) else kwargs
+    # Folder stamping and merging went with the old engine. Planning them here
+    # would record an empty transaction that Completes having moved nothing.
+    if payload.get("mode") or payload.get("candidates"):
+        return {"ok": False, "code": "artist_folder_mode_unsupported",
+                "error": "Artist folder stamping and merging are not available; no folders were changed."}
 
     artist_name = payload.get("artist") or payload.get("albumartist") or ""
     canonical_name = payload.get("canonical_name") or payload.get("target_artist") or artist_name
