@@ -1590,10 +1590,32 @@ function MaintenanceRunnerReportDialog({
   );
 }
 
-function useLinkedPanelScroll(linked: boolean) {
-  const ref = useRef<HTMLDetailsElement>(null);
+/** Brings a ?tab= panel into view. Panels above it load after this runs and push
+ * it down, so it follows layout changes until the user takes over. Give the
+ * target `scroll-mt-16` to clear the sticky header. */
+function useLinkedPanelScroll<T extends HTMLElement>(linked: boolean) {
+  const ref = useRef<T>(null);
+  const finished = useRef(false);
   useEffect(() => {
-    if (linked) ref.current?.scrollIntoView?.({ block: 'start' });
+    if (!linked || finished.current) return undefined;
+    const scroll = () => ref.current?.scrollIntoView?.({ block: 'start' });
+    scroll();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scroll);
+    observer?.observe(document.body);
+    const userEvents = ['wheel', 'touchstart', 'pointerdown', 'keydown'];
+    const release = () => {
+      observer?.disconnect();
+      window.clearTimeout(timer);
+      userEvents.forEach((name) => window.removeEventListener(name, finish));
+    };
+    const finish = () => {
+      finished.current = true;
+      release();
+    };
+    // ponytail: panels that finish loading after 5s are not followed; scroll anchoring covers most of those.
+    const timer = window.setTimeout(finish, 5000);
+    userEvents.forEach((name) => window.addEventListener(name, finish, { passive: true }));
+    return release;
   }, [linked]);
   return ref;
 }
@@ -1614,7 +1636,7 @@ function CommonActionsSection({
   /** A ?tab=library-db link: open Database Health and bring it into view. */
   linked?: boolean;
 }) {
-  const databaseHealthRef = useLinkedPanelScroll(linked);
+  const databaseHealthRef = useLinkedPanelScroll<HTMLDetailsElement>(linked);
   return (
     <section className="space-y-3">
       <div>
@@ -1651,7 +1673,7 @@ function CommonActionsSection({
           </div>
         </details>
 
-        <details ref={databaseHealthRef} open={linked} className="rounded-md border border-graphite-800 bg-graphite-950/40">
+        <details ref={databaseHealthRef} open={linked} className="scroll-mt-16 rounded-md border border-graphite-800 bg-graphite-950/40">
           <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-zinc-300 hover:text-zinc-100">
             Database Health
           </summary>
@@ -1707,13 +1729,12 @@ function JobHistorySection({
 
 function AdvancedMaintenanceSection({ linked = false }: { linked?: boolean }) {
   const [open, setOpen] = useState(false);
-  const panelRef = useLinkedPanelScroll(linked);
+  const albumTracksRef = useLinkedPanelScroll<HTMLDivElement>(linked && open);
   useEffect(() => {
     if (linked) setOpen(true);
   }, [linked]);
   return (
     <details
-      ref={panelRef}
       className="rounded-md border border-amber-900/50 bg-amber-950/10"
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
@@ -1745,12 +1766,14 @@ function AdvancedMaintenanceSection({ linked = false }: { linked?: boolean }) {
             >
               <ArtistAliasPanel active autoLoad />
             </MaintenanceCard>
-            <MaintenanceCard
-              title="Album Track Repair"
-              description="Compare existing album rows to MusicBrainz tracklists and repair clear album-track mismatches."
-            >
-              <AlbumTracksPanel />
-            </MaintenanceCard>
+            <div ref={albumTracksRef} className="scroll-mt-16">
+              <MaintenanceCard
+                title="Album Track Repair"
+                description="Compare existing album rows to MusicBrainz tracklists and repair clear album-track mismatches."
+              >
+                <AlbumTracksPanel />
+              </MaintenanceCard>
+            </div>
             <MaintenanceCard
               title="Advanced Library Move"
               description="Keep the library-wide move operation locked until a full source/target preview can be reviewed."

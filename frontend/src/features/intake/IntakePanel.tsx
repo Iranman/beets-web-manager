@@ -1,4 +1,3 @@
-import { useInterval } from '../../lib/hooks';
 import { errorMessage } from '../../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
@@ -427,10 +426,13 @@ function JobLog({
     }
   }, [jobId, onJobIdChange]);
 
-  useEffect(() => { void loadStatus(false); }, [loadStatus]);
-  useInterval(() => {
-    if (!document.hidden) void loadStatus(false);
-  }, 2500);
+  useEffect(() => {
+    void loadStatus(false);
+    const intervalId = window.setInterval(() => {
+      if (!document.hidden) void loadStatus(false);
+    }, 2500);
+    return () => window.clearInterval(intervalId);
+  }, [loadStatus]);
 
   const log = job?.log ?? [];
   const batchDone = isAiBatchTerminal(batchState?.status);

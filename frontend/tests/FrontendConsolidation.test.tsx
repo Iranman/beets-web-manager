@@ -92,28 +92,56 @@ describe('Old Clean links reach their Jobs panel (QA L1)', () => {
     expect(albumPrimaryAction(album({ not_imported: 1, not_imported_is_extra: true }), new Map())?.path).toBe('/jobs?tab=album-tracks');
   });
 
-  it('?tab=album-tracks opens Advanced Maintenance with the Album Track Repair panel', async () => {
+  function spyOnScroll() {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    return scrollIntoView;
+  }
+  afterEach(() => { delete (Element.prototype as Partial<Element>).scrollIntoView; });
+
+  it('?tab=album-tracks opens Advanced Maintenance and scrolls to the real Album Track Repair panel', async () => {
     stubJobsApi();
+    const scrollIntoView = spyOnScroll();
     withProviders(<Jobs />, '/jobs?tab=album-tracks');
-    expect(await screen.findByText('Album Track Repair')).toBeTruthy();
+    // "Scan Albums" comes from AlbumTracksPanel itself, not the wrapper card.
+    const panelControl = await screen.findByRole('button', { name: 'Scan Albums' });
     expect(detailsOf('Advanced Maintenance').open).toBe(true);
     expect(detailsOf('Database Health').open).toBe(false);
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    const target = scrollIntoView.mock.instances[0] as unknown as HTMLElement;
+    expect(target.tagName).not.toBe('DETAILS');
+    expect(target.contains(panelControl)).toBe(true);
+    expect(target.contains(screen.getByText('Artist Alias Repair'))).toBe(false);
+    expect(target.className).toContain('scroll-mt-16');
   });
 
-  it('?tab=library-db opens Database Health only', async () => {
+  it('?tab=library-db opens and scrolls to Database Health, which stays closable', async () => {
     stubJobsApi();
+    const scrollIntoView = spyOnScroll();
     withProviders(<Jobs />, '/jobs?tab=library-db');
     await screen.findByText('Database Health');
-    expect(detailsOf('Database Health').open).toBe(true);
+    const health = detailsOf('Database Health');
+    expect(health.open).toBe(true);
     expect(detailsOf('Advanced Maintenance').open).toBe(false);
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    expect(scrollIntoView.mock.instances[0]).toBe(health);
+    expect(health.className).toContain('scroll-mt-16');
+
+    fireEvent.click(screen.getByText('Database Health'));
+    await waitFor(() => expect(health.open).toBe(false));
+    fireEvent.click(screen.getAllByRole('button', { name: /refresh/i })[0]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(health.open).toBe(false);
   });
 
-  it('plain /jobs leaves both closed', async () => {
+  it('plain /jobs leaves both closed and does not scroll', async () => {
     stubJobsApi();
+    const scrollIntoView = spyOnScroll();
     withProviders(<Jobs />, '/jobs');
     await screen.findByText('Database Health');
     expect(detailsOf('Database Health').open).toBe(false);
     expect(detailsOf('Advanced Maintenance').open).toBe(false);
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 });
 

@@ -17,11 +17,11 @@ The project uses Semantic Versioning.
 
 ### Changed
 
-- **Frontend infrastructure consolidated (modernization M6).** The two API clients share request-header preparation, fetch-failure text and HTTP failure classification; 155 inline error-text expressions use `lib/errors.ts`; repeated timestamp formatting moved to `lib/dates.ts`; three simple pollers use `useInterval`; unused duplicate API types were removed. Displayed text and API calls are unchanged.
+- **Frontend infrastructure consolidated (modernization M6).** The two API clients share request-header preparation, fetch-failure text and HTTP failure classification; 155 inline error-text expressions use `lib/errors.ts`; repeated timestamp formatting moved to `lib/dates.ts`; two simple pollers use `useInterval`; unused duplicate API types were removed. Displayed text and API calls are unchanged.
 
 ### Fixed
 
-- **Library actions reach the right Jobs panel.** "Track Cleanup" and "Merge split album" linked to `/clean?tab=…`, whose redirect dropped the query and left the user at the top of Jobs. They now open Advanced Maintenance or Database Health and scroll to it, and old `/clean?tab=…` links keep working.
+- **Library actions reach the right Jobs panel.** "Track Cleanup" and "Merge split album" linked to `/clean?tab=…`, whose redirect dropped the query and left the user at the top of Jobs. They now open Advanced Maintenance and scroll to Album Track Repair, or open and scroll to Database Health, and old `/clean?tab=…` links keep working.
 
 ## v0.15.0 - 2026-10-28
 
