@@ -29,7 +29,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict
 
@@ -37,9 +37,11 @@ from typing import Any, Dict
 def atomic_write_text(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` through a same-directory temp file that is
     removed on every failure path, including a refused replace."""
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    # Outside the try: if this name exists it is another writer's file, not ours to remove.
+    fh = open(tmp, "x", encoding="utf-8")
     try:
-        with open(tmp, "x", encoding="utf-8") as fh:
+        with fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
