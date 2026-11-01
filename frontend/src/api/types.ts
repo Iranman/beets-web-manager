@@ -1,3 +1,5 @@
+import type { JobStatus } from '../types/api';
+
 export type ReviewItemType = 'all' | 'pending_ai' | 'skipped' | 'library_no_mb';
 
 export type ReviewOriginType =
@@ -1309,7 +1311,7 @@ export interface AiBatchStatusResponse extends ApiOkResponse {
   state: AiBatchState;
 }
 
-export type JobStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'recovery_required' | 'killed' | 'missing';
+export type { JobStatus };
 
 export interface JobResponse extends ApiOkResponse {
   job_id?: string;

@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import {
   Dialog,
   DialogBackdrop,
@@ -2220,7 +2221,7 @@ function CandidateCarousel({
       })
       .catch((err) => {
         if (!active) return;
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         setTrackError(message);
         onSelectMatchRef.current?.(buildCandidateSelectedMatch(current, null, 'failed', `Track comparison failed: ${message}`));
       })
@@ -3760,7 +3761,7 @@ export function ImportReviewPage({
         return next;
       });
     } catch (err) {
-      if (seq === loadSeqRef.current) setError(err instanceof Error ? err.message : String(err));
+      if (seq === loadSeqRef.current) setError(errorMessage(err));
     } finally {
       if (seq === loadSeqRef.current) setLoading(false);
     }
@@ -3925,7 +3926,7 @@ export function ImportReviewPage({
           if (errors < 3) continue;
           ended = true;
           setRevalidateMsg(
-            `Could not check the background revalidation job (${jobId}): ${err instanceof Error ? err.message : String(err)}. It may still be running; check the Jobs page, then click Refresh.`,
+            `Could not check the background revalidation job (${jobId}): ${errorMessage(err)}. It may still be running; check the Jobs page, then click Refresh.`,
           );
           return;
         }
@@ -3978,7 +3979,7 @@ export function ImportReviewPage({
       }
       await applyRevalidateResult(result);
     } catch (err) {
-      setRevalidateMsg(`Revalidation failed: ${err instanceof Error ? err.message : String(err)}. Click Refresh to see the current queue, then try again.`);
+      setRevalidateMsg(`Revalidation failed: ${errorMessage(err)}. Click Refresh to see the current queue, then try again.`);
     }
     setRevalidateBusy(false);
   }, [applyRevalidateResult, followRevalidateJob]);
@@ -4015,7 +4016,7 @@ export function ImportReviewPage({
         if (targetPreviewKeysRef.current[item.id] !== key) return;
         setTargetPreviews((prev) => ({
           ...prev,
-          [item.id]: { status: 'error', key, error: err instanceof Error ? err.message : String(err) },
+          [item.id]: { status: 'error', key, error: errorMessage(err) },
         }));
       });
   }, [activeItem, selectedMatches]);
@@ -4061,7 +4062,7 @@ export function ImportReviewPage({
         setCleanupMsg('No stale entries found.');
       }
     } catch (err) {
-      setCleanupMsg(err instanceof Error ? err.message : String(err));
+      setCleanupMsg(errorMessage(err));
     } finally {
       setCleanupBusy(false);
     }
@@ -4190,7 +4191,7 @@ export function ImportReviewPage({
         throw new Error(lastLine || `Job ${job.status}`);
       }
     } catch (err) {
-      updateBg({ status: 'failed', message: err instanceof Error ? err.message : String(err), retryCount: 0 });
+      updateBg({ status: 'failed', message: errorMessage(err), retryCount: 0 });
     } finally {
       runningJobItemIdsRef.current.delete(item.id);
     }
@@ -4344,7 +4345,7 @@ export function ImportReviewPage({
                 : 'No confident recording match found.'),
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         const warning = findMatchBusyMessage(err) || optionalAiWarning(message);
         setAction(item.id, { status: warning ? 'warning' : 'error', message: warning || message });
       }
@@ -4393,7 +4394,7 @@ export function ImportReviewPage({
               : 'Find Match completed. Verify the release-group ID before applying.'),
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       const warning = findMatchBusyMessage(err) || optionalAiWarning(message);
       setAction(item.id, { status: warning ? 'warning' : 'error', message: warning || message });
     }
@@ -4550,7 +4551,7 @@ export function ImportReviewPage({
           return;
         }
       }
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       const aiWarning = optionalAiWarning(message);
       setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
@@ -4599,7 +4600,7 @@ export function ImportReviewPage({
         });
         return;
       }
-      setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+      setAction(item.id, { status: 'error', message: errorMessage(err) });
     }
   }, [pollJobBackground, removeLocalItem, setAction]);
 
@@ -4628,7 +4629,7 @@ export function ImportReviewPage({
       if ((item.type === 'pending_ai' || item.type === 'skipped') && item.path) await deletePendingReview(item.path);
       removeLocalItem(item);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       const aiWarning = optionalAiWarning(message);
       setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
@@ -4671,7 +4672,7 @@ export function ImportReviewPage({
         void loadQueue(true);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       const aiWarning = optionalAiWarning(message);
       setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
@@ -4695,7 +4696,7 @@ export function ImportReviewPage({
       setCleanupMsg(message);
       void loadQueue(true);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       const aiWarning = optionalAiWarning(message);
       setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
@@ -4916,7 +4917,7 @@ export function ImportReviewPage({
       }));
       setAction(item.id, { status: 'success', message: response.message || 'Manual MusicBrainz ID validated.' });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       setManualValidations((current) => ({ ...current, [item.id]: { status: 'error', message } }));
       setAction(item.id, { status: 'warning', message });
     }

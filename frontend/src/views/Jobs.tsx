@@ -1,3 +1,4 @@
+import { formatShortDateTime } from '../lib/dates';
 import {
   Dialog,
   DialogBackdrop,
@@ -40,8 +41,8 @@ import {
   type PathHit,
 } from '../lib/jobFeed';
 import { useGlobalJobs, useInterval, useJobPoll } from '../lib/hooks';
+import type { ApiOkResponse } from '../api/types';
 import type {
-  ApiOkResponse,
   Job,
   JobListResponse,
   JobLogFeedResponse,
@@ -363,12 +364,7 @@ function cleanAllPipelineFromState(state: JobState | null | undefined) {
 }
 function formatDateTime(ts?: number | null) {
   if (!ts) return 'Never';
-  return new Date(ts * 1000).toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  return formatShortDateTime(ts * 1000);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1594,19 +1590,53 @@ function MaintenanceRunnerReportDialog({
   );
 }
 
+/** Brings a ?tab= panel into view. Panels above it load after this runs and push
+ * it down, so it follows layout changes until the user takes over. Give the
+ * target `scroll-mt-16` to clear the sticky header. */
+function useLinkedPanelScroll<T extends HTMLElement>(linked: boolean) {
+  const ref = useRef<T>(null);
+  const finished = useRef(false);
+  useEffect(() => {
+    if (!linked || finished.current) return undefined;
+    const scroll = () => ref.current?.scrollIntoView?.({ block: 'start' });
+    scroll();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scroll);
+    observer?.observe(document.body);
+    const userEvents = ['wheel', 'touchstart', 'pointerdown', 'keydown'];
+    const release = () => {
+      observer?.disconnect();
+      window.clearTimeout(timer);
+      userEvents.forEach((name) => window.removeEventListener(name, finish));
+    };
+    const finish = () => {
+      finished.current = true;
+      release();
+    };
+    // ponytail: panels that finish loading after 5s are not followed; scroll anchoring covers most of those.
+    const timer = window.setTimeout(finish, 5000);
+    userEvents.forEach((name) => window.addEventListener(name, finish, { passive: true }));
+    return release;
+  }, [linked]);
+  return ref;
+}
+
 function CommonActionsSection({
   jobs,
   onStarted,
   failedCount,
   onReviewFailed,
   onSelectJob,
+  linked = false,
 }: {
   jobs: Job[];
   onStarted: () => Promise<void>;
   failedCount: number;
   onReviewFailed: () => void;
   onSelectJob: (job: Job, options?: JobOpenOptions) => void;
+  /** A ?tab=library-db link: open Database Health and bring it into view. */
+  linked?: boolean;
 }) {
+  const databaseHealthRef = useLinkedPanelScroll<HTMLDetailsElement>(linked);
   return (
     <section className="space-y-3">
       <div>
@@ -1643,7 +1673,7 @@ function CommonActionsSection({
           </div>
         </details>
 
-        <details className="rounded-md border border-graphite-800 bg-graphite-950/40">
+        <details ref={databaseHealthRef} open={linked} className="scroll-mt-16 rounded-md border border-graphite-800 bg-graphite-950/40">
           <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-zinc-300 hover:text-zinc-100">
             Database Health
           </summary>
@@ -1697,8 +1727,12 @@ function JobHistorySection({
   );
 }
 
-function AdvancedMaintenanceSection() {
+function AdvancedMaintenanceSection({ linked = false }: { linked?: boolean }) {
   const [open, setOpen] = useState(false);
+  const albumTracksRef = useLinkedPanelScroll<HTMLDivElement>(linked && open);
+  useEffect(() => {
+    if (linked) setOpen(true);
+  }, [linked]);
   return (
     <details
       className="rounded-md border border-amber-900/50 bg-amber-950/10"
@@ -1732,12 +1766,14 @@ function AdvancedMaintenanceSection() {
             >
               <ArtistAliasPanel active autoLoad />
             </MaintenanceCard>
-            <MaintenanceCard
-              title="Album Track Repair"
-              description="Compare existing album rows to MusicBrainz tracklists and repair clear album-track mismatches."
-            >
-              <AlbumTracksPanel />
-            </MaintenanceCard>
+            <div ref={albumTracksRef} className="scroll-mt-16">
+              <MaintenanceCard
+                title="Album Track Repair"
+                description="Compare existing album rows to MusicBrainz tracklists and repair clear album-track mismatches."
+              >
+                <AlbumTracksPanel />
+              </MaintenanceCard>
+            </div>
             <MaintenanceCard
               title="Advanced Library Move"
               description="Keep the library-wide move operation locked until a full source/target preview can be reviewed."
@@ -2711,6 +2747,7 @@ export default function Jobs() {
   // Deep link from other pages: /jobs?job=<id> (older links use ?q=<id>)
   // opens that job once the list has loaded.
   const [searchParams] = useSearchParams();
+  const linkedPanel = searchParams.get('tab');
   const linkedJobId = searchParams.get('job') || searchParams.get('q') || '';
   const linkedJobHandled = useRef('');
   useEffect(() => {
@@ -2783,9 +2820,9 @@ export default function Jobs() {
           onSelectJob={(job, options) => void handleSelectJob(job, options)}
         />
 
-        <CommonActionsSection jobs={jobs} failedCount={failedJobs.length} onReviewFailed={handleReviewFailed} onSelectJob={(job, options) => void handleSelectJob(job, options)} onStarted={refreshAll} />
+        <CommonActionsSection jobs={jobs} failedCount={failedJobs.length} onReviewFailed={handleReviewFailed} onSelectJob={(job, options) => void handleSelectJob(job, options)} onStarted={refreshAll} linked={linkedPanel === 'library-db'} />
 
-        <AdvancedMaintenanceSection />
+        <AdvancedMaintenanceSection linked={linkedPanel === 'album-tracks'} />
 
         <JobHistorySection
           jobs={jobs}
