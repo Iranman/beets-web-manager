@@ -85,6 +85,9 @@ _SCENARIOS = {
     "details_fetch_fails_keeps_suggestion": {
         "mb": [_mb_cand()], "details": RuntimeError("boom"),
         "ai": {"mb_trackid": _REC, "confidence": "medium", "reason": "r"}},
+    "acoustid_confirmed_hit_reaches_enrichment": {
+        "mb": [], "acoustid": [{**_mb_cand(), "source": "acoustid"}], "details": _details(),
+        "ai": {"mb_trackid": _REC, "confidence": "high", "reason": "fingerprint"}},
     "evidence_packet_failure_is_generic_error": {"key": "", "mb": [], "evidence_error": True},
     "serialization_failure_is_generic_error": {"key": "", "mb": [], "unserializable": True},
     "ai_non_string_artist_id_fails_closed": {
@@ -157,8 +160,9 @@ def _run(spec, events=None):
         _ai_api_key=mock.Mock(return_value=spec.get("key", "test-placeholder")),
         _ai_model_and_endpoint=mock.Mock(return_value=("model", spec.get("endpoint", "https://ai.test/v1"))),
         _item_ai_abs_path=mock.Mock(return_value="/music/a/03 - Some Song.flac"),
-        _acoustid_lookup_cached_outcome=_traced(events, "acoustid", mock.Mock(
-            return_value=pb.ProviderResult("acoustid", pb.ProviderOutcome.NOT_CONFIGURED))),
+        _acoustid_lookup_cached_outcome=_traced(events, "acoustid", mock.Mock(return_value=(
+            pb.ProviderResult("acoustid", pb.ProviderOutcome.CONFIRMED, data=spec["acoustid"]) if "acoustid" in spec
+            else pb.ProviderResult("acoustid", pb.ProviderOutcome.NOT_CONFIGURED)))),
         _mb_recording_search=_traced(events, "musicbrainz", mb_search),
         _discogs_track_search=_traced(events, "discogs", mock.Mock(return_value=[])),
         _fetch_mb_recording_details=details_fn,
@@ -199,6 +203,14 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
                 mock.patch.object(routes_library, "lib", mock.Mock(get_item=mock.Mock(return_value=None))):
             resp = app_module.app.test_client().post("/api/items/7/ai-suggest", headers=_CSRF)
         self.assertEqual(resp.get_json(), {"ok": False, "error": "Not found"})
+
+    def test_confirmed_acoustid_hits_are_forwarded_to_every_enrichment(self):
+        body = self.golden["acoustid_confirmed_hit_reaches_enrichment"]["body"]
+        self.assertEqual(body["acoustid_status"], "")
+        calls = body["mb_candidates"][0]["enrich_calls"]
+        self.assertEqual([c["has_details"] for c in calls], [False, True])
+        for call in calls:
+            self.assertEqual([h["mb_trackid"] for h in call["acoustid_hits"]], [_REC])
 
     def test_failures_are_the_generic_error_not_a_500(self):
         for name in ("evidence_packet_failure_is_generic_error", "serialization_failure_is_generic_error",

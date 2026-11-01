@@ -15,7 +15,7 @@ FOLDER = "/downloads/Artist - Album"
 
 
 def _resolve(mb_input, *, source_folder=FOLDER, group=(), fitting=(), rg_first=REL_A,
-             has_tracks=lambda r: r != RG):
+             has_tracks=lambda r: r != RG, track_counts=None):
     log, preflights = [], []
     search = MagicMock(return_value=[{"mb_albumid": "cccccccc-cccc-cccc-cccc-cccccccccccc",
                                       "artist": "Artist", "album": "Album", "tracks": 10}])
@@ -27,7 +27,7 @@ def _resolve(mb_input, *, source_folder=FOLDER, group=(), fitting=(), rg_first=R
     with patch.object(ls, "_folder_import_track_count", return_value=10), \
          patch.object(ls, "_resolve_release_group_to_release", return_value=rg_first), \
          patch.object(ls, "_mb_release_group_candidates",
-                      return_value=[{"mb_albumid": r, "track_count": 10} for r in group]), \
+                      return_value=[{"mb_albumid": r, "track_count": (track_counts or {}).get(r, 10)} for r in group]), \
          patch.object(ls, "_folder_release_preflight", side_effect=_pre), \
          patch.object(ls, "_mb_release_search", search), \
          patch.object(ls, "_mb_release_search_by_folder_tracks", search), \
@@ -71,6 +71,12 @@ class ReleaseGroupResolverTests(unittest.TestCase):
         # The ranked release plus at most the cap of alternatives.
         self.assertLessEqual(len(preflights), 1 + ls._RG_ALTERNATIVE_RELEASE_CAP)
         self.assertTrue(any("closest by track count" in line for line in log))
+
+    def test_unknown_track_count_is_tried_after_any_valid_edition(self):
+        unknown, far = "dddddddd-dddd-dddd-dddd-dddddddddddd", "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+        _, _, preflights, _ = _resolve(f"https://musicbrainz.org/release-group/{RG}", group=[unknown, far],
+                                       track_counts={unknown: 0, far: 25})
+        self.assertLess(preflights.index(far), preflights.index(unknown))
 
     def test_import_with_id_passes_the_release_group_url(self):
         src = inspect.getsource(imp.start_folder_import_with_id)

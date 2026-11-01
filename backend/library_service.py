@@ -416,7 +416,7 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             if c.get("mb_albumid") and c["mb_albumid"] != first
         ]
         if rank_track_count:
-            others.sort(key=lambda c: abs(int(c.get("track_count") or 0) - rank_track_count))
+            others.sort(key=lambda c: abs(int(c["track_count"]) - rank_track_count) if c.get("track_count") else 999)
         # #264: one tracklist fetch per release, so the loop is capped. The
         # resolver has no cancel_event; the cap bounds the work instead.
         if len(others) > _RG_ALTERNATIVE_RELEASE_CAP:

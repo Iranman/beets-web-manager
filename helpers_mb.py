@@ -505,7 +505,8 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
         vinyl_pen    = 10 if rel["is_vinyl"] else 0
         country_pts  = _country_rank(rel["country"])
         year_miss    = 0 if (not year or rel["year"][:4] == str(year)[:4]) else 2
-        track_delta  = abs(int(rel["tracks"] or 0) - int(track_count or 0)) if track_count else 0
+        # tracks == 0 is an unknown count (_mb_total_track_count): below any valid edition.
+        track_delta  = (abs(int(rel["tracks"]) - int(track_count)) if rel["tracks"] else 999) if track_count else 0
         track_miss   = 0 if (not track_count or rel["tracks"] == track_count) else 1
         score_pts    = -rel["score"]
         if track_count:

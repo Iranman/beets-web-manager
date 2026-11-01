@@ -67,6 +67,14 @@ class ReleaseParsingTests(unittest.TestCase):
             found = helpers_mb._mb_release_search("Album", "Artist", track_count=10)
         self.assertEqual(found[0]["mb_albumid"], RG)
 
+    def test_unknown_count_ranks_below_a_valid_non_exact_edition(self):
+        def raw(rel_id, counts):
+            return {**RAW, "id": rel_id, "media": [{"format": "CD", "track-count": c} for c in counts]}
+        for releases in ([raw(REL, [10, None]), raw(RG, [7])], [raw(RG, [7]), raw(REL, [10, None])]):
+            with _opened({"releases": releases}):
+                found = helpers_mb._mb_release_search("Album", "Artist", track_count=3)
+            self.assertEqual(found[0]["mb_albumid"], RG)
+
     def test_no_cover_art_block(self):
         self.assertEqual(helpers_mb._cover_art_details(None), (None, None, 0))
 
