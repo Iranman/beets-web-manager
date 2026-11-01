@@ -15,7 +15,7 @@ RAW = {
     "release-group": {"id": RG, "primary-type": "Album"},
     "label-info": [{"label": {"name": "L1"}, "catalog-number": "C1"}, {"label": None, "catalog-number": ""},
                    "junk", {"label": {"name": "L2"}}],
-    "media": [{"format": "CD", "track-count": 10, "position": 1}, "junk",
+    "media": [{"format": "CD", "track-count": 10, "position": 1},
               {"format": '12" Vinyl', "track-count": 2}, {"track-count": 1, "position": 9}],
     "cover-art-archive": {"artwork": True, "front": False, "count": 3},
 }
@@ -43,6 +43,29 @@ class ReleaseParsingTests(unittest.TestCase):
         self.assertEqual(looked_up["format_summary"], 'CD (10) + 12" Vinyl (2) + Medium (1)')
         self.assertTrue(looked_up["is_vinyl"])
         self.assertEqual(looked_up["mediums"][1]["position"], 2)
+
+    def test_invalid_count_makes_the_release_size_unknown(self):
+        for bad in ("x", None, "", -1, 1.5, True, [], "junk-medium"):
+            medium = bad if bad == "junk-medium" else {"format": "CD", "track-count": bad}
+            with self.subTest(bad=bad):
+                media = [{"format": "CD", "track-count": 10}, medium]
+                self.assertEqual(helpers_mb._mb_release_track_count({"media": media}), 0)
+                self.assertEqual(helpers_mb._media_summary(media)[0], 0)
+        self.assertEqual(helpers_mb._mb_release_track_count({"media": [{"track-count": 10}, {"track-count": "2"}]}), 12)
+        self.assertEqual(helpers_mb._mb_release_track_count({}), 0)
+
+    def test_invalid_count_never_beats_a_valid_edition(self):
+        bad = {"id": "bad", "status": "Official", "country": "US", "media": [{"track-count": 10}, {"track-count": "x"}]}
+        good = {"id": "good", "status": "Official", "country": "JP", "media": [{"track-count": 10}]}
+        for releases in ([bad, good], [good, bad]):
+            with _opened({"releases": releases}):
+                self.assertEqual(helpers_mb._resolve_release_group_to_release(RG, [], track_count=10), "good")
+
+        def raw(rel_id, country, counts):
+            return {**RAW, "id": rel_id, "country": country, "media": [{"format": "CD", "track-count": c} for c in counts]}
+        with _opened({"releases": [raw(REL, "US", [10, "x"]), raw(RG, "JP", [10])]}):
+            found = helpers_mb._mb_release_search("Album", "Artist", track_count=10)
+        self.assertEqual(found[0]["mb_albumid"], RG)
 
     def test_no_cover_art_block(self):
         self.assertEqual(helpers_mb._cover_art_details(None), (None, None, 0))

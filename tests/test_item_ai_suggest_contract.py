@@ -85,7 +85,14 @@ _SCENARIOS = {
     "details_fetch_fails_keeps_suggestion": {
         "mb": [_mb_cand()], "details": RuntimeError("boom"),
         "ai": {"mb_trackid": _REC, "confidence": "medium", "reason": "r"}},
-    "serialization_failure_is_generic_error": {"key": "", "mb": [], "evidence_error": True},
+    "evidence_packet_failure_is_generic_error": {"key": "", "mb": [], "evidence_error": True},
+    "serialization_failure_is_generic_error": {"key": "", "mb": [], "unserializable": True},
+    "ai_non_string_artist_id_fails_closed": {
+        "mb": [_mb_cand()], "details": _details(),
+        "ai": {"mb_trackid": _REC, "mb_artistid": 123, "confidence": "high", "reason": "r"}},
+    "ai_non_string_album_id_fails_closed": {
+        "mb": [_mb_cand()], "details": _details(),
+        "ai": {"mb_trackid": _REC, "mb_albumid": 123, "confidence": "high", "reason": "r"}},
     "title_split_replaces_noise_artist": {
         "key": "", "mb": [], "item": {"title": "Real Artist - Real Song", "artist": "Some Radio Station"}},
     "title_split_keeps_good_artist": {
@@ -117,7 +124,18 @@ def _fake_evidence(iid, **kw):
             "acoustid_status": kw["acoustid_status"], "confidence": kw["suggestions"].get("confidence")}
 
 
-def _run(spec):
+def _unserializable_evidence(iid, **kw):
+    return {"not_json": {1, 2}}
+
+
+def _traced(events, label, fn):
+    def call(*args, **kwargs):
+        events.append(label)
+        return fn(*args, **kwargs)
+    return call
+
+
+def _run(spec, events=None):
     item = _item(**spec.get("item", {}))
     mb = spec.get("mb", [])
     mb_search = mock.Mock(side_effect=mb) if isinstance(mb, Exception) else mock.Mock(return_value=mb)
@@ -126,8 +144,10 @@ def _run(spec):
                   else mock.Mock(return_value=details))
     ai = spec.get("ai", {"confidence": "low", "reason": "unused"})
     sent = []
+    events = [] if events is None else events
 
     def opened(provider, req, **_kw):
+        events.append("ai")
         sent.append({"provider": provider, "url": req.full_url, "body": json.loads(req.data)})
         if isinstance(ai, Exception):
             raise ai
@@ -135,16 +155,16 @@ def _run(spec):
 
     patches = dict(
         _ai_api_key=mock.Mock(return_value=spec.get("key", "test-placeholder")),
-        _ai_model_and_endpoint=mock.Mock(return_value=("model", "https://ai.test/v1")),
+        _ai_model_and_endpoint=mock.Mock(return_value=("model", spec.get("endpoint", "https://ai.test/v1"))),
         _item_ai_abs_path=mock.Mock(return_value="/music/a/03 - Some Song.flac"),
-        _acoustid_lookup_cached_outcome=mock.Mock(
-            return_value=pb.ProviderResult("acoustid", pb.ProviderOutcome.NOT_CONFIGURED)),
-        _mb_recording_search=mb_search,
-        _discogs_track_search=mock.Mock(return_value=[]),
+        _acoustid_lookup_cached_outcome=_traced(events, "acoustid", mock.Mock(
+            return_value=pb.ProviderResult("acoustid", pb.ProviderOutcome.NOT_CONFIGURED))),
+        _mb_recording_search=_traced(events, "musicbrainz", mb_search),
+        _discogs_track_search=_traced(events, "discogs", mock.Mock(return_value=[])),
         _fetch_mb_recording_details=details_fn,
         _enrich_track_ai_candidate=_fake_enrich,
-        _track_ai_evidence_packet=(mock.Mock(side_effect=RuntimeError("boom"))
-                                   if spec.get("evidence_error") else _fake_evidence),
+        _track_ai_evidence_packet=(mock.Mock(side_effect=RuntimeError("boom")) if spec.get("evidence_error")
+                                   else _unserializable_evidence if spec.get("unserializable") else _fake_evidence),
         _compact_track_ai_candidate=lambda c: {k: v for k, v in (c or {}).items() if k != "enrich_calls"},
     )
     with mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
@@ -179,6 +199,33 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
                 mock.patch.object(routes_library, "lib", mock.Mock(get_item=mock.Mock(return_value=None))):
             resp = app_module.app.test_client().post("/api/items/7/ai-suggest", headers=_CSRF)
         self.assertEqual(resp.get_json(), {"ok": False, "error": "Not found"})
+
+    def test_failures_are_the_generic_error_not_a_500(self):
+        for name in ("evidence_packet_failure_is_generic_error", "serialization_failure_is_generic_error",
+                     "ai_non_string_artist_id_fails_closed", "ai_non_string_album_id_fails_closed"):
+            with self.subTest(name):
+                self.assertEqual(self.golden[name]["status"], 200)
+                self.assertEqual(self.golden[name]["body"], {"ok": False, "error": "Could not generate suggestions."})
+
+    def test_evidence_is_gathered_first_with_or_without_ai(self):
+        for key, expected in (("", ["acoustid", "musicbrainz", "discogs"]),
+                              ("test-placeholder", ["acoustid", "musicbrainz", "discogs", "ai"])):
+            with self.subTest(key=key):
+                events = []
+                _run({"key": key, "mb": []}, events=events)
+                # MusicBrainz is searched twice when an artist search finds nothing.
+                self.assertEqual(list(dict.fromkeys(events)), expected)
+
+    def test_unusable_ai_endpoint_falls_back_to_the_evidence(self):
+        """Declared difference from the pre-extraction handler, which returned 500 here."""
+        out = _run({"mb": [_mb_cand()], "details": _details(), "endpoint": "not-a-url"})
+        self.assertEqual(out["status"], 200)
+        self.assertEqual(out["ai_request"], [])
+        s = out["body"]["suggestions"]
+        self.assertEqual(s["mb_trackid"], _REC)
+        self.assertEqual(s["confidence_source"], "musicbrainz")
+        self.assertFalse(s["ai_status"]["contributed"])
+        self.assertIn("AI unavailable: the AI provider request failed unexpectedly (ValueError)", s["reason"])
 
     def test_identity_rules_hold_in_golden(self):
         """AI may rank, never establish identity: only a listed candidate is trusted."""

@@ -249,6 +249,9 @@ def _validate_identity(suggestions: Dict[str, Any], mb_candidates: List[Dict[str
     malformed one, is downgraded and carries a warning for the reviewer.
     """
     mb_trackid = (suggestions.get("mb_trackid") or "").strip()
+    # A non-string ID from the AI raises here, so the request fails closed.
+    (suggestions.get("mb_albumid") or "").strip()
+    (suggestions.get("mb_artistid") or "").strip()
     selected_candidate = None
     candidate_index = -1
     if mb_trackid:
@@ -351,6 +354,12 @@ def _stamp_ai_status(suggestions: Dict[str, Any], ai_available: bool, ai_configu
     suggestions["confidence_source"] = "ai" if ai_contributed else ("musicbrainz" if mb_candidates else "none")
 
 
+def suggestion_failure(exc: Exception) -> Dict[str, Any]:
+    """The generic response for a failure after the evidence is gathered; details stay in the log."""
+    _app_logger.warning("AI track suggestion failed: %s", type(exc).__name__)
+    return {"ok": False, "error": "Could not generate suggestions."}
+
+
 def suggest_for_item(item, iid: int) -> Dict[str, Any]:
     """The JSON body of POST /api/items/<iid>/ai-suggest."""
     # AI is optional: the evidence below is gathered unconditionally, so a
@@ -429,5 +438,4 @@ def suggest_for_item(item, iid: int) -> Dict[str, Any]:
                 "acoustid_unavailable": bool(evidence.acoustid_status),
                 "acoustid_status": evidence.acoustid_status}
     except Exception as exc:
-        _app_logger.warning("AI track suggestion failed: %s", type(exc).__name__)
-        return {"ok": False, "error": "Could not generate suggestions."}
+        return suggestion_failure(exc)

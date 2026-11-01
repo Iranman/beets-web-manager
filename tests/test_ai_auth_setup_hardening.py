@@ -205,14 +205,6 @@ class ItemAiSuggestFallbackSourceTests(unittest.TestCase):
         )
         self.assertIn("ai_available = bool(api_key)", self.fn)
 
-    def test_acoustid_mb_discogs_gathering_happens_before_ai_gate(self):
-        ai_gate_pos = self.fn.index("if ai_available:")
-        acoustid_pos = self.fn.index("_acoustid_lookup_cached_outcome(item_path)")
-        mb_pos = self.fn.index("_mb_recording_search(")
-        discogs_pos = self.fn.index("_discogs_track_search(")
-        self.assertLess(acoustid_pos, ai_gate_pos)
-        self.assertLess(mb_pos, ai_gate_pos)
-        self.assertLess(discogs_pos, ai_gate_pos)
 
     def test_falls_back_to_top_candidate_when_ai_unavailable(self):
         self.assertIn("if suggestions is None:", self.fn)

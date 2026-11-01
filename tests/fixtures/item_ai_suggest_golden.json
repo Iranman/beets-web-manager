@@ -312,6 +312,78 @@
   ],
   "status": 200
  },
+ "ai_non_string_album_id_fails_closed": {
+  "ai_request": [
+   {
+    "body": {
+     "messages": [
+      {
+       "content": "You are a music metadata expert. A file was imported with incorrect or incomplete tags.\n\nFilename: 03 - Some Song.flac\nCurrent (possibly wrong) tags:\n  title: Some Song\n  artist: Some Artist\n  album: Some Album\n  albumartist: Some Artist\n  year: 2012\n  genre: (empty)\n  track: 3\n  label: (empty)\n  mb_trackid: (empty)\n  mb_albumid: (empty)\n  mb_releasegroupid: (empty)\n  filename: 03 - Some Song.flac\n  source_path: /music/a/03 - Some Song.flac\n  duration_seconds: 200.0\n  duration: 3:20\n\nMusicBrainz/AcoustID candidates (idx / match / score / title / artist / album / year / country / mb_trackid / source):\n  [0] match=0.95 mb= 95 Some Song \u2014 Some Artist / Some Album (2012) US [11111111-1111-1111-1111-111111111111] via mb\n\nRULES \u2014 apply strictly:\n1. If AcoustID fingerprint candidates are available, prefer them over text-only matches and only use MB recordings from that candidate list.\n   Do not silently override strong contradictory fingerprint evidence; return low confidence and explain the conflict.\n2. If no AcoustID candidates are found, fall back to MusicBrainz text search results.\n   If choosing a MusicBrainz candidate, copy its mb_trackid exactly; do not invent a recording ID.\n3. FILENAME is the next most reliable clue. Filenames often follow 'Artist - Title' or 'NN - Artist - Title' patterns \u2014 extract the correct title and artist from it.\n4. YEAR: output only a 4-digit year (e.g. 2012, not 20120923 or 2012-09-23).\n5. ARTIST: use the correct performing artist, not a radio station, label, or 'Various Artists'.\n6. ALBUM: if the file belongs to a known album, fill it in. Otherwise leave empty.\n7. RELEASE PREFERENCE: prefer US releases (country=US). If no equally strong US match exists, use Worldwide (country=XW) before other countries.\n8. FORMAT: prefer CD or Digital Media recordings. Avoid vinyl if a digital version exists.\n9. CONFIDENCE \u2014 set one of:\n   high:   certain of artist, title, year, and album\n   medium: reasonably sure but one field is uncertain\n   low:    guessing based on limited info\n\nReturn ONLY a valid JSON object with these keys (include only what you are confident about):\n  title \u2014 clean track title only (no artist prefix)\n  artist \u2014 performing artist using feat. notation: e.g. 'Young Money feat. Lil Wayne & Curren$y'\n  album, albumartist, year (4-digit integer), genre, track (integer), tracktotal (integer),\n  disc (integer), disctotal (integer), label,\n  mb_trackid (recording UUID), mb_albumid (release UUID), mb_artistid (artist UUID),\n  confidence (high|medium|low), reason (one sentence)\n\nExample: {\"title\":\"Poppin' Them Bottles\",\"artist\":\"Young Money feat. Lil Wayne, Curren$y & Mack Maine\",\"album\":\"Dedication 2\",\"albumartist\":\"Lil Wayne\",\"year\":2006,\"genre\":\"Hip-Hop\",\"track\":4,\"mb_trackid\":\"b5316c12-b617-4086-a107-312eccfd12e7\",\"confidence\":\"high\",\"reason\":\"AcoustID fingerprint matches Lil Wayne Dedication 2 mixtape\"}",
+       "role": "user"
+      }
+     ],
+     "model": "model",
+     "response_format": {
+      "type": "json_object"
+     },
+     "temperature": 0.1
+    },
+    "provider": "ai",
+    "url": "https://ai.test/v1"
+   }
+  ],
+  "body": {
+   "error": "Could not generate suggestions.",
+   "ok": false
+  },
+  "details_calls": [],
+  "mb_search_calls": [
+   [
+    "Some Song",
+    "Some Artist",
+    {
+     "limit": 6
+    }
+   ]
+  ],
+  "status": 200
+ },
+ "ai_non_string_artist_id_fails_closed": {
+  "ai_request": [
+   {
+    "body": {
+     "messages": [
+      {
+       "content": "You are a music metadata expert. A file was imported with incorrect or incomplete tags.\n\nFilename: 03 - Some Song.flac\nCurrent (possibly wrong) tags:\n  title: Some Song\n  artist: Some Artist\n  album: Some Album\n  albumartist: Some Artist\n  year: 2012\n  genre: (empty)\n  track: 3\n  label: (empty)\n  mb_trackid: (empty)\n  mb_albumid: (empty)\n  mb_releasegroupid: (empty)\n  filename: 03 - Some Song.flac\n  source_path: /music/a/03 - Some Song.flac\n  duration_seconds: 200.0\n  duration: 3:20\n\nMusicBrainz/AcoustID candidates (idx / match / score / title / artist / album / year / country / mb_trackid / source):\n  [0] match=0.95 mb= 95 Some Song \u2014 Some Artist / Some Album (2012) US [11111111-1111-1111-1111-111111111111] via mb\n\nRULES \u2014 apply strictly:\n1. If AcoustID fingerprint candidates are available, prefer them over text-only matches and only use MB recordings from that candidate list.\n   Do not silently override strong contradictory fingerprint evidence; return low confidence and explain the conflict.\n2. If no AcoustID candidates are found, fall back to MusicBrainz text search results.\n   If choosing a MusicBrainz candidate, copy its mb_trackid exactly; do not invent a recording ID.\n3. FILENAME is the next most reliable clue. Filenames often follow 'Artist - Title' or 'NN - Artist - Title' patterns \u2014 extract the correct title and artist from it.\n4. YEAR: output only a 4-digit year (e.g. 2012, not 20120923 or 2012-09-23).\n5. ARTIST: use the correct performing artist, not a radio station, label, or 'Various Artists'.\n6. ALBUM: if the file belongs to a known album, fill it in. Otherwise leave empty.\n7. RELEASE PREFERENCE: prefer US releases (country=US). If no equally strong US match exists, use Worldwide (country=XW) before other countries.\n8. FORMAT: prefer CD or Digital Media recordings. Avoid vinyl if a digital version exists.\n9. CONFIDENCE \u2014 set one of:\n   high:   certain of artist, title, year, and album\n   medium: reasonably sure but one field is uncertain\n   low:    guessing based on limited info\n\nReturn ONLY a valid JSON object with these keys (include only what you are confident about):\n  title \u2014 clean track title only (no artist prefix)\n  artist \u2014 performing artist using feat. notation: e.g. 'Young Money feat. Lil Wayne & Curren$y'\n  album, albumartist, year (4-digit integer), genre, track (integer), tracktotal (integer),\n  disc (integer), disctotal (integer), label,\n  mb_trackid (recording UUID), mb_albumid (release UUID), mb_artistid (artist UUID),\n  confidence (high|medium|low), reason (one sentence)\n\nExample: {\"title\":\"Poppin' Them Bottles\",\"artist\":\"Young Money feat. Lil Wayne, Curren$y & Mack Maine\",\"album\":\"Dedication 2\",\"albumartist\":\"Lil Wayne\",\"year\":2006,\"genre\":\"Hip-Hop\",\"track\":4,\"mb_trackid\":\"b5316c12-b617-4086-a107-312eccfd12e7\",\"confidence\":\"high\",\"reason\":\"AcoustID fingerprint matches Lil Wayne Dedication 2 mixtape\"}",
+       "role": "user"
+      }
+     ],
+     "model": "model",
+     "response_format": {
+      "type": "json_object"
+     },
+     "temperature": 0.1
+    },
+    "provider": "ai",
+    "url": "https://ai.test/v1"
+   }
+  ],
+  "body": {
+   "error": "Could not generate suggestions.",
+   "ok": false
+  },
+  "details_calls": [],
+  "mb_search_calls": [
+   [
+    "Some Song",
+    "Some Artist",
+    {
+     "limit": 6
+    }
+   ]
+  ],
+  "status": 200
+ },
  "ai_outage": {
   "ai_request": [
    {
@@ -2077,6 +2149,31 @@
    [
     "Some Song",
     "Some Artist",
+    {
+     "limit": 6
+    }
+   ]
+  ],
+  "status": 200
+ },
+ "evidence_packet_failure_is_generic_error": {
+  "ai_request": [],
+  "body": {
+   "error": "Could not generate suggestions.",
+   "ok": false
+  },
+  "details_calls": [],
+  "mb_search_calls": [
+   [
+    "Some Song",
+    "Some Artist",
+    {
+     "limit": 6
+    }
+   ],
+   [
+    "Some Song",
+    "",
     {
      "limit": 6
     }

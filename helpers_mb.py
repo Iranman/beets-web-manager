@@ -70,11 +70,28 @@ def _mb_first_artist_id(credits: Any) -> str:
     return ""
 
 
+def _mb_medium_track_count(medium: Any) -> Optional[int]:
+    """A medium's track count, or None when MusicBrainz data doesn't state a valid one."""
+    raw = medium.get("track-count") if isinstance(medium, dict) else None
+    if isinstance(raw, str) and raw.strip().isdecimal():
+        return int(raw)
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return None
+
+
+def _mb_total_track_count(media: Any) -> int:
+    """Tracks across a release's media; 0 (unknown) unless every medium states a valid count.
+
+    A partial sum must not read as a release's size: media counted [10, "x"] could
+    otherwise pass as an exact 10-track match and beat a valid edition.
+    """
+    counts = [_mb_medium_track_count(medium) for medium in media or []]
+    return 0 if None in counts else sum(counts)
+
+
 def _mb_release_track_count(release: Dict[str, Any]) -> int:
-    total = 0
-    for medium in release.get("media") or []:
-        total += _mb_int(medium.get("track-count"), 0)
-    return total
+    return _mb_total_track_count(release.get("media"))
 
 
 _VINYL_KEYWORDS = {"vinyl", '7"', '10"', '12"', "shellac", "78"}
@@ -106,15 +123,13 @@ def _label_details(label_info: Any) -> tuple[str, List[str], List[str], List[Dic
 
 def _media_summary(media_list: Any) -> tuple[int, List[str], List[Dict[str, Any]], str]:
     """(total tracks, formats, mediums, display summary) of a release's media."""
-    total = 0
     formats: List[str] = []
     mediums: List[Dict[str, Any]] = []
     for medium in media_list or []:
         if not isinstance(medium, dict):
             continue
         fmt = str(medium.get("format") or "").strip()
-        count = int(medium.get("track-count") or 0)
-        total += count
+        count = _mb_medium_track_count(medium) or 0
         if fmt and fmt not in formats:
             formats.append(fmt)
         mediums.append({
@@ -123,7 +138,7 @@ def _media_summary(media_list: Any) -> tuple[int, List[str], List[Dict[str, Any]
             "tracks": count,
         })
     summary = " + ".join(f"{m['format'] or 'Medium'} ({m['tracks']})" for m in mediums)
-    return total, formats, mediums, summary
+    return _mb_total_track_count(media_list), formats, mediums, summary
 
 
 def _cover_art_details(caa: Any) -> tuple[Optional[bool], Optional[bool], int]:
