@@ -218,11 +218,11 @@ def _valid_ai_reply(reply: Any) -> Dict[str, Any]:
         clean["confidence"] = clean["confidence"].lower()
         if clean["confidence"] not in _AI_CONFIDENCE:
             raise ValueError("AI reply confidence is not high, medium or low")
-    if not clean:
-        raise ValueError("AI reply has no usable field")
     # Checked above so a bad value counts against the reply, but only MusicBrainz supplies these.
     clean.pop("mb_albumid", None)
     clean.pop("mb_artistid", None)
+    if not clean:
+        raise ValueError("AI reply has no usable field")
     return clean
 
 

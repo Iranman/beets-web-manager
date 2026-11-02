@@ -334,10 +334,12 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
 
 
 def _ai_reply_object(content: Any) -> Dict[str, Any]:
-    """The parsed AI reply; anything but a JSON object is a failed reply, like unparseable text."""
+    """The parsed AI reply; a non-object or a non-string albumartist is a failed reply, like unparseable text."""
     reply = json.loads(content)
     if not isinstance(reply, dict):
         raise ValueError("AI reply is not a JSON object")
+    if not isinstance(reply.get("albumartist"), (str, type(None))):
+        raise ValueError("AI reply albumartist is not a string")
     return reply
 
 
@@ -689,12 +691,12 @@ def _ai_suggest_album_internal(
     ai_unavailable_reason = "" if ai_available else "OPENAI_API_KEY not configured"
     sug: Optional[Dict[str, Any]] = None
     if ai_available:
-        req = urllib.request.Request(
-            _ai_endpoint,
-            data=oai_payload,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        )
         try:
+            req = urllib.request.Request(
+                _ai_endpoint,
+                data=oai_payload,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            )
             with provider_boundary.opened("ai", req, timeout=30) as r:
                 data = json.loads(r.read())
             msg = (data.get("choices") or [{}])[0].get("message") or {}
@@ -1502,12 +1504,12 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
     ai_unavailable_reason = "" if ai_available else "OPENAI_API_KEY not configured"
     sug: Optional[Dict[str, Any]] = None
     if ai_available:
-        req = urllib.request.Request(
-            _ai_endpoint,
-            data=req_payload,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        )
         try:
+            req = urllib.request.Request(
+                _ai_endpoint,
+                data=req_payload,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            )
             with provider_boundary.opened("ai", req, timeout=30) as r:
                 data = json.loads(r.read())
             # Check for refusal

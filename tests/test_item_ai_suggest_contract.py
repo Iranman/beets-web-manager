@@ -17,7 +17,8 @@ from unittest import mock
 
 import app as app_module
 import routes_library
-from backend import ai_evidence_service, ai_service, item_ai_suggest_service, library_service, provider_boundary as pb
+from backend import ai_evidence_service, ai_service, item_ai_suggest_service, library_service, recovery_carrier
+from backend import provider_boundary as pb
 
 _TARGET = item_ai_suggest_service
 _GOLDEN = Path(__file__).parent / "fixtures" / "item_ai_suggest_golden.json"
@@ -169,7 +170,9 @@ def _run(spec, events=None):
         _fetch_mb_recording_details=details_fn,
         _enrich_track_ai_candidate=_fake_enrich,
         _track_ai_evidence_packet=(mock.Mock(side_effect=RuntimeError("boom")) if spec.get("evidence_error")
-                                   else _unserializable_evidence if spec.get("unserializable") else _fake_evidence),
+                                   else _unserializable_evidence if spec.get("unserializable")
+                                   else ai_service._track_ai_evidence_packet if spec.get("real_packet")
+                                   else _fake_evidence),
         _compact_track_ai_candidate=lambda c: {k: v for k, v in (c or {}).items() if k != "enrich_calls"},
     )
     with mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
@@ -302,6 +305,20 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
         self.assertIn("mb_apply_warning", s)
         self.assertTrue(ai_service._compact_track_ai_candidate(_mb_cand())["requires_confirmation"])
 
+    def test_evidence_packet_trusts_for_apply_only_an_evaluated_candidate(self):
+        def spec():  # enrichment changes the candidate in place, so each run needs its own
+            return {"mb": [_mb_cand()], "details": _details(), "real_packet": True,
+                    "ai": {"mb_trackid": _REC, "confidence": "high", "reason": "r"}}
+        body = _run(spec())["body"]
+        self.assertTrue(body["evidence"]["validation"]["trusted_for_apply"])
+
+        def boom(*_a, **_k):
+            raise RuntimeError("boom")
+        with mock.patch.object(sys.modules[__name__], "_fake_enrich", boom):
+            body = _run(spec())["body"]
+        self.assertTrue(body["evidence"]["mb_candidate_valid"])
+        self.assertFalse(body["evidence"]["validation"]["trusted_for_apply"])
+
     def test_binder_ignores_forged_fields_and_bad_indexes(self):
         cands = [{"mb_albumid": _REL}, {"mb_albumid": _REC}]
         forged = {"candidate_index": 0, "mb_artistid": _INVENTED, "requires_confirmation": False,
@@ -342,6 +359,8 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
         good = {"mb_trackid": _REC, "confidence": "high", "reason": "r"}
         replies = ["[]", '"x"', "5", "null", "{}", {"foo": 1},
                    {"mb_releasegroupid": _INVENTED, "safety_result": "safe"},
+                   {"mb_albumid": _INVENTED}, {"mb_artistid": _INVENTED},
+                   {"mb_albumid": _INVENTED, "mb_artistid": _INVENTED},
                    '{"title": NaN, "mb_trackid": "%s", "reason": "r"}' % _REC,
                    '{"year": 1e999, "mb_trackid": "%s"}' % _REC,
                    {**good, "confidence": "certain"}, {**good, "confidence": 5}, {**good, "confidence": ["high"]},
@@ -402,6 +421,81 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
         s = self.golden["no_key_falls_back_to_top_candidate"]["body"]["suggestions"]
         self.assertEqual(s["confidence_source"], "musicbrainz")
         self.assertFalse(s["ai_status"]["contributed"])
+
+
+class AlbumAndFolderAiFallbackTests(unittest.TestCase):
+    """AI failures on these paths must leave the MusicBrainz/AcoustID match standing."""
+
+    def _suggest(self, path, reply=None, env=None):
+        def release(*_a, **_k):
+            return [{"mb_albumid": _REL, "mb_releasegroupid": _RG, "artist": "A", "album": "B", "year": "2012",
+                     "country": "US", "score": 90, "tracks": 1, "title": "B", "label": "", "format_summary": "",
+                     "mb_url": ""}]
+        album = types.SimpleNamespace(id=7, year=2012, album="B", albumartist="A", mb_releasegroupid="",
+                                      mb_albumartistid="",
+                                      items=lambda: [types.SimpleNamespace(track=1, title="t", path="")])
+        folder_evidence = {"audio_files": [], "folder_track_count": 1, "nested_audio_count": 0, "guessed_artist": "A",
+                           "guessed_artist_mbid": "", "guessed_album": "B", "guessed_year": "2012", "track_lines": [],
+                           "filenames": []}
+        source = mock.MagicMock()
+        source.is_dir.return_value = True
+        source.iterdir.return_value = []
+        opened = mock.Mock(side_effect=lambda *_a, **_k: _ai_reply(reply))
+        with mock.patch.dict(os.environ, env or {}), \
+                mock.patch.multiple(
+                    ai_service,
+                    _ai_api_key=mock.Mock(return_value="test-placeholder"),
+                    _album_preflight_folder=mock.Mock(return_value="/downloads/x"),
+                    _mb_release_search=release,
+                    _run_ai_release_preflight=mock.Mock(return_value={"ok": True, "matches": 1, "expected": 1}),
+                    _build_folder_evidence=mock.Mock(return_value=folder_evidence),
+                    _resolve_import_review_source_path=mock.Mock(return_value=(source, None)),
+                    _import_review_folder_signature=mock.Mock(return_value=""),
+                    _acoustid_multi_file=mock.Mock(return_value={}),
+                    _acoustid_lookup_cached_outcome=mock.Mock(
+                        return_value=pb.ProviderResult("acoustid", pb.ProviderOutcome.NO_RESULT, data=[])),
+                    _mb_release_search_by_folder_tracks=mock.Mock(return_value=[]),
+                    _discogs_release_fallback_candidate=mock.Mock(return_value={}),
+                ), \
+                mock.patch.object(recovery_carrier, "load_for_folder", return_value=None), \
+                mock.patch.object(pb, "opened", opened):
+            if path == "album":
+                return ai_service._ai_suggest_album_internal(album, [], existing_album_id=7), opened
+            return ai_service._ai_suggest_folder_internal("/downloads/x"), opened
+
+    def _assert_evidence_fallback(self, out):
+        self.assertTrue(out["ok"])
+        s = out["suggestion"]
+        self.assertFalse(s["ai_available"])
+        self.assertIn("(ValueError)", s["ai_unavailable_reason"])
+        self.assertIn("Matched using MusicBrainz and AcoustID", s["reason"])
+        self.assertNotEqual(s["confidence"], "high")
+        self.assertEqual(s["mb_albumid"], _REL)
+        self.assertEqual(s["mb_releasegroupid"], _RG)
+
+    def test_usable_ai_reply_is_used(self):
+        for path in ("album", "folder"):
+            with self.subTest(path):
+                out, _ = self._suggest(path, {"candidate_index": 0, "albumartist": "A", "confidence": "high",
+                                              "reason": "ai reason"})
+                self.assertTrue(out["suggestion"]["ai_available"])
+                self.assertEqual(out["suggestion"]["reason"], "ai reason")
+
+    def test_unusable_ai_endpoint_falls_back_to_the_evidence(self):
+        for path in ("album", "folder"):
+            with self.subTest(path):
+                out, opened = self._suggest(path, env={"AI_BASE_URL": "not-a-url"})
+                self._assert_evidence_fallback(out)
+                opened.assert_not_called()
+
+    def test_non_string_albumartist_falls_back_to_the_evidence(self):
+        for path in ("album", "folder"):
+            for bad in (123, ["A"], {"a": 1}, True, 1.5):
+                with self.subTest(path=path, albumartist=bad):
+                    out, opened = self._suggest(path, {"candidate_index": 0, "albumartist": bad, "confidence": "high",
+                                                       "reason": "ai reason"})
+                    self._assert_evidence_fallback(out)
+                    opened.assert_called_once()
 
 
 if __name__ == "__main__":
