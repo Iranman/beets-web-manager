@@ -22,6 +22,7 @@ from tests._module_time import module_time
 
 import app as app_module  # noqa: F401  -- loads the module family in order
 import backend.acquisition_service as acq
+import backend.item_ai_suggest_service as item_ai_suggest_service
 import backend.artwork_service as artwork_service
 import backend.musicbrainz_service as mbs
 import backend.playlist_service as ps
@@ -827,11 +828,12 @@ class MusicBrainzOutageRouteTests(_RouteCase):
             mb_releasegroupid="")
         acoustid = [{"mb_trackid": REL, "title": "Song", "artist": "Artist", "album": "Album",
                      "year": "2001", "score": 97, "source": "acoustid", "country": ""}]
-        with _patch_all(routes_library, lib=lib, _ai_api_key=mock.Mock(return_value=""),
-                        _item_ai_abs_path=mock.Mock(return_value="/music/a/song.flac"),
-                        _acoustid_lookup_cached_outcome=mock.Mock(
-                            return_value=_aid(pb.ProviderOutcome.CONFIRMED, acoustid)),
-                        _discogs_track_search=mock.Mock(return_value=[])):
+        with _patch_all(routes_library, lib=lib), \
+                _patch_all(item_ai_suggest_service, _ai_api_key=mock.Mock(return_value=""),
+                           _item_ai_abs_path=mock.Mock(return_value="/music/a/song.flac"),
+                           _acoustid_lookup_cached_outcome=mock.Mock(
+                               return_value=_aid(pb.ProviderOutcome.CONFIRMED, acoustid)),
+                           _discogs_track_search=mock.Mock(return_value=[])):
             res = self.client.post("/api/items/1/ai-suggest", json={})
         body = res.get_json()
         self.assertTrue(body["ok"], body)
@@ -851,7 +853,8 @@ class MusicBrainzOutageRouteTests(_RouteCase):
         for outcome, status in ((pb.ProviderOutcome.AUTHENTICATION_ERROR, "auth_failed"),
                                 (pb.ProviderOutcome.NOT_CONFIGURED, "not_configured"),
                                 (pb.ProviderOutcome.UNAVAILABLE, "lookup_failed")):
-            with self.subTest(status=status),                     _patch_all(routes_library, lib=lib, _ai_api_key=mock.Mock(return_value=""),
+            with self.subTest(status=status), _patch_all(routes_library, lib=lib), \
+                    _patch_all(item_ai_suggest_service, _ai_api_key=mock.Mock(return_value=""),
                                _item_ai_abs_path=mock.Mock(return_value="/music/a/song.flac"),
                                _acoustid_lookup_cached_outcome=mock.Mock(return_value=_aid(outcome)),
                                _discogs_track_search=mock.Mock(return_value=[])):
