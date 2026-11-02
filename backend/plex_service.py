@@ -127,8 +127,7 @@ def _plex_settings() -> Dict[str, str]:
     url = (os.environ.get("PLEX_URL") or cfg.get("plex_url") or cfg.get("url") or PLEX_URL or "").rstrip("/")
     token = os.environ.get("PLEX_TOKEN") or cfg.get("plex_token") or cfg.get("token") or PLEX_TOKEN or ""
     section = (
-        os.environ.get("PLEX_MUSIC_SECTION")
-        or os.environ.get("PLEX_SECTION_KEY")
+        config_layers.legacy_env_value("PLEX_MUSIC_SECTION")
         or cfg.get("plex_music_section")
         or cfg.get("section_key")
         or cfg.get("section")
@@ -144,8 +143,7 @@ def _plex_settings() -> Dict[str, str]:
         or ""
     )
     beets_root = (
-        os.environ.get("PLEX_BEETS_MUSIC_ROOT")
-        or os.environ.get("BEETS_MUSIC_ROOT")
+        config_layers.legacy_env_value("PLEX_BEETS_MUSIC_ROOT")
         or cfg.get("beets_music_root")
         or str(MUSIC_ROOT)
     )

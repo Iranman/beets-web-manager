@@ -10,17 +10,21 @@ configure their own data directories. The function is evaluated from source.
 
 import ast
 import os
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from backend import config_layers  # noqa: E402  (leaf module, does not initialize the app)
 
 
 def _load_acoustid_key():
     src = (ROOT / "routes_submissions.py").read_text(encoding="utf-8")
     node = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "_acoustid_key")
-    namespace = {"os": os}
+    namespace = {"os": os, "config_layers": config_layers}
     exec(compile(ast.Module(body=[node], type_ignores=[]), "routes_submissions.py", "exec"), namespace)
     return namespace["_acoustid_key"]
 

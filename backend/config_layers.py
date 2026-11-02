@@ -27,6 +27,11 @@ Settings page may save it:
 ``dead``
     Names the app used to expose but never reads. Never loaded; removed from
     the saved settings file by the one-time migration.
+``environment``
+    Advanced tunables and legacy aliases read only from the process
+    environment. Never saved or loaded from the settings file, but a value
+    found there is left alone, like an unknown key. The Settings API keeps
+    reporting them as ``unknown`` (``reported_layer``).
 
 This module is a leaf: it imports nothing from ``backend`` so the lowest
 layer (``backend.app_runtime``) can use it during environment boot.
@@ -53,6 +58,7 @@ LAYER_CONTAINER = "container"
 LAYER_APP = "app"
 LAYER_SECRET = "secret"
 LAYER_DEAD = "dead"
+LAYER_ENV_ONLY = "environment"
 LAYER_UNKNOWN = "unknown"
 
 # Restart semantics for a change to a variable.
@@ -194,6 +200,82 @@ SECRET_KEYS = frozenset({
     "QBITTORRENT_PASSWORD",
 })
 
+# Legacy name -> canonical name, for legacy_env_value. Order matters when a
+# canonical name has several: the first non-blank one wins.
+LEGACY_ENV_ALIASES: Dict[str, str] = {
+    "QBIT_URL": "QBITTORRENT_URL",
+    "QB_URL": "QBITTORRENT_URL",
+    "QBIT_USER": "QBITTORRENT_USERNAME",
+    "QB_USER": "QBITTORRENT_USERNAME",
+    "QBIT_PASS": "QBITTORRENT_PASSWORD",
+    "QB_PASS": "QBITTORRENT_PASSWORD",
+    "QBIT_CATEGORY": "QBITTORRENT_CATEGORY",
+    "QBIT_FILTER": "QBITTORRENT_FILTER",
+    "BEETS_WEB_TOKEN": "BEETS_WEB_AUTH_TOKEN",
+    "DISCOGS_USER_TOKEN": "DISCOGS_TOKEN",
+    "ACOUSTID_KEY": "ACOUSTID_API_KEY",
+    "PLEX_SECTION_KEY": "PLEX_MUSIC_SECTION",
+    "BEETS_MUSIC_ROOT": "PLEX_BEETS_MUSIC_ROOT",
+    "YTDLP_COOKIES_BROWSER": "YTDLP_COOKIES_FROM_BROWSER",
+}
+
+# Read from the process environment only; docs/CONFIGURATION.md lists each one
+# (tests/test_env_contract.py keeps code, this set and the docs in step).
+ENV_ONLY_KEYS = frozenset({
+    # Legacy aliases not already in another layer.
+    "QBIT_URL", "QB_URL", "QBIT_USER", "QB_USER", "QBIT_PASS", "QB_PASS",
+    "QBIT_CATEGORY", "QBIT_FILTER", "BEETS_WEB_TOKEN", "PLEX_SECTION_KEY",
+    "BEETS_MUSIC_ROOT", "YTDLP_COOKIES_BROWSER",
+    # Credentials and state files.
+    "BEETS_WEB_AUTH_TOKEN_FILE", "BEETS_WEB_INITIAL_PASSWORD_FILE", "BEETS_WEB_PASSWORD_FILE",
+    "BEETS_WEB_PERSISTED_PASSWORD_FILE", "BEETS_WEB_PERSISTED_USERNAME_FILE",
+    "BEETS_WEB_SECRET_KEY", "BEETS_WEB_SECRET_KEY_FILE", "BEETS_WEB_SETUP_STATE_FILE",
+    "LIDARR_API_KEY_FILE", "LIDARR_URL_FILE", "QBITTORRENT_PASSWORD_FILE", "QBITTORRENT_URL_FILE",
+    "QBITTORRENT_USERNAME_FILE", "PLEX_CLIENT_IDENTIFIER_FILE", "AI_BATCH_STATE_DIR",
+    "AI_PENDING_REVIEW_FILE", "BEETS_SCAN_STATE_FILE", "BEETS_SUBMISSION_DRAFTS",
+    "IMPORT_REVIEW_AUTO_IMPORTS_FILE", "METADATA_CACHE_DIR", "MUSIC_FORMAT_PREFS_FILE",
+    "MUSIC_FORMAT_REPLACEMENT_STATUS_FILE", "PLAYLIST_DOWNLOAD_ROOT", "PLAYLIST_JOB_STATE_DIR",
+    "RECOVERY_CARRIER_STATE_DIR", "UNMATCHED_DRAFT_DIR", "YTDLP_RUNTIME_BIN_DIR",
+    # Web server and engine.
+    "BEETS_ALLOWED_ROOTS", "BEETS_CONFIG_CONTENT_MAX_CHARS", "BEETS_ENABLE_LEGACY_LOCAL_SCAN",
+    "BEETS_WEBMANAGER_IMPORT_ROOTS", "BEETS_WEB_DURABLE_JOBS", "BEETS_WEB_MAX_CONTENT_LENGTH",
+    "BEETS_WEB_MAX_FORM_MEMORY_SIZE", "BEETS_WEB_MAX_FORM_PARTS", "BEETS_WEB_SESSION_HOURS",
+    "BEETS_WEB_URL", "PROVIDER_MAX_ATTEMPTS", "RECOVERY_ADVANCE_INTERVAL_SECONDS", "WEBCONTROL_THREADS",
+    # AI batches, imports, audio probes and metadata.
+    "ACOUSTID_MIN_INTERVAL_SECONDS", "AI_BATCH_AI_TIMEOUT", "AI_BATCH_MAX_AI_WORKERS",
+    "AI_BATCH_STALE_SECONDS", "AUDIO_DECODE_MD5_TIMEOUT", "AUDIO_FFMPEG_TIMEOUT",
+    "AUDIO_FFPROBE_FAST_TIMEOUT", "AUDIO_FFPROBE_TIMEOUT", "IMPORT_TARGET_PREVIEW_CACHE_TTL",
+    "MB_RELEASE_TRACKLIST_DISK_CACHE_TTL", "MUSIC_FORMAT_REPLACEMENT_BACKOFF_SECONDS",
+    "MUSIC_FORMAT_REPLACEMENT_MAX_ATTEMPTS",
+    # Playlists and Plex.
+    "PLAYLIST_CHANNEL_ARTIST_ALIASES", "PLAYLIST_DOWNLOAD_BATCH_SIZE", "PLAYLIST_DOWNLOAD_MAX_ROUNDS",
+    "PLAYLIST_MB_REPAIR_ARTIST_SCORE", "PLAYLIST_MB_REPAIR_MIN_MB_SCORE", "PLAYLIST_MB_REPAIR_TITLE_SCORE",
+    "PLAYLIST_PATH_ROOT_ALIASES", "PLAYLIST_SLSKD_BUSY_RETRIES", "PLAYLIST_SLSKD_TIMEOUT",
+    "PLAYLIST_WARM_INDEX", "PLEX_API_TIMEOUT", "PLEX_BEETS_MUSIC_ROOT", "PLEX_INDEX_CACHE_TTL",
+    "PLEX_INDEX_PAGE_SIZE", "PLEX_INDEX_TIMEOUT", "PLEX_MUSIC_ROOT", "PLEX_MUSIC_ROOTS",
+    "PLEX_PLAYLIST_CHUNK_SIZE", "PLEX_SCAN_TIMEOUT", "PLEX_SYNC_MAX_FALLBACK_SEARCHES",
+    "PLEX_SYNC_MAX_UNMATCHED_REPLACE", "PLEX_SYNC_MIN_MATCH_RATIO",
+    # Acquisition.
+    "ALLOW_TORRENT_SOURCE_MOVE", "QBITTORRENT_FILTER", "QBIT_PATH_ALIASES", "QBIT_REPAIR_ALLOWED_ROOTS",
+    "SLSKD_FALLBACK_METHODS", "SPOTIFLAC_INPUT_SOURCES", "SPOTIFLAC_PIP_PACKAGE", "SPOTIFLAC_TIMEOUT",
+    "TORRENT_SOURCE_ROOTS", "YTDLP_AUTH_SMOKE_TTL", "YTDLP_AUTH_SMOKE_URL", "YTDLP_BGUTIL_PIP_PACKAGE",
+    "YTDLP_COOKIES_FROM_BROWSER", "YTDLP_COOKIES_FROM_BROWSER_FALLBACK", "YTDLP_PIP_FALLBACK_PACKAGE",
+    "YTDLP_PIP_PACKAGE", "YTDLP_REQUIRE_YOUTUBE_AUTH", "YTDLP_YOUTUBE_CLIENTS",
+    "YTDLP_YOUTUBE_IMPERSONATE", "YTDLP_YOUTUBE_TEST_URL",
+})
+
+# Read by the code but not product configuration, so not documented as such:
+# the OS search path, a test-only setup bypass, and the setup path overrides
+# routes_setup._BLOCKED_ENV_NAMES hides from the Settings API (test isolation).
+INTERNAL_ENV_KEYS = frozenset({
+    "PATH",
+    "BEETS_SKIP_ENGINE_CHECK",
+    "SETUP_COMPLETE_FILE",
+    "SETUP_ENV_EXAMPLE_FILE",
+    "SETUP_ENV_FILE",
+    "SETUP_SETTINGS_FILE",
+})
+
 LOADABLE_LAYERS = frozenset({LAYER_APP, LAYER_SECRET})
 
 # Keys whose value is read once at import time by a module constant, so a
@@ -246,7 +328,16 @@ def classify(name: str) -> str:
         return LAYER_SECRET
     if key in APP_KEYS:
         return LAYER_APP
+    if key in ENV_ONLY_KEYS:
+        return LAYER_ENV_ONLY
     return LAYER_UNKNOWN
+
+
+def reported_layer(name: str) -> str:
+    """The layer the Settings API shows: env-only names stay ``unknown``, the
+    value that API has always returned for them."""
+    layer = classify(name)
+    return LAYER_UNKNOWN if layer == LAYER_ENV_ONLY else layer
 
 
 def apply_mode(name: str) -> str:
@@ -311,6 +402,27 @@ def _warn_once(message: str, *args) -> None:
         return
     _warned_aliases.add(key)
     log.warning(message, *args)
+
+
+def legacy_env_value(canonical: str, *, environ: Optional[Dict[str, str]] = None) -> str:
+    """Raw value of ``canonical``, else of its first non-blank legacy alias
+    (LEGACY_ENV_ALIASES), else "". Using an alias logs its name once, never
+    its value."""
+    env = os.environ if environ is None else environ
+    raw = env.get(canonical, "")
+    if raw.strip():
+        return raw
+    for alias, target in LEGACY_ENV_ALIASES.items():
+        if target == canonical and env.get(alias, "").strip():
+            _warn_once("%s is deprecated; set %s instead.", alias, canonical)
+            return env[alias]
+    return raw
+
+
+def warn_legacy_env_aliases(environ: Optional[Dict[str, str]] = None) -> None:
+    """Boot check, so an alias is reported even if its reader runs late."""
+    for canonical in dict.fromkeys(LEGACY_ENV_ALIASES.values()):
+        legacy_env_value(canonical, environ=environ)
 
 
 def container_path(canonical: str, default: str, *, environ: Optional[Dict[str, str]] = None) -> str:

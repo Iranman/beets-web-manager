@@ -1138,7 +1138,7 @@ _LAYER_NOTES = {
 def _annotate_layer(key: str, entry: Dict[str, Any]) -> Dict[str, Any]:
     """Attach the configuration layer and how a change applies. Only
     application-layer keys stay editable (backend.config_layers)."""
-    layer = config_layers.classify(key)
+    layer = config_layers.reported_layer(key)
     if layer in (config_layers.LAYER_APP, config_layers.LAYER_SECRET):
         apply = config_layers.APPLY_RESTART if (entry.get("restart_required") or config_layers.apply_mode(key) == config_layers.APPLY_RESTART) else config_layers.APPLY_LIVE
     elif layer == config_layers.LAYER_UNKNOWN:
@@ -1364,7 +1364,7 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
         # host-side Compose values, Compose-pinned deployment values,
         # container paths and dead keys can never take effect from here.
         if not config_layers.is_saveable(key):
-            layer = config_layers.classify(key)
+            layer = config_layers.reported_layer(key)
             raise ValueError(
                 f"{key} cannot be changed from this application -- it is a {layer} setting "
                 "(set it in Docker Compose and recreate the container)"
@@ -1676,7 +1676,7 @@ def _remote_failure_shape(
         "plugin_failures": [],
         "replaygain_backend": "",
         "replaygain_command": "",
-        "discogs_token_configured": bool(os.environ.get("DISCOGS_TOKEN") or os.environ.get("DISCOGS_USER_TOKEN")),
+        "discogs_token_configured": bool(config_layers.legacy_env_value("DISCOGS_TOKEN")),
         "listenbrainz_token_configured": bool(os.environ.get("LISTENBRAINZ_TOKEN")),
         "fpcalc_available": False,
         "fpcalc_path": "",
@@ -1950,7 +1950,7 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
         "plugin_failures": [_redact_diagnostic_text(str(line)) for line in (plugin_failures or [])][:12],
         "replaygain_backend": replaygain_backend,
         "replaygain_command": replaygain_command,
-        "discogs_token_configured": bool(os.environ.get("DISCOGS_TOKEN") or os.environ.get("DISCOGS_USER_TOKEN")),
+        "discogs_token_configured": bool(config_layers.legacy_env_value("DISCOGS_TOKEN")),
         "listenbrainz_token_configured": bool(os.environ.get("LISTENBRAINZ_TOKEN")),
         "fpcalc_available": fpcalc_available,
         "fpcalc_path": "",
@@ -2746,7 +2746,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         first_run_req = _first_run_setup_required()
     except ImportError:
         token_configured = _fallback_auth_secret_usable(
-            os.environ.get("BEETS_WEB_AUTH_TOKEN", "") or os.environ.get("BEETS_WEB_TOKEN", "")
+            config_layers.legacy_env_value("BEETS_WEB_AUTH_TOKEN")
         )
         password_configured = _fallback_auth_secret_usable(os.environ.get("BEETS_WEB_PASSWORD", ""))
         token_auto_generated = token_configured and _FALLBACK_AUTH_TOKEN_FILE.exists()

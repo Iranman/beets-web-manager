@@ -2,6 +2,7 @@
 """
 
 from __future__ import annotations
+from backend import config_layers
 from backend.json_state import atomic_write_json, load_json_object
 
 import backend.provider_boundary as provider_boundary
@@ -46,8 +47,7 @@ def _beets_config_discogs_token() -> str:
 
 
 DISCOGS_TOKEN = (
-    os.environ.get("DISCOGS_TOKEN", "").strip()
-    or os.environ.get("DISCOGS_USER_TOKEN", "").strip()
+    config_layers.legacy_env_value("DISCOGS_TOKEN").strip()
     or _beets_config_discogs_token()
 )
 

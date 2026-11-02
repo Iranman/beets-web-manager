@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64, hashlib, hmac, os, re, secrets, string, threading, time
 import urllib.error, urllib.parse, urllib.request
+from backend import config_layers
 from backend.security import bounded_rate_key_store_sweep, direct_peer_is_trusted
 from backend.web_manager_config_store import WebManagerConfigStore, WebManagerConfigStoreError
 from pathlib import Path
@@ -138,7 +139,7 @@ def _first_config_secret(*names: str) -> str:
 
 
 def _security_auth_token() -> str:
-    return _first_config_secret("BEETS_WEB_AUTH_TOKEN", "BEETS_WEB_TOKEN")
+    return config_layers.legacy_env_value("BEETS_WEB_AUTH_TOKEN").strip()
 
 
 _GENERATED_AUTH_TOKEN_FILE = Path(
