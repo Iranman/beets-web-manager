@@ -4712,11 +4712,16 @@ def _artist_folder_repair_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]
 
 def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
                                 dry_run: bool, log: List[str],
-                                use_musicbrainz: bool = True) -> Dict[str, int]:
+                                use_musicbrainz: bool = True) -> Dict[str, Any]:
+    def refused(error: Any) -> Dict[str, Any]:
+        """Nothing moved, so every count is zero; ok=False fails the merge job."""
+        return {"ok": False, "error": _s(error), "groups": 0, "folders": 0, "files": 0,
+                "db_paths": 0, "db_artists": 0, "db_tags": 0}
+
     root_path, root_error = _artist_folder_repair_root(root)
     if root_path is None:
         log.append(f"Refusing to operate: {root_error}")
-        return {"groups": 0, "folders": 0, "files": 0, "db_paths": 0, "db_artists": 0, "db_tags": 0}
+        return refused(root_error)
     wanted = set(keys or [])
     groups = _scan_artist_folder_groups(
         str(root_path),
@@ -4821,22 +4826,22 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
     except (BeetsUnavailableError, BeetsError) as ex:
         log.append("Engine unavailable; artist folder merge was not performed.")
         _app_logger.error("Artist folder merge: engine unavailable: %s", ex)
-        return summary
+        return refused("Engine unavailable; artist folder merge was not performed.")
     except Exception as ex:
         log.append("Engine communication failed; artist folder merge was not performed.")
         _app_logger.error("Artist folder merge: unexpected engine communication failure: %s", ex)
-        return summary
+        return refused("Engine communication failed; artist folder merge was not performed.")
 
     if not plan_res.get("ok"):
         log.append(f"Refusing to operate: {plan_res.get('error')}")
-        return summary
+        return refused(plan_res.get("error"))
 
     op_id = plan_res["operation_id"]
     apply_res = _apply_artist_folder_reconcile_resilient(op_id, log, log_prefix="Artist folder merge")
 
     if not apply_res.get("ok"):
         log.append(f"Engine artist folder merge failed: {apply_res.get('error')}")
-        return summary
+        return refused(apply_res.get("error"))
 
     _invalidate_lib_cache()
     log.append(f"  [merge] Delegated artist folder merge to engine (op_id={op_id})")

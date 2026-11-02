@@ -1110,6 +1110,11 @@ def plan_artist_folder_reconcile(
     ad = adapter or beets_adapter
     st = _get_store(store)
     payload = payload_or_root if isinstance(payload_or_root, dict) else kwargs
+    # Folder stamping and merging went with the old engine. Planning them here
+    # would record an empty transaction that Completes having moved nothing.
+    if payload.get("mode") or payload.get("candidates"):
+        return {"ok": False, "code": "artist_folder_mode_unsupported",
+                "error": "Artist folder stamping and merging are not available; no folders were changed."}
 
     artist_name = payload.get("artist") or payload.get("albumartist") or ""
     canonical_name = payload.get("canonical_name") or payload.get("target_artist") or artist_name
@@ -1180,10 +1185,12 @@ def apply_artist_folder_reconcile(
     meta = tx.get("metadata", {})
     canonical_name = meta.get("canonical_name")
     album_ids = meta.get("album_ids", [])
+    # An empty plan (e.g. a stamping op saved by an older version) would otherwise Complete having done nothing.
+    if not (album_ids and canonical_name):
+        return {"ok": False, "code": "artist_folder_plan_empty", "operation_id": operation_id, "mutated": False,
+                "error": "This artist folder operation has an empty plan; nothing was changed."}
 
     def write() -> Optional[Dict[str, Any]]:
-        if not (album_ids and canonical_name):
-            return None
         res = _engine_ok(_modify(ad, {"albumartist": canonical_name}, album_ids=[int(x) for x in album_ids],
                                  write=True, move=True))
         kept = (res or {}).get("preserved_album_ids") if isinstance(res, dict) else None

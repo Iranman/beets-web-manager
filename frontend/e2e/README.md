@@ -56,4 +56,4 @@ Not covered by the audit hook. The namespace still stops the network ones leavin
 
 - `harness/serve.py`: boots the app with isolated paths and network stubs. `--no-frontend` serves it as if the build were missing.
 - `harness/build_fixture.py`: builds the synthetic library and downloads folders.
-- `specs/`: one file per feature. Specs share one server per run and execute in file order, so the Clean All flow runs before anything is imported. `11-known-defects.spec.ts` holds expected failures that pin open product bugs.
+- `specs/`: one file per feature. Specs share one server per run and execute in file order, so the Clean All flow runs before anything is imported. `11-known-defects.spec.ts` pins how the app behaves around recorded gaps, such as Clean All skipping artist folder stamping.

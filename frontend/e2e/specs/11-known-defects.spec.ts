@@ -1,29 +1,37 @@
 import {
-  cleanAllPanel, expect, holdCleanAll, libraryAlbums, releaseCleanAll, startFreshCleanAll, test,
+  cleanAllPanel, expect, fileHashes, holdCleanAll, libraryAlbums, releaseCleanAll, root, startFreshCleanAll, test,
 } from '../fixtures';
 
 test.afterAll(releaseCleanAll);
 
-// Reproduces a real defect. When it is fixed the signature check below fails: remove it and test.fail then.
-// backend/import_reconciliation_service.py passes apply_artist_folder_reconcile keyword arguments it
-// does not accept. The TypeError is logged as a lost response, then a never-applied transaction is polled.
-test('Clean All finishes when an imported artist folder needs its MBID stamp', async ({ page }) => {
-  test.setTimeout(150_000);
-  // Needs the album 03-review imported. Failures up to test.fail() below are real failures.
+// Stamping and scan merge are a recorded gap (docs/TECHNICAL_DEBT.md), not a failure: Clean All finishes without them.
+test('Clean All finishes and skips Artist Folder Merge, with the reason, when a folder needs its MBID stamp', async ({ page }) => {
+  test.setTimeout(120_000);
+  // Needs the album 03-review imported: the skip only happens when a folder needs stamping.
   expect((await libraryAlbums(page)).map((album) => album.album)).toContain('Review Album');
+  const filesBefore = fileHashes(root('music'));
   holdCleanAll();
   await page.goto('/jobs');
-  await startFreshCleanAll(page);
+  const jobId = await startFreshCleanAll(page);
   releaseCleanAll();
 
-  // The hang below only counts as this defect if the job log shows this defect's signature.
-  const { jobs } = (await (await page.request.get('/api/jobs')).json()) as { jobs: { job_id: string; label: string; status: string }[] };
-  const job = jobs.find((row) => row.label === 'Clean All' && row.status === 'running');
-  expect(job, 'running Clean All job').toBeTruthy();
-  await expect
-    .poll(async () => ((await (await page.request.get(`/api/jobs/${job?.job_id}`)).json()) as { log: string[] }).log.join('\n'), { timeout: 60_000 })
-    .toContain('Apply response was lost (unexpected error)');
+  const panel = cleanAllPanel(page);
+  await expect(panel.getByRole('button', { name: 'Stop' })).toHaveCount(0, { timeout: 75_000 });
+  await expect(panel.getByRole('button', { name: 'Resume Clean All' })).toHaveCount(0);
+  await expect(panel).toContainText(/Complete/);
+  await expect(panel).toContainText('Artist Folder Merge skipped: Artist folder stamping and merging are not available');
 
-  test.fail();
-  await expect(cleanAllPanel(page).getByRole('button', { name: 'Stop' })).toHaveCount(0, { timeout: 60_000 });
+  // Out of band: the job record, not what the page rendered.
+  const job = (await (await page.request.get(`/api/jobs/${jobId}`)).json()) as {
+    status: string;
+    log: string[];
+    state: { maintenance_status: string; maintenance_tasks: { id: string; status: string; detail: string }[] };
+  };
+  expect(job.status).toBe('success');
+  expect(job.state.maintenance_status).toBe('complete');
+  const task = job.state.maintenance_tasks.find((row) => row.id === 'artist_folder_merge');
+  expect(task?.status).toBe('skipped');
+  expect(task?.detail).toContain('not available');
+  expect(job.log.join('\n')).not.toContain('Delegated');
+  expect(fileHashes(root('music'))).toEqual(filesBefore);
 });
