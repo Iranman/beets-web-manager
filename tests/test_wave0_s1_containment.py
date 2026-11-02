@@ -447,6 +447,7 @@ class RouteTests(_Env):
 class AlbumDeduplicateTests(_Env):
     def _run(self, items, proof, confirm=False):
         import routes_library
+        import backend.dedup_service as dedup_service
         self.result = None
 
         def run_now(fn, label=None, metadata=None):
@@ -462,9 +463,9 @@ class AlbumDeduplicateTests(_Env):
                                   return_value=items), \
                 mock.patch.object(routes_library.composite_workflows, "relocate_album", return_value={"ok": True}), \
                 mock.patch.object(routes_library, "_strip_year_from_album_name"), \
-                mock.patch.object(routes_library, "same_recording_proof", side_effect=proof), \
-                mock.patch.object(routes_library._duplicate_cleanup, "plan_reviewed_cleanup", plan), \
-                mock.patch.object(routes_library._duplicate_cleanup, "apply_reviewed_cleanup", apply_), \
+                mock.patch.object(dedup_service, "same_recording_proof", side_effect=proof), \
+                mock.patch.object(dedup_service._duplicate_cleanup, "plan_reviewed_cleanup", plan), \
+                mock.patch.object(dedup_service._duplicate_cleanup, "apply_reviewed_cleanup", apply_), \
                 mock.patch.object(routes_library.jobs, "start_python", side_effect=run_now):
             self.app_client().post("/api/albums/3/deduplicate", json={"confirm": confirm})
         return plan, apply_

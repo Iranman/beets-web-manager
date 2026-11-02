@@ -2,6 +2,7 @@
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json
 
 import copy, hashlib, json, math, os, re, sqlite3, threading, time
 import backend.job_contract as job_contract
@@ -3807,10 +3808,7 @@ def _library_import_all_read_last() -> Dict[str, Any]:
 def _library_import_all_write_last(data: Dict[str, Any]) -> None:
     try:
         with _library_import_all_last_lock:
-            _LIBRARY_IMPORT_ALL_LAST_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _LIBRARY_IMPORT_ALL_LAST_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            tmp.replace(_LIBRARY_IMPORT_ALL_LAST_FILE)
+            atomic_write_json(_LIBRARY_IMPORT_ALL_LAST_FILE, data, indent=2)
     except Exception:
         pass
 

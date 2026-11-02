@@ -11,7 +11,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from flask import jsonify, request, send_file, redirect
-from backend.matching_contract import AiState
 from backend.transaction_engine import metadata_diff
 from job_engine import DuplicateJobError, TERMINAL_STATUSES
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_mb_release_id
@@ -20,28 +19,28 @@ import backend.composite_workflows as composite_workflows
 import backend.missing_mb_batch as missing_mb_batch
 import backend.recording_review as recording_review
 from backend.identity_contract import verify_album_identity as _verify_album_identity
-from backend.acoustid_service import _acoustid_fingerprint_match, _acoustid_lookup_cached_outcome, acoustid_failure_status, _normalize_albumartist, same_recording_proof
-import backend.duplicate_cleanup as _duplicate_cleanup
+from backend.acoustid_service import _acoustid_fingerprint_match, _normalize_albumartist
 from backend.ai_batch_state_service import _get_ai_batch_store
-from backend.ai_evidence_service import _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
-from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _classify_openai_error, _compact_track_ai_candidate, _track_ai_evidence_packet, find_match_slot
+from backend.ai_evidence_service import _ai_suggest_genre
+from backend.item_ai_suggest_service import suggest_for_item, suggestion_failure
+from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _compact_track_ai_candidate, find_match_slot
 from backend.app_runtime import ARTIST_IMAGE_CACHE_DIR, AUDIO_EXT, DOWNLOADS_ROOT, EDITABLE_FIELDS, METADATA_CACHE_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, UNMATCHED_DRAFT_ROOT, _ANSI_RE, _DISC_CACHE_TTL, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _app_logger, _path_is_under, _redact_security_text, _s, _safe_path_component, jobs, transactions
 from backend.artwork_service import AlbumArtRequestError, _ALBUM_ART_UPLOAD_MAX_BYTES, _RELEASE_ART_MBID_RE, _album_art_cache, _album_art_cache_lock, _album_art_expected_release_group, _album_art_repair_entry, _album_art_status, _album_dir_for_art, _art_repair_attach_last_run, _art_repair_build_report, _art_repair_save_last, _artist_image_cache_url, _artist_local_art_url, _cache_artist_image, _fetch_album_art, _fetch_artist_image, _repair_album_art, _replace_album_art_bytes, _replace_album_art_from_url, _resolve_album_art_request_album, _save_art_to_disk, _usable_album_art_file, _validate_album_art_bytes
 from backend.auth_service import _sanitize_confirmation_reason
 from backend.cleanup_service import album_cleanup_apply_response, _cleanup_artist_alias_source_dirs, _cleanup_template_token_files, _cleanup_template_tokens_for_album
-from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_duplicate_resolver_plan
+from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_dedup_quarantine_proven, _album_duplicate_resolver_plan
 from backend.import_reconciliation_service import _run_artist_folder_reconcile_for_alias_merge
 from backend.import_review_service import _metadata_transaction_pending_fields, _redact_unmatched_draft_tracks
 from backend.import_service import _coerce_library_import_all_album, _library_import_all_read_last, _library_import_all_record, _library_import_all_write_last, _start_reimport_disk_job_internal, start_reimport_disk
 from backend.job_service import _wait_for_child_job
-from backend.library_service import AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _apply_folder_name_placeholders, _apply_folder_mbid_names, _rollback_folder_placeholder_apply, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
+from backend.library_service import album_tracks_with_disk_files, library_mbid_status_payload, AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _apply_folder_name_placeholders, _apply_folder_mbid_names, _rollback_folder_placeholder_apply, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _SCAN_STATE, _do_scan_job
-from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_mb_completeness, _album_mb_match_plan, _disc_cache, _disc_cache_discogs, _disc_cache_discogs_lock, _disc_cache_lock, _invalidate_lib_cache, _load_album_mb_suggestions, _match_tracks_from_mb, _remove_album_track_items
-from backend.musicbrainz_service import _discogs_artist_discography, _discogs_track_search, _ensure_release_group_art, _mb_release_group_for_release
+from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_mb_match_plan, _disc_cache, _disc_cache_discogs, _disc_cache_discogs_lock, _disc_cache_lock, _invalidate_lib_cache, _load_album_mb_suggestions, _match_tracks_from_mb, _remove_album_track_items
+from backend.musicbrainz_service import _discogs_artist_discography, _ensure_release_group_art, _mb_release_group_for_release
 from backend.pending_review_store import _is_music_root_path, _queue_folder_for_manual_review
 from backend.plex_service import _trigger_plex_refresh
 import backend.item_replacement as _item_replacement
-from backend.serializers import _format_duration, _leaked_db_paths_summary, _resolve_import_review_source_path, json_route_result, query_int_arg
+from backend.serializers import beets_auth_failed_response, beets_engine_error_response, beets_offline_response, _leaked_db_paths_summary, _resolve_import_review_source_path, json_route_result, query_int_arg
 from backend.transaction_service import _item_metadata_transaction_payload, _start_metadata_apply_transaction
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 from helpers_mb import _fetch_mb_release_candidate
@@ -49,6 +48,14 @@ from backend.library_service import _album_source_folder, _resolve_album_release
 from backend.auth_service import _transaction_user_label
 
 # ── ARCH-001 extracted code ──
+
+
+def _start_job(fn, *, response_extra: Optional[Dict[str, Any]] = None, **start_kwargs):
+    """Start ``fn`` as a job and return the standard ``{"ok", "job_id"}`` body.
+
+    DuplicateJobError still propagates to the app-wide 409 handler."""
+    job = jobs.start_python(fn, **start_kwargs)
+    return jsonify({"ok": True, "job_id": job.job_id, **(response_extra or {})})
 
 
 @app.get("/api/stats")
@@ -138,11 +145,7 @@ def items():
         return jsonify({"count": len(rows), "items": rows})
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
         _app_logger.warning("Beets items query unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets library unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response()
 
 
 @app.get("/api/items/<int:iid>")
@@ -151,11 +154,7 @@ def get_item(iid):
         item = lib.get_item(iid)
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
         _app_logger.warning("Beets get_item unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets library unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response()
     if not item:
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True, "item": item_dict_full(item)})
@@ -169,11 +168,7 @@ def get_artists_list():
         return jsonify({"ok": True, "count": len(artists), "artists": artists})
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
         _app_logger.warning("Beets get_artists unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets library unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response()
 
 
 @app.get("/api/search")
@@ -194,11 +189,7 @@ def api_search():
         })
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
         _app_logger.warning("Beets search unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets library unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response()
 
 
 @app.get("/api/items/<int:iid>/file")
@@ -212,11 +203,7 @@ def item_audio_file(iid: int):
         return jsonify({"ok": False, "error": "Item audio file not found"}), 404
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError) as ex:
         _app_logger.warning("Beets audio stream connection error for item %d: %s", iid, ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets audio streaming unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response("Beets audio streaming unavailable")
     except Exception as ex:
         _app_logger.warning("Beets audio stream error for item %d: %s", iid, ex)
         return jsonify({"ok": False, "error": "Audio stream failed"}), 500
@@ -376,8 +363,7 @@ def retag_item(iid):
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
 
-    job = jobs.start_python(_do, label=f"Retag+Move: item {iid}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Retag+Move: item {iid}")
 
 
 @app.post("/api/items/<int:iid>/mbsubmit")
@@ -395,8 +381,7 @@ def item_mbsubmit(iid: int):
             if line.strip():
                 log.append(line)
         return {"output": output}
-    job = jobs.start_python(_do, label=f"mbsubmit: item {iid}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"mbsubmit: item {iid}")
 
 
 @app.post("/api/albums/<int:aid>/mbsubmit")
@@ -410,8 +395,7 @@ def album_mbsubmit(aid: int):
             if line.strip():
                 log.append(line)
         return {"output": output}
-    job = jobs.start_python(_do, label=f"mbsubmit: album {aid}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"mbsubmit: album {aid}")
 
 
 @app.post("/api/albums/<int:aid>/add-mbids")
@@ -452,8 +436,7 @@ def album_add_mbids(aid: int):
         _trigger_plex_refresh(log)
         log.append(f"MBIDs applied and album moved to MBID-stamped path.")
 
-    job = jobs.start_python(_do, label=f"Add MBIDs: album {aid}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Add MBIDs: album {aid}")
 
 
 @app.post("/api/items/<int:iid>/attach-recording")
@@ -871,374 +854,11 @@ def ai_suggest(iid):
     item = lib.get_item(iid)
     if not item:
         return jsonify({"ok": False, "error": "Not found"})
-    # AI is optional: gathering AcoustID/MusicBrainz/Discogs candidates below
-    # runs unconditionally, so a missing/invalid key still yields a match.
-    api_key = _ai_api_key()
-    ai_available = bool(api_key)
-    ai_configured = ai_available  # preserved for later boundary; ai_available itself may be mutated below
-
-    item_path = _item_ai_abs_path(item)
-    filename = Path(item_path or _s(item.path)).name
-    raw_year  = str(item.year or "")
-    # Normalise year: "20120923" → "2012", "2012-09-23" → "2012"
-    clean_year = re.match(r'^((?:19|20)\d{2})', raw_year)
-    clean_year = clean_year.group(1) if clean_year else raw_year
-
-    current = {
-        "title":       item.title       or "",
-        "artist":      item.artist      or "",
-        "album":       item.album       or "",
-        "albumartist": item.albumartist or "",
-        "year":        clean_year,
-        "genre":       _s(getattr(item, "genre", "")) or "",
-        "track":       item.track       or "",
-        "label":       _s(getattr(item, "label", "")) or "",
-        "mb_trackid":  _s(getattr(item, "mb_trackid", "")) or "",
-        "mb_albumid":  _s(getattr(item, "mb_albumid", "")) or "",
-        "mb_releasegroupid": _s(getattr(item, "mb_releasegroupid", "")) or "",
-        "filename": filename,
-        "source_path": item_path,
-        "duration_seconds": float(getattr(item, "length", 0) or 0),
-        "duration": _format_duration(float(getattr(item, "length", 0) or 0)),
-    }
-
-    # ── Pre-process: extract artist/title from "Artist - Title" filenames ──────
-    # When the title tag contains "Artist - Title" or the filename does, split it.
-    stem = Path(filename).stem
-    # Strip leading track numbers: "01 - Title" → "Title"
-    stem_clean = re.sub(r'^\d+\s*[-_.]\s*', '', stem).strip()
-
-    search_title  = current["title"] or stem_clean
-    search_artist = current["artist"] or current["albumartist"] or ""
-
-    # If title looks like "Artist - Title" (and artist seems wrong/missing), split it
-    _SPLIT_SCORE_THRESH = 0.4
-    if " - " in search_title:
-        parts = search_title.split(" - ", 1)
-        candidate_artist, candidate_title = parts[0].strip(), parts[1].strip()
-        # Use the split if the existing artist looks like station/label noise or is absent
-        _junk_patterns = re.compile(
-            r'radio|station|channel|network|records|music|media|official|vevo|'
-            r'entertainment|group|label|^various',
-            re.I)
-        if (not search_artist or _junk_patterns.search(search_artist)
-                or len(search_artist) > 30):
-            search_title  = candidate_title
-            search_artist = candidate_artist
-
-    _mb_t, _mb_a = _clean_for_mb(search_title, search_artist)
-
-    # ── 1. AcoustID fingerprint (most reliable) ───────────────────────────────
-    # #252 NF-2: not asked (no key, rejected key, outage) is not "no match".
-    acoustid_lookup = _acoustid_lookup_cached_outcome(item_path) if item_path else None
-    acoustid_status = acoustid_failure_status(acoustid_lookup) if acoustid_lookup else ""
-    acoustid_cands = list(acoustid_lookup.data or []) if acoustid_lookup else []
-
-    # ── 2. MusicBrainz text search ────────────────────────────────────────────
-    # A MusicBrainz outage keeps the AcoustID evidence; the MB part is
-    # reported unavailable, never as "no candidates".
-    musicbrainz_unavailable = False
+    body = suggest_for_item(item, iid)
     try:
-        mb_text_cands = _mb_recording_search(_mb_t, _mb_a, limit=6)
-        # Broaden if nothing found
-        if not mb_text_cands and _mb_a:
-            mb_text_cands = _mb_recording_search(_mb_t, "", limit=6)
-    except provider_boundary.ProviderError:
-        musicbrainz_unavailable, mb_text_cands = True, []
-
-    # ── 3. Discogs (supplemental genre / label info) ──────────────────────────
-    discogs_cands = _discogs_track_search(_mb_t, _mb_a, limit=3)
-
-    # Merge AcoustID + MB, deduplicate by mb_trackid (candidate generation
-    # only -- the canonical evaluator decides, with the full hit set).
-    acoustid_hits = None if acoustid_status else recording_review.acoustid_hits_for(item_path, acoustid_cands)
-    mb_candidates = recording_review.merge_recording_candidates(
-        acoustid_cands, mb_text_cands, item_path=item_path,
-        score_fn=lambda c: _score_track_ai_candidate(current, _mb_t, _mb_a, filename, c),
-    )
-    recording_review.enrich_and_index(
-        mb_candidates,
-        lambda c, hits: _enrich_track_ai_candidate(current, c, item_id=iid, acoustid_hits=hits),
-        acoustid_hits,
-        swallow_errors=True,
-    )
-
-    mb_section = ""
-    if mb_candidates:
-        lines = ["MusicBrainz/AcoustID candidates "
-                 "(idx / match / score / title / artist / album / year / country / mb_trackid / source):"]
-        for c in mb_candidates:
-            ms = c.get("_match_score", {})
-            lines.append(
-                f"  [{c.get('candidate_index', -1)}] match={ms.get('total', 0):.2f} "
-                f"mb={int(c.get('score') or 0):3d} {c['title']} — {c['artist']} / "
-                f"{c['album']} ({c['year']}) {c.get('country','')} "
-                f"[{c['mb_trackid']}] via {c.get('source','mb')}")
-        mb_section = "\n\n" + "\n".join(lines)
-
-    discogs_section = ""
-    if discogs_cands:
-        dlines = ["Discogs candidates (artist / album / year / genre / format):"]
-        for d in discogs_cands:
-            dlines.append(f"  {d['artist']} — {d['album']} ({d['year']}) "
-                          f"[{d['genre']}] {d['format']}")
-        discogs_section = "\n\n" + "\n".join(dlines)
-
-    prompt = (
-        "You are a music metadata expert. A file was imported with incorrect or incomplete tags.\n\n"
-        f"Filename: {filename}\n"
-        "Current (possibly wrong) tags:\n" +
-        "\n".join(f"  {k}: {v or '(empty)'}" for k, v in current.items()) +
-        mb_section + discogs_section +
-        "\n\n"
-        "RULES — apply strictly:\n"
-        "1. If AcoustID fingerprint candidates are available, prefer them over text-only matches and only use MB recordings from that candidate list.\n"
-        "   Do not silently override strong contradictory fingerprint evidence; return low confidence and explain the conflict.\n"
-        "2. If no AcoustID candidates are found, fall back to MusicBrainz text search results.\n"
-        "   If choosing a MusicBrainz candidate, copy its mb_trackid exactly; do not invent a recording ID.\n"
-        "3. FILENAME is the next most reliable clue. Filenames often follow 'Artist - Title' or "
-        "'NN - Artist - Title' patterns — extract the correct title and artist from it.\n"
-        "4. YEAR: output only a 4-digit year (e.g. 2012, not 20120923 or 2012-09-23).\n"
-        "5. ARTIST: use the correct performing artist, not a radio station, label, or 'Various Artists'.\n"
-        "6. ALBUM: if the file belongs to a known album, fill it in. Otherwise leave empty.\n"
-        "7. RELEASE PREFERENCE: prefer US releases (country=US). If no equally strong US match exists, use Worldwide (country=XW) before other countries.\n"
-        "8. FORMAT: prefer CD or Digital Media recordings. Avoid vinyl if a digital version exists.\n"
-        "9. CONFIDENCE — set one of:\n"
-        "   high:   certain of artist, title, year, and album\n"
-        "   medium: reasonably sure but one field is uncertain\n"
-        "   low:    guessing based on limited info\n\n"
-        "Return ONLY a valid JSON object with these keys "
-        "(include only what you are confident about):\n"
-        "  title — clean track title only (no artist prefix)\n"
-        "  artist — performing artist using feat. notation: e.g. 'Young Money feat. Lil Wayne & Curren$y'\n"
-        "  album, albumartist, year (4-digit integer), genre, track (integer), tracktotal (integer),\n"
-        "  disc (integer), disctotal (integer), label,\n"
-        "  mb_trackid (recording UUID), mb_albumid (release UUID), mb_artistid (artist UUID),\n"
-        "  confidence (high|medium|low), reason (one sentence)\n\n"
-        'Example: {"title":"Poppin\' Them Bottles","artist":"Young Money feat. Lil Wayne, Curren$y & Mack Maine",'
-        '"album":"Dedication 2","albumartist":"Lil Wayne","year":2006,"genre":"Hip-Hop","track":4,'
-        '"mb_trackid":"b5316c12-b617-4086-a107-312eccfd12e7",'
-        '"confidence":"high","reason":"AcoustID fingerprint matches Lil Wayne Dedication 2 mixtape"}'
-    )
-    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o")
-    payload = json.dumps({
-        "model": _ai_model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "response_format": {"type": "json_object"},
-    }).encode()
-    ai_unavailable_reason = "" if ai_available else "OPENAI_API_KEY not configured"
-    suggestions: Optional[Dict[str, Any]] = None
-    if ai_available:
-        req = urllib.request.Request(
-            _ai_endpoint,
-            data=payload,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        )
-        try:
-            with provider_boundary.opened("ai", req, timeout=30) as resp:
-                data = json.loads(resp.read())
-            suggestions = json.loads(data["choices"][0]["message"]["content"])
-        except Exception as exc:
-            ai_available = False
-            ai_unavailable_reason = _classify_openai_error(exc)
-
-    # Captured before the fallback below overwrites `suggestions` with a
-    # mechanically-derived (non-AI) guess, so the matching contract never
-    # claims AI contributed when it did not actually respond.
-    ai_contributed = suggestions is not None
-
-    if suggestions is None:
-        # AI unavailable/failed -- fall back to the top-ranked AcoustID/
-        # MusicBrainz candidate (already gathered above) instead of
-        # returning ok=False.
-        if mb_candidates:
-            top = mb_candidates[0]
-            top_score = float((top.get("_match_score") or {}).get("total", 0) or 0)
-            suggestions = {
-                "title": top.get("title", "") or current["title"],
-                "artist": top.get("artist", "") or current["artist"],
-                "album": top.get("album", "") or current["album"],
-                "year": str(top.get("year") or current["year"] or ""),
-                "genre": top.get("genre", "") or current["genre"],
-                "label": top.get("label", "") or current["label"],
-                "mb_trackid": top.get("mb_trackid", ""),
-                "mb_albumid": top.get("mb_albumid", ""),
-                "confidence": "medium" if top_score >= 0.75 else "low",
-                "reason": f"Matched using MusicBrainz and AcoustID (AI unavailable: {ai_unavailable_reason}).",
-            }
-        else:
-            suggestions = {
-                "confidence": "low",
-                "reason": f"No MusicBrainz/AcoustID candidates found, and AI is unavailable ({ai_unavailable_reason}).",
-            }
-
-    try:
-        # Coerce numeric fields
-        for f in ("year", "track", "tracktotal", "disc", "disctotal"):
-            if f in suggestions:
-                suggestions[f] = str(suggestions[f])
-        # Clamp year to 4 digits
-        if suggestions.get("year"):
-            _ym = re.match(r'^((?:19|20)\d{2})', str(suggestions["year"]))
-            if _ym:
-                suggestions["year"] = _ym.group(1)
-        # Ensure confidence and reason are always present
-        if not suggestions.get("confidence"):
-            suggestions["confidence"] = "medium"
-        if not suggestions.get("reason"):
-            suggestions["reason"] = ""
-        # Validate mb_trackid
-        _MB_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-        mb_trackid  = (suggestions.get("mb_trackid")  or "").strip()
-        mb_albumid  = (suggestions.get("mb_albumid")  or "").strip()
-        mb_artistid = (suggestions.get("mb_artistid") or "").strip()
-        selected_candidate = None
-        candidate_index = -1
-        if mb_trackid:
-            target_trackid = mb_trackid.strip().lower()
-            for c in mb_candidates:
-                if _s(c.get("mb_trackid", "")).strip().lower() == target_trackid:
-                    selected_candidate = c
-                    try:
-                        candidate_index = int(c.get("candidate_index", -1))
-                    except Exception:
-                        candidate_index = -1
-                    break
-        suggestions["candidate_index"] = candidate_index
-        suggestions["mb_candidate_valid"] = bool(selected_candidate)
-        suggestions["mb_trusted"] = bool(selected_candidate)
-        if mb_trackid and mb_candidates and not selected_candidate:
-            if _s(suggestions.get("confidence")).lower() == "high":
-                suggestions["confidence"] = "low"
-            reason = _s(suggestions.get("reason")).strip()
-            guard = "AI returned a MusicBrainz recording ID that was not in the AcoustID/MusicBrainz candidate list; review before applying."
-            suggestions["reason"] = f"{guard} {reason}".strip()
-        suggestions["mb_valid"] = bool(re.match(_MB_RE, mb_trackid, re.I))
-        if not suggestions["mb_valid"]:
-            suggestions["mb_trusted"] = False
-            suggestions["mb_apply_warning"] = (
-                "No validated MusicBrainz recording ID was returned; review text tags manually before applying."
-            )
-            if _s(suggestions.get("confidence")).lower() == "high":
-                suggestions["confidence"] = "medium"
-            reason = _s(suggestions.get("reason")).strip()
-            guard = suggestions["mb_apply_warning"]
-            if guard not in reason:
-                suggestions["reason"] = f"{guard} {reason}".strip()
-        if suggestions["mb_valid"]:
-            suggestions["mb_url"] = f"https://musicbrainz.org/recording/{mb_trackid}"
-            # Fetch full recording details from MB to fill remaining fields
-            if selected_candidate:
-                try:
-                    preferred_albumid = (
-                        mb_albumid
-                        or _s(selected_candidate.get("mb_albumid", "")).strip()
-                        or next(iter(selected_candidate.get("mb_albumids") or []), "")
-                    )
-                    details = _fetch_mb_recording_details(mb_trackid, preferred_albumid)
-                    # All facts below are genuinely known at this point in
-                    # the request (AI has already been attempted, and the
-                    # fallback path -- if AI failed -- has already run), so
-                    # this is the one call site where a real AiState can be
-                    # reported instead of "not evaluated at this boundary".
-                    ai_state_for_selected = AiState(
-                        state_known=True,
-                        configured=ai_configured,
-                        attempted=ai_configured,
-                        available=ai_contributed,
-                        unavailability_reason=ai_unavailable_reason,
-                        contribution=(
-                            {
-                                "mb_trackid": suggestions.get("mb_trackid", ""),
-                                "confidence": suggestions.get("confidence", ""),
-                                "reason": suggestions.get("reason", ""),
-                            }
-                            if ai_contributed else {}
-                        ),
-                    )
-                    _enrich_track_ai_candidate(
-                        current, selected_candidate, details,
-                        ai_state=ai_state_for_selected, acoustid_hits=acoustid_hits,
-                    )
-                    # Fields MB fills authoritatively (override AI guesses)
-                    _mb_authoritative = {"artist", "mb_albumid", "mb_artistid",
-                                         "track", "tracktotal", "disc", "disctotal",
-                                         "label", "genre", "album", "year"}
-                    for k, v in details.items():
-                        if v and (k in _mb_authoritative or not suggestions.get(k)):
-                            suggestions[k] = v
-                    # Re-read possibly-updated mb_albumid
-                    mb_albumid = (suggestions.get("mb_albumid") or "").strip()
-                except Exception:
-                    pass
-        if selected_candidate:
-            selected_packet = _compact_track_ai_candidate(selected_candidate)
-            suggestions["candidate_type"] = "recording"
-            suggestions["candidate_evidence"] = selected_packet
-            suggestions["selected_recording_candidate"] = selected_packet
-            suggestions["selected_release"] = selected_packet.get("selected_release") or {}
-            suggestions["linked_releases"] = selected_packet.get("linked_releases") or []
-            suggestions["conflicts"] = selected_packet.get("conflicts") or []
-            suggestions["recommended_action"] = selected_packet.get("recommended_action") or ""
-            suggestions["requires_confirmation"] = bool(selected_packet.get("requires_confirmation"))
-            suggestions["safety_result"] = selected_packet.get("safety_result") or ""
-            suggestions["confidence_score"] = selected_packet.get("confidence_score")
-            suggestions["match_method"] = selected_packet.get("match_method") or selected_packet.get("source")
-        suggestions["recording_candidates"] = [_compact_track_ai_candidate(c) for c in mb_candidates[:8]]
-        suggestions["missing_id_type"] = "Recording ID"
-        if re.match(_MB_RE, (suggestions.get("mb_albumid") or ""), re.I):
-            suggestions["mb_album_url"] = (
-                f"https://musicbrainz.org/release/{suggestions['mb_albumid']}")
-        evidence = _track_ai_evidence_packet(
-            iid,
-            filename=filename,
-            current=current,
-            search_title=_mb_t,
-            search_artist=_mb_a,
-            suggestions=suggestions,
-            selected_candidate=selected_candidate,
-            candidates=mb_candidates,
-            acoustid_candidates=acoustid_cands,
-            discogs_candidates=discogs_cands,
-            acoustid_status=acoustid_status,
-        )
-        suggestions["ai_available"] = ai_available
-        suggestions["ai_unavailable_reason"] = ai_unavailable_reason
-        # When AI did not actually contribute (not configured, or its key was
-        # rejected/unreachable -- classified by _classify_openai_error), the
-        # confidence below is a MusicBrainz/AcoustID (or absent) verdict, NOT an
-        # AI one. Emit a STRUCTURED ai_status (separating configured vs validly
-        # reachable, with the provider boundary's last classified outcome, which
-        # knows a 401-rejected key) plus an explicit confidence_source, so the UI
-        # can render a provider-status chip instead of a misleading "AI low".
-        # matching_decision.ai is left untouched (its boundary default is correct
-        # by design).
-        _ai_ph = (provider_boundary.provider_health() or {}).get("ai") or {}
-        suggestions["ai_status"] = {
-            "configured": bool(ai_configured),
-            "attempted": bool(ai_configured),
-            "contributed": bool(ai_contributed),
-            "available": bool(ai_contributed),
-            "unavailable_reason": "" if ai_contributed else ai_unavailable_reason,
-            "last_outcome": _ai_ph.get("last_outcome"),
-            "last_status_code": _ai_ph.get("last_status_code"),
-        }
-        suggestions["confidence_source"] = (
-            "ai" if ai_contributed else ("musicbrainz" if mb_candidates else "none"))
-        suggestions["evidence"] = evidence
-        return jsonify({"ok": True, "suggestions": suggestions,
-                        "mb_candidates": mb_candidates,
-                        "selected_candidate": _compact_track_ai_candidate(selected_candidate) if selected_candidate else {},
-                        "evidence": evidence,
-                        "acoustid_candidates": acoustid_cands,
-                        "discogs_candidates": discogs_cands,
-                        "musicbrainz_unavailable": musicbrainz_unavailable,
-                        "acoustid_unavailable": bool(acoustid_status),
-                        "acoustid_status": acoustid_status})
+        return jsonify(body)
     except Exception as exc:
-        _app_logger.warning("AI track suggestion failed: %s", type(exc).__name__)
-        return jsonify({"ok": False, "error": "Could not generate suggestions."})
+        return jsonify(suggestion_failure(exc))
 
 
 @app.get("/api/items/<int:iid>/mb-candidates")
@@ -1467,18 +1087,10 @@ def library_art_repair_report():
         return jsonify(_art_repair_attach_last_run(report))
     except BeetsUnavailableError as ex:
         _app_logger.warning("Artwork repair report failed: Beets engine unavailable")
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine is unavailable.",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response("Beets engine is unavailable.")
     except BeetsAuthError as ex:
         _app_logger.error("Artwork repair report failed: Control agent authentication failed (%s)", type(ex).__name__)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine authentication failed.",
-            "error_code": "ENGINE_AUTH_FAILED",
-        }), 503
+        return beets_auth_failed_response()
     except BeetsError as ex:
         _app_logger.error("Artwork repair report failed: %s", ex)
         return jsonify({
@@ -1613,12 +1225,11 @@ def album_fetch_art(aid):
             log.append(f"  Art saved: {Path(saved_path).name}")
         _invalidate_lib_cache()
         return result
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"FetchArt: album {aid}",
         metadata={"type": "album_art_repair", "album_id": aid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/fetch-embed-artwork")
@@ -1645,12 +1256,11 @@ def album_fetch_embed_artwork(aid):
         log.append(f"  Artwork saved: {res.get('artpath')}")
         _invalidate_lib_cache()
         return res
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"FetchEmbedArtwork: album {aid}",
         metadata={"type": "album_artwork_fetch_v1", "album_id": aid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/art/url")
@@ -1695,12 +1305,11 @@ def album_replace_art_from_url(aid):
         _invalidate_lib_cache()
         return {"path": saved, "image": result.get("image") or {}}
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Replace art: album {aid}",
         metadata={"type": "album-art-replace", "album_id": aid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/art/upload")
@@ -1742,12 +1351,11 @@ def album_upload_art(aid):
         _invalidate_lib_cache()
         return {"path": saved, "image": result.get("image") or {}}
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Upload art: album {aid}",
         metadata={"type": "album-art-upload", "album_id": aid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.delete("/api/albums/<int:aid>/art")
@@ -1803,7 +1411,7 @@ def album_remove(aid):
         plan = composite_workflows.plan_album_cleanup(aid, delete_files=delete_files, reason="album remove request")
     except (BeetsUnavailableError, BeetsError) as ex:
         _app_logger.warning("Album remove plan failed: Beets engine unavailable (%s)", type(ex).__name__)
-        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "error_code": "ENGINE_OFFLINE"}), 503
+        return beets_offline_response("Beets engine is unavailable.")
     status_code = 200 if plan.get("ok") else 400
     return jsonify({**plan, "item_count": len(item_ids),
                     "next_step": "POST /api/albums/cleanup/apply with this operation_id"}), status_code
@@ -1826,9 +1434,8 @@ def album_rename(aid):
                    f"(transaction {res.get('operation_id')}; roll it back from Transactions)")
 
     # The relocation records its own transaction; the job hook must not add a second row.
-    job = jobs.start_python(_do, label=label,
+    return _start_job(_do, label=label,
                             metadata={"type": "album-rename", "album_id": aid, "transaction": False})
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/move-to-library")
@@ -1848,12 +1455,11 @@ def album_move_to_library(aid):
                    f"(transaction {res.get('operation_id')}; roll it back from Transactions)")
 
     # The relocation records its own transaction; the job hook must not add a second row.
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=label,
         metadata={"type": "album-move-to-library", "album_id": aid, "transaction": False},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/fix-metadata")
@@ -1957,9 +1563,8 @@ def album_fix_metadata(aid):
     # real, rollbackable Metadata Update / MB track repair transactions sat
     # in separate rows; those rows are now the only record, under this user.
     label = f"Fix metadata: album_id={aid}"
-    job = jobs.start_python(_do, label=label, metadata={"type": "album-fix-metadata", "album_id": aid,
+    return _start_job(_do, label=label, metadata={"type": "album-fix-metadata", "album_id": aid,
                                                         "transaction": False})
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/deduplicate")
@@ -2014,8 +1619,6 @@ def album_deduplicate(aid):
     label = f"Dedup: {_s(getattr(album,'albumartist',''))} — {_s(getattr(album,'album',''))}"
 
     def _do(log, cancel_event=None):
-        _MROOT   = str(MUSIC_ROOT)
-
         # Resolve which MB album ID to use
         mb_albumid = mb_override
         if not mb_albumid:
@@ -2049,24 +1652,7 @@ def album_deduplicate(aid):
         else:
             log.append("  No MB ID — skipping MB re-match (track numbers may be 0)")
 
-        # ── Step 2: Load all items and group by track number ──────────────────
-        def _abs(p):
-            if isinstance(p, bytes):
-                p = p.decode("utf-8", errors="replace")
-            return (_MROOT + "/" + p) if (p and not p.startswith("/")) else (p or "")
-
-        def _pstr(raw) -> str:
-            """Decode bytes path to str."""
-            if isinstance(raw, bytes):
-                return raw.decode("utf-8", errors="replace")
-            return str(raw or "")
-
-        def _collision_rank(raw_path) -> int:
-            """0 = primary (no .N suffix), 1+ = collision copy number."""
-            stem = Path(_pstr(raw_path)).stem
-            m = re.search(r'\.(\d+)$', stem)
-            return int(m.group(1)) if m else 0
-
+        # ── Steps 2-4: group by slot; quarantine only proven duplicates ───────
         try:
             raw_items = composite_workflows.find_all_items_by_album_id(int(aid))
             sorted_items = sorted(
@@ -2079,99 +1665,7 @@ def album_deduplicate(aid):
         except Exception as ex:
             log.append(f"ERROR loading items: {ex}")
             return
-
-        # Normalise rows to plain dicts with string paths
-        all_items = []
-        for it in sorted_items:
-            all_items.append({
-                "id":    int(it["id"]),
-                "track": int(it.get("track") or 0),
-                "disc":  int(it.get("disc") or 1),
-                "title": _pstr(it.get("title")),
-                "path":  _pstr(it.get("path")),
-                "mb_trackid": _pstr(it.get("mb_trackid")).strip().lower(),
-            })
-
-        log.append(f"Items in DB: {len(all_items)}")
-
-        # MI-3: a slot is (disc, track) -- track 3 of disc 1 and of disc 2
-        # are different songs.
-        by_slot = defaultdict(list)
-        for it in all_items:
-            by_slot[(it["disc"], it["track"])].append(it)
-
-        # ── Step 3: Decide what to remove -- only with positive proof ─────────
-        # A copy is a duplicate only when BOTH files fingerprint (AcoustID) as
-        # CONFIRMED for one recording. Unknown/unavailable/conflicting
-        # evidence spares the copy and reports it; unmatched (track 0) items
-        # are never removed here (keep_extras is ignored for removal).
-        pairs = []
-        spared = []
-        summary = []
-        for (disc, trk), group in sorted(by_slot.items()):
-            if trk == 0:
-                summary.append(f"  [00] Kept {len(group)} unmatched item(s) for review")
-                spared.extend({"item_id": it["id"], "reason": "unmatched_track_number"} for it in group)
-                continue
-            if len(group) == 1:
-                summary.append(f"  [{disc}-{trk:02d}] OK — {Path(group[0]['path']).name[:60]}")
-                continue
-            group.sort(key=lambda x: (_collision_rank(x["path"]), x["id"]))
-            kept = group[0]
-            kept_abs = _abs(kept["path"])
-            for d in group[1:]:
-                proof = same_recording_proof(_abs(d["path"]), kept_abs, kept.get("mb_trackid") or "")
-                if proof["proven"]:
-                    pairs.append({"delete_item_id": d["id"], "keep_item_id": kept["id"]})
-                    summary.append(f"  [{disc}-{trk:02d}] Duplicate proven ({proof['recording_id']}): "
-                                   f"{Path(d['path']).name[:40]} (keep {Path(kept['path']).name[:40]})")
-                else:
-                    spared.append({"item_id": d["id"], "reason": proof["reason"],
-                                   "drop_status": proof["drop_status"], "keep_status": proof["keep_status"]})
-                    summary.append(f"  [{disc}-{trk:02d}] SPARED (no same-recording proof: {proof['reason']}): "
-                                   f"{Path(d['path']).name[:40]}")
-
-        for line in summary:
-            log.append(line)
-
-        # ── Step 4: Reviewed duplicate cleanup (quarantine, rollbackable) ─────
-        dedup_result = {"proven_pairs": len(pairs), "spared": spared, "operation_id": None,
-                        "applied": False, "quarantined": 0}
-        if not pairs:
-            log.append("Nothing proven duplicate — nothing removed.")
-        else:
-            try:
-                plan = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=f"Album {aid} deduplicate")
-            except (BeetsUnavailableError, BeetsError) as ex:
-                log.append(f"  Engine unavailable planning duplicate cleanup: {ex}")
-                raise RuntimeError(f"Duplicate cleanup planning failed: {ex}")
-            for skipped in plan.get("skipped") or []:
-                log.append(f"  Kept item {skipped.get('delete_item_id')}: "
-                           f"{', '.join(skipped.get('reasons') or [])}")
-            if plan.get("ok"):
-                dedup_result["operation_id"] = plan["operation_id"]
-                if confirm_apply:
-                    store = composite_workflows.get_default_store()
-                    if store.transition(plan["operation_id"], "Preview", "Approved",
-                                        metadata={"approved_by": "operator confirmed album deduplicate"}) is None:
-                        raise RuntimeError(f"Duplicate cleanup {plan['operation_id']} changed state before it "
-                                           "could be approved; nothing was quarantined.")
-                    applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
-                    if not applied.get("ok"):
-                        raise RuntimeError(f"Duplicate cleanup {plan['operation_id']} did not apply "
-                                           f"({applied.get('status') or applied.get('code')}): "
-                                           f"{applied.get('error') or 'see transaction log'}")
-                    dedup_result.update(applied=bool(applied.get("ok")),
-                                        quarantined=len(applied.get("removed") or []))
-                    log.append(f"  Quarantined {dedup_result['quarantined']} proven duplicate(s) "
-                               f"({applied.get('status')}); rollback via transaction {plan['operation_id']}.")
-                else:
-                    log.append(f"  Preview transaction {plan['operation_id']} created; approve and apply it "
-                               "to quarantine the proven duplicates (nothing removed yet).")
-            else:
-                log.append("  No pair passed duplicate re-verification; nothing removed.")
-        if spared:
-            log.append(f"  {len(spared)} item(s) kept for review (no positive same-recording proof).")
+        dedup_result = _album_dedup_quarantine_proven(aid, sorted_items, confirm_apply, log)
 
         # ── Step 5: Strip year suffix from album name (anti-double-year) ──────
         _strip_year_from_album_name(aid, log)
@@ -2253,8 +1747,7 @@ def match_album(aid):
     def _do(log, cancel_event=None):
         _match_album_run(aid, mb_input, log)
 
-    job = jobs.start_python(_do, label=label)
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=label)
 
 
 def _match_album_run(aid: int, mb_input: str, log, *, release_selected_by_operator: bool = True) -> List[str]:
@@ -2603,12 +2096,11 @@ def rebuild_album_art():
         )
         return summary
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label="Rebuild Album Art",
         metadata={"type": "album-art-rebuild", "mode": "full_rebuild"},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.get("/api/library/missing-mb-ids")
@@ -2630,15 +2122,9 @@ def library_missing_mb_ids():
     try:
         return jsonify(library_missing_mb_payload(
             kind=kind, search=_s(args.get("search") or "")[:200], offset=offset, limit=limit, sort=sort))
-    except BeetsUnavailableError as ex:
-        _app_logger.warning("library_missing_mb_ids: Beets engine unavailable: %s", ex)
-        return jsonify({"ok": False, "error": "Beets engine unavailable", "error_code": "ENGINE_UNAVAILABLE"}), 503
-    except BeetsAuthError as ex:
-        _app_logger.warning("library_missing_mb_ids: Beets engine auth failed: %s", ex)
-        return jsonify({"ok": False, "error": "Beets engine auth failed", "error_code": "ENGINE_AUTH_ERROR"}), 502
     except BeetsError as ex:
-        _app_logger.warning("library_missing_mb_ids: Beets engine error: %s", ex)
-        return jsonify({"ok": False, "error": "Beets engine error", "error_code": "ENGINE_ERROR"}), 502
+        _app_logger.warning("library_missing_mb_ids: %s: %s", type(ex).__name__, ex)
+        return beets_engine_error_response(ex)
     except Exception:
         _app_logger.exception("Unexpected error in library_missing_mb_ids")
         return jsonify({"ok": False, "error": "Internal error loading missing IDs",
@@ -2701,14 +2187,6 @@ def _batch_write_item(item_id: int, proof: Dict[str, Any], log) -> Dict[str, Any
     return {"changed": True, "transaction_ids": [body.get("audit_id")]}
 
 
-def _batch_beets_error(ex: Exception):
-    if isinstance(ex, BeetsAuthError):
-        return jsonify({"ok": False, "error": "Beets engine auth failed", "error_code": "ENGINE_AUTH_ERROR"}), 502
-    if isinstance(ex, BeetsUnavailableError):
-        return jsonify({"ok": False, "error": "Beets engine unavailable", "error_code": "ENGINE_UNAVAILABLE"}), 503
-    return jsonify({"ok": False, "error": "Beets engine error", "error_code": "ENGINE_ERROR"}), 502
-
-
 @app.post("/api/library/missing-mb-ids/batch/preview")
 def library_missing_mb_ids_batch_preview():
     """Read-only job: prove each selected row and record a Preview transaction."""
@@ -2717,7 +2195,7 @@ def library_missing_mb_ids_batch_preview():
         rows, err = missing_mb_batch.select_rows(payload)
     except BeetsError as ex:
         _app_logger.warning("missing-mb batch preview: Beets error: %s", type(ex).__name__)
-        return _batch_beets_error(ex)
+        return beets_engine_error_response(ex)
     if err:
         return jsonify({"ok": False, "error": err, "error_code": "INVALID_PARAM"}), 400
     if not rows:
@@ -2728,10 +2206,9 @@ def library_missing_mb_ids_batch_preview():
     def _do(log, cancel_event=None, update_state=None):
         return missing_mb_batch.run_preview(rows, log, cancel_event, update_state, user=user)
 
-    job = jobs.start_python(_do, label=f"Missing IDs batch preview ({len(rows)} rows)", metadata={
+    return _start_job(_do, label=f"Missing IDs batch preview ({len(rows)} rows)", metadata={
         "type": "missing-mb-ids-batch-preview", "category": "library", "mutating": False,
-        "dedupe_key": "missing-mb-ids-batch-preview"})
-    return jsonify({"ok": True, "job_id": job.job_id, "rows": len(rows)})
+        "dedupe_key": "missing-mb-ids-batch-preview"}, response_extra={"rows": len(rows)})
 
 
 @app.post("/api/library/missing-mb-ids/batch/apply")
@@ -2947,88 +2424,7 @@ def album_tracks(aid):
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Not found"}), 404
-    items = sorted(album.items(), key=lambda i: (i.disc or 0, i.track or 0))
-    tracks = [_library_track_dict(i) for i in items]
-    known_paths = {
-        str(Path(t.get("path") or "").resolve(strict=False)).lower()
-        for t in tracks
-        if t.get("path")
-    }
-    all_path_items: Dict[str, Any] = {}
-    try:
-        for other in lib.items([]):
-            raw_path = _s(getattr(other, "path", "") or "")
-            if not raw_path:
-                continue
-            abs_path = raw_path if Path(raw_path).is_absolute() else str(MUSIC_ROOT / raw_path)
-            all_path_items[str(Path(abs_path).resolve(strict=False)).lower()] = other
-    except Exception:
-        all_path_items = {}
-    album_dir = _album_dir_for_art(album)
-    if album_dir and album_dir.exists():
-        disc_sub_re = re.compile(r'^(?:cd|disc|disk)\s*0*(\d+)$', re.IGNORECASE)
-        disk_files: List[Path] = []
-        try:
-            disk_files.extend(
-                sorted(
-                    [p for p in album_dir.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXT],
-                    key=lambda p: p.name.lower(),
-                )
-            )
-            for sub in sorted([p for p in album_dir.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
-                if not disc_sub_re.match(sub.name):
-                    continue
-                disk_files.extend(
-                    sorted(
-                        [p for p in sub.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXT],
-                        key=lambda p: p.name.lower(),
-                    )
-                )
-        except Exception:
-            disk_files = []
-
-        for fpath in disk_files:
-            key = str(fpath.resolve(strict=False)).lower()
-            if key in known_paths:
-                continue
-            other_item = all_path_items.get(key)
-            if other_item:
-                other_album_id = int(getattr(other_item, "album_id", 0) or 0)
-                if other_album_id == aid:
-                    continue
-                if other_album_id:
-                    row = _library_track_dict(other_item)
-                    row["status"] = "other_album"
-                    row["other_album_id"] = other_album_id
-                    row["imported"] = True
-                    row["disk_only"] = False
-                    row["missing"] = False
-                    tracks.append(row)
-                    continue
-            disc = 1
-            dm = disc_sub_re.match(fpath.parent.name)
-            if dm:
-                disc = int(dm.group(1))
-            tracks.append({
-                "id": 0,
-                "album_id": aid,
-                "path": str(fpath),
-                "title": fpath.stem,
-                "track": 0,
-                "disc": disc,
-                "tracktotal": 0,
-                "ok": False,
-                "missing": False,
-                "imported": False,
-                "disk_only": True,
-                "status": "not_imported",
-                "mb_trackid": "",
-            })
-    tracks.sort(key=lambda t: (
-        int(t.get("disc") or 1),
-        int(t.get("track") or 999),
-        _s(t.get("title") or "").lower(),
-    ))
+    tracks = album_tracks_with_disk_files(album, aid)
     return jsonify({
         "ok": True,
         "album_id": aid,
@@ -3137,7 +2533,7 @@ def album_merge_split_album(target_aid):
             "operation_id": merge_res.get("operation_id"),
         }
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Merge split album {source_id} → {target_id}",
         metadata={
@@ -3147,7 +2543,6 @@ def album_merge_split_album(target_aid):
             "item_count": len(item_ids),
         },
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.get("/api/albums")
@@ -3183,117 +2578,11 @@ def recent():
 @app.get("/api/library/mbid-status")
 def library_mbid_status():
     """MusicBrainz coverage for albums/tracks already under /data/media/music."""
-    total_albums = missing_album_mb = total_tracks = missing_track_mb = 0
-    item_release_gap_rows = 0
-    albums_with_item_release_gaps = 0
-    track_recording_gap_rows = 0
-    albums_with_track_recording_gaps = 0
-    inferred_album_mbid_rows = 0
-    albums_with_template_tokens = 0
-    template_token_rows = 0
-    examples: List[Dict[str, Any]] = []
-    release_gap_examples: List[Dict[str, Any]] = []
-    track_gap_examples: List[Dict[str, Any]] = []
-    template_token_examples: List[Dict[str, Any]] = []
     try:
-        for album in lib.albums([]):
-            items = list(album.items())
-            music_items = [i for i in items if _is_music_root_path(getattr(i, "path", ""))]
-            if not music_items:
-                continue
-            total_albums += 1
-            total_tracks += len(music_items)
-            album_mb = _s(getattr(album, "mb_albumid", "") or "").strip().lower()
-            if not album_mb:
-                missing_album_mb += 1
-                item_release_ids = {
-                    _s(getattr(i, "mb_albumid", "") or "").strip().lower()
-                    for i in music_items
-                    if _s(getattr(i, "mb_albumid", "") or "").strip()
-                }
-                if len(item_release_ids) == 1:
-                    inferred_album_mbid_rows += 1
-                if len(examples) < 12:
-                    examples.append({
-                        "album_id": album.id,
-                        "artist": _s(getattr(album, "albumartist", "") or ""),
-                        "album": _s(getattr(album, "album", "") or ""),
-                        "tracks": len(music_items),
-                        "year": int(getattr(album, "year", 0) or 0),
-                    })
-            album_release_gaps = 0
-            album_track_gaps = 0
-            album_template_tokens = 0
-            for item in music_items:
-                item_mb = _s(getattr(item, "mb_albumid", "") or "").strip().lower()
-                if album_mb and (not item_mb or item_mb != album_mb):
-                    item_release_gap_rows += 1
-                    album_release_gaps += 1
-                    if len(release_gap_examples) < 8:
-                        release_gap_examples.append({
-                            "album_id": album.id,
-                            "item_id": getattr(item, "id", 0),
-                            "artist": _s(getattr(album, "albumartist", "") or ""),
-                            "album": _s(getattr(album, "album", "") or ""),
-                            "title": _s(getattr(item, "title", "") or ""),
-                            "album_mb_albumid": album_mb,
-                            "item_mb_albumid": item_mb,
-                        })
-                if not _s(getattr(item, "mb_trackid", "") or "").strip():
-                    missing_track_mb += 1
-                    track_recording_gap_rows += 1
-                    album_track_gaps += 1
-                    if len(track_gap_examples) < 8:
-                        track_gap_examples.append({
-                            "album_id": album.id,
-                            "item_id": getattr(item, "id", 0),
-                            "artist": _s(getattr(album, "albumartist", "") or ""),
-                            "album": _s(getattr(album, "album", "") or ""),
-                            "title": _s(getattr(item, "title", "") or ""),
-                            "track": int(getattr(item, "track", 0) or 0),
-                            "disc": int(getattr(item, "disc", 1) or 1),
-                        })
-                item_path = _s(getattr(item, "path", "") or "")
-                if item_path and _UNRESOLVED_TEMPLATE_TOKEN_RE.search(item_path):
-                    template_token_rows += 1
-                    album_template_tokens += 1
-                    if len(template_token_examples) < 8:
-                        template_token_examples.append({
-                            "album_id": album.id,
-                            "item_id": getattr(item, "id", 0),
-                            "artist": _s(getattr(album, "albumartist", "") or ""),
-                            "album": _s(getattr(album, "album", "") or ""),
-                            "title": _s(getattr(item, "title", "") or ""),
-                            "path": item_path,
-                        })
-            if album_release_gaps:
-                albums_with_item_release_gaps += 1
-            if album_track_gaps:
-                albums_with_track_recording_gaps += 1
-            if album_template_tokens:
-                albums_with_template_tokens += 1
+        return jsonify(library_mbid_status_payload())
     except Exception as exc:
         _app_logger.warning("Library health scan failed: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not scan library health."})
-    return jsonify({
-        "ok": True,
-        "root": str(MUSIC_ROOT),
-        "total_albums": total_albums,
-        "missing_album_mb": missing_album_mb,
-        "total_tracks": total_tracks,
-        "missing_track_mb": missing_track_mb,
-        "item_release_gap_rows": item_release_gap_rows,
-        "albums_with_item_release_gaps": albums_with_item_release_gaps,
-        "track_recording_gap_rows": track_recording_gap_rows,
-        "albums_with_track_recording_gaps": albums_with_track_recording_gaps,
-        "inferred_album_mbid_rows": inferred_album_mbid_rows,
-        "template_token_rows": template_token_rows,
-        "albums_with_template_tokens": albums_with_template_tokens,
-        "examples": examples,
-        "release_gap_examples": release_gap_examples,
-        "track_gap_examples": track_gap_examples,
-        "template_token_examples": template_token_examples,
-    })
 
 
 @app.post("/api/albums/reimport-disk")
@@ -3363,7 +2652,7 @@ def library_import_all():
                     conf   = (sug.get("confidence") or "low").lower()
                     found  = (sug.get("mb_albumid") or "").strip()
                     if result.get("ok") and found and conf in ("high", "medium") \
-                            and sug.get("mb_valid"):
+                            and sug.get("mb_valid") and sug.get("identity_validated") is not False:
                         mb_albumid = found
                         album["mb_albumid"] = mb_albumid
                         log.append(
@@ -3371,8 +2660,8 @@ def library_import_all():
                             f"{sug.get('album')} [{conf}]"
                         )
                     else:
-                        reason = (sug.get("reason") or result.get("error")
-                                  or "Could not identify album")
+                        reason = (sug.get("candidate_identity_error") or sug.get("reason")
+                                  or result.get("error") or "Could not identify album")
                         log.append(f"  Queuing for Import Review: {reason}")
                         _queue_folder_for_manual_review(
                             album["aldir"], sug or None, reason, log,
@@ -3490,12 +2779,12 @@ def library_import_all():
             "failed": len(failures),
         }
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Import All: {len(albums)} album(s)",
         metadata={"type": "library-import-all", "album_count": len(albums)},
+        response_extra={"album_count": len(albums)},
     )
-    return jsonify({"ok": True, "job_id": job.job_id, "album_count": len(albums)})
 
 
 @app.get("/api/library/import-all/last")
@@ -3618,8 +2907,7 @@ def library_merge_artist():
         _invalidate_lib_cache()
         log.append(f"Done — {len(renamed_ids)} album(s) now under '{to_artist}'.")
 
-    job = jobs.start_python(_do, label=f"Merge artist: {from_artist!r} → {to_artist!r}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Merge artist: {from_artist!r} → {to_artist!r}")
 
 
 @app.post("/api/library/sync-deleted")
@@ -3718,12 +3006,11 @@ def library_sync_deleted():
                 },
             })
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label="Preview Missing File DB Sync" if dry_run else "Apply Missing File DB Sync",
         metadata={"type": "sync-deleted", "dry_run": dry_run},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/unmatched-draft")
@@ -4005,8 +3292,7 @@ def library_move_all():
         if folder_failures:
             raise RuntimeError(f"{folder_failures} folder cleanup(s) stopped part-way; see the log.")
 
-    job = jobs.start_python(_do, label="Move all library files", metadata={"type": "move-all", "dedupe_key": "library:move-all"})
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label="Move all library files", metadata={"type": "move-all", "dedupe_key": "library:move-all"})
 
 
 @app.post("/api/library/mbsync-all")
@@ -4030,8 +3316,7 @@ def library_mbsync_all():
             _invalidate_lib_cache()
         return res
 
-    job = jobs.start_python(_do, label="MBSync all library tracks", metadata=meta)
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label="MBSync all library tracks", metadata=meta)
 
 
 @app.get("/api/library/genre-stats")
@@ -4100,8 +3385,7 @@ def album_fix_genre(aid):
         _invalidate_lib_cache()
 
     label = f"Fix genre: {album.albumartist or '?'} — {album.album or '?'}"
-    job = jobs.start_python(_do, label=label)
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=label)
 
 
 @app.post("/api/library/normalize-artists")
@@ -4170,8 +3454,7 @@ def library_normalize_artists():
         _invalidate_lib_cache()
         log.append("Done.")
 
-    job = jobs.start_python(_do, label="Normalize artist names (Unicode→ASCII)")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label="Normalize artist names (Unicode→ASCII)")
 
 
 @app.post("/api/library/merge-artist-id")
@@ -4204,8 +3487,7 @@ def library_merge_artist_id():
         _invalidate_lib_cache()
         log.append(f"Done. Updated artist aliases to {canonical!r}.")
 
-    job = jobs.start_python(_do, label=f"Merge artist aliases: {canonical}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Merge artist aliases: {canonical}")
 
 
 @app.post("/api/library/confirm-artist-alias")
@@ -4241,8 +3523,7 @@ def library_confirm_artist_alias():
         _invalidate_lib_cache()
         log.append(f"Done. Updated artist alias {source!r} -> {canonical!r}.")
 
-    job = jobs.start_python(_do, label=f"Confirm artist alias: {source} -> {canonical}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Confirm artist alias: {source} -> {canonical}")
 
 
 @app.get("/api/browse")
@@ -4656,12 +3937,11 @@ def repair_album_mb_tracks(aid):
             "operation_id": op_id,
         }
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Repair MB track IDs: {album.albumartist or album.album or aid}",
         metadata={"type": "repair-mb-tracks", "album_id": aid, "mb_albumid": mbid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/mbid-sticking-repair")
@@ -4721,7 +4001,7 @@ def library_template_token_cleanup():
             _trigger_plex_refresh(log)
         return result
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label="Library template-token cleanup",
         metadata={
@@ -4730,7 +4010,6 @@ def library_template_token_cleanup():
             "album_id": album_id,
         },
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/leaked-db-paths/scan")
@@ -4779,12 +4058,11 @@ def scan_leaked_db_paths_job():
             "rows": rows,
             "final_summary": final_summary,
         }
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label="Leaked DB path scan",
         metadata={"type": "leaked-db-path-scan"},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/leaked-db-paths/fix")
@@ -4929,7 +4207,7 @@ def fix_leaked_db_paths():
             "final_summary": final_summary,
         }
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Leaked DB path fix ({'dry-run' if dry_run else 'apply'})",
         metadata={
@@ -4937,7 +4215,6 @@ def fix_leaked_db_paths():
             "dry_run": dry_run,
         },
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/folder-placeholders/scan")
@@ -5606,7 +4883,7 @@ def _start_library_mbid_sticking_repair(
         )
         return summary
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=job_label,
         metadata={
@@ -5618,4 +4895,3 @@ def _start_library_mbid_sticking_repair(
             "limit": limit,
         },
     )
-    return jsonify({"ok": True, "job_id": job.job_id})

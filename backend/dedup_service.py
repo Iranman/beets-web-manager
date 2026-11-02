@@ -28,7 +28,7 @@ from backend.title_normalize import restore_time_colon_title as _restore_time_co
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
 import backend.duplicate_identity as _duplicate_identity
-from backend.acoustid_service import AUDIO_EXTS, _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _album_track_norm, _read_file_media_tags
+from backend.acoustid_service import AUDIO_EXTS, _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _album_track_norm, _read_file_media_tags, same_recording_proof
 from backend.matching_service import _album_mb_completeness
 from backend.app_runtime import jobs
 from backend.job_service import _running_job_of_type, _wait_for_child_job
@@ -831,6 +831,123 @@ def _dedup_pairs_for_paths(paths: List[str]) -> Tuple[List[Dict[str, Any]], List
     return list(pairs.values()), unmatched
 
 
+def _approve_and_apply_reviewed_cleanup(op_id: str, approved_by: str) -> Optional[Dict[str, Any]]:
+    """Approve a reviewed-cleanup Preview and apply it; the one route from an
+    authorized plan to quarantined files. ``None`` when the plan is no longer a
+    Preview (a cancelled plan is never resurrected, #206 F4). An apply that
+    raises before claiming the transaction cancels it."""
+    store = composite_workflows.get_default_store()
+    if approve_preview(store, op_id, approved_by) is None:
+        return None
+    with cancel_unclaimed_on_error(store, op_id):
+        return _duplicate_cleanup.apply_reviewed_cleanup(op_id)
+
+
+def _album_dedup_quarantine_proven(aid: int, sorted_items: List[Dict[str, Any]], confirm: bool,
+                                   log: List[str]) -> Dict[str, Any]:
+    """Find the proven duplicates among one album's items and send them to a
+    reviewed cleanup: quarantined in this call only with ``confirm``, otherwise
+    left in Preview. Nothing is ever deleted outright.
+
+    A copy is a duplicate only when BOTH files fingerprint (AcoustID) as
+    CONFIRMED for one recording (MI-3). Unknown, unavailable or conflicting
+    evidence spares the copy and reports it; unmatched (track 0) items are never
+    removed here.
+    """
+    music_root = str(MUSIC_ROOT)
+
+    def _pstr(raw: Any) -> str:
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace")
+        return str(raw or "")
+
+    def _abs(p: str) -> str:
+        return (music_root + "/" + p) if (p and not p.startswith("/")) else (p or "")
+
+    def _collision_rank(raw_path: str) -> int:
+        """0 = primary (no .N suffix), 1+ = collision copy number."""
+        m = re.search(r"\.(\d+)$", Path(raw_path).stem)
+        return int(m.group(1)) if m else 0
+
+    all_items = [{
+        "id": int(it["id"]),
+        "track": int(it.get("track") or 0),
+        "disc": int(it.get("disc") or 1),
+        "title": _pstr(it.get("title")),
+        "path": _pstr(it.get("path")),
+        "mb_trackid": _pstr(it.get("mb_trackid")).strip().lower(),
+    } for it in sorted_items]
+    log.append(f"Items in DB: {len(all_items)}")
+
+    # MI-3: a slot is (disc, track) -- track 3 of disc 1 and of disc 2 are
+    # different songs.
+    by_slot: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
+    for it in all_items:
+        by_slot[(it["disc"], it["track"])].append(it)
+
+    pairs: List[Dict[str, int]] = []
+    spared: List[Dict[str, Any]] = []
+    for (disc, trk), group in sorted(by_slot.items()):
+        if trk == 0:
+            log.append(f"  [00] Kept {len(group)} unmatched item(s) for review")
+            spared.extend({"item_id": it["id"], "reason": "unmatched_track_number"} for it in group)
+            continue
+        if len(group) == 1:
+            log.append(f"  [{disc}-{trk:02d}] OK — {Path(group[0]['path']).name[:60]}")
+            continue
+        group.sort(key=lambda x: (_collision_rank(x["path"]), x["id"]))
+        kept = group[0]
+        kept_abs = _abs(kept["path"])
+        for d in group[1:]:
+            proof = same_recording_proof(_abs(d["path"]), kept_abs, kept.get("mb_trackid") or "")
+            if proof["proven"]:
+                pairs.append({"delete_item_id": d["id"], "keep_item_id": kept["id"]})
+                log.append(f"  [{disc}-{trk:02d}] Duplicate proven ({proof['recording_id']}): "
+                           f"{Path(d['path']).name[:40]} (keep {Path(kept['path']).name[:40]})")
+            else:
+                spared.append({"item_id": d["id"], "reason": proof["reason"],
+                               "drop_status": proof["drop_status"], "keep_status": proof["keep_status"]})
+                log.append(f"  [{disc}-{trk:02d}] SPARED (no same-recording proof: {proof['reason']}): "
+                           f"{Path(d['path']).name[:40]}")
+
+    result: Dict[str, Any] = {"proven_pairs": len(pairs), "spared": spared, "operation_id": None,
+                              "applied": False, "quarantined": 0}
+    if not pairs:
+        log.append("Nothing proven duplicate — nothing removed.")
+    else:
+        try:
+            plan = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=f"Album {aid} deduplicate")
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  Engine unavailable planning duplicate cleanup: {ex}")
+            raise RuntimeError(f"Duplicate cleanup planning failed: {ex}")
+        for skipped in plan.get("skipped") or []:
+            log.append(f"  Kept item {skipped.get('delete_item_id')}: "
+                       f"{', '.join(skipped.get('reasons') or [])}")
+        if not plan.get("ok"):
+            log.append("  No pair passed duplicate re-verification; nothing removed.")
+        elif not confirm:
+            result["operation_id"] = plan["operation_id"]
+            log.append(f"  Preview transaction {plan['operation_id']} created; approve and apply it "
+                       "to quarantine the proven duplicates (nothing removed yet).")
+        else:
+            op_id = plan["operation_id"]
+            result["operation_id"] = op_id
+            applied = _approve_and_apply_reviewed_cleanup(op_id, "operator confirmed album deduplicate")
+            if applied is None:
+                raise RuntimeError(f"Duplicate cleanup {op_id} changed state before it "
+                                   "could be approved; nothing was quarantined.")
+            if not applied.get("ok"):
+                raise RuntimeError(f"Duplicate cleanup {op_id} did not apply "
+                                   f"({applied.get('status') or applied.get('code')}): "
+                                   f"{applied.get('error') or 'see transaction log'}")
+            result.update(applied=True, quarantined=len(applied.get("removed") or []))
+            log.append(f"  Quarantined {result['quarantined']} proven duplicate(s) "
+                       f"({applied.get('status')}); rollback via transaction {op_id}.")
+    if spared:
+        log.append(f"  {len(spared)} item(s) kept for review (no positive same-recording proof).")
+    return result
+
+
 def run_dedup_cleanup(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     """Manual duplicate cleanup for explicit paths.
 
@@ -874,10 +991,8 @@ def run_dedup_cleanup(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         if plan.get("ok"):
             # A plan cancelled before approval is never resurrected (#206 F4):
             # nothing is applied and every path reports "left in place".
-            if approve_preview(composite_workflows.get_default_store(), plan["operation_id"],
-                               "manual duplicate cleanup request (confirmed after preview)") is not None:
-                with cancel_unclaimed_on_error(composite_workflows.get_default_store(), plan["operation_id"]):
-                    applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
+            applied = _approve_and_apply_reviewed_cleanup(
+                plan["operation_id"], "manual duplicate cleanup request (confirmed after preview)") or {}
     except BeetsUnavailableError as ex:
         return {"ok": False, "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
                 "code": getattr(ex, "error_code", "") or "beets_unavailable", "dry_run": False}, 503
@@ -1365,13 +1480,11 @@ def _unattended_reviewed_cleanup(proposal: List[Dict[str, Any]], log: List[str])
     if not plan.get("ok"):
         return {"ok": True, "deleted": 0, "skipped": len(pairs), "folders_removed": 0, "results": []}
     op_id = plan["operation_id"]
-    if approve_preview(composite_workflows.get_default_store(), op_id,
-                       "unattended duplicate deletion authorization") is None:
+    applied = _approve_and_apply_reviewed_cleanup(op_id, "unattended duplicate deletion authorization")
+    if applied is None:
         log.append(f"[duplicates] Reviewed cleanup {op_id} is no longer a Preview (cancelled?); nothing applied.")
         return {"ok": False, "deleted": 0, "skipped": len(pairs), "folders_removed": 0, "operation_id": op_id,
                 "results": []}
-    with cancel_unclaimed_on_error(composite_workflows.get_default_store(), op_id):
-        applied = _duplicate_cleanup.apply_reviewed_cleanup(op_id)
     removed = applied.get("removed") or []
     log.append(f"[duplicates] Reviewed cleanup {op_id}: {len(removed)} file(s) quarantined "
                f"({applied.get('status')}).")

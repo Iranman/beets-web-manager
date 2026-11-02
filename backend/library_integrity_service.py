@@ -4,6 +4,7 @@ mount, the AcoustID file cache) and persist their evidence under the Web
 Manager data directory for later, separately reviewed cleanup work."""
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json
 
 import json
 import time
@@ -31,10 +32,7 @@ def run_album_duplicate_analysis() -> Dict[str, Any]:
     report = album_duplicate_analysis.analyze(
         albums, items, cached_ids=_acoustid_cached_fingerprint_ids, abs_path=_album_item_abs_path)
     target = _data_dir() / ALBUM_ANALYSIS_FILE
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".tmp")
-    tmp.write_text(json.dumps(report, indent=1), encoding="utf-8")
-    tmp.replace(target)
+    atomic_write_json(target, report, indent=1)
     return report
 
 

@@ -2,8 +2,9 @@
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json, load_json_object
 
-import json, re, threading, time
+import re, threading, time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from backend.app_runtime import _app_logger, MAINTENANCE_RUNNER_LAST_FILE, MUSIC_ROOT, _s
@@ -11,7 +12,7 @@ from backend.library_service import _append_stamp_skipped_log, _record_scan, _re
 from backend.pending_review_store import _load_pending_reviews
 from backend.import_reconciliation_service import _ARTIST_RECONCILE_TERMINAL_FAILURE_STATUSES, _ARTIST_RECONCILE_TERMINAL_SUCCESS_STATUSES, _apply_artist_folder_reconcile_resilient
 from backend.cleanup_service import _album_cleanup_save_report, _album_folder_cleanup_apply_safe, _clean_remove_orphaned_items, _load_rgid_resolutions
-from backend.app_runtime import _path_under, _safe_inventory_error_message, _safe_operation_status_error_message
+from backend.app_runtime import _safe_inventory_error_message, _safe_operation_status_error_message
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
 import backend.duplicate_identity as _duplicate_identity
@@ -204,74 +205,6 @@ def _library_health_payload(orphan_sample_limit: int = 100,
     return res
 
 
-def _maintenance_safe_folder_renames(rows: List[Dict[str, Any]], log: List[str],
-                                     cancel_event=None) -> Dict[str, Any]:
-    """Apply only safe_rename folder placeholder rows.
-
-    This intentionally excludes target_exists, DB-tracked, merge/delete, and
-    conflict cases. It never overwrites an existing folder and never deletes
-    media files.
-    """
-    renamed = 0
-    skipped = 0
-    errors = 0
-    examples: List[Dict[str, str]] = []
-    for row in rows:
-        if cancel_event and cancel_event.is_set():
-            raise RuntimeError("cancelled")
-        source_raw = _s(row.get("folder")).strip()
-        target_raw = _s(row.get("proposed_folder")).strip()
-        safe = bool(row.get("safe"))
-        if (
-            not safe
-            or row.get("target_exists")
-            or int(row.get("db_item_count") or 0) > 0
-            or not source_raw
-            or not target_raw
-        ):
-            skipped += 1
-            continue
-        try:
-            source = Path(source_raw).resolve(strict=False)
-            target = Path(target_raw).resolve(strict=False)
-            if not _path_under(source, MUSIC_ROOT) or not _path_under(target, MUSIC_ROOT):
-                skipped += 1
-                log.append(f"  [folder-safe-rename] skipped outside library root: {source_raw}")
-                continue
-            if source == target:
-                skipped += 1
-                continue
-            if not source.exists() or not source.is_dir():
-                skipped += 1
-                log.append(f"  [folder-safe-rename] skipped missing source: {source}")
-                continue
-            if target.exists():
-                skipped += 1
-                log.append(f"  [folder-safe-rename] skipped existing target: {target}")
-                continue
-            # Library folders are renamed only through the folder_cleanup_v1
-            # engine (audited, rollback-capable); move_file is staging-only.
-            res = composite_workflows.safe_rename_library_folder(
-                str(source), str(target), approved_by="Clean All folder safe rename")
-            if not res.get("ok"):
-                raise RuntimeError(f"{res.get('code')}: {res.get('error') or 'rename failed'}")
-            renamed += 1
-            if len(examples) < 20:
-                examples.append({"source": str(source), "target": str(target)})
-            log.append(f"  [folder-safe-rename] renamed: {source.name!r} -> {target.name!r}")
-        except Exception as exc:
-            errors += 1
-            log.append(f"  [folder-safe-rename] error for {source_raw}: {exc}")
-    if renamed:
-        _invalidate_lib_cache()
-    return {
-        "renamed": renamed,
-        "skipped": skipped,
-        "errors": errors,
-        "examples": examples,
-    }
-
-
 MAINTENANCE_RUNNER_TASKS = [
     {"id": "library_health", "label": "Library DB Health Check"},
     {"id": "missing_files", "label": "Missing Files Scan"},
@@ -298,14 +231,7 @@ def _maintenance_initial_task_state() -> List[Dict[str, Any]]:
 
 
 def _maintenance_load_last_report() -> Dict[str, Any]:
-    try:
-        if MAINTENANCE_RUNNER_LAST_FILE.exists():
-            loaded = json.loads(MAINTENANCE_RUNNER_LAST_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                return loaded
-    except Exception:
-        pass
-    return {}
+    return load_json_object(MAINTENANCE_RUNNER_LAST_FILE)
 
 
 def _maintenance_checkpoint_results(report: Dict[str, Any], last_run: Dict[str, Any]) -> Dict[str, Any]:
@@ -431,6 +357,7 @@ def _maintenance_artist_folder_merge_step(
     *,
     resume_operation_id: str = "",
     on_operation_planned: Optional[Any] = None,
+    acceptance_failpoint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run (or resume) the artist-folder MBID-stamping/merge step, shared by
     the /api/clean/artist-folders/stamp-mbid route and Clean All's
@@ -583,7 +510,10 @@ def _maintenance_artist_folder_merge_step(
     if on_operation_planned is not None:
         on_operation_planned(op_id)
 
-    apply_res = _apply_artist_folder_reconcile_resilient(op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping")
+    apply_res = _apply_artist_folder_reconcile_resilient(
+        op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping",
+        _acceptance_failpoint=acceptance_failpoint,
+    )
     if not apply_res.get("ok"):
         log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
         return {
@@ -593,13 +523,23 @@ def _maintenance_artist_folder_merge_step(
 
     _invalidate_lib_cache()
     log.append(f"  [stamp] Delegated MBID stamping to engine (op_id={op_id})")
-    return {
+    summary = {
         "ok": True,
         "operation_id": op_id,
         "renamed": apply_res.get("moved_files", 0),
         "merged": apply_res.get("quarantined_files", 0),
         "skipped": len(skipped),
+        "files_moved": apply_res.get("moved_files", 0),
+        "duplicate_files_removed": apply_res.get("quarantined_files", 0),
+        "artwork_collisions_resolved": 0,
+        "filename_conflicts_preserved": 0,
+        "folders_removed": apply_res.get("removed_dirs", 0),
     }
+    log.append(
+        f"Done: {summary['renamed']} renamed, {summary['merged']} merged, {summary['skipped']} skipped; "
+        f"{summary['files_moved']} file(s) moved, {summary['duplicate_files_removed']} duplicate file(s) removed."
+    )
+    return summary
 
 
 def _maintenance_running_job() -> Optional[Any]:
@@ -767,10 +707,7 @@ def _maintenance_save_last_report(update: Dict[str, Any], log: Optional[List[str
     report.update(update)
     report["updated_at"] = time.time()
     try:
-        MAINTENANCE_RUNNER_LAST_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = MAINTENANCE_RUNNER_LAST_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
-        tmp.replace(MAINTENANCE_RUNNER_LAST_FILE)
+        atomic_write_json(MAINTENANCE_RUNNER_LAST_FILE, report, ensure_ascii=False, indent=2, sort_keys=True, default=str)
     except Exception as exc:
         if log is not None:
             log.append(f"[Maintenance] WARN: could not save latest report: {exc}")
