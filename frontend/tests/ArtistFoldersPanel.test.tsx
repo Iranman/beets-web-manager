@@ -5,21 +5,28 @@ import { ArtistFoldersPanel } from '../src/features/artistfolders/ArtistFoldersP
 
 afterEach(cleanup);
 
-const group = {
-  key: 'al',
-  match_type: 'name',
-  canonical: { name: 'Al Campbell' },
-  variants: [{ name: 'Al Campbell', db_albums: 1 }],
-  sources: [{ name: 'Al  Campbell', db_tracks: 1 }],
-  source_audio_files: 1,
-};
+// Stable objects, like the real hook's state: the panel's effects depend on the job's identity,
+// so a new object on each render would loop forever.
+const { scanJob, scanResult } = vi.hoisted(() => ({
+  scanJob: { status: 'success' },
+  scanResult: {
+    groups: [{
+      key: 'al',
+      match_type: 'name',
+      canonical: { name: 'Al Campbell' },
+      variants: [{ name: 'Al Campbell', db_albums: 1 }],
+      sources: [{ name: 'Al  Campbell', db_tracks: 1 }],
+      source_audio_files: 1,
+    }],
+  },
+}));
 
 vi.mock('../src/lib/hooks', () => ({
-  useJobPoll: (id: string | null) => ({ job: id === 'scan' ? { status: 'success' } : null }),
+  useJobPoll: (id: string | null) => ({ job: id === 'scan' ? scanJob : null }),
 }));
 vi.mock('../src/api/client', () => ({
   scanArtistFolders: vi.fn().mockResolvedValue({ job_id: 'scan' }),
-  getJobResult: () => ({ groups: [group] }),
+  getJobResult: () => scanResult,
   mergeArtistFolders: vi.fn(),
   stampMbidFolders: vi.fn(),
 }));

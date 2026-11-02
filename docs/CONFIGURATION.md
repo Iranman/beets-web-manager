@@ -185,7 +185,7 @@ Files in `/web-manager-data` that can hold secrets are created at mode 0600: `.e
 | `QBITTORRENT_URL`, `QBITTORRENT_USERNAME`, `QBITTORRENT_PASSWORD`, `QBITTORRENT_CATEGORY` | Optional qBittorrent connection for the torrent repair tools. Category defaults to `music`. |
 | `PLAYLIST_MIN_DOWNLOAD_SECONDS` | Length in seconds below which a playlist download counts as a preview clip (default `45`; applies after a restart). A shorter downloaded file is deleted and logged, and a shorter track is flagged `preview_risk`. `0` turns this off. |
 | `BEETS_WEB_AUTH_MIN_LENGTH`, `BEETS_WEB_PASSWORD_MIN_LENGTH` | Shortest accepted API token (default `32`) and password (default `16`). |
-| `BEETS_LONG_OPERATION_POLL_SECONDS`, `BEETS_LONG_OPERATION_MAX_SECONDS`, `BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS` | Polling interval (default `5`) and limit (default `600`) for long Beets operations, and the artist reconcile timeout (default `120`). |
+| `BEETS_LONG_OPERATION_POLL_SECONDS`, `BEETS_LONG_OPERATION_MAX_SECONDS`, `BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS` | Polling interval (default `5`) and limit (default `600`) for long Beets operations, and the artist reconcile timeout (default `120`), which has no effect while artist folder stamping and merging are unavailable. |
 | `BEETS_OUTBOUND_TIMEOUT_SECONDS`, `BEETS_OUTBOUND_MAX_REDIRECTS`, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` | Outbound fetch limits: timeout per request (default `20`), redirects (default `5`) and response size (default 20 MiB). |
 
 ## Deprecated variable names
