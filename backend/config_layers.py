@@ -292,6 +292,9 @@ _RESTART_APP_KEYS = frozenset({
     "BEETS_LONG_OPERATION_MAX_SECONDS",
     "BEETS_LONG_OPERATION_POLL_SECONDS",
     "SPOTIFLAC_SERVICES",
+    "BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS",
+    "DISCOGS_TOKEN",
+    "SLSKD_API_KEY",
     "DEMO_MODE",
     # PLEX_URL/PLEX_TOKEN are absent on purpose: plex_service._plex_settings
     # reads os.environ on every call, so they apply live.

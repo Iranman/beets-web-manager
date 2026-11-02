@@ -5,8 +5,8 @@
    "name": "_get_or_create_flask_secret_key",
    "module": "app.py",
    "lines": [
-    115,
-    131
+    117,
+    133
    ],
    "size": 17,
    "body_lines": 16,
@@ -25,8 +25,8 @@
    "name": "_enforce_security_boundary",
    "module": "app.py",
    "lines": [
-    154,
-    199
+    156,
+    201
    ],
    "size": 46,
    "body_lines": 45,
@@ -58,8 +58,8 @@
    "name": "_compress_response",
    "module": "app.py",
    "lines": [
-    207,
-    255
+    209,
+    257
    ],
    "size": 49,
    "body_lines": 28,
@@ -76,8 +76,8 @@
    "name": "_set_security_headers",
    "module": "app.py",
    "lines": [
-    259,
-    273
+    261,
+    275
    ],
    "size": 15,
    "body_lines": 14,
@@ -96,8 +96,8 @@
    "name": "_safe_static_file",
    "module": "app.py",
    "lines": [
-    276,
-    292
+    278,
+    294
    ],
    "size": 17,
    "body_lines": 16,
@@ -119,8 +119,8 @@
    "name": "_handle_http_error",
    "module": "app.py",
    "lines": [
-    297,
-    298
+    299,
+    300
    ],
    "size": 2,
    "body_lines": 1,
@@ -137,8 +137,8 @@
    "name": "_handle_ai_batch_state_conflict",
    "module": "app.py",
    "lines": [
-    310,
-    321
+    312,
+    323
    ],
    "size": 12,
    "body_lines": 1,
@@ -155,8 +155,8 @@
    "name": "_handle_provider_unavailable",
    "module": "app.py",
    "lines": [
-    324,
-    330
+    326,
+    332
    ],
    "size": 7,
    "body_lines": 4,
@@ -173,8 +173,8 @@
    "name": "_handle_unexpected_error",
    "module": "app.py",
    "lines": [
-    333,
-    340
+    335,
+    342
    ],
    "size": 8,
    "body_lines": 7,
@@ -193,8 +193,8 @@
    "name": "index",
    "module": "app.py",
    "lines": [
-    346,
-    347
+    348,
+    349
    ],
    "size": 2,
    "body_lines": 1,
@@ -242,8 +242,8 @@
    "name": "react_assets",
    "module": "app.py",
    "lines": [
-    350,
-    355
+    352,
+    357
    ],
    "size": 6,
    "body_lines": 4,
@@ -265,8 +265,8 @@
    "name": "react_next_static",
    "module": "app.py",
    "lines": [
-    359,
-    364
+    361,
+    366
    ],
    "size": 6,
    "body_lines": 4,
@@ -288,8 +288,8 @@
    "name": "favicon",
    "module": "app.py",
    "lines": [
-    368,
-    375
+    370,
+    377
    ],
    "size": 8,
    "body_lines": 7,
@@ -309,8 +309,8 @@
    "name": "_health_checks",
    "module": "app.py",
    "lines": [
-    378,
-    404
+    380,
+    406
    ],
    "size": 27,
    "body_lines": 26,
@@ -329,8 +329,8 @@
    "name": "health",
    "module": "app.py",
    "lines": [
-    408,
-    414
+    410,
+    416
    ],
    "size": 7,
    "body_lines": 1,
@@ -361,8 +361,8 @@
    "name": "health_detail",
    "module": "app.py",
    "lines": [
-    418,
-    432
+    420,
+    434
    ],
    "size": 15,
    "body_lines": 13,
@@ -384,8 +384,8 @@
    "name": "render_index",
    "module": "app.py",
    "lines": [
-    479,
-    489
+    481,
+    491
    ],
    "size": 11,
    "body_lines": 9,
@@ -405,8 +405,8 @@
    "name": "react_index_response",
    "module": "app.py",
    "lines": [
-    492,
-    502
+    494,
+    504
    ],
    "size": 11,
    "body_lines": 10,
@@ -428,8 +428,8 @@
    "name": "react_spa_fallback",
    "module": "app.py",
    "lines": [
-    506,
-    519
+    508,
+    521
    ],
    "size": 14,
    "body_lines": 12,
@@ -452,8 +452,8 @@
    "name": "__getattr__",
    "module": "app.py",
    "lines": [
-    567,
-    577
+    569,
+    579
    ],
    "size": 11,
    "body_lines": 10,
@@ -470,8 +470,8 @@
    "name": "_load_route_module",
    "module": "app.py",
    "lines": [
-    595,
-    608
+    597,
+    610
    ],
    "size": 14,
    "body_lines": 13,
@@ -38641,7 +38641,7 @@
    "lines": 11
   }
  },
- "app_py_lines": 639,
+ "app_py_lines": 641,
  "extracted_modules": [
   "backend/app_runtime.py",
   "backend/auth_service.py",

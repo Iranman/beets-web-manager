@@ -15,7 +15,7 @@ Every setting in this app belongs to exactly one of four owners, each with its o
 
 Precedence for any given web-manager value, highest first:
 
-1. **Explicit Docker environment variable** (set in the Compose file or host environment). This is what an operator controls at deploy time and it always wins.
+1. **Explicit Docker environment variable** (set in the Compose file or host environment). This is what an operator controls at deploy time and it wins over saved state under the same name. The exception is a deprecated name: a Docker `BEETS_WEB_TOKEN` loses to a saved `BEETS_WEB_AUTH_TOKEN`, because saved settings load into the canonical name and the canonical name wins over its [deprecated aliases](#deprecated-variable-names). Set the canonical name in Docker to be sure it wins.
 2. **Persistent web-manager state** written by the app itself (`/web-manager-data/.env`, `.browser_password`, `.browser_username`, `app_settings.json`). This is what changes when you use the Settings/System UI.
 3. **Built-in application default.**
 
@@ -141,7 +141,7 @@ Only these keys may be saved from the System page, and only these keys are loade
 | `BEETS_WEB_AUTH_TOKEN` | live | Owner API/script bearer token. Auto-generated if unset. |
 | `BEETS_WEB_PASSWORD` | live | Administrator password, stored only as a hash. Prefer the first-run wizard. |
 | `BEETS_WEB_USERNAME` | live | Browser login username, default `admin`. |
-| `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` | restart | Wall-clock limit (default 60 s) for one fetch of a user-supplied or provider-supplied URL (reference URLs, artwork images). It covers trying each DNS answer, every redirect, and reading the whole body, so a server that sends data very slowly cannot hold a worker open. A value that is not a positive number is ignored with a warning in the log, and 60 s is used. |
+| `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` | restart | Wall-clock limit (default 60 s) for one fetch of a user-supplied or provider-supplied URL (reference URLs, artwork images). It covers trying each DNS answer, every redirect, and reading the whole body, so a server that sends data very slowly cannot hold a worker open. A value that is below 0.1 s, not a number, or above the 600 s ceiling is ignored with a warning in the log, and 60 s is used. The other outbound limits have ceilings too: `BEETS_OUTBOUND_TIMEOUT_SECONDS` 300 s, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` 200 MiB, `BEETS_OUTBOUND_MAX_REDIRECTS` 20. |
 
 The provider settings in the next section are application settings too.
 

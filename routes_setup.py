@@ -936,7 +936,6 @@ _BUILTIN_SETTINGS: Dict[str, Tuple[str, bool, str]] = {
     "AI_BASE_URL": ("https://api.openai.com/v1", False, "value"),
     "AI_MODEL": ("gpt-4o-mini", False, "value"),
 }
-_OPENROUTER_DEFAULTS = {"AI_BASE_URL": "https://openrouter.ai/api/v1", "AI_MODEL": "openai/gpt-4o-mini"}
 
 
 def _builtin_setting_fallback(name: str, persisted: Dict[str, str]) -> Tuple[str, str]:
@@ -953,11 +952,6 @@ def _builtin_setting_fallback(name: str, persisted: Dict[str, str]) -> Tuple[str
                 pass
         if runtime:
             return runtime, "runtime"
-    if name in _OPENROUTER_DEFAULTS:
-        has_openrouter = os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")
-        has_openai = os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")
-        if has_openrouter and not has_openai:
-            return _OPENROUTER_DEFAULTS[name], "default"
     return _BUILTIN_SETTINGS[name][0], "default"
 
 
@@ -987,7 +981,7 @@ def _resolve_setting_item(
 
     persisted_val = persisted.get(name, "").strip() if name in persisted else ""
     has_persisted = name in persisted and bool(persisted_val)
-    env_val = os.environ.get(name, "").strip()
+    env_val = config_layers.legacy_env_value(name).strip()
 
     def item(**fields: Any) -> Dict[str, Any]:
         return {
@@ -1552,17 +1546,19 @@ _REDACTED = "[redacted]"
 _SECRET_KV_RE = re.compile(
     r"""(?ix)
     \b([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|secret|auth))
-    (\s*[:=]\s*)
+    (["']?\s*[:=]\s*)
     (?!['"]?\[redacted\]['"]?)
-    (?:"([^"]*)"|'([^']*)'|([^\s,;}\]&]+))
+    (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\s,;}\]&]+)
     """,
-    re.VERBOSE,
+    re.VERBOSE | re.DOTALL,
 )
 
-# Secret variable names and their legacy aliases, which the generic pattern
-# above may not match (QBIT_PASS, QB_PASS).
+# Exact secret variable names and their legacy aliases, which the generic
+# pattern above may not match (QBIT_PASS, QB_PASS). A bare value runs to the
+# next whitespace, and an unterminated quoted one to the end of the text: the
+# whole value is known to be secret, so this over-redacts rather than leaks.
 _SECRET_NAME_KV_RE = re.compile(
-    r"""(?i)\b(%s)(\s*[:=]\s*)(?!['"]?\[redacted\]['"]?)(?:"[^"]*"|'[^']*'|[^\s,;}\]&]+)"""
+    r"""(?is)\b(%s)(["']?\s*[:=]\s*)(?!['"]?\[redacted\]['"]?)(?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|\S+)"""
     % "|".join(sorted(
         re.escape(name)
         for name in (*config_layers.SECRET_KEYS, *config_layers.LEGACY_ENV_ALIASES)
@@ -1613,7 +1609,9 @@ def _redact_diagnostic_text(text: str) -> str:
     payloads, so it must be idempotent: calling it again on its own output
     must return that output unchanged, with no accumulation of stray `]`
     characters and no corruption of an existing placeholder."""
-    redacted = str(text or "")
+    # First: the shorter generic patterns would stop at a comma and hide the
+    # rest of the value from this one.
+    redacted = _SECRET_NAME_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", str(text or ""))
     try:
         # Reuse app.py's generic secret-assignment/control-char sanitizer
         # (added for CodeQL exception sanitization) as a first pass when the
@@ -1631,7 +1629,6 @@ def _redact_diagnostic_text(text: str) -> str:
     redacted = _COOKIE_HEADER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
     redacted = _URL_CREDENTIAL_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}@", redacted)
     redacted = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
-    redacted = _SECRET_NAME_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
     redacted = _STRAY_REDACTED_BRACKET_RE.sub(lambda m: m.group(1), redacted)
     return redacted
 
@@ -1647,8 +1644,11 @@ def _redact_plugins_report(plugins_report: Dict[str, Any]) -> Dict[str, Any]:
     summary = report.get("summary")
     if isinstance(summary, dict) and isinstance(summary.get("errors"), list):
         summary["errors"] = [_redact_diagnostic_text(str(line)) for line in summary["errors"]]
-    plugins = report.get("plugins")
-    if isinstance(plugins, list):
+    categories = report.get("categories")
+    plugin_lists = [report.get("plugins"), *(categories.values() if isinstance(categories, dict) else [])]
+    for plugins in plugin_lists:
+        if not isinstance(plugins, list):
+            continue
         for plugin in plugins:
             if not isinstance(plugin, dict):
                 continue

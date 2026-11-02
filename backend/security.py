@@ -51,43 +51,35 @@ _SENSITIVE_REDIRECT_HEADERS = {
     "x-mediabrowser-token",
     "x-listenbrainz-token",
 }
-def _env_limit(name: str, default: Any, cast: Any, minimum: Any) -> Any:
+def _env_limit(name: str, default: Any, cast: Any, minimum: Any, maximum: Any) -> Any:
     """A numeric limit from the environment or saved settings. A bad saved
     value falls back to the default, because this runs at import and must not
-    stop the app (and the Settings page that could fix it) from starting."""
-    raw = os.environ.get(name, "").strip()
+    stop the app (and the Settings page that could fix it) from starting. The
+    ceiling keeps a saved value from removing the protection the limit gives."""
+    raw = os.environ.get(name, "")
     if not raw:
         return default
     try:
         value = cast(raw)
     except ValueError:
         value = None
-    if value is None or not minimum <= value < float("inf"):
+    if value is None or not minimum <= value:  # "not <=" also rejects nan
         LOG.warning("%s is invalid; using the default %s.", name, default)
+        return default
+    if value > maximum:
+        LOG.warning("%s is above its ceiling of %s; using the default %s.", name, maximum, default)
         return default
     return value
 
 
-_DEFAULT_TIMEOUT = _env_limit("BEETS_OUTBOUND_TIMEOUT_SECONDS", 20.0, float, 0.1)
-_DEFAULT_MAX_BYTES = _env_limit("BEETS_OUTBOUND_MAX_RESPONSE_BYTES", 20 * 1024 * 1024, int, 1)
-_DEFAULT_MAX_REDIRECTS = _env_limit("BEETS_OUTBOUND_MAX_REDIRECTS", 5, int, 0)
+_DEFAULT_TIMEOUT = _env_limit("BEETS_OUTBOUND_TIMEOUT_SECONDS", 20.0, float, 0.1, 300.0)
+_DEFAULT_MAX_BYTES = _env_limit("BEETS_OUTBOUND_MAX_RESPONSE_BYTES", 20 * 1024 * 1024, int, 1, 200 * 1024 * 1024)
+_DEFAULT_MAX_REDIRECTS = _env_limit("BEETS_OUTBOUND_MAX_REDIRECTS", 5, int, 0, 20)
 # Wall-clock budget for one user-supplied-URL fetch (every DNS answer tried,
 # every redirect hop, and the whole body read). The per-operation timeout
 # above only bounds a single socket wait, so a server dripping one byte per
 # few seconds could otherwise hold a worker for hours (SEC-7).
-def _total_timeout_setting() -> float:
-    raw = os.environ.get("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS", "") or "60"
-    try:
-        value = float(raw)
-    except ValueError:
-        value = 0.0
-    if not (0 < value < float("inf")):  # also rejects nan
-        LOG.warning("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS must be a positive number; using 60.")
-        return 60.0
-    return value
-
-
-_DEFAULT_TOTAL_TIMEOUT = _total_timeout_setting()
+_DEFAULT_TOTAL_TIMEOUT = _env_limit("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS", 60.0, float, 0.1, 600.0)
 _READ_CHUNK = 64 * 1024
 _ORIGINAL_URLOPEN_ATTR = "_beets_original_urlopen"
 _INSTALLED_ATTR = "_beets_secure_urlopen_installed"

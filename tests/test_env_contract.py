@@ -280,10 +280,78 @@ class BootOrderTests(unittest.TestCase):
         self.assertEqual(limits[:3], [20.0, 20 * 1024 * 1024, 5])
         self.assertIn("BEETS_OUTBOUND_TIMEOUT_SECONDS is invalid", stderr)
 
-    def test_import_time_limits_report_restart(self):
+    def test_limits_above_their_ceiling_warn_and_use_the_default(self):
+        saved = ("BEETS_OUTBOUND_TIMEOUT_SECONDS=301\nBEETS_OUTBOUND_MAX_RESPONSE_BYTES=209715201\n"
+                 "BEETS_OUTBOUND_MAX_REDIRECTS=21\nBEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS=601\n")
+        code = ("import json, app\nfrom backend import security as s\n"
+                "print(json.dumps([s._DEFAULT_TIMEOUT, s._DEFAULT_MAX_BYTES, s._DEFAULT_MAX_REDIRECTS, s._DEFAULT_TOTAL_TIMEOUT]))\n")
+        limits, stderr = self._boot(saved, code)
+        self.assertEqual(limits, [20.0, 20 * 1024 * 1024, 5, 60.0])
+        for name in ("TIMEOUT_SECONDS", "MAX_RESPONSE_BYTES", "MAX_REDIRECTS", "TOTAL_TIMEOUT_SECONDS"):
+            self.assertIn(f"BEETS_OUTBOUND_{name} is above its ceiling", stderr)
+
+    def test_limits_at_their_ceiling_apply(self):
+        saved = ("BEETS_OUTBOUND_TIMEOUT_SECONDS=300\nBEETS_OUTBOUND_MAX_RESPONSE_BYTES=209715200\n"
+                 "BEETS_OUTBOUND_MAX_REDIRECTS=20\nBEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS=600\n")
+        code = ("import json, app\nfrom backend import security as s\n"
+                "print(json.dumps([s._DEFAULT_TIMEOUT, s._DEFAULT_MAX_BYTES, s._DEFAULT_MAX_REDIRECTS, s._DEFAULT_TOTAL_TIMEOUT]))\n")
+        self.assertEqual(self._boot(saved, code)[0], [300.0, 209715200, 20, 600.0])
+
+    def test_import_time_settings_report_restart(self):
         for name in ("BEETS_OUTBOUND_TIMEOUT_SECONDS", "BEETS_OUTBOUND_MAX_REDIRECTS", "BEETS_OUTBOUND_MAX_RESPONSE_BYTES",
-                     "BEETS_LONG_OPERATION_MAX_SECONDS", "BEETS_LONG_OPERATION_POLL_SECONDS", "SPOTIFLAC_SERVICES"):
+                     "BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS", "BEETS_LONG_OPERATION_MAX_SECONDS",
+                     "BEETS_LONG_OPERATION_POLL_SECONDS", "SPOTIFLAC_SERVICES", "BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS",
+                     "DISCOGS_TOKEN", "SLSKD_API_KEY"):
             self.assertEqual(cl.apply_mode(name), cl.APPLY_RESTART, name)
+
+    def test_retired_key_is_removed_from_the_saved_file_at_boot(self):
+        code = ("import json, os, app\n"
+                "print(json.dumps(open(os.environ['SETUP_ENV_FILE'], encoding='utf-8').read()))\n")
+        text, _ = self._boot("BEETS_VERSION_PROBE_TIMEOUT_SECONDS=45\nAI_MODEL=fake-model\n", code)
+        self.assertNotIn("BEETS_VERSION_PROBE_TIMEOUT_SECONDS", text)
+        self.assertIn("AI_MODEL=fake-model", text)
+
+    def test_no_connection_before_the_urllib_patch_and_no_captured_urlopen(self):
+        code = (
+            "import json, sys, types, urllib.request\n"
+            "original = urllib.request.urlopen\n"
+            "early = []\n"
+            "def hook(event, args):\n"
+            "    if event in ('socket.connect', 'socket.getaddrinfo') and urllib.request.urlopen is original:\n"
+            "        early.append(event)\n"
+            "sys.addaudithook(hook)\n"
+            "import app\n"
+            "patched = urllib.request.urlopen is not original\n"
+            "holders = sorted(\n"
+            "    f'{name}.{attr}' for name, mod in list(sys.modules.items())\n"
+            "    if isinstance(mod, types.ModuleType) and name != '__main__'\n"  # this probe's own reference
+            "    for attr, value in list(vars(mod).items())\n"
+            "    if value is original and not (name == 'urllib.request' and attr.startswith('_beets_'))\n"
+            ")\n"
+            "print(json.dumps([patched, early, holders]))\n"
+        )
+        (patched, early, holders), _ = self._boot("", code)
+        self.assertTrue(patched)
+        self.assertEqual(early, [], "connected before install_secure_urllib")
+        self.assertEqual(holders, [], "these keep the unpatched urlopen")
+
+
+class ExampleKeyDefaultTests(unittest.TestCase):
+    """A key in .env.example with no metadata row reports the example's value
+    as its default (routes_setup._env_catalog), so that value must be the reader's."""
+
+    READERS = {}
+    EXEMPT = {}
+
+    def test_keys_without_a_row_report_their_readers_default(self):
+        rows = SettingMetadataDefaultTests._metadata_defaults()
+        values = dict(re.findall(r"(?m)^([A-Z_][A-Z0-9_]*)=(.*)$", (ROOT / ".env.example").read_text(encoding="utf-8")))
+        no_row = set(values) - set(rows)
+        self.assertEqual(sorted(no_row - set(self.READERS) - set(self.EXEMPT)), [],
+                         "add a metadata row, name the reader in READERS, or justify it in EXEMPT")
+        self.assertEqual(sorted((set(self.READERS) | set(self.EXEMPT)) - no_row), [], "stale entries")
+        for name, path in self.READERS.items():
+            self.assertEqual(values[name], SettingMetadataDefaultTests._reader_default(path, name), name)
 
 
 class SecretNameTests(unittest.TestCase):

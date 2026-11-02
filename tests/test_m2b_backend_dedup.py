@@ -72,11 +72,12 @@ class SettingItem(unittest.TestCase):
         self.assertEqual(item["status_message"], "Docker environment overrides saved timezone (UTC)")
         self.assertEqual(self._item("TZ", persisted={"TZ": "UTC"})["status_message"], "Saved — restart required")
 
-    def test_ai_defaults_follow_the_configured_provider(self):
+    def test_ai_default_is_what_matching_uses_whatever_key_is_set(self):
         with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "x"}):
             os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop("AI_BASE_URL", None)
             item = self._item("AI_BASE_URL")
-        self.assertEqual(item["value"], "https://openrouter.ai/api/v1")
+        self.assertEqual(item["value"], "https://api.openai.com/v1")
         self.assertEqual(item["default"], "https://api.openai.com/v1")
 
 

@@ -730,11 +730,34 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertNotIn("fake-query-credential", r.get_data(as_text=True))
         self.assertIn(raw, self.env_file.read_text(encoding="utf-8"))
 
-    def test_diagnostic_text_redacts_secret_alias_assignments(self):
-        for text in ("QBIT_PASS=fake-diag", "failed: qb_pass: fake-diag", 'QB_PASS="fake-diag"'):
+    def test_url_fragment_is_masked(self):
+        self.env_file.write_text("AI_BASE_URL=https://ai.test/v1#fake-fragment-credential\n", encoding="utf-8")
+        r = self.client.get("/api/setup/env")
+        self.assertNotIn("fake-fragment-credential", r.get_data(as_text=True))
+
+    def test_diagnostic_text_redacts_every_secret_assignment_form(self):
+        for text in (
+            "QBIT_PASS=fake-diag", "failed: qb_pass: fake-diag", 'QB_PASS="fake-diag"',
+            '{"QB_PASS":"fake-diag"}', "{'qb_pass': 'fake-diag'}", "QB_PASS=fake-diag,fake-diag",
+            'QB_PASS="fake-diag fake-diag', "QB_PASS='fake-diag fake-diag", r'{"QB_PASS":"a\"fake-diag"}',
+            '{"password":"fake-diag"}', "{'password': 'fake-diag'}", 'password="fake-diag fake-diag',
+            '{"QBITTORRENT_PASSWORD":"fake-diag"}', '{"PLEX_TOKEN": "fake-diag"}',
+            "PLEX_TOKEN=fake-diag,fake-diag",
+        ):
             redacted = self.module._redact_diagnostic_text(text)
             self.assertNotIn("fake-diag", redacted, text)
-            self.assertEqual(self.module._redact_diagnostic_text(redacted), redacted)
+            self.assertEqual(self.module._redact_diagnostic_text(redacted), redacted, text)
+
+    def test_plugins_report_redacts_categories(self):
+        plugin = {"name": "x", "note": "QB_PASS=fake-diag", "errors": ['{"password":"fake-diag"}']}
+        report = self.module._redact_plugins_report({"plugins": [dict(plugin)], "categories": {"required": [dict(plugin)]}})
+        self.assertNotIn("fake-diag", repr(report))
+
+    def test_canonical_row_sees_its_alias(self):
+        os.environ["QBIT_URL"] = "http://qbit.test:8080"
+        variables = {item["name"]: item for item in self.client.get("/api/setup/env").get_json()["variables"]}
+        self.assertEqual(variables["QBITTORRENT_URL"]["value"], "http://qbit.test:8080")
+        self.assertEqual(variables["QBITTORRENT_URL"]["source"], "environment")
 
     def test_unread_setting_is_retired_not_editable(self):
         variables = {item["name"] for item in self.client.get("/api/setup/env").get_json()["variables"]}
