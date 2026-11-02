@@ -37,6 +37,11 @@ Set `E2E_PYTHON` if `python` is not the right interpreter. CI runs the same suit
 
 Provider stubs replace `urlopen`, `open_public_url` and the `requests` transport, so the real `secure_urlopen` never runs. **This suite is no evidence for URL security checks** (SSRF guards, allowlists, redirect handling). `tests/` covers those.
 
+Known limits of the specs:
+
+- `02a-clean-all` compares album names and file names, so item-row loss or content corruption would not show, and its baseline is taken after the first two tasks have run.
+- `05-jobs` needs the cancelled row from `02a`, so it fails when run alone. The specs share one ordered run.
+
 Not covered by the audit hook. The namespace still stops the network ones leaving, but nothing fails the run:
 
 - `sendmsg`, `gethostbyaddr` and `getnameinfo`.
