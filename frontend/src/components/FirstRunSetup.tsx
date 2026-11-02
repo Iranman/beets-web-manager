@@ -1,3 +1,4 @@
+import { errorMessage } from '../lib/errors';
 import { useEffect, useState } from 'react';
 import {
   completeSetup,
@@ -103,7 +104,7 @@ export default function FirstRunSetup() {
         setBeetsStatus({ testing: false, ok: false, error: res.error || 'Could not execute Beets. Check the Docker service and configuration.' });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Could not reach Beets engine.';
+      const msg = errorMessage(err, 'Could not reach Beets engine.');
       setBeetsStatus({ testing: false, ok: false, error: msg });
     }
   };
@@ -118,7 +119,7 @@ export default function FirstRunSetup() {
         setMbStatus({ testing: false, ok: false, error: res.error || 'Could not reach MusicBrainz.' });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'MusicBrainz test failed.';
+      const msg = errorMessage(err, 'MusicBrainz test failed.');
       setMbStatus({ testing: false, ok: false, error: msg });
     }
   };
@@ -133,7 +134,7 @@ export default function FirstRunSetup() {
         setAcoustidStatus({ testing: false, ok: false, error: res.error || 'AcoustID check failed.' });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'AcoustID test failed.';
+      const msg = errorMessage(err, 'AcoustID test failed.');
       setAcoustidStatus({ testing: false, ok: false, error: msg });
     }
   };
@@ -148,7 +149,7 @@ export default function FirstRunSetup() {
         setAiStatus({ testing: false, ok: false, error: res.error || 'Authentication failed. Check your API key.' });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'AI connection test failed.';
+      const msg = errorMessage(err, 'AI connection test failed.');
       setAiStatus({ testing: false, ok: false, error: msg });
     }
   };
@@ -164,7 +165,7 @@ export default function FirstRunSetup() {
         setPlexStatus({ testing: false, ok: false, error: res.error || 'Could not connect to Plex.' });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Plex test failed.';
+      const msg = errorMessage(err, 'Plex test failed.');
       setPlexStatus({ testing: false, ok: false, error: msg });
     }
   };
@@ -198,7 +199,7 @@ export default function FirstRunSetup() {
         ok: res.ok,
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Plugin verification failed.';
+      const msg = errorMessage(err, 'Plugin verification failed.');
       setPluginsActionMessage({ text: msg, ok: false });
     } finally {
       setPluginsLoading(false);
@@ -243,7 +244,7 @@ export default function FirstRunSetup() {
         window.location.href = '/';
       }, 1500);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'An error occurred while finishing setup.';
+      const msg = errorMessage(err, 'An error occurred while finishing setup.');
       setFinishError(msg);
     } finally {
       setFinishing(false);

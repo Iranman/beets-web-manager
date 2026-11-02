@@ -1,3 +1,4 @@
+import { errorMessage } from '../lib/errors';
 import {
   Dialog,
   DialogBackdrop,
@@ -59,7 +60,7 @@ export function AlbumCleanupModal({
         setStep('failed');
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Engine communication error.';
+      const msg = errorMessage(err, 'Engine communication error.');
       setErrorMsg(msg);
       setStep('failed');
     }
@@ -103,7 +104,7 @@ export function AlbumCleanupModal({
       // engine unreachable, non-2xx with an unparseable body) -- there is
       // no error_kind/mutated signal available, so this can never be
       // presented as "nothing changed."
-      const msg = err instanceof Error ? err.message : 'Failed to apply cleanup plan.';
+      const msg = errorMessage(err, 'Failed to apply cleanup plan.');
       setErrorMsg(msg);
       setStep('failed');
     }

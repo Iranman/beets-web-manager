@@ -1,19 +1,16 @@
+import { formatShortTime } from '../../lib/dates';
 import Alert from '@mui/material/Alert';
 import type { PlaylistSyncDetail, PlaylistSyncStatusResponse } from '../../api/types';
 
 const fmt = new Intl.NumberFormat();
-
-function clock(epochSeconds: number): string {
-  return new Date(epochSeconds * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-}
 
 /** One short line: auto-sync mode, last and next run, and the last totals. */
 export function playlistSyncStatusLabel(status: PlaylistSyncStatusResponse | null): string {
   if (!status) return '';
   const parts = [status.enabled ? `Auto every ${Math.round((status.interval || 0) / 60)} min` : 'Auto off'];
   if (status.running) parts.push('Syncing now');
-  parts.push(`Last ${status.last_run ? clock(status.last_run) : 'never'}`);
-  if (status.enabled && status.next_run_at && !status.running) parts.push(`Next ${clock(status.next_run_at)}`);
+  parts.push(`Last ${status.last_run ? formatShortTime(status.last_run) : 'never'}`);
+  if (status.enabled && status.next_run_at && !status.running) parts.push(`Next ${formatShortTime(status.next_run_at)}`);
   const r = status.last_result;
   if (r) {
     parts.push(`${fmt.format(r.playlists_updated ?? 0)} updated`);

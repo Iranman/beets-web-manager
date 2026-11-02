@@ -1,3 +1,4 @@
+import { errorMessage } from './errors';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getDedupScan, getSetupStatus } from '../api/client';
@@ -47,7 +48,7 @@ export function useJobPoll(jobId: string | null, enabled = true): {
 
   return {
     job: jobId ? query.data ?? null : null,
-    error: query.error ? (query.error instanceof Error ? query.error.message : String(query.error)) : null,
+    error: query.error ? (errorMessage(query.error)) : null,
   };
 }
 
@@ -120,7 +121,7 @@ export function useDedupScan(jid: string | null): {
           if (s.status === 'done') return;
         } catch (err) {
           if (!active) return;
-          setError(err instanceof Error ? err.message : String(err));
+          setError(errorMessage(err));
           return;
         }
         await new Promise<void>((r) => setTimeout(r, 1500));
@@ -148,7 +149,7 @@ export function useDownloadsRoot(): { root: string; loading: boolean; error: str
   return {
     root: query.data?.paths?.downloads?.path?.trim() ?? '',
     loading: query.isPending,
-    error: err ? (err instanceof Error ? err.message : String(err)) : null,
+    error: err ? (errorMessage(err)) : null,
   };
 }
 

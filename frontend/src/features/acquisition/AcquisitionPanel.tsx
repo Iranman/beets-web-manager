@@ -1,3 +1,5 @@
+import { formatShortDateTime, normaliseEpochSeconds } from '../../lib/dates';
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -74,10 +76,6 @@ export function formatAge(seconds?: number | null) {
   return `${Math.floor(seconds / 86400)} d ago`;
 }
 
-function errorMessage(err: unknown) {
-  return err instanceof Error ? err.message : String(err);
-}
-
 function errorCode(err: unknown) {
   return (err as { body?: { code?: string; error_code?: string } } | null)?.body?.code
     || (err as { body?: { error_code?: string } } | null)?.body?.error_code
@@ -113,23 +111,12 @@ function lastLogLine(log?: string[]) {
   return (log ?? []).filter(Boolean).slice(-1)[0] ?? '';
 }
 
-function normaliseEpochSeconds(ts?: number | string | null) {
-  const value = Number(ts);
-  if (!Number.isFinite(value) || value <= 0) return null;
-  return value > 100000000000 ? value / 1000 : value;
-}
-
 function formatBatchTimestamp(ts?: number | string | null) {
   const seconds = normaliseEpochSeconds(ts);
   if (seconds === null) return '';
   const date = new Date(seconds * 1000);
   if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  return formatShortDateTime(date.getTime());
 }
 
 function jobStatusColor(status?: string) {
@@ -221,7 +208,7 @@ function AcquisitionRow({
       const started = await startAlbumDownload(payload);
       setJobId(started.job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setAction(null);
     }
@@ -236,7 +223,7 @@ function AcquisitionRow({
       const result = await runLidarrAlbumSearch(wanted.lidarr_id);
       setNotice(result.command_id ? `Lidarr search queued: command ${result.command_id}` : 'Lidarr search queued.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setAction(null);
     }
@@ -492,7 +479,7 @@ export function AcquisitionPanel({
           enabled: false,
           cookie_file: '',
           cookie_candidates: [],
-          message: err instanceof Error ? err.message : String(err),
+          message: errorMessage(err),
         });
       });
   }, []);
