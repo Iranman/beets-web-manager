@@ -363,13 +363,31 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
 
 
 def _ai_reply_object(content: Any) -> Dict[str, Any]:
-    """The parsed AI reply; a non-object or a non-string albumartist is a failed reply, like unparseable text."""
+    """The keys the album/folder prompt asks for, validated; anything else in the
+    reply is dropped, so scores and identity can only come from evidence. A reply
+    of the wrong shape is a failed reply, like unparseable text.
+    """
     reply = json.loads(content)
     if not isinstance(reply, dict):
         raise ValueError("AI reply is not a JSON object")
-    if not isinstance(reply.get("albumartist"), (str, type(None))):
-        raise ValueError("AI reply albumartist is not a string")
-    return reply
+    clean: Dict[str, Any] = {}
+    for key in ("album", "albumartist", "year", "label", "country", "confidence", "reason"):
+        value = reply.get(key)
+        if value is None:
+            continue
+        if key == "year" and type(value) is int and abs(value) < 10**9:
+            clean[key] = value
+        elif isinstance(value, str) and len(value) <= 1000:
+            clean[key] = value.strip()
+        else:
+            raise ValueError(f"AI reply field {key} has the wrong type or size")
+    if "confidence" in clean:
+        clean["confidence"] = clean["confidence"].lower()
+        if clean["confidence"] not in ("high", "medium", "low"):
+            raise ValueError("AI reply confidence is not high, medium or low")
+    if "candidate_index" in reply:
+        clean["candidate_index"] = reply["candidate_index"]  # _ai_bind_selected_release validates it
+    return clean
 
 
 def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str, Any]]) -> tuple:

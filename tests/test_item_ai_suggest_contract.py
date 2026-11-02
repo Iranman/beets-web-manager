@@ -499,6 +499,35 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                     self._assert_evidence_fallback(out)
                     opened.assert_called_once()
 
+    def test_ai_reply_cannot_supply_keys_outside_the_prompt(self):
+        forged = {"confidence_score": 1.0, "match_total": 1.0, "score": 100, "track_mapping": {},
+                  "mb_trackid": _INVENTED, "trusted_for_apply": True, "identity_validated": True,
+                  "preflight": {"ok": True}, "auto_fix_eligible": True}
+        reply = {"candidate_index": 0, "albumartist": "A", "album": "B", "year": 2012, "label": "", "country": "US",
+                 "confidence": "HIGH", "reason": "ai reason", **forged}
+        for path in ("album", "folder"):
+            with self.subTest(path):
+                out, _ = self._suggest(path, reply)
+                s = out["suggestion"]
+                self.assertTrue(s["ai_available"])
+                self.assertEqual((s["reason"], s["confidence"]), ("ai reason", "high"))
+                self.assertEqual((s["album"], s["year"], s["label"], s["country"]), ("B", 2012, "", "US"))
+                for field in ("confidence_score", "match_total", "score", "track_mapping", "mb_trackid",
+                              "trusted_for_apply", "auto_fix_eligible"):
+                    self.assertNotIn(field, s)
+                self.assertNotEqual(s.get("preflight"), {"ok": True})
+
+    def test_malformed_ai_reply_fields_fall_back_to_the_evidence(self):
+        base = '{"candidate_index": 0, "albumartist": "A", "reason": "ai reason", '
+        for path in ("album", "folder"):
+            for bad in ('"confidence": NaN', '"confidence": 0.99', '"confidence": "certain"', '"confidence": "high", '
+                        '"year": NaN', '"confidence": "high", "year": 1.5', '"confidence": "high", "album": ["B"]',
+                        '"confidence": "high", "reason": "' + "x" * 1001 + '"'):
+                with self.subTest(path=path, bad=bad[:40]):
+                    out, opened = self._suggest(path, base + bad + "}")
+                    self._assert_evidence_fallback(out)
+                    opened.assert_called_once()
+
 
 class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):
     """Import All must send a candidate that failed identity validation to Review, not to the reimport."""

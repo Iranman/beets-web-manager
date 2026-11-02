@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **AI album and folder replies keep only the fields the prompt asks for (#521).** Extra keys such as `confidence_score`, `match_total`, `track_mapping` or `trusted_for_apply` are dropped, so these keys can no longer make a weak match eligible for auto-import or break the review page. A reply with a malformed field, including a `NaN` value, now counts as a failed reply and falls back to MusicBrainz and AcoustID evidence.
+
 ## v0.16.2 - 2026-11-04
 
 ### Fixed
