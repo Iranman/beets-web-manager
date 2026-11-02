@@ -272,7 +272,7 @@ def _mask(value: str) -> str:
 
 def _is_secret_env(name: str) -> bool:
     upper = name.upper()
-    return any(part in upper for part in _SECRET_ENV_PARTS)
+    return config_layers.is_secret_name(upper) or any(part in upper for part in _SECRET_ENV_PARTS)
 
 
 def _decode_env_value(raw: str) -> str:
@@ -411,7 +411,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_LONG_OPERATION_MAX_SECONDS": {
         "section": "System & Environment",
-        "default": "1800",
+        "default": "600",
         "description": "Maximum execution window for long background operations before timeout",
         "secret": False,
         "editable": True,
@@ -420,7 +420,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_LONG_OPERATION_POLL_SECONDS": {
         "section": "System & Environment",
-        "default": "2",
+        "default": "5",
         "description": "Status polling interval in seconds for background jobs",
         "secret": False,
         "editable": True,
@@ -487,7 +487,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_OUTBOUND_TIMEOUT_SECONDS": {
         "section": "Authentication & Security",
-        "default": "30",
+        "default": "20",
         "description": "Outbound HTTP request timeout in seconds",
         "secret": False,
         "editable": True,
@@ -599,15 +599,6 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "restart_required": True,
         "type": "string",
     },
-    "BEETS_VERSION_PROBE_TIMEOUT_SECONDS": {
-        "section": "Beets Core & Engine",
-        "default": "45",
-        "description": "Timeout in seconds for remote Beets engine diagnostics probes",
-        "secret": False,
-        "editable": True,
-        "restart_required": False,
-        "type": "integer",
-    },
 
     # 5. Storage & Paths
     "MUSIC_PATH": {
@@ -652,9 +643,8 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "IMPORT_REVIEW_QUARANTINE_DIR": {
         "section": "Storage & Paths",
-        "default": "/config/quarantine",
-        "container_path": "/config/quarantine",
-        "description": "Quarantine storage path for ambiguous or conflicting import files",
+        "default": None,
+        "description": "Quarantine storage path for ambiguous or conflicting import files. When blank, the code picks a folder named import_review_quarantine",
         "secret": False,
         "editable": True,
         "restart_required": False,
@@ -735,7 +725,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     # 7. Media Server Integrations
     "PLEX_URL": {
         "section": "Media Server Integrations",
-        "default": "http://localhost:32400",
+        "default": "",
         "description": "Plex Media Server URL (e.g. http://plex:32400)",
         "secret": False,
         "editable": True,
@@ -763,7 +753,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "LIDARR_URL": {
         "section": "Media Server Integrations",
-        "default": "http://localhost:8686",
+        "default": "http://lidarr:8686",
         "description": "Lidarr server URL (e.g. http://lidarr:8686)",
         "secret": False,
         "editable": True,
@@ -801,8 +791,8 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "QBITTORRENT_URL": {
         "section": "Media Server Integrations",
-        "default": "http://localhost:8080",
-        "description": "qBittorrent WebUI URL for torrent management",
+        "default": "",
+        "description": "qBittorrent WebUI URL for torrent management (e.g. http://qbittorrent:8080)",
         "secret": False,
         "editable": True,
         "restart_required": False,
@@ -810,7 +800,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "QBITTORRENT_USERNAME": {
         "section": "Media Server Integrations",
-        "default": "admin",
+        "default": "",
         "description": "qBittorrent WebUI authentication username",
         "secret": False,
         "editable": True,
@@ -840,7 +830,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     # 8. Playlists & Download Providers
     "PLAYLIST_AUTO_SYNC": {
         "section": "Playlists & Download Providers",
-        "default": "1",
+        "default": "0",
         "description": "Enable automated background playlist acquisition and sync",
         "secret": False,
         "editable": True,
@@ -858,8 +848,8 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "PLAYLIST_DOWNLOAD_METHODS": {
         "section": "Playlists & Download Providers",
-        "default": "slskd,spotiflac,ytdlp,soundcloud",
-        "description": "Priority order of acquisition providers for missing tracks",
+        "default": "slskd,ytdlp,soundcloud",
+        "description": "Priority order of acquisition providers for missing tracks. SpotiFLAC is opt-in: add spotiflac to use it",
         "secret": False,
         "editable": True,
         "restart_required": False,
@@ -946,7 +936,6 @@ _BUILTIN_SETTINGS: Dict[str, Tuple[str, bool, str]] = {
     "AI_BASE_URL": ("https://api.openai.com/v1", False, "value"),
     "AI_MODEL": ("gpt-4o-mini", False, "value"),
 }
-_OPENROUTER_DEFAULTS = {"AI_BASE_URL": "https://openrouter.ai/api/v1", "AI_MODEL": "openai/gpt-4o-mini"}
 
 
 def _builtin_setting_fallback(name: str, persisted: Dict[str, str]) -> Tuple[str, str]:
@@ -963,11 +952,6 @@ def _builtin_setting_fallback(name: str, persisted: Dict[str, str]) -> Tuple[str
                 pass
         if runtime:
             return runtime, "runtime"
-    if name in _OPENROUTER_DEFAULTS:
-        has_openrouter = os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")
-        has_openai = os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")
-        if has_openrouter and not has_openai:
-            return _OPENROUTER_DEFAULTS[name], "default"
     return _BUILTIN_SETTINGS[name][0], "default"
 
 
@@ -997,7 +981,7 @@ def _resolve_setting_item(
 
     persisted_val = persisted.get(name, "").strip() if name in persisted else ""
     has_persisted = name in persisted and bool(persisted_val)
-    env_val = os.environ.get(name, "").strip()
+    env_val = config_layers.legacy_env_value(name).strip()
 
     def item(**fields: Any) -> Dict[str, Any]:
         return {
@@ -1138,7 +1122,7 @@ _LAYER_NOTES = {
 def _annotate_layer(key: str, entry: Dict[str, Any]) -> Dict[str, Any]:
     """Attach the configuration layer and how a change applies. Only
     application-layer keys stay editable (backend.config_layers)."""
-    layer = config_layers.classify(key)
+    layer = config_layers.reported_layer(key)
     if layer in (config_layers.LAYER_APP, config_layers.LAYER_SECRET):
         apply = config_layers.APPLY_RESTART if (entry.get("restart_required") or config_layers.apply_mode(key) == config_layers.APPLY_RESTART) else config_layers.APPLY_LIVE
     elif layer == config_layers.LAYER_UNKNOWN:
@@ -1215,19 +1199,25 @@ def _is_url_setting(name: str) -> bool:
     return name.endswith("_URL")
 
 
+def _url_needs_redaction(value: str) -> bool:
+    """Userinfo, a query or a fragment can each hold a credential, and
+    redact_url_userinfo removes all three."""
+    return config_layers.url_has_userinfo(value) or "?" in value or "#" in value
+
+
 def _redact_url_setting(name: str, item: Dict[str, Any], raw_values: Iterable[str]) -> None:
-    """#183 F1 / #208: never return user:pass@ of a URL setting from
-    GET /api/setup/env, in any field, status_message included."""
+    """#183 F1 / #208: never return user:pass@ or a query string of a URL
+    setting from GET /api/setup/env, in any field, status_message included."""
     if not _is_url_setting(name):
         return
     for field in _URL_DISPLAY_FIELDS:
         value = item.get(field)
-        if isinstance(value, str) and config_layers.url_has_userinfo(value):
+        if isinstance(value, str) and _url_needs_redaction(value):
             item[field] = config_layers.redact_url_userinfo(value)
     message = item.get("status_message")
     if isinstance(message, str):
         for raw in raw_values:
-            if raw and config_layers.url_has_userinfo(raw):
+            if raw and _url_needs_redaction(raw):
                 message = message.replace(raw, config_layers.redact_url_userinfo(raw))
         item["status_message"] = message
 
@@ -1238,7 +1228,7 @@ def _is_redacted_url_echo(name: str, value: str, stored: Iterable[str]) -> bool:
     if not _is_url_setting(name):
         return False
     return any(
-        raw and raw != value and config_layers.url_has_userinfo(raw)
+        raw and raw != value and _url_needs_redaction(raw)
         and value == config_layers.redact_url_userinfo(raw)
         for raw in stored
     )
@@ -1270,7 +1260,7 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     for name in names:
         meta = catalog[name]
         var_item = _resolve_setting_item(name, meta, persisted)
-        _redact_url_setting(name, var_item, (persisted.get(name, "").strip(), os.environ.get(name, "").strip()))
+        _redact_url_setting(name, var_item, (persisted.get(name, "").strip(), config_layers.legacy_env_value(name).strip()))
         for field in ("layer", "apply", "layer_note"):
             if field in meta:
                 var_item[field] = meta[field]
@@ -1364,7 +1354,7 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
         # host-side Compose values, Compose-pinned deployment values,
         # container paths and dead keys can never take effect from here.
         if not config_layers.is_saveable(key):
-            layer = config_layers.classify(key)
+            layer = config_layers.reported_layer(key)
             raise ValueError(
                 f"{key} cannot be changed from this application -- it is a {layer} setting "
                 "(set it in Docker Compose and recreate the container)"
@@ -1555,12 +1545,27 @@ _REDACTED = "[redacted]"
 # bracket, appending an extra `]` on every additional pass.
 _SECRET_KV_RE = re.compile(
     r"""(?ix)
-    \b([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|secret|auth))
-    (\s*[:=]\s*)
-    (?!['"]?\[redacted\]['"]?)
-    (?:"([^"]*)"|'([^']*)'|([^\s,;}\]&]+))
+    \b([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|passwd|passphrase|secret|authorization|auth
+        |(?<![a-z0-9])(?:pass|pwd)))  # whole word or suffix only: not bypass, compass
+    (["']?\s*[:=]\s*)
+    (?!['"]?(?:(?:bearer|basic)\s+)?\[redacted\]['"]?)
+    (?:(?:bearer|basic)\s+)?
+    (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\s,;}\]&]+)
     """,
-    re.VERBOSE,
+    re.VERBOSE | re.DOTALL,
+)
+
+# Exact secret variable names and their legacy aliases, which the generic
+# pattern above may not match (QBIT_PASS, QB_PASS). A bare value runs to the
+# next whitespace, and an unterminated quoted one to the end of the text: the
+# whole value is known to be secret, so this over-redacts rather than leaks.
+_SECRET_NAME_KV_RE = re.compile(
+    r"""(?is)\b(%s)(["']?\s*[:=]\s*)(?!['"]?\[redacted\]['"]?)(?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|\S+)"""
+    % "|".join(sorted(
+        re.escape(name)
+        for name in (*config_layers.SECRET_KEYS, *config_layers.LEGACY_ENV_ALIASES)
+        if config_layers.is_secret_name(name)
+    ))
 )
 
 # Authorization / Proxy-Authorization headers, with or without a Bearer/Basic
@@ -1596,7 +1601,7 @@ _STRAY_REDACTED_BRACKET_RE = re.compile(r"(?i)(\[redacted\])\]+")
 def _redact_diagnostic_text(text: str) -> str:
     """Redact secret-bearing diagnostic text before it can reach the System
     page. Covers named key/value secrets (quoted or bare, any prefix ending
-    in api_key/token/password/secret/auth), Authorization/Proxy-Authorization
+    in api_key/token/password/pass/pwd/passphrase/secret/auth), Authorization/Proxy-Authorization
     headers (Bearer/Basic or bare), Cookie/Set-Cookie headers (the entire
     header value through end-of-line, not just the first cookie pair),
     query-string credentials, and credentials embedded in a URL's userinfo.
@@ -1606,7 +1611,9 @@ def _redact_diagnostic_text(text: str) -> str:
     payloads, so it must be idempotent: calling it again on its own output
     must return that output unchanged, with no accumulation of stray `]`
     characters and no corruption of an existing placeholder."""
-    redacted = str(text or "")
+    # First: the shorter generic patterns would stop at a comma and hide the
+    # rest of the value from this one.
+    redacted = _SECRET_NAME_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", str(text or ""))
     try:
         # Reuse app.py's generic secret-assignment/control-char sanitizer
         # (added for CodeQL exception sanitization) as a first pass when the
@@ -1639,8 +1646,11 @@ def _redact_plugins_report(plugins_report: Dict[str, Any]) -> Dict[str, Any]:
     summary = report.get("summary")
     if isinstance(summary, dict) and isinstance(summary.get("errors"), list):
         summary["errors"] = [_redact_diagnostic_text(str(line)) for line in summary["errors"]]
-    plugins = report.get("plugins")
-    if isinstance(plugins, list):
+    categories = report.get("categories")
+    plugin_lists = [report.get("plugins"), *(categories.values() if isinstance(categories, dict) else [])]
+    for plugins in plugin_lists:
+        if not isinstance(plugins, list):
+            continue
         for plugin in plugins:
             if not isinstance(plugin, dict):
                 continue
@@ -1676,7 +1686,7 @@ def _remote_failure_shape(
         "plugin_failures": [],
         "replaygain_backend": "",
         "replaygain_command": "",
-        "discogs_token_configured": bool(os.environ.get("DISCOGS_TOKEN") or os.environ.get("DISCOGS_USER_TOKEN")),
+        "discogs_token_configured": bool(config_layers.legacy_env_value("DISCOGS_TOKEN")),
         "listenbrainz_token_configured": bool(os.environ.get("LISTENBRAINZ_TOKEN")),
         "fpcalc_available": False,
         "fpcalc_path": "",
@@ -1950,7 +1960,7 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
         "plugin_failures": [_redact_diagnostic_text(str(line)) for line in (plugin_failures or [])][:12],
         "replaygain_backend": replaygain_backend,
         "replaygain_command": replaygain_command,
-        "discogs_token_configured": bool(os.environ.get("DISCOGS_TOKEN") or os.environ.get("DISCOGS_USER_TOKEN")),
+        "discogs_token_configured": bool(config_layers.legacy_env_value("DISCOGS_TOKEN")),
         "listenbrainz_token_configured": bool(os.environ.get("LISTENBRAINZ_TOKEN")),
         "fpcalc_available": fpcalc_available,
         "fpcalc_path": "",
@@ -2746,7 +2756,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         first_run_req = _first_run_setup_required()
     except ImportError:
         token_configured = _fallback_auth_secret_usable(
-            os.environ.get("BEETS_WEB_AUTH_TOKEN", "") or os.environ.get("BEETS_WEB_TOKEN", "")
+            config_layers.legacy_env_value("BEETS_WEB_AUTH_TOKEN")
         )
         password_configured = _fallback_auth_secret_usable(os.environ.get("BEETS_WEB_PASSWORD", ""))
         token_auto_generated = token_configured and _FALLBACK_AUTH_TOKEN_FILE.exists()
@@ -2933,7 +2943,7 @@ def setup_save_env():
         value = "" if raw_value is None else str(raw_value)
         if _is_secret_env(key) and value == "" and key not in raw_clear:
             continue
-        if _is_redacted_url_echo(key, value.strip(), (str(stored_env.get(key, "")).strip(), os.environ.get(key, "").strip())):
+        if _is_redacted_url_echo(key, value.strip(), (str(stored_env.get(key, "")).strip(), config_layers.legacy_env_value(key).strip())):
             continue
         updates[key] = value
     clear = [str(key) for key in raw_clear]
@@ -3823,7 +3833,7 @@ def plugins_status():
             "categories": {"required": [], "recommended": [], "optional": [], "integration": []},
             "summary": {"total": 0, "healthy": 0, "errors": ["Beets plugin verification failed."]},
         }
-    return jsonify(report)
+    return jsonify(_redact_plugins_report(report))
 
 
 @app.post("/api/plugins/verify")
@@ -3846,7 +3856,7 @@ def plugins_verify():
             "all_required_healthy": False,
             "error": "Beets plugin verification failed.",
         }), 500
-    return jsonify(result)
+    return jsonify(_redact_plugins_report(result))
 
 
 # ── Opt-in Beets config edits (BI-5 / BI-6) ──────────────────────────────────

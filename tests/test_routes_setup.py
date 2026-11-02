@@ -696,6 +696,116 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertTrue(variables["PLEX_TOKEN"]["has_value"])
         self.assertNotIn("supersecretvalue", str(body))
 
+    def test_secret_aliases_are_masked_and_not_saveable(self):
+        self.env_file.write_text("QBIT_PASS=fake-saved-qbit\nQB_PASS=fake-saved-qb\n", encoding="utf-8")
+        os.environ["QBIT_PASS"] = "fake-env-qbit"
+        fakes = ("fake-saved-qbit", "fake-saved-qb", "fake-env-qbit")
+
+        r = self.client.get("/api/setup/env")
+        self.assertEqual(r.status_code, 200)
+        variables = {item["name"]: item for item in r.get_json()["variables"]}
+        self.assertTrue(variables["QBIT_PASS"]["secret"])
+        self.assertTrue(variables["QB_PASS"]["secret"])
+        for fake in fakes:
+            self.assertNotIn(fake, r.get_data(as_text=True))
+
+        r = self.client.post("/api/setup/env", json={"variables": {"DEMO_MODE": "0"}})
+        self.assertEqual(r.status_code, 200)
+        for fake in fakes:
+            self.assertNotIn(fake, r.get_data(as_text=True))
+
+        r = self.client.post("/api/setup/env", json={"variables": {"QBIT_PASS": "fake-new"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertNotIn("fake-new", self.env_file.read_text(encoding="utf-8"))
+
+    def test_url_query_credential_is_masked_and_survives_an_echo(self):
+        raw = "https://ai.test/v1?api_key=fake-query-credential"
+        self.env_file.write_text(f"AI_BASE_URL={raw}\n", encoding="utf-8")
+        r = self.client.get("/api/setup/env")
+        self.assertNotIn("fake-query-credential", r.get_data(as_text=True))
+        variables = {item["name"]: item for item in r.get_json()["variables"]}
+        self.assertEqual(variables["AI_BASE_URL"]["value"], "https://ai.test/v1")
+        r = self.client.post("/api/setup/env", json={"variables": {"AI_BASE_URL": "https://ai.test/v1"}})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("fake-query-credential", r.get_data(as_text=True))
+        self.assertIn(raw, self.env_file.read_text(encoding="utf-8"))
+
+    def test_url_fragment_is_masked(self):
+        self.env_file.write_text("AI_BASE_URL=https://ai.test/v1#fake-fragment-credential\n", encoding="utf-8")
+        r = self.client.get("/api/setup/env")
+        self.assertNotIn("fake-fragment-credential", r.get_data(as_text=True))
+
+    def test_diagnostic_text_redacts_every_secret_assignment_form(self):
+        for text in (
+            "QBIT_PASS=fake-diag", "failed: qb_pass: fake-diag", 'QB_PASS="fake-diag"',
+            '{"QB_PASS":"fake-diag"}', "{'qb_pass': 'fake-diag'}", "QB_PASS=fake-diag,fake-diag",
+            'QB_PASS="fake-diag fake-diag', "QB_PASS='fake-diag fake-diag", r'{"QB_PASS":"a\"fake-diag"}',
+            '{"password":"fake-diag"}', "{'password': 'fake-diag'}", 'password="fake-diag fake-diag',
+            '{"QBITTORRENT_PASSWORD":"fake-diag"}', '{"PLEX_TOKEN": "fake-diag"}',
+            "PLEX_TOKEN=fake-diag,fake-diag",
+            "pass=fake-diag", "db_pass: fake-diag", '{"pass":"fake-diag"}', "passwd=fake-diag", "{'passwd': 'fake-diag'}",
+            "pwd=fake-diag", '{"db-pwd": "fake-diag"}', "passphrase=fake-diag", '{"ssh_passphrase":"fake-diag"}',
+            '{"Authorization":"Bearer fake-diag"}', "{'authorization': 'Basic fake-diag'}",
+            '{"Proxy-Authorization": "fake-diag"}', '"Authorization": Bearer fake-diag', "Authorization=Basic fake-diag",
+        ):
+            redacted = self.module._redact_diagnostic_text(text)
+            self.assertNotIn("fake-diag", redacted, text)
+            self.assertEqual(self.module._redact_diagnostic_text(redacted), redacted, text)
+
+    def test_diagnostic_text_keeps_words_that_only_contain_a_secret_name(self):
+        for text in ("password_policy=strict", "bypass=true", "compass: north", "passed: 3", "passing=1", "Bearer token expired"):
+            self.assertEqual(self.module._redact_diagnostic_text(text), text)
+
+    def test_authorization_header_keeps_its_scheme(self):
+        self.assertEqual(self.module._redact_diagnostic_text("Authorization: Bearer fake-diag"), "Authorization: Bearer [redacted]")
+
+    def test_plugins_report_redacts_categories(self):
+        plugin = {"name": "x", "note": "QB_PASS=fake-diag", "errors": ['{"password":"fake-diag"}']}
+        report = self.module._redact_plugins_report({"plugins": [dict(plugin)], "categories": {"required": [dict(plugin)]}})
+        self.assertNotIn("fake-diag", repr(report))
+
+    def test_plugin_routes_redact_their_reports(self):
+        plugin = {"name": "x", "note": "QB_PASS=fake-diag", "errors": ["password=fake-diag"]}
+        report = {"plugins": [plugin], "categories": {"required": [plugin]}, "summary": {"errors": ["token=fake-diag"]}}
+        with mock.patch.object(self.module, "_checked_beets_config_path", return_value=(Path(self.tempdir.name, "config.yaml"), None)), \
+                mock.patch.object(self.module, "_setup_csrf_failure", return_value=None), \
+                mock.patch("backend.beets_plugins.verify_all_plugins", return_value=report):
+            for response in (self.client.get("/api/setup/plugins"), self.client.post("/api/setup/plugins/verify")):
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("fake-diag", response.get_data(as_text=True))
+
+    def test_alias_url_shown_value_posted_back_writes_nothing(self):
+        os.environ["QBIT_URL"] = "http://qbit.test:1/x?k=fake-alias-credential"
+        r = self.client.get("/api/setup/env")
+        self.assertNotIn("fake-alias-credential", r.get_data(as_text=True))
+        shown = {item["name"]: item for item in r.get_json()["variables"]}["QBITTORRENT_URL"]["value"]
+        self.assertEqual(shown, "http://qbit.test:1/x")
+        r = self.client.post("/api/setup/env", json={"variables": {"QBITTORRENT_URL": shown}})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["saved"], [])
+        self.assertFalse(self.env_file.exists())
+
+    def test_canonical_row_sees_its_alias(self):
+        os.environ["QBIT_URL"] = "http://qbit.test:8080"
+        variables = {item["name"]: item for item in self.client.get("/api/setup/env").get_json()["variables"]}
+        self.assertEqual(variables["QBITTORRENT_URL"]["value"], "http://qbit.test:8080")
+        self.assertEqual(variables["QBITTORRENT_URL"]["source"], "environment")
+
+    def test_unread_setting_is_retired_not_editable(self):
+        variables = {item["name"] for item in self.client.get("/api/setup/env").get_json()["variables"]}
+        self.assertNotIn("BEETS_VERSION_PROBE_TIMEOUT_SECONDS", variables)
+
+    def test_env_only_names_keep_their_api_layer_labels(self):
+        self.env_file.write_text("WEBCONTROL_THREADS=4\nQBIT_URL=http://qbit:8080\n", encoding="utf-8")
+        variables = {item["name"]: item for item in self.client.get("/api/setup/env").get_json()["variables"]}
+        for name in ("WEBCONTROL_THREADS", "QBIT_URL"):
+            self.assertEqual(variables[name]["layer"], "unknown", name)
+            self.assertEqual(variables[name]["apply"], "restart", name)
+            self.assertFalse(variables[name]["editable"], name)
+        r = self.client.post("/api/setup/env", json={"variables": {"WEBCONTROL_THREADS": "5"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("it is a unknown setting", r.get_json()["error"])
+
     def test_env_save_updates_file_and_applies_process_env(self):
         self.env_file.write_text("PLEX_URL=http://old:32400\nPLEX_TOKEN=oldsecretvalue\n", encoding="utf-8")
         r = self.client.post("/api/setup/env", json={

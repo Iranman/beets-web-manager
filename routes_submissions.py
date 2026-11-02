@@ -4,6 +4,7 @@ Registered after app.py initializes. Keeps submission-only Beets commands out of
 the main app module while reusing the existing JobStore and Beets config helpers.
 """
 import backend.provider_boundary as provider_boundary
+from backend import config_layers
 from backend.json_state import atomic_write_json
 import hashlib
 import importlib.util
@@ -72,8 +73,7 @@ def _acoustid_key() -> str:
     """
     return (
         os.environ.get("ACOUSTID_USER_KEY", "").strip()
-        or os.environ.get("ACOUSTID_API_KEY", "").strip()
-        or os.environ.get("ACOUSTID_KEY", "").strip()
+        or config_layers.legacy_env_value("ACOUSTID_API_KEY").strip()
     )
 
 

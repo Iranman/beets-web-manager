@@ -27,7 +27,7 @@ test('music format preferences: save, reload, read back, restore', async ({ page
 
 test('environment setting: edit in System, saved to the data dir, shown after reload', async ({ page }) => {
   await page.goto('/system');
-  const field = page.getByRole('textbox', { name: 'Default: 30', exact: true });
+  const field = page.getByRole('textbox', { name: 'Default: 20', exact: true });
   await field.fill('41');
   const saved = page.waitForResponse((r) => r.request().method() !== 'GET' && r.url().includes('/api/setup'));
   await page.getByRole('button', { name: 'Save environment' }).click();
