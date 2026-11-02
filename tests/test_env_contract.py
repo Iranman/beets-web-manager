@@ -280,6 +280,12 @@ class BootOrderTests(unittest.TestCase):
         self.assertEqual(limits[:3], [20.0, 20 * 1024 * 1024, 5])
         self.assertIn("BEETS_OUTBOUND_TIMEOUT_SECONDS is invalid", stderr)
 
+    def test_total_timeout_below_its_minimum_warns_and_uses_the_default(self):
+        code = "import json, app\nfrom backend import security as s\nprint(json.dumps(s._DEFAULT_TOTAL_TIMEOUT))\n"
+        limit, stderr = self._boot("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS=0.05\n", code)
+        self.assertEqual(limit, 60.0)
+        self.assertIn("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS is invalid", stderr)
+
     def test_limits_above_their_ceiling_warn_and_use_the_default(self):
         saved = ("BEETS_OUTBOUND_TIMEOUT_SECONDS=301\nBEETS_OUTBOUND_MAX_RESPONSE_BYTES=209715201\n"
                  "BEETS_OUTBOUND_MAX_REDIRECTS=21\nBEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS=601\n")

@@ -743,15 +743,47 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
             '{"password":"fake-diag"}', "{'password': 'fake-diag'}", 'password="fake-diag fake-diag',
             '{"QBITTORRENT_PASSWORD":"fake-diag"}', '{"PLEX_TOKEN": "fake-diag"}',
             "PLEX_TOKEN=fake-diag,fake-diag",
+            "pass=fake-diag", "db_pass: fake-diag", '{"pass":"fake-diag"}', "passwd=fake-diag", "{'passwd': 'fake-diag'}",
+            "pwd=fake-diag", '{"db-pwd": "fake-diag"}', "passphrase=fake-diag", '{"ssh_passphrase":"fake-diag"}',
+            '{"Authorization":"Bearer fake-diag"}', "{'authorization': 'Basic fake-diag'}",
+            '{"Proxy-Authorization": "fake-diag"}', '"Authorization": Bearer fake-diag', "Authorization=Basic fake-diag",
         ):
             redacted = self.module._redact_diagnostic_text(text)
             self.assertNotIn("fake-diag", redacted, text)
             self.assertEqual(self.module._redact_diagnostic_text(redacted), redacted, text)
 
+    def test_diagnostic_text_keeps_words_that_only_contain_a_secret_name(self):
+        for text in ("password_policy=strict", "bypass=true", "compass: north", "passed: 3", "passing=1", "Bearer token expired"):
+            self.assertEqual(self.module._redact_diagnostic_text(text), text)
+
+    def test_authorization_header_keeps_its_scheme(self):
+        self.assertEqual(self.module._redact_diagnostic_text("Authorization: Bearer fake-diag"), "Authorization: Bearer [redacted]")
+
     def test_plugins_report_redacts_categories(self):
         plugin = {"name": "x", "note": "QB_PASS=fake-diag", "errors": ['{"password":"fake-diag"}']}
         report = self.module._redact_plugins_report({"plugins": [dict(plugin)], "categories": {"required": [dict(plugin)]}})
         self.assertNotIn("fake-diag", repr(report))
+
+    def test_plugin_routes_redact_their_reports(self):
+        plugin = {"name": "x", "note": "QB_PASS=fake-diag", "errors": ["password=fake-diag"]}
+        report = {"plugins": [plugin], "categories": {"required": [plugin]}, "summary": {"errors": ["token=fake-diag"]}}
+        with mock.patch.object(self.module, "_checked_beets_config_path", return_value=(Path(self.tempdir.name, "config.yaml"), None)), \
+                mock.patch.object(self.module, "_setup_csrf_failure", return_value=None), \
+                mock.patch("backend.beets_plugins.verify_all_plugins", return_value=report):
+            for response in (self.client.get("/api/setup/plugins"), self.client.post("/api/setup/plugins/verify")):
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("fake-diag", response.get_data(as_text=True))
+
+    def test_alias_url_shown_value_posted_back_writes_nothing(self):
+        os.environ["QBIT_URL"] = "http://qbit.test:1/x?k=fake-alias-credential"
+        r = self.client.get("/api/setup/env")
+        self.assertNotIn("fake-alias-credential", r.get_data(as_text=True))
+        shown = {item["name"]: item for item in r.get_json()["variables"]}["QBITTORRENT_URL"]["value"]
+        self.assertEqual(shown, "http://qbit.test:1/x")
+        r = self.client.post("/api/setup/env", json={"variables": {"QBITTORRENT_URL": shown}})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["saved"], [])
+        self.assertFalse(self.env_file.exists())
 
     def test_canonical_row_sees_its_alias(self):
         os.environ["QBIT_URL"] = "http://qbit.test:8080"

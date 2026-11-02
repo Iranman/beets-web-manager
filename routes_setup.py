@@ -1260,7 +1260,7 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     for name in names:
         meta = catalog[name]
         var_item = _resolve_setting_item(name, meta, persisted)
-        _redact_url_setting(name, var_item, (persisted.get(name, "").strip(), os.environ.get(name, "").strip()))
+        _redact_url_setting(name, var_item, (persisted.get(name, "").strip(), config_layers.legacy_env_value(name).strip()))
         for field in ("layer", "apply", "layer_note"):
             if field in meta:
                 var_item[field] = meta[field]
@@ -1545,9 +1545,11 @@ _REDACTED = "[redacted]"
 # bracket, appending an extra `]` on every additional pass.
 _SECRET_KV_RE = re.compile(
     r"""(?ix)
-    \b([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|secret|auth))
+    \b([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|passwd|passphrase|secret|authorization|auth
+        |(?<![a-z0-9])(?:pass|pwd)))  # whole word or suffix only: not bypass, compass
     (["']?\s*[:=]\s*)
-    (?!['"]?\[redacted\]['"]?)
+    (?!['"]?(?:(?:bearer|basic)\s+)?\[redacted\]['"]?)
+    (?:(?:bearer|basic)\s+)?
     (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\s,;}\]&]+)
     """,
     re.VERBOSE | re.DOTALL,
@@ -1599,7 +1601,7 @@ _STRAY_REDACTED_BRACKET_RE = re.compile(r"(?i)(\[redacted\])\]+")
 def _redact_diagnostic_text(text: str) -> str:
     """Redact secret-bearing diagnostic text before it can reach the System
     page. Covers named key/value secrets (quoted or bare, any prefix ending
-    in api_key/token/password/secret/auth), Authorization/Proxy-Authorization
+    in api_key/token/password/pass/pwd/passphrase/secret/auth), Authorization/Proxy-Authorization
     headers (Bearer/Basic or bare), Cookie/Set-Cookie headers (the entire
     header value through end-of-line, not just the first cookie pair),
     query-string credentials, and credentials embedded in a URL's userinfo.
@@ -2941,7 +2943,7 @@ def setup_save_env():
         value = "" if raw_value is None else str(raw_value)
         if _is_secret_env(key) and value == "" and key not in raw_clear:
             continue
-        if _is_redacted_url_echo(key, value.strip(), (str(stored_env.get(key, "")).strip(), os.environ.get(key, "").strip())):
+        if _is_redacted_url_echo(key, value.strip(), (str(stored_env.get(key, "")).strip(), config_layers.legacy_env_value(key).strip())):
             continue
         updates[key] = value
     clear = [str(key) for key in raw_clear]
@@ -3831,7 +3833,7 @@ def plugins_status():
             "categories": {"required": [], "recommended": [], "optional": [], "integration": []},
             "summary": {"total": 0, "healthy": 0, "errors": ["Beets plugin verification failed."]},
         }
-    return jsonify(report)
+    return jsonify(_redact_plugins_report(report))
 
 
 @app.post("/api/plugins/verify")
@@ -3854,7 +3856,7 @@ def plugins_verify():
             "all_required_healthy": False,
             "error": "Beets plugin verification failed.",
         }), 500
-    return jsonify(result)
+    return jsonify(_redact_plugins_report(result))
 
 
 # ── Opt-in Beets config edits (BI-5 / BI-6) ──────────────────────────────────
