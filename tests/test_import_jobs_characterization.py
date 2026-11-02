@@ -516,6 +516,9 @@ WITH_ID_SCENARIOS = {
     "recovery_authorized_rg_url": dict(payload=_with_id(recovery_carrier_id="c1"), overrides={
         "_recovery_auto_insert_authorized": {"ok": True, "carrier": {
             "mb_releasegroupid": "", "release_id": f"https://musicbrainz.org/release-group/{RG}"}}}),
+    "recovery_authorized_rg_url_only": dict(payload={"path": "{SRC}", "mb_albumid": REL, "recovery_carrier_id": "c1"}, overrides={
+        "_recovery_auto_insert_authorized": {"ok": True, "carrier": {
+            "mb_releasegroupid": "", "release_id": f"https://musicbrainz.org/release-group/{RG}"}}}),
     "reentry_merge_lookup_fails": dict(payload=_with_id(existing_album_id=5, wanted_tracks=WANTED),
                                        overrides={"carrier.load_for_folder": RuntimeError("store")}),
     "reentry_recovers_identity": dict(overrides={"carrier.load_for_folder": _CARRIER,
