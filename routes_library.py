@@ -2652,7 +2652,7 @@ def library_import_all():
                     conf   = (sug.get("confidence") or "low").lower()
                     found  = (sug.get("mb_albumid") or "").strip()
                     if result.get("ok") and found and conf in ("high", "medium") \
-                            and sug.get("mb_valid"):
+                            and sug.get("mb_valid") and sug.get("identity_validated") is not False:
                         mb_albumid = found
                         album["mb_albumid"] = mb_albumid
                         log.append(
@@ -2660,8 +2660,8 @@ def library_import_all():
                             f"{sug.get('album')} [{conf}]"
                         )
                     else:
-                        reason = (sug.get("reason") or result.get("error")
-                                  or "Could not identify album")
+                        reason = (sug.get("candidate_identity_error") or sug.get("reason")
+                                  or result.get("error") or "Could not identify album")
                         log.append(f"  Queuing for Import Review: {reason}")
                         _queue_folder_for_manual_review(
                             album["aldir"], sug or None, reason, log,

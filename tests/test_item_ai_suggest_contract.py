@@ -426,9 +426,9 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
 class AlbumAndFolderAiFallbackTests(unittest.TestCase):
     """AI failures on these paths must leave the MusicBrainz/AcoustID match standing."""
 
-    def _suggest(self, path, reply=None, env=None):
+    def _suggest(self, path, reply=None, env=None, artist="A"):
         def release(*_a, **_k):
-            return [{"mb_albumid": _REL, "mb_releasegroupid": _RG, "artist": "A", "album": "B", "year": "2012",
+            return [{"mb_albumid": _REL, "mb_releasegroupid": _RG, "artist": artist, "album": "B", "year": "2012",
                      "country": "US", "score": 90, "tracks": 1, "title": "B", "label": "", "format_summary": "",
                      "mb_url": ""}]
         album = types.SimpleNamespace(id=7, year=2012, album="B", albumartist="A", mb_releasegroupid="",
@@ -459,6 +459,8 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                 ), \
                 mock.patch.object(recovery_carrier, "load_for_folder", return_value=None), \
                 mock.patch.object(pb, "opened", opened):
+            if callable(path):
+                return path(), opened
             if path == "album":
                 return ai_service._ai_suggest_album_internal(album, [], existing_album_id=7), opened
             return ai_service._ai_suggest_folder_internal("/downloads/x"), opened
@@ -496,6 +498,67 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                                                        "reason": "ai reason"})
                     self._assert_evidence_fallback(out)
                     opened.assert_called_once()
+
+
+class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):
+    """Import All must send a candidate that failed identity validation to Review, not to the reimport."""
+
+    # One AI reply path; the rest reach the evidence fallback.
+    PATHS = {
+        "ai_reply": {"reply": {"candidate_index": 0, "albumartist": "A", "confidence": "high", "reason": "ai"}},
+        "unusable_endpoint": {"env": {"AI_BASE_URL": "not-a-url"}},
+        "non_object_reply": {"reply": "[1]"},
+        "non_string_albumartist": {"reply": {"candidate_index": 0, "albumartist": 123, "confidence": "high"}},
+    }
+
+    def _import_all(self, artist, **suggest_kwargs):
+        jobs = []
+
+        def start_job(fn, **_kw):
+            jobs.append(fn)
+            return {"ok": True}, 200
+
+        def post_and_run():
+            client = app_module.app.test_client()
+            client.post("/api/library/import-all", headers=_CSRF,
+                        json={"albums": [{"aldir": "/downloads/x", "artist": "A"}]})
+            log = []
+            jobs[0](log)
+            return log
+
+        queue, reimport = mock.Mock(return_value=True), mock.Mock(return_value="child")
+        with mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
+                mock.patch.multiple(
+                    routes_library,
+                    _start_job=start_job,
+                    _queue_folder_for_manual_review=queue,
+                    _start_reimport_disk_job_internal=reimport,
+                    _wait_for_child_job=mock.Mock(return_value={"status": "ok"}),
+                    _invalidate_lib_cache=mock.Mock(),
+                    _library_import_all_write_last=mock.Mock(),
+                ), \
+                mock.patch.object(ai_service, "_score_mb_release_candidate",
+                                  return_value={"total": 0.9}):  # the fallback's score for medium confidence
+            AlbumAndFolderAiFallbackTests._suggest(self, post_and_run, artist=artist, **suggest_kwargs)
+        return queue, reimport
+
+    def test_candidate_failing_identity_validation_goes_to_review(self):
+        for name, kwargs in self.PATHS.items():
+            with self.subTest(name):
+                queue, reimport = self._import_all("Vitalic", **kwargs)
+                reimport.assert_not_called()
+                queue.assert_called_once()
+                suggestion, reason = queue.call_args.args[1:3]
+                self.assertIs(suggestion["identity_validated"], False)
+                self.assertIn("artist mismatch", reason)
+
+    def test_validated_candidate_still_proceeds(self):
+        for name, kwargs in self.PATHS.items():
+            with self.subTest(name):
+                queue, reimport = self._import_all("A", **kwargs)
+                queue.assert_not_called()
+                reimport.assert_called_once()
+                self.assertEqual(reimport.call_args.args[:2], ("/downloads/x", _REL))
 
 
 if __name__ == "__main__":
