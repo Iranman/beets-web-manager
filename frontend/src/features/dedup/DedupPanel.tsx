@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -150,7 +151,7 @@ export function DedupPanel() {
       setScanKind('standard');
       window.dispatchEvent(new Event('beets:jobs-changed'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setStarting(false);
     }
@@ -166,7 +167,7 @@ export function DedupPanel() {
       setSelected(new Set());
       window.dispatchEvent(new Event('beets:jobs-changed'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 
@@ -198,7 +199,7 @@ export function DedupPanel() {
         void startScan();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setCleaning(false);
     }

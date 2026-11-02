@@ -13,7 +13,7 @@ class DedupJobsTests(unittest.TestCase):
         app_source = app_family_source()
         dedup_source = "".join(app_unit_source(n) for n in ("start_dedup_scan", "dedup_ai_review", "dedup_scan_status"))
         panel_source = (root / "frontend" / "src" / "features" / "dedup" / "DedupPanel.tsx").read_text(encoding="utf-8")
-        clean_source = (root / "frontend" / "src" / "views" / "Clean.tsx").read_text(encoding="utf-8")
+        jobs_source = (root / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encoding="utf-8")
         hooks_source = (root / "frontend" / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
 
         self.assertIn("jobs.start_python(", dedup_source)
@@ -27,7 +27,9 @@ class DedupJobsTests(unittest.TestCase):
         self.assertIn("job_status", (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8"))
         self.assertIn("navigate(jobsUrl(scanJid))", panel_source)
         self.assertIn("beets:jobs-changed", panel_source)
-        self.assertIn("beets:jobs-changed", clean_source)
+        # Reachable from a routed view: the Jobs "Duplicate type" tab is the
+        # only host since the legacy Clean view was removed.
+        self.assertIn("<DedupPanel />", jobs_source)
         self.assertIn("beets:jobs-changed", hooks_source)
 
 

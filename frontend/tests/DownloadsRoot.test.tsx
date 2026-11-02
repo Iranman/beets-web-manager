@@ -16,7 +16,6 @@ vi.mock('../src/api/client', () => ({
   pauseAiBatch: vi.fn(),
   reconcileArtwork: vi.fn(),
   recoverAiBatch: vi.fn(),
-  retryLibraryImportAllFailed: vi.fn(),
   runDedupCleanup: vi.fn(),
   runDuplicateMaintenance: vi.fn(),
   runPreflight: vi.fn(),

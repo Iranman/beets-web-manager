@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -159,7 +160,7 @@ export function ArtistAliasPanel({ active = true, autoLoad = true, onRefreshLibr
         return next;
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -201,7 +202,7 @@ export function ArtistAliasPanel({ active = true, autoLoad = true, onRefreshLibr
       setMergeJobId(job_id);
     } catch (err) {
       setActiveMbid(null);
-      setMergeError(err instanceof Error ? err.message : String(err));
+      setMergeError(errorMessage(err));
     }
   }
 
@@ -214,7 +215,7 @@ export function ArtistAliasPanel({ active = true, autoLoad = true, onRefreshLibr
       setGroups((current) => current.filter((item) => (item.reject_key || item.mb_artistid) !== key));
       setHiddenCount((count) => count + 1);
     } catch (err) {
-      setRejectError(err instanceof Error ? err.message : String(err));
+      setRejectError(errorMessage(err));
     } finally {
       setRejectingKey(null);
     }
@@ -232,7 +233,7 @@ export function ArtistAliasPanel({ active = true, autoLoad = true, onRefreshLibr
       );
       setConfirmJobId(job_id);
     } catch (err) {
-      setConfirmError(err instanceof Error ? err.message : String(err));
+      setConfirmError(errorMessage(err));
     }
   }
 

@@ -33,11 +33,6 @@ export function downloadMethodLabel(method: DownloadMethod) {
   return DIRECT_DOWNLOAD_METHODS.find((item) => item.method === method)?.label ?? method;
 }
 
-export function downloadMethodShortLabel(method: DownloadMethod) {
-  if (method === 'slskd') return 'SLSKD';
-  return DIRECT_DOWNLOAD_METHODS.find((item) => item.method === method)?.shortLabel ?? method;
-}
-
 export function directDownloadMethodEnabled(method: DirectDownloadMethod, status?: YtdlpStatusResponse | null) {
   if (!status?.ready) return false;
   if (method === 'spotiflac') return Boolean(status.spotiflac?.enabled ?? true);

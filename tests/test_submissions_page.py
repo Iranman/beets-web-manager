@@ -42,8 +42,9 @@ class MetadataSubmissionsStaticTests(unittest.TestCase):
     def test_client_wrappers_cover_submission_endpoints(self):
         self.assertIn("albumAcoustidSubmit", CLIENT_SOURCE)
         self.assertIn("itemAcoustidSubmit", CLIENT_SOURCE)
-        self.assertIn("getAlbumMbFormat", CLIENT_SOURCE)
         self.assertIn("itemMbsubmit", CLIENT_SOURCE)
+        # getAlbumMbFormat was an orphaned wrapper with no caller left in the
+        # submissions flow (or anywhere else); the backend endpoint survives.
 
     def test_submission_post_wrappers_use_csrf_helper(self):
         for endpoint in (

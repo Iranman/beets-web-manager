@@ -84,21 +84,6 @@ export function albumMissingCount(album?: LibraryAlbum | null) {
   return Math.max(flagged, trackMissing);
 }
 
-export function albumLooksComplete(album?: LibraryAlbum | null) {
-  if (!album) return false;
-  return (
-    albumImportedCount(album) > 0 &&
-    albumMissingCount(album) === 0 &&
-    albumNotImportedCount(album) === 0 &&
-    albumExtraCount(album) === 0 &&
-    Number(album.mb_trackid_missing_count ?? 0) === 0 &&
-    Number(album.mb_trackid_mismatch_count ?? 0) === 0 &&
-    Number(album.mb_duplicate_recording_id_count ?? 0) === 0 &&
-    Number(album.mb_repairable_count ?? 0) === 0 &&
-    !albumHasNoTrackRows(album)
-  );
-}
-
 export function getAlbumHealth(album: LibraryAlbum): AlbumHealth {
   const tracks = album.tracks ?? [];
   const imported = albumImportedCount(album);
@@ -219,29 +204,4 @@ export function getAlbumHealth(album: LibraryAlbum): AlbumHealth {
 
 export function artistNeedsAttention(artist: LibraryArtist) {
   return Boolean(artist.empty_artist_folder) || artist.albums.some((album) => getAlbumHealth(album).needsAttention);
-}
-
-export function albumCanImportRepair(album: LibraryAlbum) {
-  return getAlbumHealth(album).canImportRepair && Boolean(album.aldir);
-}
-
-export function artistCanImportRepair(artist: LibraryArtist) {
-  return artist.albums.some(albumCanImportRepair);
-}
-
-/** Albums that need MB ID discovery: in the library with a folder on disk but no release ID,
- *  and not already sitting in the Import Review queue waiting for a human decision. */
-export function albumNeedsDiscovery(album: LibraryAlbum) {
-  if (album.pending_review) return false;
-  return Boolean(album.aldir) && !album.mb_albumid && Boolean(album.album_id);
-}
-
-/** Any album that Import All can help with: missing files, partial import, or needs MB ID.
- *  Excludes albums already waiting in Import Review (pending_review) — those need a human
- *  decision first. Also excludes albums where Beets is already complete but disk has extra
- *  files beyond the MB tracklist — those need Album Track Cleanup, not re-import. */
-export function albumCanImportAllRepair(album: LibraryAlbum) {
-  if (album.not_imported_is_extra) return false;
-  if (album.pending_review) return false;
-  return albumCanImportRepair(album) || albumNeedsDiscovery(album);
 }

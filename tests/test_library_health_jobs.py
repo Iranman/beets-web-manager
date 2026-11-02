@@ -18,7 +18,7 @@ class LibraryHealthJobsTests(unittest.TestCase):
         panel_source = (
             root / "frontend" / "src" / "features" / "libraryHealth" / "LibraryHealthPanel.tsx"
         ).read_text(encoding="utf-8")
-        clean_source = (root / "frontend" / "src" / "views" / "Clean.tsx").read_text(encoding="utf-8")
+        jobs_source = (root / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encoding="utf-8")
 
         self.assertIn("jobs.start_python(", route_source)
         self.assertIn('"type": "library-health-scan"', route_source)
@@ -34,8 +34,9 @@ class LibraryHealthJobsTests(unittest.TestCase):
         self.assertIn("navigate(jobsUrl(scanJobId))", panel_source)
         self.assertIn("JobStatusCard job={scanJob}", panel_source)
         self.assertIn("beets:jobs-changed", panel_source)
-        self.assertIn("CLEAN_JOB_TAB_RULES", clean_source)
-        self.assertIn("library-health-scan", clean_source)
+        # Reachable from a routed view: the Jobs maintenance card is the only
+        # host since the legacy Clean view was removed.
+        self.assertIn("<LibraryHealthPanel active autoLoad={false} />", jobs_source)
 
 
 if __name__ == "__main__":

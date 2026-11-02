@@ -173,9 +173,12 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('pending_review_exists?: boolean', TYPES)
         self.assertIn('note?: string', TYPES)
         self.assertIn('export function autoEnqueueImport(payload: AutoEnqueueImportPayload)', CLIENT)
-        self.assertIn('export function reconcileAutoEnqueueImport(payload: AutoEnqueueImportPayload)', CLIENT)
         self.assertIn("'/api/import-review/auto-enqueue'", CLIENT)
-        self.assertIn("'/api/import-review/auto-enqueue/reconcile'", CLIENT)
+        # The reconcile wrapper was orphaned (the page never enqueues on view,
+        # and the confirmed Revalidate & Import action calls revalidate), so it
+        # was removed with the rest of the dead client surface. The backend
+        # route /api/import-review/auto-enqueue/reconcile stays served; see
+        # test_backend_reconciles_stale_enqueueing_items.
 
     def test_backend_rejects_stale_review_item_and_count_mismatch(self):
         body = section(APP, 'def evaluate_import_eligibility', 'def _import_review_start_auto_import')

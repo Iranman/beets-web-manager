@@ -399,7 +399,7 @@ class PlaylistDeleteExceptionSanitizationTests(unittest.TestCase):
            patch_app_family(app_module, "_playlist_key", return_value="pl_test_playlist"), \
            mock.patch.object(app_module.composite_workflows, "delete_playlist_m3u", return_value={"ok": True, "deleted": True}), \
            patch_app_family(app_module, "_plex_settings", return_value={"token": "secret"}), \
-           patch_app_family(app_module, "_plex_delete_playlist_by_title", side_effect=OSError("LEAK_MARKER plex.internal.example")):
+           patch_app_family(app_module, "_plex_delete_playlist_by_title_unambiguous", side_effect=OSError("LEAK_MARKER plex.internal.example")):
             response = app_module.playlist_delete("Test Playlist")
         data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
         self.assertNotIn("LEAK_MARKER", json.dumps(data))
