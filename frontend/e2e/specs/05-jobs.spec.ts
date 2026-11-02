@@ -9,7 +9,7 @@ test('job runs with progress, cancels after confirmation, and stays in history w
   // 02a-clean-all left a cancelled run in the history: this run must add its own.
   await expect(cancelledRows.first()).toBeVisible();
   const cancelledBefore = await cancelledRows.count();
-  await startFreshCleanAll(page);
+  const jobId = await startFreshCleanAll(page);
 
   // Progress: 2 of 14 tasks checkpointed before the hold; shown in the page and the nav badge.
   const activity = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Current activity' }) });
@@ -43,8 +43,13 @@ test('job runs with progress, cancels after confirmation, and stays in history w
   await expect(row).toBeVisible();
 
   const container = row.locator('xpath=ancestor::*[.//button[normalize-space()="View raw log"]][1]');
+  // The button must fetch this run's log, not an earlier run's, and show exactly that in the raw view.
+  const fetched = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/jobs/${jobId}`);
   await container.getByRole('button', { name: 'View raw log' }).click();
-  await expect(page.getByText('Clean All partially completed: cancelled').first()).toBeVisible();
+  const { log } = (await (await fetched).json()) as { log: string[] };
+  expect(log.join('\n')).toContain('Clean All partially completed: cancelled');
+  // Timeline entries can hold their own <pre>; the raw log view comes after them.
+  await expect(page.getByRole('dialog', { name: /Clean All/ }).locator('pre').last()).toHaveText(log.join('\n'));
 });
 
 test('history search finds jobs by name and hides the rest', async ({ page }) => {

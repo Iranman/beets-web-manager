@@ -39,7 +39,7 @@ Provider stubs replace `urlopen`, `open_public_url` and the `requests` transport
 
 Known limits of the specs:
 
-- `02a-clean-all` compares album names and file names, so item-row loss or content corruption would not show, and its baseline is taken after the first two tasks have run.
+- `02a-clean-all` compares each album's name and track count, and each file's name and sha256. Its baseline is taken after the first two tasks have run, so damage those tasks do does not show here.
 - `05-jobs` needs the cancelled row from `02a`, so it fails when run alone. The specs share one ordered run.
 
 Not covered by the audit hook. The namespace still stops the network ones leaving, but nothing fails the run:

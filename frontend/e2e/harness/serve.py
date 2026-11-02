@@ -35,7 +35,7 @@ PASSWORD = "e2e-synthetic-password-not-a-secret"
 #: Settings from the developer's shell must not reach real services.
 _SCRUBBED = re.compile(
     r"^(BEETS|PLEX|LIDARR|SLSKD|QBIT|QB_|AI_|OPENAI|OPENROUTER|ACOUSTID|DISCOGS|LISTENBRAINZ|SPOTIFY|SETUP_|WEB_MANAGER"
-    r"|MUSIC_|DOWNLOADS_|YTDLP|IMPORT_REVIEW|METADATA|PLAYLIST)|_FILE$")
+    r"|MUSIC_|DOWNLOAD|YTDLP|IMPORT_REVIEW|METADATA|PLAYLIST|ALLOW_TORRENT|SPOTIFLAC|RECOVER_OWNED|DEMO_MODE)|_FILE$")
 #: Port 1: nothing listens there, so these look like services that are down.
 _DEAD_URL = "http://127.0.0.1:1"
 #: What the app and ctypes.util.find_library legitimately run. None opens a socket for them.
@@ -151,6 +151,8 @@ def configure(root: Path, port: int) -> dict:
         "BEETS_LOG": str(paths["config"] / "beet.log"),
         "MUSIC_ROOT": str(paths["music"]),
         "DOWNLOADS_ROOT": str(paths["downloads"]),
+        # Import accepts sources under these, so a value from the shell would reach host folders.
+        "TORRENT_SOURCE_ROOTS": str(paths["downloads"]),
         "WEB_MANAGER_DATA_DIR": str(paths["data"]),
         "METADATA_CACHE_DIR": str(paths["cache"]),
         "BEETS_TRANSACTION_DIR": str(paths["transactions"]),

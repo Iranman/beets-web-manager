@@ -1,6 +1,9 @@
 import {
-  cleanAllPanel, expect, filesUnder, holdCleanAll, libraryAlbums, releaseCleanAll, root, startFreshCleanAll, test,
+  cleanAllPanel, expect, fileHashes, holdCleanAll, libraryAlbums, releaseCleanAll, root, startFreshCleanAll, test,
 } from '../fixtures';
+
+const albumsAndTrackCounts = async (page: import('@playwright/test').Page) =>
+  (await libraryAlbums(page)).map((album) => `${album.album}:${album.track_count}`).sort();
 
 test.describe.configure({ mode: 'serial' });
 test.afterAll(releaseCleanAll);
@@ -34,8 +37,8 @@ test('Stop cancels and leaves a resumable checkpoint at the next task', async ({
 });
 
 test('Resume skips the checkpointed tasks and runs to the end without losing data', async ({ page }) => {
-  const filesBefore = filesUnder(root('music'));
-  const albumsBefore = (await libraryAlbums(page)).map((album) => album.album).sort();
+  const filesBefore = fileHashes(root('music'));
+  const albumsBefore = await albumsAndTrackCounts(page);
 
   await page.goto('/jobs');
   const panel = cleanAllPanel(page);
@@ -51,7 +54,7 @@ test('Resume skips the checkpointed tasks and runs to the end without losing dat
   await expect(panel).toContainText(/Complete/);
 
   // The clean fixture has nothing to repair: Clean All must not have touched it.
-  expect((await libraryAlbums(page)).map((album) => album.album).sort()).toEqual(albumsBefore);
-  expect(filesUnder(root('music'))).toEqual(filesBefore);
+  expect(await albumsAndTrackCounts(page)).toEqual(albumsBefore);
+  expect(fileHashes(root('music'))).toEqual(filesBefore);
   expect((await resumeInfo(page)).resumable).toBe(false);
 });
