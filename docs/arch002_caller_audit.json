@@ -704,6 +704,42 @@
     "backend/item_ai_suggest_service.py::_stamp_ai_status": [
       "DISPLAY_ONLY",
       "Reports which source the displayed confidence came from."
+    ],
+    "backend/import_service.py::_reimport_repair_in_place": [
+      "COMPATIBILITY_WRAPPER",
+      "Mutation requires canonical preflight.ok (or explicit manual override) and the engine deterministic-identity gate. (ARCH-001: body moved from the route into this request-free service.) (#505 M4: moved verbatim out of start_reimport_disk into this step.)"
+    ],
+    "backend/import_service.py::_reimport_fill_gap_without_source": [
+      "COMPATIBILITY_WRAPPER",
+      "Mutation requires canonical preflight.ok (or explicit manual override) and the engine deterministic-identity gate. (ARCH-001: body moved from the route into this request-free service.) (#505 M4: moved verbatim out of start_reimport_disk into this step.)"
+    ],
+    "backend/import_service.py::_reimport_keep_for_review": [
+      "DISPLAY_ONLY",
+      "#505 M4: moved verbatim out of the import job. The only pattern hit is the literal \"confidence\": \"low\" in a Review suggestion; it decides nothing."
+    ],
+    "backend/import_service.py::_reimport_preflight_failed": [
+      "DISPLAY_ONLY",
+      "#505 M4: moved verbatim out of the import job. The only pattern hit is the literal \"confidence\": \"low\" in a Review suggestion; it decides nothing."
+    ],
+    "backend/import_service.py::_reimport_refuse_failed_import": [
+      "DISPLAY_ONLY",
+      "#505 M4: moved verbatim out of the import job. The only pattern hit is the literal \"confidence\": \"low\" in a Review suggestion; it decides nothing."
+    ],
+    "backend/import_service.py::_reimport_refuse_unresolved_release": [
+      "DISPLAY_ONLY",
+      "#505 M4: moved verbatim out of the import job. The only pattern hit is the literal \"confidence\": \"low\" in a Review suggestion; it decides nothing."
+    ],
+    "backend/import_service.py::_folder_import_refuse_failed_apply": [
+      "DISPLAY_ONLY",
+      "#505 M4: moved verbatim out of the import job. The only pattern hit is the literal \"confidence\": \"low\" in a Review suggestion; it decides nothing."
+    ],
+    "backend/import_service.py::_folder_import_review_payload": [
+      "DISPLAY_ONLY",
+      "#505 M4: moved verbatim out of the import job. The only pattern hit is the literal \"confidence\": \"low\" in a Review suggestion; it decides nothing."
+    ],
+    "backend/import_service.py::_folder_import_record_ai_history": [
+      "DISPLAY_ONLY",
+      "#505 M4: moved verbatim out of the import job. The only pattern hit is the caller's confidence label copied into the History record; it decides nothing."
     ]
   }
 }

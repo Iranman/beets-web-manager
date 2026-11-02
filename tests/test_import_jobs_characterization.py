@@ -219,7 +219,8 @@ class World:
 
     def run(self, kind, payload):
         entry = isvc.start_reimport_disk if kind == "reimport" else isvc.start_folder_import_with_id
-        for patcher in self.patches():
+        patchers = self.patches()
+        for patcher in patchers:
             patcher.start()
         try:
             body, status = entry(self.fill(payload))
@@ -234,7 +235,8 @@ class World:
             record["trace"] = self.trace
             return record
         finally:
-            mock.patch.stopall()
+            for patcher in patchers:
+                patcher.stop()
 
 
 def _reimport(**payload):
@@ -690,6 +692,28 @@ class ImportJobGoldenTests(unittest.TestCase):
     def test_every_golden_entry_has_a_scenario(self):
         names = {f"reimport/{n}" for n in REIMPORT_SCENARIOS} | {f"with_id/{n}" for n in WITH_ID_SCENARIOS}
         self.assertEqual(set(self.golden), names)
+
+
+class StepsRunAloneTests(unittest.TestCase):
+    """The steps work without a job around them."""
+
+    def test_parse_ids_tells_a_release_group_from_a_release(self):
+        self.assertEqual(isvc._folder_import_parse_ids(REL, RG), (REL, REL, RG, False))
+        self.assertEqual(isvc._folder_import_parse_ids("", RG), (RG, RG, RG, True))
+
+    def test_carrier_identity_ignores_the_client_album_and_tracks(self):
+        carrier = {"mb_releasegroupid": RG, "release_id": REL, "existing_album_id": 5, "expected_tracks": WANTED}
+        got = isvc._folder_import_carrier_identity(carrier, RG2, [])
+        self.assertEqual(got[:5], (RG, REL, REL, RG, False))
+        self.assertEqual(got[5], 5)
+        self.assertEqual([t["title"] for t in got[6]], ["Two"])
+
+    def test_handoff_without_a_target_album_declines(self):
+        ctx = isvc._FolderImportContext(
+            log=[], cancel_event=None, folder_path="/x", ai_suggestion={}, raw_mb_input=REL,
+            input_looks_like_release_group=False, queue_review_on_uncertain=True, light_confirm=False,
+            existing_album_id=0, wanted_tracks=[], source_is_library=False, selected_subset_import=False)
+        self.assertFalse(isvc._folder_import_handoff(ctx, REL, RG, []))
 
 
 if __name__ == "__main__":
