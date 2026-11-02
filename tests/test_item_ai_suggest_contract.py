@@ -8,6 +8,7 @@ change: UPDATE_ITEM_AI_SUGGEST_GOLDEN=1 python -m unittest tests.test_item_ai_su
 import io
 import json
 import os
+import sys
 import types
 import unittest
 import urllib.error
@@ -16,7 +17,7 @@ from unittest import mock
 
 import app as app_module
 import routes_library
-from backend import item_ai_suggest_service, provider_boundary as pb
+from backend import ai_evidence_service, ai_service, item_ai_suggest_service, library_service, provider_boundary as pb
 
 _TARGET = item_ai_suggest_service
 _GOLDEN = Path(__file__).parent / "fixtures" / "item_ai_suggest_golden.json"
@@ -90,10 +91,10 @@ _SCENARIOS = {
         "ai": {"mb_trackid": _REC, "confidence": "high", "reason": "fingerprint"}},
     "evidence_packet_failure_is_generic_error": {"key": "", "mb": [], "evidence_error": True},
     "serialization_failure_is_generic_error": {"key": "", "mb": [], "unserializable": True},
-    "ai_non_string_artist_id_fails_closed": {
+    "ai_non_string_artist_id_falls_back": {
         "mb": [_mb_cand()], "details": _details(),
         "ai": {"mb_trackid": _REC, "mb_artistid": 123, "confidence": "high", "reason": "r"}},
-    "ai_non_string_album_id_fails_closed": {
+    "ai_non_string_album_id_falls_back": {
         "mb": [_mb_cand()], "details": _details(),
         "ai": {"mb_trackid": _REC, "mb_albumid": 123, "confidence": "high", "reason": "r"}},
     "title_split_replaces_noise_artist": {
@@ -208,13 +209,12 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
         body = self.golden["acoustid_confirmed_hit_reaches_enrichment"]["body"]
         self.assertEqual(body["acoustid_status"], "")
         calls = body["mb_candidates"][0]["enrich_calls"]
-        self.assertEqual([c["has_details"] for c in calls], [False, True])
+        self.assertEqual([c["has_details"] for c in calls], [False])
         for call in calls:
             self.assertEqual([h["mb_trackid"] for h in call["acoustid_hits"]], [_REC])
 
     def test_failures_are_the_generic_error_not_a_500(self):
-        for name in ("evidence_packet_failure_is_generic_error", "serialization_failure_is_generic_error",
-                     "ai_non_string_artist_id_fails_closed", "ai_non_string_album_id_fails_closed"):
+        for name in ("evidence_packet_failure_is_generic_error", "serialization_failure_is_generic_error"):
             with self.subTest(name):
                 self.assertEqual(self.golden[name]["status"], 200)
                 self.assertEqual(self.golden[name]["body"], {"ok": False, "error": "Could not generate suggestions."})
@@ -251,7 +251,7 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
                  )["body"]["suggestions"]
         self.assertNotIn("mb_releasegroupid", s)
 
-    def test_ai_release_and_artist_ids_need_evidence(self):
+    def test_ai_release_and_artist_ids_are_never_used(self):
         ai = {"mb_trackid": _REC, "mb_albumid": _INVENTED, "mb_artistid": _INVENTED, "confidence": "high", "reason": "r"}
         s = _run({"mb": [_mb_cand()], "details": {}, "ai": ai})["body"]["suggestions"]
         self.assertTrue(s["mb_trusted"])
@@ -261,12 +261,62 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
         s = _run({"mb": [], "ai": {**ai, "mb_trackid": _INVENTED}})["body"]["suggestions"]
         self.assertNotIn("mb_albumid", s)
         self.assertNotIn("mb_artistid", s)
-        self.assertNotIn("mb_album_url", s)
-        # A requested release still ranks: the lookup decides whether the recording is on it.
         out = _run({"mb": [_mb_cand()], "details": _details(), "ai": ai})
-        self.assertEqual(out["details_calls"], [[_REC, _INVENTED]])
+        self.assertEqual(out["details_calls"], [[_REC, _REL]])
         self.assertEqual(out["body"]["suggestions"]["mb_albumid"], _REL)
         self.assertEqual(out["body"]["suggestions"]["mb_artistid"], _ARTIST)
+
+    def test_shown_decision_is_the_deterministic_one_with_real_enrichment(self):
+        """Same decision and version with or without AI, equal to one enrichment pass (what attach rebuilds)."""
+        other = "66666666-6666-6666-6666-666666666666"
+        details = _details()
+        fields = ("decision", "decision_version", "safety_result", "requires_confirmation", "recommended_action")
+
+        def enrich(current, candidate, det=None, **kw):
+            return ai_evidence_service._enrich_track_ai_candidate(current, candidate, det, **kw)
+
+        with mock.patch.object(sys.modules[__name__], "_fake_enrich", enrich), \
+                mock.patch.object(ai_evidence_service, "_fetch_mb_recording_details", return_value=details):
+            base = _run({"key": "", "mb": [_mb_cand()], "details": details})["body"]
+            with_ai = _run({"mb": [_mb_cand()], "details": details,
+                            "ai": {"mb_trackid": _REC, "mb_albumid": other, "confidence": "high", "reason": "r"}})["body"]
+            with mock.patch.object(library_service, "_item_ai_abs_path", return_value="/music/a/03 - Some Song.flac"),                     mock.patch.object(library_service, "_acoustid_lookup_cached_outcome",
+                                      return_value=pb.ProviderResult("acoustid", pb.ProviderOutcome.NOT_CONFIGURED)),                     mock.patch.object(library_service, "_mb_recording_search", return_value=[_mb_cand()]):
+                enforced = library_service._reconstruct_track_recording_candidates(_item(), 7)[1][0]
+        for field in fields:
+            self.assertEqual(with_ai["mb_candidates"][0][field], base["mb_candidates"][0][field], field)
+        self.assertEqual(base["mb_candidates"][0]["decision_version"], enforced["decision_version"])
+        self.assertTrue(with_ai["mb_candidates"][0]["decision_version"])
+        self.assertTrue(with_ai["mb_candidates"][0]["matching_contract"]["ai"]["available"])
+
+    def test_failed_enrichment_needs_confirmation_and_is_not_trusted(self):
+        def boom(*_a, **_k):
+            raise RuntimeError("boom")
+        with mock.patch.object(sys.modules[__name__], "_fake_enrich", boom):
+            body = _run({"mb": [_mb_cand()], "details": _details(),
+                         "ai": {"mb_trackid": _REC, "confidence": "high", "reason": "r"}})["body"]
+        s = body["suggestions"]
+        self.assertTrue(body["ok"])
+        self.assertTrue(s["requires_confirmation"])
+        self.assertFalse(s["mb_trusted"])
+        self.assertIn("mb_apply_warning", s)
+        self.assertTrue(ai_service._compact_track_ai_candidate(_mb_cand())["requires_confirmation"])
+
+    def test_binder_ignores_forged_fields_and_bad_indexes(self):
+        cands = [{"mb_albumid": _REL}, {"mb_albumid": _REC}]
+        forged = {"candidate_index": 0, "mb_artistid": _INVENTED, "requires_confirmation": False,
+                  "safety_result": "safe", "selected_release": {"x": 1}}
+        with mock.patch.object(ai_service, "_fetch_mb_release_tracklist", return_value={}):
+            self.assertEqual(ai_service._ai_bind_selected_release(forged, cands)[1], _REL)
+            for field in ("mb_artistid", "requires_confirmation", "safety_result", "selected_release"):
+                self.assertNotIn(field, forged)
+            for bad in ("x", 1.9, True, None, [0], "0"):
+                self.assertEqual(ai_service._ai_bind_selected_release({"candidate_index": bad}, cands), (None, ""), bad)
+        for reply in ([], "x", 5, None):
+            self.assertEqual(ai_service._ai_bind_selected_release(reply, cands), (None, ""))
+        for raw in ("[]", '"x"', "5", "null"):
+            with self.assertRaises(ValueError):
+                ai_service._ai_reply_object(raw)
 
     def test_ai_cannot_supply_safety_or_evidence_fields(self):
         forged = {"selected_recording_candidate": {"mb_trackid": _INVENTED}, "candidate_evidence": {"x": 1},
@@ -289,16 +339,41 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
         self.assertEqual(s["safety_result"], "needs_review")
 
     def test_schema_invalid_ai_reply_falls_back_to_the_evidence(self):
-        for reply in ("[]", '"x"', "5", "null"):
+        good = {"mb_trackid": _REC, "confidence": "high", "reason": "r"}
+        replies = ["[]", '"x"', "5", "null", "{}", {"foo": 1},
+                   {"mb_releasegroupid": _INVENTED, "safety_result": "safe"},
+                   '{"title": NaN, "mb_trackid": "%s", "reason": "r"}' % _REC,
+                   '{"year": 1e999, "mb_trackid": "%s"}' % _REC,
+                   {**good, "confidence": "certain"}, {**good, "confidence": 5}, {**good, "confidence": ["high"]},
+                   {**good, "title": "x" * 1001}, {**good, "year": 10 ** 12}, {**good, "track": True}]
+        for field in ("mb_trackid", "mb_albumid", "mb_artistid"):
+            replies += [{**good, field: bad} for bad in (5, True, ["x"], {"a": 1}, 1.5)]
+        for field in ("title", "artist", "album", "reason", "label", "genre", "year", "track"):
+            replies += [{**good, field: bad} for bad in (["x"], {"a": 1}, 1.5)]
+        for reply in replies:
             with self.subTest(reply=reply):
-                out = _run({"mb": [_mb_cand()], "details": _details(), "ai": reply})
-                self.assertEqual(out["status"], 200)
-                self.assertTrue(out["body"]["ok"])
-                s = out["body"]["suggestions"]
+                resp = _run({"mb": [_mb_cand()], "details": _details(), "ai": reply})
+                self.assertEqual(resp["status"], 200)
+                self.assertTrue(resp["body"]["ok"])
+                self.assertNotIn("NaN", json.dumps(resp["body"], allow_nan=True))
+                s = resp["body"]["suggestions"]
                 self.assertEqual(s["mb_trackid"], _REC)
                 self.assertEqual(s["confidence_source"], "musicbrainz")
                 self.assertFalse(s["ai_status"]["contributed"])
                 self.assertIn("(ValueError)", s["ai_unavailable_reason"])
+
+    def test_confidence_variants_and_out_of_candidate_ids(self):
+        for spelled in ("HIGH", "high ", "High"):
+            s = _run({"mb": [_mb_cand()], "details": _details(),
+                      "ai": {"mb_trackid": _REC, "confidence": spelled, "reason": "r"}})["body"]["suggestions"]
+            self.assertEqual(s["confidence"], "high")
+        for mb in ([_mb_cand()], []):
+            for conf in ("high", "HIGH", "high ", "medium", "low"):
+                s = _run({"mb": mb, "ai": {"mb_trackid": _INVENTED, "confidence": conf, "reason": "r"}}
+                         )["body"]["suggestions"]
+                self.assertEqual(s["confidence"], "low", (bool(mb), conf))
+                self.assertFalse(s["mb_trusted"])
+                self.assertIn("mb_apply_warning", s)
 
     def test_identity_rules_hold_in_golden(self):
         """AI may rank, never establish identity: only a listed candidate is trusted."""

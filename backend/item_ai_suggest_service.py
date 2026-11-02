@@ -2,10 +2,11 @@
 
 Pipeline: read the item's tags, gather AcoustID/MusicBrainz/Discogs evidence,
 optionally let the AI rank it, then validate what came back against that
-evidence and shape the response. AI is optional and untrusted: its reply is reduced to
-_AI_REPLY_FIELDS, only a recording already in the candidate list is ever marked
-trusted, and every other identity or safety field comes from that candidate or
-MusicBrainz. Everything else is downgraded and left for the user to review.
+evidence and shape the response. AI is optional and untrusted: a reply of the wrong shape counts
+as AI being unavailable, only a recording already in the candidate list is ever
+marked trusted, and every other identity or safety field comes from that
+candidate or MusicBrainz. Everything else is downgraded and left for the user
+to review. The decision shown is the one attach-recording rebuilds and enforces.
 """
 from __future__ import annotations
 
@@ -35,12 +36,15 @@ _YEAR_RE = re.compile(r'^((?:19|20)\d{2})')
 # Fields MusicBrainz fills authoritatively (override AI guesses).
 _MB_AUTHORITATIVE = {"artist", "mb_albumid", "mb_artistid", "track", "tracktotal", "disc", "disctotal",
                      "label", "genre", "album", "year"}
-# The only keys kept from an AI reply: what the prompt asks for. Identity and
+# The only keys read from an AI reply: what the prompt asks for. Identity and
 # safety fields outside this set can only come from verified evidence.
-_AI_REPLY_FIELDS = frozenset({
-    "title", "artist", "album", "albumartist", "year", "genre", "track", "tracktotal", "disc", "disctotal",
-    "label", "mb_trackid", "mb_albumid", "mb_artistid", "confidence", "reason",
-})
+_AI_NUMBER_FIELDS = frozenset({"year", "track", "tracktotal", "disc", "disctotal"})
+_AI_REPLY_FIELDS = _AI_NUMBER_FIELDS | {
+    "title", "artist", "album", "albumartist", "genre", "label", "mb_trackid", "mb_albumid", "mb_artistid",
+    "confidence", "reason",
+}
+_AI_CONFIDENCE = frozenset({"high", "medium", "low"})
+_AI_TEXT_MAX = 1000
 
 
 class _Evidence(NamedTuple):
@@ -193,8 +197,37 @@ def _build_prompt(current: Dict[str, Any], evidence: _Evidence) -> str:
     )
 
 
+def _valid_ai_reply(reply: Any) -> Dict[str, Any]:
+    """The usable part of an AI reply. Raises ValueError (names only, never values) if its shape is wrong.
+
+    Floats are refused along with every other wrong type, so NaN and Infinity cannot reach the response.
+    """
+    if not isinstance(reply, dict):
+        raise ValueError("AI reply is not a JSON object")
+    clean: Dict[str, Any] = {}
+    for key in _AI_REPLY_FIELDS:
+        value = reply.get(key)
+        if key in _AI_NUMBER_FIELDS and type(value) is int and abs(value) < 10**9:
+            clean[key] = value
+        elif isinstance(value, str) and len(value) <= _AI_TEXT_MAX:
+            if value.strip():
+                clean[key] = value.strip()
+        elif value is not None:
+            raise ValueError(f"AI reply field {key} has the wrong type or size")
+    if "confidence" in clean:
+        clean["confidence"] = clean["confidence"].lower()
+        if clean["confidence"] not in _AI_CONFIDENCE:
+            raise ValueError("AI reply confidence is not high, medium or low")
+    if not clean:
+        raise ValueError("AI reply has no usable field")
+    # Checked above so a bad value counts against the reply, but only MusicBrainz supplies these.
+    clean.pop("mb_albumid", None)
+    clean.pop("mb_artistid", None)
+    return clean
+
+
 def _ask_ai(prompt: str, api_key: str) -> Dict[str, Any]:
-    """The AI's reply, allowlisted. Raises on any provider or parse failure, or a reply that is not an object."""
+    """The AI's validated reply. Raises on any provider or parse failure, or a reply of the wrong shape."""
     model, endpoint = _ai_model_and_endpoint("gpt-4o")
     req = urllib.request.Request(
         endpoint,
@@ -208,10 +241,7 @@ def _ask_ai(prompt: str, api_key: str) -> Dict[str, Any]:
     )
     with provider_boundary.opened("ai", req, timeout=30) as resp:
         data = json.loads(resp.read())
-    reply = json.loads(data["choices"][0]["message"]["content"])
-    if not isinstance(reply, dict):
-        raise ValueError("AI reply is not a JSON object")
-    return {k: v for k, v in reply.items() if k in _AI_REPLY_FIELDS}
+    return _valid_ai_reply(json.loads(data["choices"][0]["message"]["content"]))
 
 
 def _fallback_suggestion(current: Dict[str, Any], mb_candidates: List[Dict[str, Any]],
@@ -252,25 +282,13 @@ def _normalize_fields(suggestions: Dict[str, Any]) -> None:
         suggestions["reason"] = ""
 
 
-def _candidate_release_ids(candidate: Optional[Dict[str, Any]]) -> set:
-    if not candidate:
-        return set()
-    ids = [candidate.get("mb_albumid"), *(candidate.get("mb_albumids") or []),
-           *(r.get("mb_albumid") for r in candidate.get("linked_releases") or [] if isinstance(r, dict))]
-    return {_s(i).strip().lower() for i in ids if i}
-
-
 def _validate_identity(suggestions: Dict[str, Any], mb_candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Check the suggested recording against the evidence; returns the candidate it names.
 
     Only a recording in the candidate list is trusted. An ID outside it, or a
-    malformed one, is downgraded and carries a warning for the reviewer. A
-    release or artist ID the selected candidate does not back is dropped.
+    malformed one, is always low confidence and carries a warning for the reviewer.
     """
     mb_trackid = (suggestions.get("mb_trackid") or "").strip()
-    # A non-string ID from the AI raises here, so the request fails closed.
-    mb_albumid = (suggestions.get("mb_albumid") or "").strip()
-    (suggestions.get("mb_artistid") or "").strip()
     selected_candidate = None
     candidate_index = -1
     if mb_trackid:
@@ -283,16 +301,11 @@ def _validate_identity(suggestions: Dict[str, Any], mb_candidates: List[Dict[str
                 except Exception:
                     candidate_index = -1
                 break
-    # MusicBrainz fills the artist; the release stays only if the candidate lists it.
-    suggestions.pop("mb_artistid", None)
-    if mb_albumid.lower() not in _candidate_release_ids(selected_candidate):
-        suggestions.pop("mb_albumid", None)
     suggestions["candidate_index"] = candidate_index
     suggestions["mb_candidate_valid"] = bool(selected_candidate)
     suggestions["mb_trusted"] = bool(selected_candidate)
     if mb_trackid and not selected_candidate:
-        if _s(suggestions.get("confidence")).lower() == "high":
-            suggestions["confidence"] = "low"
+        suggestions["confidence"] = "low"
         reason = _s(suggestions.get("reason")).strip()
         guard = "AI returned a MusicBrainz recording ID that was not in the AcoustID/MusicBrainz candidate list; review before applying."
         suggestions["reason"] = f"{guard} {reason}".strip()
@@ -312,22 +325,22 @@ def _validate_identity(suggestions: Dict[str, Any], mb_candidates: List[Dict[str
     return selected_candidate
 
 
-def _fill_from_musicbrainz(suggestions: Dict[str, Any], current: Dict[str, Any], selected_candidate: Dict[str, Any],
-                           evidence: _Evidence, ai_state: AiState, requested_albumid: str) -> None:
+def _fill_from_musicbrainz(suggestions: Dict[str, Any], selected_candidate: Dict[str, Any], ai_state: AiState) -> None:
     """Fill remaining fields from the selected recording; MusicBrainz overrides AI guesses.
 
-    requested_albumid only ranks: the lookup honors it if the recording really is on that release.
+    The candidate is not re-evaluated: its decision and decision_version stay the
+    deterministic ones attach-recording rebuilds. AI is only recorded as provenance.
     """
+    contract = selected_candidate.get("matching_contract")
+    if isinstance(contract, dict):
+        contract["ai"] = ai_state.to_dict()
     mb_trackid = (suggestions.get("mb_trackid") or "").strip()
     try:
         preferred_albumid = (
-            requested_albumid
-            or _s(selected_candidate.get("mb_albumid", "")).strip()
+            _s(selected_candidate.get("mb_albumid", "")).strip()
             or next(iter(selected_candidate.get("mb_albumids") or []), "")
         )
         details = _fetch_mb_recording_details(mb_trackid, preferred_albumid)
-        _enrich_track_ai_candidate(current, selected_candidate, details,
-                                   ai_state=ai_state, acoustid_hits=evidence.acoustid_hits)
         for k, v in details.items():
             if v and (k in _MB_AUTHORITATIVE or not suggestions.get(k)):
                 suggestions[k] = v
@@ -346,10 +359,13 @@ def _attach_candidate_evidence(suggestions: Dict[str, Any], selected_candidate: 
         suggestions["linked_releases"] = packet.get("linked_releases") or []
         suggestions["conflicts"] = packet.get("conflicts") or []
         suggestions["recommended_action"] = packet.get("recommended_action") or ""
-        suggestions["requires_confirmation"] = bool(packet.get("requires_confirmation"))
+        suggestions["requires_confirmation"] = bool(packet.get("requires_confirmation", True))
         suggestions["safety_result"] = packet.get("safety_result") or ""
         suggestions["confidence_score"] = packet.get("confidence_score")
         suggestions["match_method"] = packet.get("match_method") or packet.get("source")
+        if "requires_confirmation" not in selected_candidate:  # enrichment failed: there is no decision
+            suggestions["mb_trusted"] = False
+            suggestions["mb_apply_warning"] = "This recording could not be evaluated; review before applying."
     suggestions["recording_candidates"] = [_compact_track_ai_candidate(c) for c in mb_candidates[:8]]
     suggestions["missing_id_type"] = "Recording ID"
     if _MB_UUID_RE.match(suggestions.get("mb_albumid") or ""):
@@ -417,7 +433,6 @@ def suggest_for_item(item, iid: int) -> Dict[str, Any]:
 
     try:
         _normalize_fields(suggestions)
-        requested_albumid = suggestions.get("mb_albumid")
         selected_candidate = _validate_identity(suggestions, mb_candidates)
         if suggestions["mb_valid"]:
             suggestions["mb_url"] = f"https://musicbrainz.org/recording/{(suggestions.get('mb_trackid') or '').strip()}"
@@ -439,8 +454,7 @@ def suggest_for_item(item, iid: int) -> Dict[str, Any]:
                         if ai_contributed else {}
                     ),
                 )
-                _fill_from_musicbrainz(suggestions, current, selected_candidate, evidence, ai_state,
-                                       (requested_albumid or "").strip())
+                _fill_from_musicbrainz(suggestions, selected_candidate, ai_state)
         _attach_candidate_evidence(suggestions, selected_candidate, mb_candidates)
         packet = _track_ai_evidence_packet(
             iid,

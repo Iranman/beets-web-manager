@@ -19,8 +19,7 @@ import backend.composite_workflows as composite_workflows
 import backend.missing_mb_batch as missing_mb_batch
 import backend.recording_review as recording_review
 from backend.identity_contract import verify_album_identity as _verify_album_identity
-from backend.acoustid_service import _acoustid_fingerprint_match, _normalize_albumartist, same_recording_proof
-import backend.duplicate_cleanup as _duplicate_cleanup
+from backend.acoustid_service import _acoustid_fingerprint_match, _normalize_albumartist
 from backend.ai_batch_state_service import _get_ai_batch_store
 from backend.ai_evidence_service import _ai_suggest_genre
 from backend.item_ai_suggest_service import suggest_for_item, suggestion_failure
@@ -29,19 +28,19 @@ from backend.app_runtime import ARTIST_IMAGE_CACHE_DIR, AUDIO_EXT, DOWNLOADS_ROO
 from backend.artwork_service import AlbumArtRequestError, _ALBUM_ART_UPLOAD_MAX_BYTES, _RELEASE_ART_MBID_RE, _album_art_cache, _album_art_cache_lock, _album_art_expected_release_group, _album_art_repair_entry, _album_art_status, _album_dir_for_art, _art_repair_attach_last_run, _art_repair_build_report, _art_repair_save_last, _artist_image_cache_url, _artist_local_art_url, _cache_artist_image, _fetch_album_art, _fetch_artist_image, _repair_album_art, _replace_album_art_bytes, _replace_album_art_from_url, _resolve_album_art_request_album, _save_art_to_disk, _usable_album_art_file, _validate_album_art_bytes
 from backend.auth_service import _sanitize_confirmation_reason
 from backend.cleanup_service import album_cleanup_apply_response, _cleanup_artist_alias_source_dirs, _cleanup_template_token_files, _cleanup_template_tokens_for_album
-from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_duplicate_resolver_plan
+from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_dedup_quarantine_proven, _album_duplicate_resolver_plan
 from backend.import_reconciliation_service import _run_artist_folder_reconcile_for_alias_merge
 from backend.import_review_service import _metadata_transaction_pending_fields, _redact_unmatched_draft_tracks
 from backend.import_service import _coerce_library_import_all_album, _library_import_all_read_last, _library_import_all_record, _library_import_all_write_last, _start_reimport_disk_job_internal, start_reimport_disk
 from backend.job_service import _wait_for_child_job
-from backend.library_service import AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _apply_folder_name_placeholders, _apply_folder_mbid_names, _rollback_folder_placeholder_apply, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
+from backend.library_service import album_tracks_with_disk_files, library_mbid_status_payload, AttachRecordingCancelled, _album_db_folder_from_item_paths, _album_genre_value, _apply_genre_to_album, _artist_id_alias_groups, _fetch_discography, _folder_placeholder_summary, _get_last_scan, _legacy_local_scan_enabled, _library_track_dict, _reconstruct_track_recording_candidates, _release_attach_recording_item, _require_attach_stage_success, _reserve_attach_recording_item, _resolve_artist_alias_mbid, _scan_folder_name_placeholders, _apply_folder_name_placeholders, _apply_folder_mbid_names, _rollback_folder_placeholder_apply, _scan_leaked_db_paths, _strip_year_from_album_name, MISSING_MB_KINDS, MISSING_MB_SORTS, album_dict, get_library_payload, library_missing_mb_payload, item_dict, item_dict_full, start_fetch_missing_art, start_library_fix_genres
 from backend.maintenance_service import _SCAN_STATE, _do_scan_job
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_mb_match_plan, _disc_cache, _disc_cache_discogs, _disc_cache_discogs_lock, _disc_cache_lock, _invalidate_lib_cache, _load_album_mb_suggestions, _match_tracks_from_mb, _remove_album_track_items
 from backend.musicbrainz_service import _discogs_artist_discography, _ensure_release_group_art, _mb_release_group_for_release
 from backend.pending_review_store import _is_music_root_path, _queue_folder_for_manual_review
 from backend.plex_service import _trigger_plex_refresh
 import backend.item_replacement as _item_replacement
-from backend.serializers import _leaked_db_paths_summary, _resolve_import_review_source_path, json_route_result, query_int_arg
+from backend.serializers import beets_auth_failed_response, beets_engine_error_response, beets_offline_response, _leaked_db_paths_summary, _resolve_import_review_source_path, json_route_result, query_int_arg
 from backend.transaction_service import _item_metadata_transaction_payload, _start_metadata_apply_transaction
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 from helpers_mb import _fetch_mb_release_candidate
@@ -49,6 +48,14 @@ from backend.library_service import _album_source_folder, _resolve_album_release
 from backend.auth_service import _transaction_user_label
 
 # ── ARCH-001 extracted code ──
+
+
+def _start_job(fn, *, response_extra: Optional[Dict[str, Any]] = None, **start_kwargs):
+    """Start ``fn`` as a job and return the standard ``{"ok", "job_id"}`` body.
+
+    DuplicateJobError still propagates to the app-wide 409 handler."""
+    job = jobs.start_python(fn, **start_kwargs)
+    return jsonify({"ok": True, "job_id": job.job_id, **(response_extra or {})})
 
 
 @app.get("/api/stats")
@@ -138,11 +145,7 @@ def items():
         return jsonify({"count": len(rows), "items": rows})
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
         _app_logger.warning("Beets items query unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets library unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response()
 
 
 @app.get("/api/items/<int:iid>")
@@ -151,11 +154,7 @@ def get_item(iid):
         item = lib.get_item(iid)
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
         _app_logger.warning("Beets get_item unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets library unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response()
     if not item:
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True, "item": item_dict_full(item)})
@@ -169,11 +168,7 @@ def get_artists_list():
         return jsonify({"ok": True, "count": len(artists), "artists": artists})
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
         _app_logger.warning("Beets get_artists unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets library unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response()
 
 
 @app.get("/api/search")
@@ -194,11 +189,7 @@ def api_search():
         })
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError, BeetsUnavailableError) as ex:
         _app_logger.warning("Beets search unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets library unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response()
 
 
 @app.get("/api/items/<int:iid>/file")
@@ -212,11 +203,7 @@ def item_audio_file(iid: int):
         return jsonify({"ok": False, "error": "Item audio file not found"}), 404
     except (BeetsAdapterConnectionError, BeetsAdapterTimeoutError) as ex:
         _app_logger.warning("Beets audio stream connection error for item %d: %s", iid, ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets audio streaming unavailable",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response("Beets audio streaming unavailable")
     except Exception as ex:
         _app_logger.warning("Beets audio stream error for item %d: %s", iid, ex)
         return jsonify({"ok": False, "error": "Audio stream failed"}), 500
@@ -376,8 +363,7 @@ def retag_item(iid):
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
 
-    job = jobs.start_python(_do, label=f"Retag+Move: item {iid}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Retag+Move: item {iid}")
 
 
 @app.post("/api/items/<int:iid>/mbsubmit")
@@ -395,8 +381,7 @@ def item_mbsubmit(iid: int):
             if line.strip():
                 log.append(line)
         return {"output": output}
-    job = jobs.start_python(_do, label=f"mbsubmit: item {iid}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"mbsubmit: item {iid}")
 
 
 @app.post("/api/albums/<int:aid>/mbsubmit")
@@ -410,8 +395,7 @@ def album_mbsubmit(aid: int):
             if line.strip():
                 log.append(line)
         return {"output": output}
-    job = jobs.start_python(_do, label=f"mbsubmit: album {aid}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"mbsubmit: album {aid}")
 
 
 @app.post("/api/albums/<int:aid>/add-mbids")
@@ -452,8 +436,7 @@ def album_add_mbids(aid: int):
         _trigger_plex_refresh(log)
         log.append(f"MBIDs applied and album moved to MBID-stamped path.")
 
-    job = jobs.start_python(_do, label=f"Add MBIDs: album {aid}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Add MBIDs: album {aid}")
 
 
 @app.post("/api/items/<int:iid>/attach-recording")
@@ -1104,18 +1087,10 @@ def library_art_repair_report():
         return jsonify(_art_repair_attach_last_run(report))
     except BeetsUnavailableError as ex:
         _app_logger.warning("Artwork repair report failed: Beets engine unavailable")
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine is unavailable.",
-            "error_code": "ENGINE_OFFLINE",
-        }), 503
+        return beets_offline_response("Beets engine is unavailable.")
     except BeetsAuthError as ex:
         _app_logger.error("Artwork repair report failed: Control agent authentication failed (%s)", type(ex).__name__)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine authentication failed.",
-            "error_code": "ENGINE_AUTH_FAILED",
-        }), 503
+        return beets_auth_failed_response()
     except BeetsError as ex:
         _app_logger.error("Artwork repair report failed: %s", ex)
         return jsonify({
@@ -1250,12 +1225,11 @@ def album_fetch_art(aid):
             log.append(f"  Art saved: {Path(saved_path).name}")
         _invalidate_lib_cache()
         return result
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"FetchArt: album {aid}",
         metadata={"type": "album_art_repair", "album_id": aid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/fetch-embed-artwork")
@@ -1282,12 +1256,11 @@ def album_fetch_embed_artwork(aid):
         log.append(f"  Artwork saved: {res.get('artpath')}")
         _invalidate_lib_cache()
         return res
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"FetchEmbedArtwork: album {aid}",
         metadata={"type": "album_artwork_fetch_v1", "album_id": aid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/art/url")
@@ -1332,12 +1305,11 @@ def album_replace_art_from_url(aid):
         _invalidate_lib_cache()
         return {"path": saved, "image": result.get("image") or {}}
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Replace art: album {aid}",
         metadata={"type": "album-art-replace", "album_id": aid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/art/upload")
@@ -1379,12 +1351,11 @@ def album_upload_art(aid):
         _invalidate_lib_cache()
         return {"path": saved, "image": result.get("image") or {}}
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Upload art: album {aid}",
         metadata={"type": "album-art-upload", "album_id": aid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.delete("/api/albums/<int:aid>/art")
@@ -1440,7 +1411,7 @@ def album_remove(aid):
         plan = composite_workflows.plan_album_cleanup(aid, delete_files=delete_files, reason="album remove request")
     except (BeetsUnavailableError, BeetsError) as ex:
         _app_logger.warning("Album remove plan failed: Beets engine unavailable (%s)", type(ex).__name__)
-        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "error_code": "ENGINE_OFFLINE"}), 503
+        return beets_offline_response("Beets engine is unavailable.")
     status_code = 200 if plan.get("ok") else 400
     return jsonify({**plan, "item_count": len(item_ids),
                     "next_step": "POST /api/albums/cleanup/apply with this operation_id"}), status_code
@@ -1463,9 +1434,8 @@ def album_rename(aid):
                    f"(transaction {res.get('operation_id')}; roll it back from Transactions)")
 
     # The relocation records its own transaction; the job hook must not add a second row.
-    job = jobs.start_python(_do, label=label,
+    return _start_job(_do, label=label,
                             metadata={"type": "album-rename", "album_id": aid, "transaction": False})
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/move-to-library")
@@ -1485,12 +1455,11 @@ def album_move_to_library(aid):
                    f"(transaction {res.get('operation_id')}; roll it back from Transactions)")
 
     # The relocation records its own transaction; the job hook must not add a second row.
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=label,
         metadata={"type": "album-move-to-library", "album_id": aid, "transaction": False},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/fix-metadata")
@@ -1594,9 +1563,8 @@ def album_fix_metadata(aid):
     # real, rollbackable Metadata Update / MB track repair transactions sat
     # in separate rows; those rows are now the only record, under this user.
     label = f"Fix metadata: album_id={aid}"
-    job = jobs.start_python(_do, label=label, metadata={"type": "album-fix-metadata", "album_id": aid,
+    return _start_job(_do, label=label, metadata={"type": "album-fix-metadata", "album_id": aid,
                                                         "transaction": False})
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/albums/<int:aid>/deduplicate")
@@ -1651,8 +1619,6 @@ def album_deduplicate(aid):
     label = f"Dedup: {_s(getattr(album,'albumartist',''))} — {_s(getattr(album,'album',''))}"
 
     def _do(log, cancel_event=None):
-        _MROOT   = str(MUSIC_ROOT)
-
         # Resolve which MB album ID to use
         mb_albumid = mb_override
         if not mb_albumid:
@@ -1686,24 +1652,7 @@ def album_deduplicate(aid):
         else:
             log.append("  No MB ID — skipping MB re-match (track numbers may be 0)")
 
-        # ── Step 2: Load all items and group by track number ──────────────────
-        def _abs(p):
-            if isinstance(p, bytes):
-                p = p.decode("utf-8", errors="replace")
-            return (_MROOT + "/" + p) if (p and not p.startswith("/")) else (p or "")
-
-        def _pstr(raw) -> str:
-            """Decode bytes path to str."""
-            if isinstance(raw, bytes):
-                return raw.decode("utf-8", errors="replace")
-            return str(raw or "")
-
-        def _collision_rank(raw_path) -> int:
-            """0 = primary (no .N suffix), 1+ = collision copy number."""
-            stem = Path(_pstr(raw_path)).stem
-            m = re.search(r'\.(\d+)$', stem)
-            return int(m.group(1)) if m else 0
-
+        # ── Steps 2-4: group by slot; quarantine only proven duplicates ───────
         try:
             raw_items = composite_workflows.find_all_items_by_album_id(int(aid))
             sorted_items = sorted(
@@ -1716,99 +1665,7 @@ def album_deduplicate(aid):
         except Exception as ex:
             log.append(f"ERROR loading items: {ex}")
             return
-
-        # Normalise rows to plain dicts with string paths
-        all_items = []
-        for it in sorted_items:
-            all_items.append({
-                "id":    int(it["id"]),
-                "track": int(it.get("track") or 0),
-                "disc":  int(it.get("disc") or 1),
-                "title": _pstr(it.get("title")),
-                "path":  _pstr(it.get("path")),
-                "mb_trackid": _pstr(it.get("mb_trackid")).strip().lower(),
-            })
-
-        log.append(f"Items in DB: {len(all_items)}")
-
-        # MI-3: a slot is (disc, track) -- track 3 of disc 1 and of disc 2
-        # are different songs.
-        by_slot = defaultdict(list)
-        for it in all_items:
-            by_slot[(it["disc"], it["track"])].append(it)
-
-        # ── Step 3: Decide what to remove -- only with positive proof ─────────
-        # A copy is a duplicate only when BOTH files fingerprint (AcoustID) as
-        # CONFIRMED for one recording. Unknown/unavailable/conflicting
-        # evidence spares the copy and reports it; unmatched (track 0) items
-        # are never removed here (keep_extras is ignored for removal).
-        pairs = []
-        spared = []
-        summary = []
-        for (disc, trk), group in sorted(by_slot.items()):
-            if trk == 0:
-                summary.append(f"  [00] Kept {len(group)} unmatched item(s) for review")
-                spared.extend({"item_id": it["id"], "reason": "unmatched_track_number"} for it in group)
-                continue
-            if len(group) == 1:
-                summary.append(f"  [{disc}-{trk:02d}] OK — {Path(group[0]['path']).name[:60]}")
-                continue
-            group.sort(key=lambda x: (_collision_rank(x["path"]), x["id"]))
-            kept = group[0]
-            kept_abs = _abs(kept["path"])
-            for d in group[1:]:
-                proof = same_recording_proof(_abs(d["path"]), kept_abs, kept.get("mb_trackid") or "")
-                if proof["proven"]:
-                    pairs.append({"delete_item_id": d["id"], "keep_item_id": kept["id"]})
-                    summary.append(f"  [{disc}-{trk:02d}] Duplicate proven ({proof['recording_id']}): "
-                                   f"{Path(d['path']).name[:40]} (keep {Path(kept['path']).name[:40]})")
-                else:
-                    spared.append({"item_id": d["id"], "reason": proof["reason"],
-                                   "drop_status": proof["drop_status"], "keep_status": proof["keep_status"]})
-                    summary.append(f"  [{disc}-{trk:02d}] SPARED (no same-recording proof: {proof['reason']}): "
-                                   f"{Path(d['path']).name[:40]}")
-
-        for line in summary:
-            log.append(line)
-
-        # ── Step 4: Reviewed duplicate cleanup (quarantine, rollbackable) ─────
-        dedup_result = {"proven_pairs": len(pairs), "spared": spared, "operation_id": None,
-                        "applied": False, "quarantined": 0}
-        if not pairs:
-            log.append("Nothing proven duplicate — nothing removed.")
-        else:
-            try:
-                plan = _duplicate_cleanup.plan_reviewed_cleanup(pairs, reason=f"Album {aid} deduplicate")
-            except (BeetsUnavailableError, BeetsError) as ex:
-                log.append(f"  Engine unavailable planning duplicate cleanup: {ex}")
-                raise RuntimeError(f"Duplicate cleanup planning failed: {ex}")
-            for skipped in plan.get("skipped") or []:
-                log.append(f"  Kept item {skipped.get('delete_item_id')}: "
-                           f"{', '.join(skipped.get('reasons') or [])}")
-            if plan.get("ok"):
-                dedup_result["operation_id"] = plan["operation_id"]
-                if confirm_apply:
-                    store = composite_workflows.get_default_store()
-                    if store.transition(plan["operation_id"], "Preview", "Approved",
-                                        metadata={"approved_by": "operator confirmed album deduplicate"}) is None:
-                        raise RuntimeError(f"Duplicate cleanup {plan['operation_id']} changed state before it "
-                                           "could be approved; nothing was quarantined.")
-                    applied = _duplicate_cleanup.apply_reviewed_cleanup(plan["operation_id"])
-                    if not applied.get("ok"):
-                        raise RuntimeError(f"Duplicate cleanup {plan['operation_id']} did not apply "
-                                           f"({applied.get('status') or applied.get('code')}): "
-                                           f"{applied.get('error') or 'see transaction log'}")
-                    dedup_result.update(applied=bool(applied.get("ok")),
-                                        quarantined=len(applied.get("removed") or []))
-                    log.append(f"  Quarantined {dedup_result['quarantined']} proven duplicate(s) "
-                               f"({applied.get('status')}); rollback via transaction {plan['operation_id']}.")
-                else:
-                    log.append(f"  Preview transaction {plan['operation_id']} created; approve and apply it "
-                               "to quarantine the proven duplicates (nothing removed yet).")
-            else:
-                log.append("  No pair passed duplicate re-verification; nothing removed.")
-        if spared:
-            log.append(f"  {len(spared)} item(s) kept for review (no positive same-recording proof).")
+        dedup_result = _album_dedup_quarantine_proven(aid, sorted_items, confirm_apply, log)
 
         # ── Step 5: Strip year suffix from album name (anti-double-year) ──────
         _strip_year_from_album_name(aid, log)
@@ -1890,8 +1747,7 @@ def match_album(aid):
     def _do(log, cancel_event=None):
         _match_album_run(aid, mb_input, log)
 
-    job = jobs.start_python(_do, label=label)
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=label)
 
 
 def _match_album_run(aid: int, mb_input: str, log, *, release_selected_by_operator: bool = True) -> List[str]:
@@ -2240,12 +2096,11 @@ def rebuild_album_art():
         )
         return summary
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label="Rebuild Album Art",
         metadata={"type": "album-art-rebuild", "mode": "full_rebuild"},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.get("/api/library/missing-mb-ids")
@@ -2267,15 +2122,9 @@ def library_missing_mb_ids():
     try:
         return jsonify(library_missing_mb_payload(
             kind=kind, search=_s(args.get("search") or "")[:200], offset=offset, limit=limit, sort=sort))
-    except BeetsUnavailableError as ex:
-        _app_logger.warning("library_missing_mb_ids: Beets engine unavailable: %s", ex)
-        return jsonify({"ok": False, "error": "Beets engine unavailable", "error_code": "ENGINE_UNAVAILABLE"}), 503
-    except BeetsAuthError as ex:
-        _app_logger.warning("library_missing_mb_ids: Beets engine auth failed: %s", ex)
-        return jsonify({"ok": False, "error": "Beets engine auth failed", "error_code": "ENGINE_AUTH_ERROR"}), 502
     except BeetsError as ex:
-        _app_logger.warning("library_missing_mb_ids: Beets engine error: %s", ex)
-        return jsonify({"ok": False, "error": "Beets engine error", "error_code": "ENGINE_ERROR"}), 502
+        _app_logger.warning("library_missing_mb_ids: %s: %s", type(ex).__name__, ex)
+        return beets_engine_error_response(ex)
     except Exception:
         _app_logger.exception("Unexpected error in library_missing_mb_ids")
         return jsonify({"ok": False, "error": "Internal error loading missing IDs",
@@ -2338,14 +2187,6 @@ def _batch_write_item(item_id: int, proof: Dict[str, Any], log) -> Dict[str, Any
     return {"changed": True, "transaction_ids": [body.get("audit_id")]}
 
 
-def _batch_beets_error(ex: Exception):
-    if isinstance(ex, BeetsAuthError):
-        return jsonify({"ok": False, "error": "Beets engine auth failed", "error_code": "ENGINE_AUTH_ERROR"}), 502
-    if isinstance(ex, BeetsUnavailableError):
-        return jsonify({"ok": False, "error": "Beets engine unavailable", "error_code": "ENGINE_UNAVAILABLE"}), 503
-    return jsonify({"ok": False, "error": "Beets engine error", "error_code": "ENGINE_ERROR"}), 502
-
-
 @app.post("/api/library/missing-mb-ids/batch/preview")
 def library_missing_mb_ids_batch_preview():
     """Read-only job: prove each selected row and record a Preview transaction."""
@@ -2354,7 +2195,7 @@ def library_missing_mb_ids_batch_preview():
         rows, err = missing_mb_batch.select_rows(payload)
     except BeetsError as ex:
         _app_logger.warning("missing-mb batch preview: Beets error: %s", type(ex).__name__)
-        return _batch_beets_error(ex)
+        return beets_engine_error_response(ex)
     if err:
         return jsonify({"ok": False, "error": err, "error_code": "INVALID_PARAM"}), 400
     if not rows:
@@ -2365,10 +2206,9 @@ def library_missing_mb_ids_batch_preview():
     def _do(log, cancel_event=None, update_state=None):
         return missing_mb_batch.run_preview(rows, log, cancel_event, update_state, user=user)
 
-    job = jobs.start_python(_do, label=f"Missing IDs batch preview ({len(rows)} rows)", metadata={
+    return _start_job(_do, label=f"Missing IDs batch preview ({len(rows)} rows)", metadata={
         "type": "missing-mb-ids-batch-preview", "category": "library", "mutating": False,
-        "dedupe_key": "missing-mb-ids-batch-preview"})
-    return jsonify({"ok": True, "job_id": job.job_id, "rows": len(rows)})
+        "dedupe_key": "missing-mb-ids-batch-preview"}, response_extra={"rows": len(rows)})
 
 
 @app.post("/api/library/missing-mb-ids/batch/apply")
@@ -2584,88 +2424,7 @@ def album_tracks(aid):
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Not found"}), 404
-    items = sorted(album.items(), key=lambda i: (i.disc or 0, i.track or 0))
-    tracks = [_library_track_dict(i) for i in items]
-    known_paths = {
-        str(Path(t.get("path") or "").resolve(strict=False)).lower()
-        for t in tracks
-        if t.get("path")
-    }
-    all_path_items: Dict[str, Any] = {}
-    try:
-        for other in lib.items([]):
-            raw_path = _s(getattr(other, "path", "") or "")
-            if not raw_path:
-                continue
-            abs_path = raw_path if Path(raw_path).is_absolute() else str(MUSIC_ROOT / raw_path)
-            all_path_items[str(Path(abs_path).resolve(strict=False)).lower()] = other
-    except Exception:
-        all_path_items = {}
-    album_dir = _album_dir_for_art(album)
-    if album_dir and album_dir.exists():
-        disc_sub_re = re.compile(r'^(?:cd|disc|disk)\s*0*(\d+)$', re.IGNORECASE)
-        disk_files: List[Path] = []
-        try:
-            disk_files.extend(
-                sorted(
-                    [p for p in album_dir.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXT],
-                    key=lambda p: p.name.lower(),
-                )
-            )
-            for sub in sorted([p for p in album_dir.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
-                if not disc_sub_re.match(sub.name):
-                    continue
-                disk_files.extend(
-                    sorted(
-                        [p for p in sub.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXT],
-                        key=lambda p: p.name.lower(),
-                    )
-                )
-        except Exception:
-            disk_files = []
-
-        for fpath in disk_files:
-            key = str(fpath.resolve(strict=False)).lower()
-            if key in known_paths:
-                continue
-            other_item = all_path_items.get(key)
-            if other_item:
-                other_album_id = int(getattr(other_item, "album_id", 0) or 0)
-                if other_album_id == aid:
-                    continue
-                if other_album_id:
-                    row = _library_track_dict(other_item)
-                    row["status"] = "other_album"
-                    row["other_album_id"] = other_album_id
-                    row["imported"] = True
-                    row["disk_only"] = False
-                    row["missing"] = False
-                    tracks.append(row)
-                    continue
-            disc = 1
-            dm = disc_sub_re.match(fpath.parent.name)
-            if dm:
-                disc = int(dm.group(1))
-            tracks.append({
-                "id": 0,
-                "album_id": aid,
-                "path": str(fpath),
-                "title": fpath.stem,
-                "track": 0,
-                "disc": disc,
-                "tracktotal": 0,
-                "ok": False,
-                "missing": False,
-                "imported": False,
-                "disk_only": True,
-                "status": "not_imported",
-                "mb_trackid": "",
-            })
-    tracks.sort(key=lambda t: (
-        int(t.get("disc") or 1),
-        int(t.get("track") or 999),
-        _s(t.get("title") or "").lower(),
-    ))
+    tracks = album_tracks_with_disk_files(album, aid)
     return jsonify({
         "ok": True,
         "album_id": aid,
@@ -2774,7 +2533,7 @@ def album_merge_split_album(target_aid):
             "operation_id": merge_res.get("operation_id"),
         }
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Merge split album {source_id} → {target_id}",
         metadata={
@@ -2784,7 +2543,6 @@ def album_merge_split_album(target_aid):
             "item_count": len(item_ids),
         },
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.get("/api/albums")
@@ -2820,117 +2578,11 @@ def recent():
 @app.get("/api/library/mbid-status")
 def library_mbid_status():
     """MusicBrainz coverage for albums/tracks already under /data/media/music."""
-    total_albums = missing_album_mb = total_tracks = missing_track_mb = 0
-    item_release_gap_rows = 0
-    albums_with_item_release_gaps = 0
-    track_recording_gap_rows = 0
-    albums_with_track_recording_gaps = 0
-    inferred_album_mbid_rows = 0
-    albums_with_template_tokens = 0
-    template_token_rows = 0
-    examples: List[Dict[str, Any]] = []
-    release_gap_examples: List[Dict[str, Any]] = []
-    track_gap_examples: List[Dict[str, Any]] = []
-    template_token_examples: List[Dict[str, Any]] = []
     try:
-        for album in lib.albums([]):
-            items = list(album.items())
-            music_items = [i for i in items if _is_music_root_path(getattr(i, "path", ""))]
-            if not music_items:
-                continue
-            total_albums += 1
-            total_tracks += len(music_items)
-            album_mb = _s(getattr(album, "mb_albumid", "") or "").strip().lower()
-            if not album_mb:
-                missing_album_mb += 1
-                item_release_ids = {
-                    _s(getattr(i, "mb_albumid", "") or "").strip().lower()
-                    for i in music_items
-                    if _s(getattr(i, "mb_albumid", "") or "").strip()
-                }
-                if len(item_release_ids) == 1:
-                    inferred_album_mbid_rows += 1
-                if len(examples) < 12:
-                    examples.append({
-                        "album_id": album.id,
-                        "artist": _s(getattr(album, "albumartist", "") or ""),
-                        "album": _s(getattr(album, "album", "") or ""),
-                        "tracks": len(music_items),
-                        "year": int(getattr(album, "year", 0) or 0),
-                    })
-            album_release_gaps = 0
-            album_track_gaps = 0
-            album_template_tokens = 0
-            for item in music_items:
-                item_mb = _s(getattr(item, "mb_albumid", "") or "").strip().lower()
-                if album_mb and (not item_mb or item_mb != album_mb):
-                    item_release_gap_rows += 1
-                    album_release_gaps += 1
-                    if len(release_gap_examples) < 8:
-                        release_gap_examples.append({
-                            "album_id": album.id,
-                            "item_id": getattr(item, "id", 0),
-                            "artist": _s(getattr(album, "albumartist", "") or ""),
-                            "album": _s(getattr(album, "album", "") or ""),
-                            "title": _s(getattr(item, "title", "") or ""),
-                            "album_mb_albumid": album_mb,
-                            "item_mb_albumid": item_mb,
-                        })
-                if not _s(getattr(item, "mb_trackid", "") or "").strip():
-                    missing_track_mb += 1
-                    track_recording_gap_rows += 1
-                    album_track_gaps += 1
-                    if len(track_gap_examples) < 8:
-                        track_gap_examples.append({
-                            "album_id": album.id,
-                            "item_id": getattr(item, "id", 0),
-                            "artist": _s(getattr(album, "albumartist", "") or ""),
-                            "album": _s(getattr(album, "album", "") or ""),
-                            "title": _s(getattr(item, "title", "") or ""),
-                            "track": int(getattr(item, "track", 0) or 0),
-                            "disc": int(getattr(item, "disc", 1) or 1),
-                        })
-                item_path = _s(getattr(item, "path", "") or "")
-                if item_path and _UNRESOLVED_TEMPLATE_TOKEN_RE.search(item_path):
-                    template_token_rows += 1
-                    album_template_tokens += 1
-                    if len(template_token_examples) < 8:
-                        template_token_examples.append({
-                            "album_id": album.id,
-                            "item_id": getattr(item, "id", 0),
-                            "artist": _s(getattr(album, "albumartist", "") or ""),
-                            "album": _s(getattr(album, "album", "") or ""),
-                            "title": _s(getattr(item, "title", "") or ""),
-                            "path": item_path,
-                        })
-            if album_release_gaps:
-                albums_with_item_release_gaps += 1
-            if album_track_gaps:
-                albums_with_track_recording_gaps += 1
-            if album_template_tokens:
-                albums_with_template_tokens += 1
+        return jsonify(library_mbid_status_payload())
     except Exception as exc:
         _app_logger.warning("Library health scan failed: %s", type(exc).__name__)
         return jsonify({"ok": False, "error": "Could not scan library health."})
-    return jsonify({
-        "ok": True,
-        "root": str(MUSIC_ROOT),
-        "total_albums": total_albums,
-        "missing_album_mb": missing_album_mb,
-        "total_tracks": total_tracks,
-        "missing_track_mb": missing_track_mb,
-        "item_release_gap_rows": item_release_gap_rows,
-        "albums_with_item_release_gaps": albums_with_item_release_gaps,
-        "track_recording_gap_rows": track_recording_gap_rows,
-        "albums_with_track_recording_gaps": albums_with_track_recording_gaps,
-        "inferred_album_mbid_rows": inferred_album_mbid_rows,
-        "template_token_rows": template_token_rows,
-        "albums_with_template_tokens": albums_with_template_tokens,
-        "examples": examples,
-        "release_gap_examples": release_gap_examples,
-        "track_gap_examples": track_gap_examples,
-        "template_token_examples": template_token_examples,
-    })
 
 
 @app.post("/api/albums/reimport-disk")
@@ -3127,12 +2779,12 @@ def library_import_all():
             "failed": len(failures),
         }
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Import All: {len(albums)} album(s)",
         metadata={"type": "library-import-all", "album_count": len(albums)},
+        response_extra={"album_count": len(albums)},
     )
-    return jsonify({"ok": True, "job_id": job.job_id, "album_count": len(albums)})
 
 
 @app.get("/api/library/import-all/last")
@@ -3255,8 +2907,7 @@ def library_merge_artist():
         _invalidate_lib_cache()
         log.append(f"Done — {len(renamed_ids)} album(s) now under '{to_artist}'.")
 
-    job = jobs.start_python(_do, label=f"Merge artist: {from_artist!r} → {to_artist!r}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Merge artist: {from_artist!r} → {to_artist!r}")
 
 
 @app.post("/api/library/sync-deleted")
@@ -3355,12 +3006,11 @@ def library_sync_deleted():
                 },
             })
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label="Preview Missing File DB Sync" if dry_run else "Apply Missing File DB Sync",
         metadata={"type": "sync-deleted", "dry_run": dry_run},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/unmatched-draft")
@@ -3642,8 +3292,7 @@ def library_move_all():
         if folder_failures:
             raise RuntimeError(f"{folder_failures} folder cleanup(s) stopped part-way; see the log.")
 
-    job = jobs.start_python(_do, label="Move all library files", metadata={"type": "move-all", "dedupe_key": "library:move-all"})
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label="Move all library files", metadata={"type": "move-all", "dedupe_key": "library:move-all"})
 
 
 @app.post("/api/library/mbsync-all")
@@ -3667,8 +3316,7 @@ def library_mbsync_all():
             _invalidate_lib_cache()
         return res
 
-    job = jobs.start_python(_do, label="MBSync all library tracks", metadata=meta)
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label="MBSync all library tracks", metadata=meta)
 
 
 @app.get("/api/library/genre-stats")
@@ -3737,8 +3385,7 @@ def album_fix_genre(aid):
         _invalidate_lib_cache()
 
     label = f"Fix genre: {album.albumartist or '?'} — {album.album or '?'}"
-    job = jobs.start_python(_do, label=label)
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=label)
 
 
 @app.post("/api/library/normalize-artists")
@@ -3807,8 +3454,7 @@ def library_normalize_artists():
         _invalidate_lib_cache()
         log.append("Done.")
 
-    job = jobs.start_python(_do, label="Normalize artist names (Unicode→ASCII)")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label="Normalize artist names (Unicode→ASCII)")
 
 
 @app.post("/api/library/merge-artist-id")
@@ -3841,8 +3487,7 @@ def library_merge_artist_id():
         _invalidate_lib_cache()
         log.append(f"Done. Updated artist aliases to {canonical!r}.")
 
-    job = jobs.start_python(_do, label=f"Merge artist aliases: {canonical}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Merge artist aliases: {canonical}")
 
 
 @app.post("/api/library/confirm-artist-alias")
@@ -3878,8 +3523,7 @@ def library_confirm_artist_alias():
         _invalidate_lib_cache()
         log.append(f"Done. Updated artist alias {source!r} -> {canonical!r}.")
 
-    job = jobs.start_python(_do, label=f"Confirm artist alias: {source} -> {canonical}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    return _start_job(_do, label=f"Confirm artist alias: {source} -> {canonical}")
 
 
 @app.get("/api/browse")
@@ -4293,12 +3937,11 @@ def repair_album_mb_tracks(aid):
             "operation_id": op_id,
         }
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Repair MB track IDs: {album.albumartist or album.album or aid}",
         metadata={"type": "repair-mb-tracks", "album_id": aid, "mb_albumid": mbid},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/mbid-sticking-repair")
@@ -4358,7 +4001,7 @@ def library_template_token_cleanup():
             _trigger_plex_refresh(log)
         return result
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label="Library template-token cleanup",
         metadata={
@@ -4367,7 +4010,6 @@ def library_template_token_cleanup():
             "album_id": album_id,
         },
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/leaked-db-paths/scan")
@@ -4416,12 +4058,11 @@ def scan_leaked_db_paths_job():
             "rows": rows,
             "final_summary": final_summary,
         }
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label="Leaked DB path scan",
         metadata={"type": "leaked-db-path-scan"},
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/leaked-db-paths/fix")
@@ -4566,7 +4207,7 @@ def fix_leaked_db_paths():
             "final_summary": final_summary,
         }
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=f"Leaked DB path fix ({'dry-run' if dry_run else 'apply'})",
         metadata={
@@ -4574,7 +4215,6 @@ def fix_leaked_db_paths():
             "dry_run": dry_run,
         },
     )
-    return jsonify({"ok": True, "job_id": job.job_id})
 
 
 @app.post("/api/library/folder-placeholders/scan")
@@ -5243,7 +4883,7 @@ def _start_library_mbid_sticking_repair(
         )
         return summary
 
-    job = jobs.start_python(
+    return _start_job(
         _do,
         label=job_label,
         metadata={
@@ -5255,4 +4895,3 @@ def _start_library_mbid_sticking_repair(
             "limit": limit,
         },
     )
-    return jsonify({"ok": True, "job_id": job.job_id})

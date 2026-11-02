@@ -48,35 +48,6 @@
        "ai_state": null,
        "has_details": false,
        "item_id": 7
-      },
-      {
-       "acoustid_hits": [
-        {
-         "album": "Some Album",
-         "artist": "Some Artist",
-         "country": "US",
-         "mb_albumid": "33333333-3333-3333-3333-333333333333",
-         "mb_trackid": "11111111-1111-1111-1111-111111111111",
-         "score": 95,
-         "source": "acoustid",
-         "title": "Some Song",
-         "year": "2012"
-        }
-       ],
-       "ai_state": {
-        "attempted": true,
-        "available": true,
-        "configured": true,
-        "contribution": {
-         "confidence": "high",
-         "mb_trackid": "11111111-1111-1111-1111-111111111111",
-         "reason": "fingerprint"
-        },
-        "state_known": true,
-        "unavailability_reason": ""
-       },
-       "has_details": true,
-       "item_id": null
       }
      ],
      "fingerprint_attempted": true,
@@ -154,35 +125,6 @@
        "ai_state": null,
        "has_details": false,
        "item_id": 7
-      },
-      {
-       "acoustid_hits": [
-        {
-         "album": "Some Album",
-         "artist": "Some Artist",
-         "country": "US",
-         "mb_albumid": "33333333-3333-3333-3333-333333333333",
-         "mb_trackid": "11111111-1111-1111-1111-111111111111",
-         "score": 95,
-         "source": "acoustid",
-         "title": "Some Song",
-         "year": "2012"
-        }
-       ],
-       "ai_state": {
-        "attempted": true,
-        "available": true,
-        "configured": true,
-        "contribution": {
-         "confidence": "high",
-         "mb_trackid": "11111111-1111-1111-1111-111111111111",
-         "reason": "fingerprint"
-        },
-        "state_known": true,
-        "unavailability_reason": ""
-       },
-       "has_details": true,
-       "item_id": null
       }
      ],
      "fingerprint_attempted": true,
@@ -713,7 +655,7 @@
   ],
   "status": 200
  },
- "ai_non_string_album_id_fails_closed": {
+ "ai_non_string_album_id_falls_back": {
   "ai_request": [
    {
     "body": {
@@ -734,10 +676,254 @@
    }
   ],
   "body": {
-   "error": "Could not generate suggestions.",
-   "ok": false
+   "acoustid_candidates": [],
+   "acoustid_status": "not_configured",
+   "acoustid_unavailable": true,
+   "discogs_candidates": [],
+   "evidence": {
+    "acoustid": 0,
+    "acoustid_status": "not_configured",
+    "candidates": 1,
+    "confidence": "medium",
+    "current": {
+     "album": "Some Album",
+     "albumartist": "Some Artist",
+     "artist": "Some Artist",
+     "duration": "3:20",
+     "duration_seconds": 200.0,
+     "filename": "03 - Some Song.flac",
+     "genre": "",
+     "label": "",
+     "mb_albumid": "",
+     "mb_releasegroupid": "",
+     "mb_trackid": "",
+     "source_path": "/music/a/03 - Some Song.flac",
+     "title": "Some Song",
+     "track": 3,
+     "year": "2012"
+    },
+    "discogs": 0,
+    "filename": "03 - Some Song.flac",
+    "iid": 7,
+    "search_artist": "Some Artist",
+    "search_title": "Some Song",
+    "selected": "11111111-1111-1111-1111-111111111111"
+   },
+   "mb_candidates": [
+    {
+     "_match_score": {
+      "total": 0.95
+     },
+     "album": "Some Album",
+     "artist": "Some Artist",
+     "candidate_index": 0,
+     "confidence_score": 0.95,
+     "country": "US",
+     "enrich_calls": [
+      {
+       "acoustid_hits": null,
+       "ai_state": null,
+       "has_details": false,
+       "item_id": 7
+      }
+     ],
+     "fingerprint_attempted": true,
+     "fingerprint_matched": false,
+     "fingerprint_status": "no_result",
+     "mapped_recording_id": "",
+     "mb_albumid": "33333333-3333-3333-3333-333333333333",
+     "mb_trackid": "11111111-1111-1111-1111-111111111111",
+     "recommended_action": "review",
+     "requires_confirmation": true,
+     "safety_result": "needs_review",
+     "score": 95,
+     "source": "mb",
+     "title": "Some Song",
+     "year": "2012"
+    }
+   ],
+   "musicbrainz_unavailable": false,
+   "ok": true,
+   "selected_candidate": {
+    "_match_score": {
+     "total": 0.95
+    },
+    "album": "Some Album",
+    "artist": "Some Artist",
+    "candidate_index": 0,
+    "confidence_score": 0.95,
+    "country": "US",
+    "fingerprint_attempted": true,
+    "fingerprint_matched": false,
+    "fingerprint_status": "no_result",
+    "mapped_recording_id": "",
+    "mb_albumid": "33333333-3333-3333-3333-333333333333",
+    "mb_trackid": "11111111-1111-1111-1111-111111111111",
+    "recommended_action": "review",
+    "requires_confirmation": true,
+    "safety_result": "needs_review",
+    "score": 95,
+    "source": "mb",
+    "title": "Some Song",
+    "year": "2012"
+   },
+   "suggestions": {
+    "ai_available": false,
+    "ai_status": {
+     "attempted": true,
+     "available": false,
+     "configured": true,
+     "contributed": false,
+     "last_outcome": "x",
+     "last_status_code": 1,
+     "unavailable_reason": "the AI provider request failed unexpectedly (ValueError)"
+    },
+    "ai_unavailable_reason": "the AI provider request failed unexpectedly (ValueError)",
+    "album": "Some Album",
+    "albumartist": "Some Artist",
+    "artist": "Some Artist",
+    "candidate_evidence": {
+     "_match_score": {
+      "total": 0.95
+     },
+     "album": "Some Album",
+     "artist": "Some Artist",
+     "candidate_index": 0,
+     "confidence_score": 0.95,
+     "country": "US",
+     "fingerprint_attempted": true,
+     "fingerprint_matched": false,
+     "fingerprint_status": "no_result",
+     "mapped_recording_id": "",
+     "mb_albumid": "33333333-3333-3333-3333-333333333333",
+     "mb_trackid": "11111111-1111-1111-1111-111111111111",
+     "recommended_action": "review",
+     "requires_confirmation": true,
+     "safety_result": "needs_review",
+     "score": 95,
+     "source": "mb",
+     "title": "Some Song",
+     "year": "2012"
+    },
+    "candidate_index": 0,
+    "candidate_type": "recording",
+    "confidence": "medium",
+    "confidence_score": 0.95,
+    "confidence_source": "musicbrainz",
+    "conflicts": [],
+    "disc": "1",
+    "disctotal": "1",
+    "evidence": {
+     "acoustid": 0,
+     "acoustid_status": "not_configured",
+     "candidates": 1,
+     "confidence": "medium",
+     "current": {
+      "album": "Some Album",
+      "albumartist": "Some Artist",
+      "artist": "Some Artist",
+      "duration": "3:20",
+      "duration_seconds": 200.0,
+      "filename": "03 - Some Song.flac",
+      "genre": "",
+      "label": "",
+      "mb_albumid": "",
+      "mb_releasegroupid": "",
+      "mb_trackid": "",
+      "source_path": "/music/a/03 - Some Song.flac",
+      "title": "Some Song",
+      "track": 3,
+      "year": "2012"
+     },
+     "discogs": 0,
+     "filename": "03 - Some Song.flac",
+     "iid": 7,
+     "search_artist": "Some Artist",
+     "search_title": "Some Song",
+     "selected": "11111111-1111-1111-1111-111111111111"
+    },
+    "genre": "rock",
+    "label": "",
+    "linked_releases": [],
+    "match_method": "mb",
+    "mb_album_url": "https://musicbrainz.org/release/33333333-3333-3333-3333-333333333333",
+    "mb_albumid": "33333333-3333-3333-3333-333333333333",
+    "mb_artistid": "55555555-5555-5555-5555-555555555555",
+    "mb_candidate_valid": true,
+    "mb_releasegroupid": "44444444-4444-4444-4444-444444444444",
+    "mb_trackid": "11111111-1111-1111-1111-111111111111",
+    "mb_trusted": true,
+    "mb_url": "https://musicbrainz.org/recording/11111111-1111-1111-1111-111111111111",
+    "mb_valid": true,
+    "missing_id_type": "Recording ID",
+    "reason": "Matched using MusicBrainz and AcoustID (AI unavailable: the AI provider request failed unexpectedly (ValueError)).",
+    "recommended_action": "review",
+    "recording_candidates": [
+     {
+      "_match_score": {
+       "total": 0.95
+      },
+      "album": "Some Album",
+      "artist": "Some Artist",
+      "candidate_index": 0,
+      "confidence_score": 0.95,
+      "country": "US",
+      "fingerprint_attempted": true,
+      "fingerprint_matched": false,
+      "fingerprint_status": "no_result",
+      "mapped_recording_id": "",
+      "mb_albumid": "33333333-3333-3333-3333-333333333333",
+      "mb_trackid": "11111111-1111-1111-1111-111111111111",
+      "recommended_action": "review",
+      "requires_confirmation": true,
+      "safety_result": "needs_review",
+      "score": 95,
+      "source": "mb",
+      "title": "Some Song",
+      "year": "2012"
+     }
+    ],
+    "recording_id": "11111111-1111-1111-1111-111111111111",
+    "recording_title": "Some Song",
+    "requires_confirmation": true,
+    "safety_result": "needs_review",
+    "same_recording_release_count": 1,
+    "selected_recording_candidate": {
+     "_match_score": {
+      "total": 0.95
+     },
+     "album": "Some Album",
+     "artist": "Some Artist",
+     "candidate_index": 0,
+     "confidence_score": 0.95,
+     "country": "US",
+     "fingerprint_attempted": true,
+     "fingerprint_matched": false,
+     "fingerprint_status": "no_result",
+     "mapped_recording_id": "",
+     "mb_albumid": "33333333-3333-3333-3333-333333333333",
+     "mb_trackid": "11111111-1111-1111-1111-111111111111",
+     "recommended_action": "review",
+     "requires_confirmation": true,
+     "safety_result": "needs_review",
+     "score": 95,
+     "source": "mb",
+     "title": "Some Song",
+     "year": "2012"
+    },
+    "selected_release": {},
+    "title": "Some Song",
+    "track": "3",
+    "tracktotal": "10",
+    "year": "2012"
+   }
   },
-  "details_calls": [],
+  "details_calls": [
+   [
+    "11111111-1111-1111-1111-111111111111",
+    "33333333-3333-3333-3333-333333333333"
+   ]
+  ],
   "mb_search_calls": [
    [
     "Some Song",
@@ -749,7 +935,7 @@
   ],
   "status": 200
  },
- "ai_non_string_artist_id_fails_closed": {
+ "ai_non_string_artist_id_falls_back": {
   "ai_request": [
    {
     "body": {
@@ -770,10 +956,254 @@
    }
   ],
   "body": {
-   "error": "Could not generate suggestions.",
-   "ok": false
+   "acoustid_candidates": [],
+   "acoustid_status": "not_configured",
+   "acoustid_unavailable": true,
+   "discogs_candidates": [],
+   "evidence": {
+    "acoustid": 0,
+    "acoustid_status": "not_configured",
+    "candidates": 1,
+    "confidence": "medium",
+    "current": {
+     "album": "Some Album",
+     "albumartist": "Some Artist",
+     "artist": "Some Artist",
+     "duration": "3:20",
+     "duration_seconds": 200.0,
+     "filename": "03 - Some Song.flac",
+     "genre": "",
+     "label": "",
+     "mb_albumid": "",
+     "mb_releasegroupid": "",
+     "mb_trackid": "",
+     "source_path": "/music/a/03 - Some Song.flac",
+     "title": "Some Song",
+     "track": 3,
+     "year": "2012"
+    },
+    "discogs": 0,
+    "filename": "03 - Some Song.flac",
+    "iid": 7,
+    "search_artist": "Some Artist",
+    "search_title": "Some Song",
+    "selected": "11111111-1111-1111-1111-111111111111"
+   },
+   "mb_candidates": [
+    {
+     "_match_score": {
+      "total": 0.95
+     },
+     "album": "Some Album",
+     "artist": "Some Artist",
+     "candidate_index": 0,
+     "confidence_score": 0.95,
+     "country": "US",
+     "enrich_calls": [
+      {
+       "acoustid_hits": null,
+       "ai_state": null,
+       "has_details": false,
+       "item_id": 7
+      }
+     ],
+     "fingerprint_attempted": true,
+     "fingerprint_matched": false,
+     "fingerprint_status": "no_result",
+     "mapped_recording_id": "",
+     "mb_albumid": "33333333-3333-3333-3333-333333333333",
+     "mb_trackid": "11111111-1111-1111-1111-111111111111",
+     "recommended_action": "review",
+     "requires_confirmation": true,
+     "safety_result": "needs_review",
+     "score": 95,
+     "source": "mb",
+     "title": "Some Song",
+     "year": "2012"
+    }
+   ],
+   "musicbrainz_unavailable": false,
+   "ok": true,
+   "selected_candidate": {
+    "_match_score": {
+     "total": 0.95
+    },
+    "album": "Some Album",
+    "artist": "Some Artist",
+    "candidate_index": 0,
+    "confidence_score": 0.95,
+    "country": "US",
+    "fingerprint_attempted": true,
+    "fingerprint_matched": false,
+    "fingerprint_status": "no_result",
+    "mapped_recording_id": "",
+    "mb_albumid": "33333333-3333-3333-3333-333333333333",
+    "mb_trackid": "11111111-1111-1111-1111-111111111111",
+    "recommended_action": "review",
+    "requires_confirmation": true,
+    "safety_result": "needs_review",
+    "score": 95,
+    "source": "mb",
+    "title": "Some Song",
+    "year": "2012"
+   },
+   "suggestions": {
+    "ai_available": false,
+    "ai_status": {
+     "attempted": true,
+     "available": false,
+     "configured": true,
+     "contributed": false,
+     "last_outcome": "x",
+     "last_status_code": 1,
+     "unavailable_reason": "the AI provider request failed unexpectedly (ValueError)"
+    },
+    "ai_unavailable_reason": "the AI provider request failed unexpectedly (ValueError)",
+    "album": "Some Album",
+    "albumartist": "Some Artist",
+    "artist": "Some Artist",
+    "candidate_evidence": {
+     "_match_score": {
+      "total": 0.95
+     },
+     "album": "Some Album",
+     "artist": "Some Artist",
+     "candidate_index": 0,
+     "confidence_score": 0.95,
+     "country": "US",
+     "fingerprint_attempted": true,
+     "fingerprint_matched": false,
+     "fingerprint_status": "no_result",
+     "mapped_recording_id": "",
+     "mb_albumid": "33333333-3333-3333-3333-333333333333",
+     "mb_trackid": "11111111-1111-1111-1111-111111111111",
+     "recommended_action": "review",
+     "requires_confirmation": true,
+     "safety_result": "needs_review",
+     "score": 95,
+     "source": "mb",
+     "title": "Some Song",
+     "year": "2012"
+    },
+    "candidate_index": 0,
+    "candidate_type": "recording",
+    "confidence": "medium",
+    "confidence_score": 0.95,
+    "confidence_source": "musicbrainz",
+    "conflicts": [],
+    "disc": "1",
+    "disctotal": "1",
+    "evidence": {
+     "acoustid": 0,
+     "acoustid_status": "not_configured",
+     "candidates": 1,
+     "confidence": "medium",
+     "current": {
+      "album": "Some Album",
+      "albumartist": "Some Artist",
+      "artist": "Some Artist",
+      "duration": "3:20",
+      "duration_seconds": 200.0,
+      "filename": "03 - Some Song.flac",
+      "genre": "",
+      "label": "",
+      "mb_albumid": "",
+      "mb_releasegroupid": "",
+      "mb_trackid": "",
+      "source_path": "/music/a/03 - Some Song.flac",
+      "title": "Some Song",
+      "track": 3,
+      "year": "2012"
+     },
+     "discogs": 0,
+     "filename": "03 - Some Song.flac",
+     "iid": 7,
+     "search_artist": "Some Artist",
+     "search_title": "Some Song",
+     "selected": "11111111-1111-1111-1111-111111111111"
+    },
+    "genre": "rock",
+    "label": "",
+    "linked_releases": [],
+    "match_method": "mb",
+    "mb_album_url": "https://musicbrainz.org/release/33333333-3333-3333-3333-333333333333",
+    "mb_albumid": "33333333-3333-3333-3333-333333333333",
+    "mb_artistid": "55555555-5555-5555-5555-555555555555",
+    "mb_candidate_valid": true,
+    "mb_releasegroupid": "44444444-4444-4444-4444-444444444444",
+    "mb_trackid": "11111111-1111-1111-1111-111111111111",
+    "mb_trusted": true,
+    "mb_url": "https://musicbrainz.org/recording/11111111-1111-1111-1111-111111111111",
+    "mb_valid": true,
+    "missing_id_type": "Recording ID",
+    "reason": "Matched using MusicBrainz and AcoustID (AI unavailable: the AI provider request failed unexpectedly (ValueError)).",
+    "recommended_action": "review",
+    "recording_candidates": [
+     {
+      "_match_score": {
+       "total": 0.95
+      },
+      "album": "Some Album",
+      "artist": "Some Artist",
+      "candidate_index": 0,
+      "confidence_score": 0.95,
+      "country": "US",
+      "fingerprint_attempted": true,
+      "fingerprint_matched": false,
+      "fingerprint_status": "no_result",
+      "mapped_recording_id": "",
+      "mb_albumid": "33333333-3333-3333-3333-333333333333",
+      "mb_trackid": "11111111-1111-1111-1111-111111111111",
+      "recommended_action": "review",
+      "requires_confirmation": true,
+      "safety_result": "needs_review",
+      "score": 95,
+      "source": "mb",
+      "title": "Some Song",
+      "year": "2012"
+     }
+    ],
+    "recording_id": "11111111-1111-1111-1111-111111111111",
+    "recording_title": "Some Song",
+    "requires_confirmation": true,
+    "safety_result": "needs_review",
+    "same_recording_release_count": 1,
+    "selected_recording_candidate": {
+     "_match_score": {
+      "total": 0.95
+     },
+     "album": "Some Album",
+     "artist": "Some Artist",
+     "candidate_index": 0,
+     "confidence_score": 0.95,
+     "country": "US",
+     "fingerprint_attempted": true,
+     "fingerprint_matched": false,
+     "fingerprint_status": "no_result",
+     "mapped_recording_id": "",
+     "mb_albumid": "33333333-3333-3333-3333-333333333333",
+     "mb_trackid": "11111111-1111-1111-1111-111111111111",
+     "recommended_action": "review",
+     "requires_confirmation": true,
+     "safety_result": "needs_review",
+     "score": 95,
+     "source": "mb",
+     "title": "Some Song",
+     "year": "2012"
+    },
+    "selected_release": {},
+    "title": "Some Song",
+    "track": "3",
+    "tracktotal": "10",
+    "year": "2012"
+   }
   },
-  "details_calls": [],
+  "details_calls": [
+   [
+    "11111111-1111-1111-1111-111111111111",
+    "33333333-3333-3333-3333-333333333333"
+   ]
+  ],
   "mb_search_calls": [
    [
     "Some Song",
@@ -985,19 +1415,6 @@
        "ai_state": null,
        "has_details": false,
        "item_id": 7
-      },
-      {
-       "acoustid_hits": null,
-       "ai_state": {
-        "attempted": true,
-        "available": false,
-        "configured": true,
-        "contribution": {},
-        "state_known": true,
-        "unavailability_reason": "the AI provider rejected the API key (invalid or unauthorized)"
-       },
-       "has_details": true,
-       "item_id": null
       }
      ],
      "fingerprint_attempted": true,
@@ -1722,23 +2139,6 @@
        "ai_state": null,
        "has_details": false,
        "item_id": 7
-      },
-      {
-       "acoustid_hits": null,
-       "ai_state": {
-        "attempted": true,
-        "available": true,
-        "configured": true,
-        "contribution": {
-         "confidence": "high",
-         "mb_trackid": "11111111-1111-1111-1111-111111111111",
-         "reason": "fingerprint"
-        },
-        "state_known": true,
-        "unavailability_reason": ""
-       },
-       "has_details": true,
-       "item_id": null
       }
      ],
      "fingerprint_attempted": true,
@@ -2072,19 +2472,6 @@
        "ai_state": null,
        "has_details": false,
        "item_id": 7
-      },
-      {
-       "acoustid_hits": null,
-       "ai_state": {
-        "attempted": true,
-        "available": false,
-        "configured": true,
-        "contribution": {},
-        "state_known": true,
-        "unavailability_reason": "the AI provider request failed unexpectedly (JSONDecodeError)"
-       },
-       "has_details": true,
-       "item_id": null
       }
      ],
      "fingerprint_attempted": true,
@@ -2739,19 +3126,6 @@
        "ai_state": null,
        "has_details": false,
        "item_id": 7
-      },
-      {
-       "acoustid_hits": null,
-       "ai_state": {
-        "attempted": false,
-        "available": false,
-        "configured": false,
-        "contribution": {},
-        "state_known": true,
-        "unavailability_reason": "OPENAI_API_KEY not configured"
-       },
-       "has_details": true,
-       "item_id": null
       }
      ],
      "fingerprint_attempted": true,
@@ -3014,19 +3388,6 @@
        "ai_state": null,
        "has_details": false,
        "item_id": 7
-      },
-      {
-       "acoustid_hits": null,
-       "ai_state": {
-        "attempted": false,
-        "available": false,
-        "configured": false,
-        "contribution": {},
-        "state_known": true,
-        "unavailability_reason": "OPENAI_API_KEY not configured"
-       },
-       "has_details": true,
-       "item_id": null
       }
      ],
      "fingerprint_attempted": true,

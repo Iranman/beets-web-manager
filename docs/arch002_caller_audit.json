@@ -671,11 +671,15 @@
     ],
     "backend/item_ai_suggest_service.py::<module>": [
       "CANDIDATE_GENERATION_ONLY",
-      "The allowlist of AI reply keys; it only removes fields from an untrusted reply and decides nothing."
+      "The allowlist of AI reply keys and confidence values; it only narrows an untrusted reply and decides nothing."
     ],
     "backend/item_ai_suggest_service.py::suggest_for_item": [
       "COMPATIBILITY_WRAPPER",
-      "Recording candidate orchestration moved from the ai_suggest route; decision and safety fields come only from the canonical serializer. The AI reply is cut to an allowlist; its confidence and reason are reported, never verified."
+      "Recording candidate orchestration moved from the ai_suggest route; decision and safety fields come only from the canonical serializer, evaluated without AI. A reply of the wrong shape counts as AI unavailable; AI confidence and reason are reported, never verified."
+    ],
+    "backend/item_ai_suggest_service.py::_valid_ai_reply": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Checks the shape of an untrusted AI reply and drops fields; only ever rejects or narrows it, and decides nothing."
     ],
     "backend/item_ai_suggest_service.py::_build_prompt": [
       "DISPLAY_ONLY",
@@ -691,7 +695,7 @@
     ],
     "backend/item_ai_suggest_service.py::_validate_identity": [
       "CANDIDATE_GENERATION_ONLY",
-      "Can only distrust or downgrade a suggestion that is outside the candidate list or malformed, and drop release or artist IDs the candidate does not back; never grants an action."
+      "Can only distrust or downgrade a suggestion that is outside the candidate list or malformed; never grants an action."
     ],
     "backend/item_ai_suggest_service.py::_attach_candidate_evidence": [
       "DISPLAY_ONLY",

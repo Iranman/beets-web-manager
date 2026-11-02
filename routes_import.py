@@ -24,7 +24,7 @@ from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_f
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
 from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
-from backend.serializers import REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
+from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
 from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
@@ -55,11 +55,7 @@ def unmatched_tracks():
         review_data = composite_workflows.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=True)
     except BeetsUnavailableError as ex:
         _app_logger.warning("unmatched_tracks: Beets engine unavailable: %s", ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine unavailable",
-            "error_code": "ENGINE_UNAVAILABLE",
-        }), 503
+        return beets_engine_error_response(ex)
 
     tracks = []
     for a in review_data.get("albums", []):

@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, EDITABLE_FIELDS, _s
 from backend.library_service import _require_attach_stage_success
-from backend.transaction_engine import acting_as, current_actor, metadata_diff
+from backend.transaction_engine import acting_as, current_actor, job_overlay, metadata_diff
 from backend.beets_adapter import lib
 import backend.composite_workflows as composite_workflows
 from backend.matching_service import _invalidate_lib_cache
@@ -117,10 +118,108 @@ def _transaction_create_for_job(label: str, metadata: Optional[Dict[str, Any]], 
     )
 
 
+#: How often a reconcile that could not finish is retried.
+_RECONCILE_RETRY_SECONDS = 30.0
+
+
+def _jobs_by_transaction(job_store) -> Dict[str, List[Any]]:
+    """The jobs held in memory per transaction id, newest first. Never touches disk."""
+    grouped: Dict[str, List[Any]] = {}
+    for job in job_store.all():
+        tx_id = (getattr(job, "metadata", None) or {}).get("transaction_id")
+        if tx_id:
+            grouped.setdefault(str(tx_id), []).append(job)
+    return grouped
+
+
+def _speaking_job(candidates: List[Any]) -> Any:
+    """The job that speaks for a transaction: a live one, else the newest."""
+    return next((j for j in candidates if j.status == "running"), candidates[0])
+
+
+def overlay_running_jobs(rows: List[Dict[str, Any]], keys: Optional[Tuple[str, ...]] = None) -> None:
+    """Show each Running row as its job would leave it (live log, or an outcome
+    not yet written). In memory only, for GET routes: nothing is written, and a
+    job record is never lazily loaded because loading can resolve and rewrite it."""
+    running = [row for row in rows if row.get("status") == "Running"]
+    if not running:
+        return
+    grouped = _jobs_by_transaction(jobs)
+    for row in running:
+        candidates = grouped.get(str(row.get("id")))
+        if candidates:
+            overlaid = job_overlay(row, _speaking_job(candidates))
+            row.update(overlaid if keys is None else {k: overlaid[k] for k in keys if k in overlaid})
+
+
+def _reconcile_running_transactions(job_store, store) -> bool:
+    """Settle every Running transaction whose job has ended, whichever process
+    or path lost the update. True when every record could be processed.
+
+    Only a job that names the transaction in its metadata speaks for it, and a
+    live job keeps it Running. A Running transaction with no such job is left
+    alone: engine operations run without one, so its absence proves nothing."""
+    grouped = _jobs_by_transaction(job_store)
+    rows, total = store.list(status="Running", limit=500)
+    while len(rows) < total:
+        page, _total = store.list(status="Running", offset=len(rows), limit=500)
+        if not page:
+            break
+        rows += page
+    ok, unbound = True, []
+    for row in rows:
+        tx_id = str(row["id"])
+        meta = row.get("metadata") or {}
+        candidates = list(grouped.get(tx_id) or [])
+        # Beyond the startup window a job is on disk only; get() loads it by id.
+        for job_id in (meta.get("rollback_job_id"), row.get("originating_job"), meta.get("job_id")):
+            job = job_store.get(job_id) if job_id else None
+            if (job is not None and job not in candidates
+                    and str((getattr(job, "metadata", None) or {}).get("transaction_id")) == tx_id):
+                candidates.append(job)
+        if not candidates:
+            unbound.append(tx_id)
+            continue
+        candidates.sort(key=lambda j: j.created_at, reverse=True)
+        job = _speaking_job(candidates)
+        if job.status == "running":
+            continue
+        try:
+            store.update_from_job(tx_id, job)
+        except Exception as ex:
+            ok = False
+            _app_logger.warning("transaction sync failed for %s, will retry: %s", tx_id, type(ex).__name__)
+    if unbound:
+        _app_logger.warning("%d Running transaction(s) have no job record and were left unchanged: %s",
+                            len(unbound), ", ".join(unbound[:20]))
+    return ok
+
+
 def _install_transaction_job_hooks() -> None:
     if getattr(jobs, "_transaction_hooks_installed", False):
         return
     original_start_python = jobs.start_python
+    job_store, tx_store = jobs, transactions
+    reconcile_due = threading.Event()
+    reconcile_due.set()
+
+    def reconcile_tick():
+        """Off the startup path (startup stays O(job window), ARCH-004). Due
+        at boot, until the job tail sweep has finished, and after any failed
+        write; otherwise a tick costs one flag check."""
+        if not reconcile_due.is_set():
+            return
+        reconcile_due.clear()
+        tail = job_store._recover_thread
+        settled = tail is None or not tail.is_alive()  # read first: the pass must see all of the tail
+        try:
+            settled = _reconcile_running_transactions(job_store, tx_store) and settled
+        except Exception:
+            settled = False
+            raise
+        finally:
+            if not settled:
+                reconcile_due.set()
 
     def start_python_with_transaction(fn, label="", metadata=None):
         metadata_payload = dict(metadata or {})
@@ -144,6 +243,7 @@ def _install_transaction_job_hooks() -> None:
     def _start_with_transaction(fn, label, metadata_payload):
         tx = _transaction_create_for_job(label, metadata_payload)
         tx_id = tx.get("id") if tx else ""
+        settles = transactions  # the store this job's transaction lives in
         if tx_id:
             metadata_payload["transaction_id"] = tx_id
 
@@ -227,10 +327,25 @@ def _install_transaction_job_hooks() -> None:
             raise
         if tx_id:
             transactions.attach_job(tx_id, job.job_id)
+        bound_tx = metadata_payload.get("transaction_id")
+        if bound_tx:
+            def settle_transaction(done):
+                # The write point for job -> transaction state: once, when the
+                # job ends, for every job naming a transaction, including one
+                # whose route claimed it. Reading a transaction never writes it.
+                try:
+                    settles.update_from_job(str(bound_tx), done)
+                except Exception:
+                    reconcile_due.set()
+                    raise
+
+            job.add_done_callback(settle_transaction)
         return job
 
     jobs.start_python = start_python_with_transaction
     jobs._transaction_hooks_installed = True
+    # A job the last process died in never reaches its done callback.
+    jobs.every("transaction-reconcile", _RECONCILE_RETRY_SECONDS, reconcile_tick)
 
 
 #: Statuses POST /api/transactions/<id>/cancel cancels outright (compare-and-set).

@@ -2,6 +2,7 @@
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
 import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
@@ -244,7 +245,8 @@ def _compact_track_ai_candidate(candidate: Optional[Dict[str, Any]]) -> Dict[str
         "action_eligibility": decision.get("action_eligibility") or c.get("action_eligibility") or {},
         "eligibility_reason": _s(decision.get("eligibility_reason") or c.get("eligibility_reason") or ""),
         "recommended_action": _s(c.get("recommended_action") or decision.get("recommended_action") or ""),
-        "requires_confirmation": bool(c.get("requires_confirmation")),
+        # Absent means enrichment failed and no decision exists: that still needs confirming.
+        "requires_confirmation": bool(c.get("requires_confirmation", True)),
         "safety_result": _s(c.get("safety_result") or ""),
         "safety_key": _s(c.get("safety_key") or ""),
         "reason": _s(c.get("reason") or ""),
@@ -326,9 +328,17 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
             "returned_track_in_candidates": bool(selected_candidate) if mb_trackid else False,
             "acoustid_available": bool(acoustid_candidates),
             "fingerprint_status": fingerprint_status,
-            "trusted_for_apply": bool(selected_candidate),
+            "trusted_for_apply": bool(selected_candidate and suggestions.get("mb_trusted", True)),
         },
     }
+
+
+def _ai_reply_object(content: Any) -> Dict[str, Any]:
+    """The parsed AI reply; anything but a JSON object is a failed reply, like unparseable text."""
+    reply = json.loads(content)
+    if not isinstance(reply, dict):
+        raise ValueError("AI reply is not a JSON object")
+    return reply
 
 
 def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str, Any]]) -> tuple:
@@ -340,7 +350,12 @@ def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str,
     selected candidate's Release is surfaced as is: never swapped for a Release
     in another Release Group (a single stays a single).
     """
-    cand_idx = int(sug.get("candidate_index", -1))
+    if not isinstance(sug, dict):
+        return None, ""
+    for forged in ("mb_artistid", "requires_confirmation", "safety_result", "selected_release"):
+        sug.pop(forged, None)
+    raw_idx = sug.get("candidate_index", -1)
+    cand_idx = raw_idx if type(raw_idx) is int else -1
     selected_candidate = None
     if 0 <= cand_idx < len(mb_candidates):
         selected_candidate = mb_candidates[cand_idx]
@@ -687,7 +702,7 @@ def _ai_suggest_album_internal(
                 ai_available = False
                 ai_unavailable_reason = f"AI refusal: {msg['refusal'][:200]}"
             else:
-                sug = json.loads(msg["content"])
+                sug = _ai_reply_object(msg["content"])
         except Exception as exc:
             ai_available = False
             ai_unavailable_reason = _classify_openai_error(exc)
@@ -829,9 +844,7 @@ def _record_ai_match(original_path: str, suggestion: dict):
             existing = []
         existing.insert(0, entry)
         # A crash mid-write must not leave a torn file the next read discards.
-        tmp = _AI_MATCH_HISTORY_FILE.with_name(_AI_MATCH_HISTORY_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(existing[:200], indent=2))
-        os.replace(tmp, _AI_MATCH_HISTORY_FILE)
+        atomic_write_json(_AI_MATCH_HISTORY_FILE, existing[:200], indent=2)
 
 
 _CANDIDATE_COUNTRY_RANK = {"US": 0, "XW": 1, "GB": 2, "CA": 3, "AU": 4}
@@ -1503,7 +1516,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                 ai_available = False
                 ai_unavailable_reason = f"AI refusal: {msg['refusal'][:200]}"
             else:
-                sug = json.loads(msg["content"])
+                sug = _ai_reply_object(msg["content"])
         except Exception as exc:
             ai_available = False
             ai_unavailable_reason = _classify_openai_error(exc)

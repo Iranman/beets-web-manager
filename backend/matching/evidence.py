@@ -11,16 +11,8 @@ from .models import (
     ReleaseMatch,
     TrackAlignmentResult,
 )
-from .normalize import normalize_artist, normalize_title, similarity
+from .normalize import _s, normalize_artist, normalize_title, similarity
 from .track_alignment import align_tracks_global
-
-
-def _s(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return str(value)
 
 
 def _id(value: Any) -> str:
