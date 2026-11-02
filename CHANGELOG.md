@@ -8,7 +8,13 @@ The project uses Semantic Versioning.
 
 ### Testing
 
-- **Playwright end-to-end suite (#505).** `frontend/e2e` runs the real app against a synthetic library in a temp directory, with non-loopback network refused and providers stubbed. It covers the library overview, browsing, import and review, jobs, Clean All, playlists, settings, plugins, deep links and the missing-build 503 page. It runs in the new `e2e` workflow; see `frontend/e2e/README.md` for the local command. No production code changed.
+- **Playwright end-to-end suite (#505).** `frontend/e2e` runs the real app against a synthetic library in a temp directory, with non-loopback network refused and providers stubbed. It covers the library overview, browsing, import and review, jobs, Clean All, playlists, settings, plugins, deep links and the missing-build 503 page. It runs in the new `e2e` workflow. Run it only in a throwaway container or CI runner: locally that needs Docker, and the harness refuses any host where it could touch real data (see `frontend/e2e/README.md`). No production code changed.
+
+### Changed
+- Playlist downloads: split the 600-line job body in `start_playlist_download` into named steps (source resolution, checkpoint import, download rounds, final sync). No behavior change; golden traces of 25 pipeline scenarios (resume, partial completion, review holds, cancel) were recorded before the split and still match. Playlist list and detail payloads now share one builder per shape, with identical keys and values (#505).
+
+### Removed
+- Unused helpers with no caller in routes, jobs or scripts: `_write_playlist_import_beets_config`, `_playlist_release_group_albumartist`, `_plex_delete_playlist_by_title`, `plex_sync_heal_job`, `_worse_name_status` (#505).
 
 ### Upgrade Notes
 
@@ -18,6 +24,14 @@ The project uses Semantic Versioning.
 
 - **Backend dead-code sweep (modernization W2).** Removed backend symbols that were provably unreachable in the running product: the legacy playlist staging-manifest stratum in `playlist_service` (`_playlist_staging_*`/`_legacy_manifest_*`); the artist-alias and delete-SQL serialization helpers in `library_service`; the fake beet-CLI shim around album genre repair (`_lastgenre_cmd`/`_require_beet_ok`/`_log_beet_output_excerpt`/`_beet_output`) so `start_library_fix_genres` and `POST /api/albums/<id>/fix-genre` call `composite_workflows.repair_album_genre` directly (HTTP paths, payloads and per-album WARN/continue semantics unchanged — the only visible delta is that genre job logs no longer print the shim's console-output excerpt, which was never the repair result); the independent `backend/mb_alignment.py` module, folded away — `summarize_mb_track_alignment` and its helpers moved into `backend/matching/track_alignment.py` (output verified identical) and the zero-caller `greedy_album_track_alignment` was deleted; the `_acoustid_lookup` compatibility wrapper and the unused `fetch_mb_release_tracklist` in `helpers_mb.py` (the live AcoustID service path is untouched); and a final single-symbol stratum across `dedup_service`, `cleanup_service`, `ai_service`, `acquisition_service`, `artwork_service`, `plex_service`, `slskd_service`, `musicbrainz_service`, `ytdlp_service`, `setup_service`, `app_runtime`, `security` and `composite_workflows` (e.g. `_maintenance_duplicate_report`, `_prune_empty_review_dirs`, `_track_ai_match_status`, `_audio_files_under`, `_album_art_ext_for_bytes`, `_plex_section_track_lookup`, `_slskd_file_matches_wanted`, `_sqlite_write_retry`, `_pip_install`, `clean_empty_albums`, `discover_import_sources`). Every deletion was AST reachability-checked against the current source before removal, tests that only pinned a removed wrapper were retargeted to the live entry point or deleted with it, and no route, request/response payload or job-outcome semantic changed (the genre job-log excerpt noted above is the only worker-visible delta).
 - **Dead frontend surface removed.** Four unused panels (`views/Clean.tsx`, `DiscographyPanel`, `WantedPanel` with its `WantedPanel.test.tsx`, and the never-rendered `TorrentRepairPanel`) and the now-orphaned client layer around them: 28 `api/client.ts` functions (the singleton-rescue trio, the qBittorrent status/hardlink pair, artist discography/release-art/completeness, duplicate-resolver plan/apply, Lidarr wanted and artist-albums-by-name, startMoveAll, libraryImportAll/getLibraryImportAllLast/retryLibraryImportAllFailed, per-album art status/url/upload/delete/move-to-library, getGenreStats/fixAlbumGenre, repairAlbumMbTracks/fixAlbumMetadata, batchSuggestAlbums, reconcileAutoEnqueueImport, getAlbumMbFormat), their `api/types.ts` response clusters, five dead `lib/libraryHealth.ts` helpers and the unused `downloadMethodShortLabel`. Live equivalents (Find Music/AcquisitionPanel, the `/clean` → `/jobs` redirect, `runLidarrAlbumSearch`, per-album artwork fetch, `fixGenres`, `downloadMethodShortLabel`'s data field) are untouched. Tests that only stubbed removed functions keep their live confirm-gate assertions.
+
+### Changed
+
+- **Frontend infrastructure consolidated (modernization M6).** The two API clients share request-header preparation, fetch-failure text and HTTP failure classification; 155 inline error-text expressions use `lib/errors.ts`; repeated timestamp formatting moved to `lib/dates.ts`; two simple pollers use `useInterval`; unused duplicate API types were removed. Displayed text and API calls are unchanged.
+
+### Fixed
+
+- **Library actions reach the right Jobs panel.** "Track Cleanup" and "Merge split album" linked to `/clean?tab=…`, whose redirect dropped the query and left the user at the top of Jobs. They now open Advanced Maintenance and scroll to Album Track Repair, or open and scroll to Database Health, and old `/clean?tab=…` links keep working.
 
 ## v0.15.0 - 2026-10-28
 

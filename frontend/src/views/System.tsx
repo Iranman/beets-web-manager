@@ -1,3 +1,5 @@
+import { formatEpochDateTime } from '../lib/dates';
+import { errorMessage } from '../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -164,7 +166,7 @@ type ConfigAction = 'save' | 'revert' | null;
 
 function formatBackupTime(value?: number | null): string {
   if (!value) return 'No backup';
-  return `Backup from ${new Date(value * 1000).toLocaleString()}`;
+  return `Backup from ${formatEpochDateTime(value)}`;
 }
 
 function ConfigActionDialog({
@@ -692,7 +694,7 @@ export default function System() {
       if (body?.reauth_required) {
         setReauthDialog({ open: true, pendingName: name, password: '', error: '', submitting: false });
       } else {
-        setRevealErrors((current) => ({ ...current, [name]: err instanceof Error ? err.message : String(err) }));
+        setRevealErrors((current) => ({ ...current, [name]: errorMessage(err) }));
       }
     } finally {
       setRevealingNames((current) => {
@@ -721,7 +723,7 @@ export default function System() {
         setReauthDialog((current) => ({ ...current, submitting: false, error: result.error || 'Incorrect password.' }));
       }
     } catch (err) {
-      setReauthDialog((current) => ({ ...current, submitting: false, error: err instanceof Error ? err.message : String(err) }));
+      setReauthDialog((current) => ({ ...current, submitting: false, error: errorMessage(err) }));
     }
   };
 
@@ -738,7 +740,7 @@ export default function System() {
       setForm(initialFormValues(nextEnv.variables));
       setClearNames(new Set());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -754,7 +756,7 @@ export default function System() {
       setSavedConfigText(content);
       setConfigMeta({ revision: cfg.revision || '', has_backup: Boolean(cfg.has_backup), backup_ts: cfg.backup_ts ?? null });
     } catch (err) {
-      setConfigError(err instanceof Error ? err.message : String(err));
+      setConfigError(errorMessage(err));
     } finally {
       setConfigLoading(false);
     }
@@ -812,7 +814,7 @@ export default function System() {
       const saved = updated.saved?.length ? updated.saved.join(', ') : 'environment';
       setMessage(`Saved ${saved}. Restart or recreate the container for Docker-managed values.`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -828,7 +830,7 @@ export default function System() {
       await loadConfig();
       setConfigMsg(saved.backed_up ? 'Saved config.yaml. Backup updated.' : 'Saved config.yaml.');
     } catch (err) {
-      setConfigError(err instanceof Error ? err.message : String(err));
+      setConfigError(errorMessage(err));
     } finally {
       setConfigBusy(false);
       setConfigAction(null);
@@ -845,7 +847,7 @@ export default function System() {
       await loadConfig();
       setConfigMsg('Reverted config.yaml from backup.');
     } catch (err) {
-      setConfigError(err instanceof Error ? err.message : String(err));
+      setConfigError(errorMessage(err));
     } finally {
       setConfigBusy(false);
       setConfigAction(null);
@@ -869,7 +871,7 @@ export default function System() {
         .catch((err) => {
           setIntegrationTests((current) => ({
             ...current,
-            [key]: { ok: false, status: 'failed', error: err instanceof Error ? err.message : String(err) },
+            [key]: { ok: false, status: 'failed', error: errorMessage(err) },
           }));
         })
         .finally(() => {
@@ -891,7 +893,7 @@ export default function System() {
         setRegenerateTokenError(result.error || 'Could not regenerate token.');
       }
     } catch (err) {
-      setRegenerateTokenError(err instanceof Error ? err.message : String(err));
+      setRegenerateTokenError(errorMessage(err));
     } finally {
       setRegeneratingToken(false);
     }
@@ -906,7 +908,7 @@ export default function System() {
       setPluginsReport(res);
       setPluginsMsg(res.ok ? 'All required Beets plugins verified healthy.' : 'Plugin verification found issues.');
     } catch (err) {
-      setPluginsError(err instanceof Error ? err.message : String(err));
+      setPluginsError(errorMessage(err));
     } finally {
       setPluginsLoading(false);
     }
@@ -921,7 +923,7 @@ export default function System() {
       setStatus((current) => current ? { ...current, setup_complete: true } : current);
       setMessage('System readiness marked complete.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setCompleting(false);
     }

@@ -1,3 +1,4 @@
+import { errorMessage } from '../lib/errors';
 import { useState } from 'react';
 import { login } from '../api/client';
 
@@ -49,7 +50,7 @@ export default function Login({ onSuccess }: LoginProps) {
         setErrorMsg(res.error || 'Incorrect username or password.');
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Sign-in failed. Please try again.';
+      const msg = errorMessage(err, 'Sign-in failed. Please try again.');
       setErrorMsg(msg.includes('401') ? 'Incorrect username or password.' : msg);
     } finally {
       setSubmitting(false);
