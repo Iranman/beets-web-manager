@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Testing
+
+- **Playwright end-to-end suite (#505).** `frontend/e2e` runs the real app against a synthetic library in a temp directory, with non-loopback network refused and providers stubbed. It covers the library overview, browsing, import and review, jobs, Clean All, playlists, settings, plugins, deep links and the missing-build 503 page. It runs in the new `e2e` workflow. Run it only in a throwaway container or CI runner: locally that needs Docker, and the harness refuses any host where it could touch real data (see `frontend/e2e/README.md`). No production code changed.
+
 ### Changed
 
 - **Backend consolidation with no API change (#505).** Library job-start routes share one helper (`_start_job` in `routes_library.py`); `_resolve_setting_item` in `routes_setup.py` is one metadata table and one item builder instead of nine hand-written 22-key dictionaries; Beets error translation lives in `backend/serializers.py` (`beets_offline_response`, `beets_auth_failed_response`, `beets_engine_error_response`); the MusicBrainz-coverage and album-tracks payloads moved from their route handlers into `backend/library_service.py`. Some log lines for Beets failures now carry the exception class name instead of a per-class sentence.
