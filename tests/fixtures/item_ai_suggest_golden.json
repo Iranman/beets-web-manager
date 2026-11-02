@@ -532,6 +532,7 @@
      "search_title": "Some Song",
      "selected": ""
     },
+    "mb_apply_warning": "AI returned a MusicBrainz recording ID that was not in the AcoustID/MusicBrainz candidate list; review before applying.",
     "mb_candidate_valid": false,
     "mb_trackid": "99999999-9999-9999-9999-999999999999",
     "mb_trusted": false,
@@ -608,7 +609,7 @@
     "acoustid": 0,
     "acoustid_status": "not_configured",
     "candidates": 0,
-    "confidence": "high",
+    "confidence": "low",
     "current": {
      "album": "Some Album",
      "albumartist": "Some Artist",
@@ -650,13 +651,13 @@
     },
     "ai_unavailable_reason": "",
     "candidate_index": -1,
-    "confidence": "high",
+    "confidence": "low",
     "confidence_source": "ai",
     "evidence": {
      "acoustid": 0,
      "acoustid_status": "not_configured",
      "candidates": 0,
-     "confidence": "high",
+     "confidence": "low",
      "current": {
       "album": "Some Album",
       "albumartist": "Some Artist",
@@ -681,13 +682,14 @@
      "search_title": "Some Song",
      "selected": ""
     },
+    "mb_apply_warning": "AI returned a MusicBrainz recording ID that was not in the AcoustID/MusicBrainz candidate list; review before applying.",
     "mb_candidate_valid": false,
     "mb_trackid": "99999999-9999-9999-9999-999999999999",
     "mb_trusted": false,
     "mb_url": "https://musicbrainz.org/recording/99999999-9999-9999-9999-999999999999",
     "mb_valid": true,
     "missing_id_type": "Recording ID",
-    "reason": "guess",
+    "reason": "AI returned a MusicBrainz recording ID that was not in the AcoustID/MusicBrainz candidate list; review before applying. guess",
     "recording_candidates": [],
     "title": "T"
    }
@@ -1416,7 +1418,7 @@
     "acoustid": 0,
     "acoustid_status": "not_configured",
     "candidates": 0,
-    "confidence": "medium",
+    "confidence": "low",
     "current": {
      "album": "Some Album",
      "albumartist": "Some Artist",
@@ -1458,13 +1460,13 @@
     },
     "ai_unavailable_reason": "",
     "candidate_index": -1,
-    "confidence": "medium",
+    "confidence": "low",
     "confidence_source": "ai",
     "evidence": {
      "acoustid": 0,
      "acoustid_status": "not_configured",
      "candidates": 0,
-     "confidence": "medium",
+     "confidence": "low",
      "current": {
       "album": "Some Album",
       "albumartist": "Some Artist",
@@ -1495,7 +1497,7 @@
     "mb_trusted": false,
     "mb_valid": false,
     "missing_id_type": "Recording ID",
-    "reason": "No validated MusicBrainz recording ID was returned; review text tags manually before applying. r",
+    "reason": "No validated MusicBrainz recording ID was returned; review text tags manually before applying. AI returned a MusicBrainz recording ID that was not in the AcoustID/MusicBrainz candidate list; review before applying. r",
     "recording_candidates": [],
     "title": "T"
    }

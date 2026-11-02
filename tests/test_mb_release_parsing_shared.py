@@ -75,6 +75,45 @@ class ReleaseParsingTests(unittest.TestCase):
                 found = helpers_mb._mb_release_search("Album", "Artist", track_count=3)
             self.assertEqual(found[0]["mb_albumid"], RG)
 
+    def test_unknown_count_ranks_below_a_valid_edition_at_any_distance(self):
+        def raw(rel_id, count):
+            return {**RAW, "id": rel_id, "media": [{"format": "CD", "track-count": count}]}
+        for wanted, valid in ((10, 1500), (1200, 10), (10, 1009)):
+            for releases in ([raw(REL, None), raw(RG, valid)], [raw(RG, valid), raw(REL, None)]):
+                with self.subTest(wanted=wanted, valid=valid), _opened({"releases": releases}):
+                    found = helpers_mb._mb_release_search("Album", "Artist", track_count=wanted)
+                    self.assertEqual(found[0]["mb_albumid"], RG)
+
+    def test_resolver_ranks_unknown_count_below_a_valid_edition(self):
+        def rel(rel_id, count, status="Official"):
+            return {"id": rel_id, "status": status, "country": "US", "media": [{"track-count": count}]}
+        for wanted, valid in ((10, 1500), (1200, 10), (10, 1009)):
+            with self.subTest(wanted=wanted, valid=valid), _opened({"releases": [rel(REL, None), rel(RG, valid)]}):
+                self.assertEqual(helpers_mb._resolve_release_group_to_release(RG, [], track_count=wanted), RG)
+        for media in ([], [{"track-count": None}], [{"track-count": 0}]):
+            releases = [{"id": REL, "status": "Official", "country": "US", "media": media},
+                        rel(RG, 10, status="Promotion")]
+            with self.subTest(media=media), _opened({"releases": releases}):
+                self.assertEqual(helpers_mb._resolve_release_group_to_release(RG, [], track_count=10), RG)
+
+    def test_resolver_still_prefers_official_among_valid_counts(self):
+        releases = [{"id": REL, "status": "Promotion", "country": "US", "media": [{"track-count": 10}]},
+                    {"id": RG, "status": "Official", "country": "US", "media": [{"track-count": 12}]}]
+        with _opened({"releases": releases}):
+            self.assertEqual(helpers_mb._resolve_release_group_to_release(RG, [], track_count=10), RG)
+
+    def test_scorer_never_rates_an_unknown_count_above_a_valid_edition(self):
+        base = {"artist": "A", "album": "B", "year": "2012", "country": "US", "score": 90}
+        folder = {"guessed_artist": "A", "guessed_album": "B", "guessed_year": "2012", "folder_track_count": 10}
+        score = ai_service._score_mb_release_candidate
+        unknown = score(folder, {**base, "tracks": 0})
+        for tracks in (14, 18, 1009, 1500):
+            valid = score(folder, {**base, "tracks": tracks})
+            self.assertGreaterEqual(valid["total"], unknown["total"], tracks)
+        self.assertEqual(score(folder, {**base, "tracks": 1009})["track_count_score"], 0.0)
+        # Without a local count, nothing can be compared: neutral, as before.
+        self.assertEqual(score({**folder, "folder_track_count": 0}, {**base, "tracks": 10})["track_count_score"], 0.5)
+
     def test_no_cover_art_block(self):
         self.assertEqual(helpers_mb._cover_art_details(None), (None, None, 0))
 

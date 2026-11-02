@@ -74,9 +74,11 @@ class ReleaseGroupResolverTests(unittest.TestCase):
 
     def test_unknown_track_count_is_tried_after_any_valid_edition(self):
         unknown, far = "dddddddd-dddd-dddd-dddd-dddddddddddd", "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
-        _, _, preflights, _ = _resolve(f"https://musicbrainz.org/release-group/{RG}", group=[unknown, far],
-                                       track_counts={unknown: 0, far: 25})
-        self.assertLess(preflights.index(far), preflights.index(unknown))
+        for count in (25, 5000):
+            with self.subTest(count=count):
+                _, _, preflights, _ = _resolve(f"https://musicbrainz.org/release-group/{RG}", group=[unknown, far],
+                                               track_counts={unknown: 0, far: count})
+                self.assertLess(preflights.index(far), preflights.index(unknown))
 
     def test_import_with_id_passes_the_release_group_url(self):
         src = inspect.getsource(imp.start_folder_import_with_id)

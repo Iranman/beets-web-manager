@@ -669,9 +669,13 @@
       "CANDIDATE_GENERATION_ONLY",
       "Binds the AI's candidate_index to that candidate's Release and Release Group; an out-of-range index selects nothing and is downgraded. Decides nothing automatic."
     ],
+    "backend/item_ai_suggest_service.py::<module>": [
+      "CANDIDATE_GENERATION_ONLY",
+      "The allowlist of AI reply keys; it only removes fields from an untrusted reply and decides nothing."
+    ],
     "backend/item_ai_suggest_service.py::suggest_for_item": [
       "COMPATIBILITY_WRAPPER",
-      "Recording candidate orchestration moved from the ai_suggest route; every decision field comes from the canonical serializer."
+      "Recording candidate orchestration moved from the ai_suggest route; decision and safety fields come only from the canonical serializer. The AI reply is cut to an allowlist; its confidence and reason are reported, never verified."
     ],
     "backend/item_ai_suggest_service.py::_build_prompt": [
       "DISPLAY_ONLY",
@@ -687,7 +691,7 @@
     ],
     "backend/item_ai_suggest_service.py::_validate_identity": [
       "CANDIDATE_GENERATION_ONLY",
-      "Can only distrust or downgrade a suggestion that is outside the candidate list or malformed; never grants an action."
+      "Can only distrust or downgrade a suggestion that is outside the candidate list or malformed, and drop release or artist IDs the candidate does not back; never grants an action."
     ],
     "backend/item_ai_suggest_service.py::_attach_candidate_evidence": [
       "DISPLAY_ONLY",

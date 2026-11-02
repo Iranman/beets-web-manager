@@ -506,11 +506,12 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
         country_pts  = _country_rank(rel["country"])
         year_miss    = 0 if (not year or rel["year"][:4] == str(year)[:4]) else 2
         # tracks == 0 is an unknown count (_mb_total_track_count): below any valid edition.
-        track_delta  = (abs(int(rel["tracks"]) - int(track_count)) if rel["tracks"] else 999) if track_count else 0
+        track_unknown = 1 if track_count and not rel["tracks"] else 0
+        track_delta  = abs(int(rel["tracks"]) - int(track_count)) if track_count and rel["tracks"] else 0
         track_miss   = 0 if (not track_count or rel["tracks"] == track_count) else 1
         score_pts    = -rel["score"]
         if track_count:
-            return (track_miss, track_delta, vinyl_pen, country_pts, year_miss, score_pts)
+            return (track_unknown, track_miss, track_delta, vinyl_pen, country_pts, year_miss, score_pts)
         return (vinyl_pen, country_pts, year_miss, track_miss, score_pts)
 
     groups: dict = OrderedDict()
@@ -886,9 +887,11 @@ def _resolve_release_group_to_release(rg_mbid: str, log: list,
         year_miss = 0 if (not year or date == str(year)[:4]) else 2
         tracks = _mb_release_track_count(rel)
         if track_count:
+            # tracks == 0 is an unknown count: below any valid edition, whatever its status.
+            track_unknown = 0 if tracks else 1
             track_miss = 0 if tracks == track_count else 1
-            track_delta = abs(tracks - track_count) if tracks else 999
-            return (status_miss, track_miss, track_delta, country, year_miss, date or "9999")
+            track_delta = abs(tracks - track_count) if tracks else 0
+            return (track_unknown, status_miss, track_miss, track_delta, country, year_miss, date or "9999")
         return (status_miss, country, year_miss, date or "9999")
 
     chosen = sorted(releases, key=_rank)[0]

@@ -239,6 +239,67 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
         self.assertFalse(s["ai_status"]["contributed"])
         self.assertIn("AI unavailable: the AI provider request failed unexpectedly (ValueError)", s["reason"])
 
+    def test_ai_cannot_supply_the_release_group_of_a_trusted_recording(self):
+        s = _run({"mb": [_mb_cand()], "details": _details(),
+                  "ai": {"mb_trackid": _REC, "mb_releasegroupid": _INVENTED, "confidence": "high", "reason": "r"}}
+                 )["body"]["suggestions"]
+        self.assertTrue(s["mb_trusted"])
+        self.assertEqual(s["mb_releasegroupid"], _RG)
+        # Without MusicBrainz details nothing verified names a release group, so there is none.
+        s = _run({"mb": [_mb_cand()], "details": {},
+                  "ai": {"mb_trackid": _REC, "mb_releasegroupid": _INVENTED, "confidence": "high", "reason": "r"}}
+                 )["body"]["suggestions"]
+        self.assertNotIn("mb_releasegroupid", s)
+
+    def test_ai_release_and_artist_ids_need_evidence(self):
+        ai = {"mb_trackid": _REC, "mb_albumid": _INVENTED, "mb_artistid": _INVENTED, "confidence": "high", "reason": "r"}
+        s = _run({"mb": [_mb_cand()], "details": {}, "ai": ai})["body"]["suggestions"]
+        self.assertTrue(s["mb_trusted"])
+        self.assertNotIn("mb_albumid", s)
+        self.assertNotIn("mb_artistid", s)
+        self.assertNotIn("mb_album_url", s)
+        s = _run({"mb": [], "ai": {**ai, "mb_trackid": _INVENTED}})["body"]["suggestions"]
+        self.assertNotIn("mb_albumid", s)
+        self.assertNotIn("mb_artistid", s)
+        self.assertNotIn("mb_album_url", s)
+        # A requested release still ranks: the lookup decides whether the recording is on it.
+        out = _run({"mb": [_mb_cand()], "details": _details(), "ai": ai})
+        self.assertEqual(out["details_calls"], [[_REC, _INVENTED]])
+        self.assertEqual(out["body"]["suggestions"]["mb_albumid"], _REL)
+        self.assertEqual(out["body"]["suggestions"]["mb_artistid"], _ARTIST)
+
+    def test_ai_cannot_supply_safety_or_evidence_fields(self):
+        forged = {"selected_recording_candidate": {"mb_trackid": _INVENTED}, "candidate_evidence": {"x": 1},
+                  "review_evidence": {"x": 1}, "requires_confirmation": False, "safety_result": "safe",
+                  "recommended_action": "attach", "mb_trusted": True, "mb_candidate_valid": True}
+        s = _run({"mb": [], "ai": {"mb_trackid": _INVENTED, "confidence": "high", "reason": "r", **forged}}
+                 )["body"]["suggestions"]
+        for field in ("selected_recording_candidate", "candidate_evidence", "review_evidence",
+                      "requires_confirmation", "safety_result", "recommended_action"):
+            self.assertNotIn(field, s)
+        self.assertFalse(s["mb_trusted"])
+        self.assertFalse(s["mb_candidate_valid"])
+        self.assertEqual(s["confidence"], "low")
+        self.assertIn("mb_apply_warning", s)
+        # With a selected candidate those fields are the candidate's, not the AI's.
+        s = _run({"mb": [_mb_cand()], "details": _details(),
+                  "ai": {"mb_trackid": _REC, "confidence": "high", "reason": "r", **forged}})["body"]["suggestions"]
+        self.assertEqual(s["selected_recording_candidate"]["mb_trackid"], _REC)
+        self.assertTrue(s["requires_confirmation"])
+        self.assertEqual(s["safety_result"], "needs_review")
+
+    def test_schema_invalid_ai_reply_falls_back_to_the_evidence(self):
+        for reply in ("[]", '"x"', "5", "null"):
+            with self.subTest(reply=reply):
+                out = _run({"mb": [_mb_cand()], "details": _details(), "ai": reply})
+                self.assertEqual(out["status"], 200)
+                self.assertTrue(out["body"]["ok"])
+                s = out["body"]["suggestions"]
+                self.assertEqual(s["mb_trackid"], _REC)
+                self.assertEqual(s["confidence_source"], "musicbrainz")
+                self.assertFalse(s["ai_status"]["contributed"])
+                self.assertIn("(ValueError)", s["ai_unavailable_reason"])
+
     def test_identity_rules_hold_in_golden(self):
         """AI may rank, never establish identity: only a listed candidate is trusted."""
         s = self.golden["ai_invents_id_with_candidates_is_downgraded"]["body"]["suggestions"]
@@ -247,12 +308,14 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
         self.assertEqual(s["confidence"], "low")
         s = self.golden["ai_invents_id_without_candidates"]["body"]["suggestions"]
         self.assertFalse(s["mb_trusted"])
+        self.assertIn("not in the AcoustID/MusicBrainz candidate list", s["mb_apply_warning"])
         s = self.golden["ai_returns_malformed_id"]["body"]["suggestions"]
         self.assertFalse(s["mb_trusted"])
         self.assertEqual(s["confidence"], "low")
+        self.assertEqual(s["confidence"], "low")
         s = self.golden["ai_returns_malformed_id_without_candidates"]["body"]["suggestions"]
         self.assertFalse(s["mb_trusted"])
-        self.assertEqual(s["confidence"], "medium")
+        self.assertEqual(s["confidence"], "low")
         s = self.golden["ai_selects_listed_candidate"]["body"]["suggestions"]
         self.assertTrue(s["mb_trusted"])
         self.assertEqual(s["mb_albumid"], _REL)

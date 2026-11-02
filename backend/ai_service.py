@@ -885,8 +885,10 @@ def _score_mb_release_candidate(
     track_count_delta = 999
     if folder_track_count and cand_tracks:
         track_count_delta = abs(folder_track_count - cand_tracks)
-    if track_count_delta == 999:
-        track_count_score = 0.5
+    if not folder_track_count:
+        track_count_score = 0.5  # nothing to compare with: neutral for every candidate
+    elif not cand_tracks:
+        track_count_score = 0.0  # unknown count: never above a valid edition, however far off
     elif track_count_delta == 0:
         track_count_score = 1.0
     elif track_count_delta == 1:
