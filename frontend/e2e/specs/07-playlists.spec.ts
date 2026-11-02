@@ -23,6 +23,13 @@ test('a track list previews against the library and marks what is already owned'
   expect(body.missing.map((track) => track.title)).toEqual(['Not In Library']);
 
   const main = page.getByRole('main');
-  await expect(main.getByRole('button', { name: 'Available 1' })).toBeVisible();
-  await expect(main.getByRole('button', { name: 'Missing 1' })).toBeVisible();
+  await main.getByRole('button', { name: 'Available 1' }).click();
+  // Exact: the track-list textarea above holds both lines.
+  const owned = main.getByText('Synthetic Aurora - First Light', { exact: true });
+  const absent = main.getByText('Nobody Real - Not In Library', { exact: true });
+  await expect(owned).toBeVisible();
+  await expect(absent).toHaveCount(0);
+  await main.getByRole('button', { name: 'Missing 1' }).click();
+  await expect(absent).toBeVisible();
+  await expect(owned).toHaveCount(0);
 });

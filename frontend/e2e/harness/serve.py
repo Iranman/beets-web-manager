@@ -5,8 +5,8 @@
 Importing the app has side effects outside any configured path: it moves
 legacy state files out of ``/config``. So this refuses to start wherever that
 could touch real data, and without an empty network namespace (see
-``refuse_unsafe_host``). Inside one, the root is rebuilt from nothing on every
-start and all overridable state paths point inside it.
+``refuse_unsafe_host``). Inside one, each start gets a new root and all
+overridable state paths point inside it.
 
 An audit hook logs this process's non-loopback sockets and lookups, and any child
 process outside a short list, in ``blocked-network.log``; global teardown fails
@@ -19,7 +19,6 @@ import io
 import json
 import os
 import re
-import shutil
 import socket
 import sys
 import tempfile
@@ -71,6 +70,9 @@ def _network_sealed() -> bool:
 def refuse_unsafe_host(config: Path = Path("/config")) -> None:
     if os.name != "posix":
         sys.exit("E2E harness refused: Linux only. On Windows \"/config\" is a real folder on this drive. See frontend/e2e/README.md.")
+    if config.is_symlink():  # the mount check below would look at the link, not at where the app's files end up
+        sys.exit(f"E2E harness refused: {config} is a symlink and importing the app moves files out of it. "
+                 "Run the suite in the throwaway container. See frontend/e2e/README.md.")
     if config.exists() and not _in_throwaway_container(config):
         sys.exit(f"E2E harness refused: {config} exists and importing the app moves files out of it. "
                  "Run the suite in the throwaway container. See frontend/e2e/README.md.")
@@ -80,11 +82,14 @@ def refuse_unsafe_host(config: Path = Path("/config")) -> None:
 
 
 def isolated_root(port: int) -> Path:
-    root = Path(tempfile.gettempdir()).resolve() / f"bwm-e2e-{port}"
-    shutil.rmtree(root, ignore_errors=True)
-    if root.exists():
-        sys.exit(f"could not clear {root}; is another harness still running?")
-    root.mkdir()
+    """A new directory for this run. Never reuses or deletes an existing one: a
+    fixed path could be a host folder mounted there. env.ts makes the run directory."""
+    run_dir = os.environ.get("BWM_E2E_RUN_DIR") or tempfile.mkdtemp(prefix="bwm-e2e-")
+    root = Path(run_dir).resolve() / str(port)
+    try:
+        root.mkdir(parents=True)
+    except FileExistsError:
+        sys.exit(f"E2E harness refused: {root} already exists. Start each run with a new BWM_E2E_RUN_DIR.")
     return root
 
 
@@ -150,6 +155,8 @@ def configure(root: Path, port: int) -> dict:
         "METADATA_CACHE_DIR": str(paths["cache"]),
         "BEETS_TRANSACTION_DIR": str(paths["transactions"]),
         "AI_BATCH_STATE_DIR": str(paths["data"] / "ai_batch_jobs"),
+        "RECOVERY_CARRIER_STATE_DIR": str(paths["data"] / "recovery_carriers"),
+        "UNMATCHED_DRAFT_DIR": str(paths["data"] / "unmatched_drafts"),
         "YTDLP_RUNTIME_BIN_DIR": str(paths["data"] / "yt-dlp"),
         # These default to /config, outside the root, whatever BEETSDIR says.
         "YTDLP_NETRC_FILE": str(paths["config"] / ".netrc"),

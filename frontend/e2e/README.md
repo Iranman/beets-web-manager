@@ -2,11 +2,14 @@
 
 Playwright drives the real app (Flask, embedded Beets, built frontend) against a synthetic library rebuilt in a temp directory on every start. MusicBrainz is answered with canned data; every other provider looks unreachable.
 
-**Never run this outside a throwaway container or CI runner against a machine with real data.** Importing the app moves legacy state files out of a hardcoded `/config`, whatever the settings say, and the harness then deletes its temp root on the next start. `harness/serve.py` therefore refuses to start when:
+**Never run this outside a throwaway container or CI runner against a machine with real data.** Importing the app moves legacy state files out of a hardcoded `/config`, whatever the settings say. `harness/serve.py` therefore refuses to start when:
 
 - the host is not Linux or another POSIX system (on Windows, `/config` is a real folder on the current drive);
+- `/config` is a symlink;
 - `/config` exists, unless this is the image below with nothing mounted there;
 - the network namespace has any route other than loopback.
+
+Each run uses a new private temp directory (`BWM_E2E_RUN_DIR`). The harness never deletes anything, so outside a throwaway container these directories stay until you remove them.
 
 ## Run it
 
@@ -29,12 +32,17 @@ Set `E2E_PYTHON` if `python` is not the right interpreter. CI runs the same suit
 
 ## What stops network access, and what is not covered
 
-- **Enforced:** the empty network namespace. Nothing in it can reach anything but loopback, in any language.
+- **Enforced:** the empty network namespace. It has no route off the machine. It does not stop Unix sockets.
 - **Fails the run:** an audit hook, installed before the app is imported, logs and refuses `connect`, `connect_ex`, `sendto`, `getaddrinfo` and `gethostbyname` for non-loopback hosts, and any child process other than `ffmpeg`, `ffprobe`, `fpcalc`, `ld`, `ldconfig` or a bare `<program> --version`. Teardown fails the suite if the log exists.
 
-Not covered:
+Provider stubs replace `urlopen`, `open_public_url` and the `requests` transport, so the real `secure_urlopen` never runs. **This suite is no evidence for URL security checks** (SSRF guards, allowlists, redirect handling). `tests/` covers those.
 
-- What an allowed child process does on the network, and native code or `ctypes` calling sockets directly. The namespace stops these leaving, but nothing fails the run. Kernel no-route counters cannot detect them because Chromium increments them on its own, even with no page open to anything but loopback.
+Not covered by the audit hook. The namespace still stops the network ones leaving, but nothing fails the run:
+
+- `sendmsg`, `gethostbyaddr` and `getnameinfo`.
+- Unix sockets, which the hook allows. A socket file reachable from the container could reach a process outside the namespace.
+- `multiprocessing` with the `spawn` start method: the child starts through a path the hook allows, and the hook is not installed in it.
+- What an allowed child process does on the network, and native code or `ctypes` calling sockets directly. Kernel no-route counters cannot detect them because Chromium increments them on its own, even with no page open to anything but loopback.
 - The browser's own traffic. It cannot leave the namespace either, and a page asking for an external URL does not fail the run.
 - Loopback traffic is not inspected. In the namespace, only the suite is listening.
 - Files under the hardcoded `/config` paths are written to the throwaway container's filesystem, or fail with a permission error on an unprivileged CI runner. Specs do not check those writes.
