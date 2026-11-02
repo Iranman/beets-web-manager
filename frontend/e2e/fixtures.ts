@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { expect, test as base, type Page } from '@playwright/test';
@@ -38,6 +39,10 @@ export function filesUnder(dir: string): string[] {
     .sort();
 }
 
+/** Each file under a directory with the sha256 of its bytes: proves media kept its name and content. */
+export const fileHashes = (dir: string) =>
+  filesUnder(dir).map((file) => [file, createHash('sha256').update(fs.readFileSync(path.join(dir, file))).digest('hex')]);
+
 const HOLD = root('hold-clean-all');
 /** While held, Clean All waits at Root Folder Repair (harness/serve.py). */
 export const holdCleanAll = () => fs.writeFileSync(HOLD, '');
@@ -47,9 +52,12 @@ export const releaseCleanAll = () => fs.rmSync(HOLD, { force: true });
 export const cleanAllPanel = (page: Page) =>
   page.locator('section').filter({ has: page.getByRole('heading', { name: 'Clean All', exact: true }) }).last();
 
-/** Start Clean All from a known state: a leftover checkpoint is discarded through the UI. */
-export async function startFreshCleanAll(page: Page) {
+/** Start Clean All from a known state: a leftover checkpoint is discarded through the UI. Returns the run's job ID. */
+export async function startFreshCleanAll(page: Page): Promise<string> {
   const panel = cleanAllPanel(page);
+  const started = page.waitForResponse(
+    (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/jobs/maintenance-runner',
+  );
   const discard = panel.getByRole('button', { name: /Discard checkpoint/ });
   const start = panel.getByRole('button', { name: 'Clean All', exact: true });
   await expect(discard.or(start).first()).toBeVisible();
@@ -59,5 +67,7 @@ export async function startFreshCleanAll(page: Page) {
   } else {
     await start.click();
   }
+  const { job_id: jobId } = (await (await started).json()) as { job_id: string };
   await expect(panel.getByText('Root Folder Repair')).toBeVisible();
+  return jobId;
 }

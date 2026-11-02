@@ -2,6 +2,7 @@
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
 import copy, importlib, json, os, re, shlex, shutil, subprocess, sys, time
@@ -208,13 +209,10 @@ def _mark_ytdlp_cookie_rejected(cookie_file: str, reason: str = "") -> None:
     if not cookie_file:
         return
     try:
-        _YTDLP_COOKIE_REJECTED_FILE.parent.mkdir(parents=True, exist_ok=True)
         data = _ytdlp_cookie_signature(cookie_file)
         data["rejected_at"] = time.time()
         data["reason"] = reason or "YouTube bot/cookie challenge"
-        tmp = _YTDLP_COOKIE_REJECTED_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(_YTDLP_COOKIE_REJECTED_FILE)
+        atomic_write_json(_YTDLP_COOKIE_REJECTED_FILE, data, ensure_ascii=False, indent=2)
     except Exception:
         pass
 

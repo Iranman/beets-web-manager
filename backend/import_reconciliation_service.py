@@ -469,8 +469,8 @@ def _apply_artist_folder_reconcile_resilient(
         except (BeetsUnavailableError, BeetsError) as ex:
             _app_logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
             log.append(
-                f"{log_prefix}: Apply response was lost ({_safe_apply_error_message(ex)}). The engine "
-                f"operation may still be running -- monitoring its transaction state instead of retrying Apply."
+                f"{log_prefix}: Apply raised an error ({_safe_apply_error_message(ex)}). Not retrying it; "
+                f"reading the outcome recorded on its transaction."
             )
         except Exception as ex:
             _app_logger.error("%s: apply failed unexpectedly for op_id=%s: %s", log_prefix, op_id, ex, exc_info=True)

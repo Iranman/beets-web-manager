@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from backend.beets_adapter import BeetsAdapter, beets_adapter
-from backend.composite_workflows import _decode_path, _get_store, _rollback_conflict, _s, engine_rollback_refusal
+from backend.composite_workflows import _decode_path, _file_sha256 as _sha256, _get_store, _rollback_conflict, _s, engine_rollback_refusal
 from backend.resource_locks import attempt_owner, claim_approved, claim_refusal, locks as resource_locks
 from backend.transaction_engine import TransactionStore
 
@@ -58,14 +58,6 @@ ACTIONS = {
 def record_id_for(kind: str, operation_id: str) -> str:
     """The engine record id for this transaction (see untracked_ops.record_id_for)."""
     return hashlib.sha256(f"untracked-{kind}|{operation_id}".encode("utf-8")).hexdigest()[:32]
-
-
-def _sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _deps() -> Dict[str, Any]:

@@ -1,3 +1,5 @@
+import { useInterval } from '../lib/hooks';
+import { errorMessage } from '../lib/errors';
 import { Tab, TabGroup, TabList, TabPanel, TabPanels } from '@headlessui/react';
 import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
@@ -166,7 +168,7 @@ export default function Import() {
     const failures = results
       .filter((result) => result.status === 'rejected')
       .map((result) => (result as PromiseRejectedResult).reason)
-      .map((reason) => reason instanceof Error ? reason.message : String(reason))
+      .map((reason) => errorMessage(reason))
       .filter(Boolean);
 
     setSummary((current) => ({
@@ -191,12 +193,9 @@ export default function Import() {
     void loadSummary();
   }, [loadSummary]);
 
-  useEffect(() => {
-    const intervalId = window.setInterval(() => {
-      if (!document.hidden) void loadSummary(true);
-    }, 45000);
-    return () => window.clearInterval(intervalId);
-  }, [loadSummary]);
+  useInterval(() => {
+    if (!document.hidden) void loadSummary(true);
+  }, 45000);
 
   const nextAction = useMemo(() => importNextAction(summary), [summary]);
 

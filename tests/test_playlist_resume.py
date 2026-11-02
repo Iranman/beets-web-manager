@@ -43,10 +43,11 @@ def _staged_entries_source(src: str) -> str:
 
 
 def _run_fn_source(src: str) -> str:
-    # update_state: the job contract publishes the resumable position (ARCH-004).
-    start = src.index("def _run(job_log: Optional[List[str]] = None, cancel_event=None, update_state=None):")
-    end = src.index("    job = jobs.start_python(", start)
-    return src[start:end]
+    # The pipeline steps, helpers first and in execution order (M3 split _run up).
+    return "\n".join(app_unit_source(step) for step in (
+        "_pipeline_import_round", "_pipeline_import_checkpoint_staged",
+        "_pipeline_download_rounds", "_pipeline_final_sync", "_pipeline_keep_review_status",
+    ))
 
 
 def _state_summary_source(src: str) -> str:
@@ -167,7 +168,7 @@ class ReviewRequiredDownloadAccountingTests(unittest.TestCase):
         """When NOTHING in the round was fingerprint-verified, the round must
         stop before reaching the import phase — there's nothing safe to import."""
         review_guard = self._run_fn.index("if review_downloaded > 0:")
-        import_phase = self._run_fn.index("state[\"phase\"] = \"import\"", review_guard)
+        import_phase = self._run_fn.index("_pipeline_import_round(run, round_num)", review_guard)
         self.assertLess(review_guard, import_phase)
         inner_guard = self._run_fn.index("if verified_downloaded <= 0:", review_guard)
         self.assertLess(inner_guard, import_phase)
@@ -188,7 +189,7 @@ class ReviewRequiredDownloadAccountingTests(unittest.TestCase):
         self.assertIn("pause_after_this_round = False", self._run_fn)
         pause_set_idx = self._run_fn.index("pause_after_this_round = True")
         review_guard = self._run_fn.index("if review_downloaded > 0:")
-        import_phase = self._run_fn.index("state[\"phase\"] = \"import\"", review_guard)
+        import_phase = self._run_fn.index("_pipeline_import_round(run, round_num)", review_guard)
         # Setting pause_after_this_round = True must happen before reaching
         # the import phase (it's set inside the review_downloaded>0 branch,
         # which falls through to import when some files were verified) —
@@ -203,7 +204,8 @@ class ReviewRequiredDownloadAccountingTests(unittest.TestCase):
         self.assertLess(active_tracks_idx, deferred_break_idx)
 
     def test_final_sync_keeps_review_required_tracks_and_does_not_raise(self):
-        self.assertIn("if existing_status == \"review_required\":\n                        continue", self._run_fn)
+        self.assertIn("if _pipeline_keep_review_status(state, track):\n            continue", self._run_fn)
+        self.assertIn('== "review_required"', app_unit_source("_pipeline_keep_review_status"))
         self.assertIn("if not matched and not review_total:", self._run_fn)
         self.assertIn("No playlist tracks matched Beets yet", self._run_fn)
 

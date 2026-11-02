@@ -1,3 +1,4 @@
+import { errorMessage } from '../lib/errors';
 import {
   Dialog,
   DialogBackdrop,
@@ -86,7 +87,7 @@ export function TrackReplacementModal({
         setStep('failed');
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Engine communication error.');
+      setErrorMsg(errorMessage(err, 'Engine communication error.'));
       setStep('failed');
     }
   };
@@ -114,7 +115,7 @@ export function TrackReplacementModal({
         }
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to apply replacement.');
+      setErrorMsg(errorMessage(err, 'Failed to apply replacement.'));
       setStep('failed');
     }
   };
@@ -132,7 +133,7 @@ export function TrackReplacementModal({
         setErrorMsg(res.error || 'Rollback failed.');
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Rollback execution failed.');
+      setErrorMsg(errorMessage(err, 'Rollback execution failed.'));
     } finally {
       setRollbackLoading(false);
     }

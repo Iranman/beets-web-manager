@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -74,7 +75,7 @@ export function UnattendedDuplicateReview({ onMusicRoot }: { onMusicRoot?: (root
       setStatus(s);
       if (s.music_root) onMusicRoot?.(s.music_root);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }, [onMusicRoot]);
 
@@ -90,7 +91,7 @@ export function UnattendedDuplicateReview({ onMusicRoot }: { onMusicRoot?: (root
       const r = await runDuplicateMaintenance();
       setMessage(`Duplicate maintenance started (job ${r.job_id.slice(0, 8)}). ${enabled ? 'Unattended deletion is ENABLED.' : 'Deletion is disabled: this only builds the proposal.'}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -103,7 +104,7 @@ export function UnattendedDuplicateReview({ onMusicRoot }: { onMusicRoot?: (root
       setStatus(await setUnattendedCleanup(next, next ? confirmText : '', next ? 'Enabled after reviewing the proposal' : ''));
       setConfirmText('');
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }

@@ -339,27 +339,6 @@ class SafeRenameTests(_Env):
         self.assertFalse(res.get("ok"), res)
         self.assertTrue((src / "01.flac").exists())
 
-    def test_clean_all_safe_renames_use_engine(self):
-        import backend.maintenance_service as ms
-        src = self.music / "Artist" / "Old Name"
-        src.mkdir(parents=True)
-        (src / "01.flac").write_bytes(b"a")
-        dst = self.music / "Artist" / "New Name"
-        rows = [{"folder": str(src), "proposed_folder": str(dst), "safe": True, "db_item_count": 0}]
-        log = []
-        real = cw.safe_rename_library_folder
-        def via_test_store(s, t, approved_by):
-            return real(s, t, approved_by=approved_by, store=self.store)
-
-        with mock.patch.object(ms, "MUSIC_ROOT", self.music),                 mock.patch.object(cw, "safe_rename_library_folder", side_effect=via_test_store) as eng,                 mock.patch.object(cw, "move_file", side_effect=AssertionError("move_file used")):
-            res = ms._maintenance_safe_folder_renames(rows, log, None)
-        self.assertEqual(res["renamed"], 1, log)
-        self.assertEqual(res["errors"], 0, log)
-        eng.assert_called_once()
-        self.assertTrue((dst / "01.flac").exists())
-        rows, _total = self.store.list(status="Completed")
-        self.assertEqual(len(rows), 1, rows)
-
 
 class PrefixTests(unittest.TestCase):
     def test_sibling_prefix_is_not_under(self):

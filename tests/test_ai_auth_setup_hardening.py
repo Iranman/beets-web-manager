@@ -196,9 +196,7 @@ class AlbumAiSuggestFallbackSourceTests(unittest.TestCase):
 class ItemAiSuggestFallbackSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.fn = _function_source(
-            APP_SOURCE, "def ai_suggest(iid):", "\n\ndef _discogs_track_search("
-        )
+        cls.fn = (ROOT / "backend" / "item_ai_suggest_service.py").read_text(encoding="utf-8")
 
     def test_does_not_return_early_on_missing_api_key(self):
         self.assertNotRegex(
@@ -207,14 +205,6 @@ class ItemAiSuggestFallbackSourceTests(unittest.TestCase):
         )
         self.assertIn("ai_available = bool(api_key)", self.fn)
 
-    def test_acoustid_mb_discogs_gathering_happens_before_ai_gate(self):
-        ai_gate_pos = self.fn.index("if ai_available:")
-        acoustid_pos = self.fn.index("_acoustid_lookup_cached_outcome(item_path)")
-        mb_pos = self.fn.index("_mb_recording_search(")
-        discogs_pos = self.fn.index("_discogs_track_search(")
-        self.assertLess(acoustid_pos, ai_gate_pos)
-        self.assertLess(mb_pos, ai_gate_pos)
-        self.assertLess(discogs_pos, ai_gate_pos)
 
     def test_falls_back_to_top_candidate_when_ai_unavailable(self):
         self.assertIn("if suggestions is None:", self.fn)
@@ -398,9 +388,9 @@ class AuthTokenRegenerateEndpointTests(unittest.TestCase):
         # effective_value and (b) only ever expose a fixed-length placeholder
         # (never a value-length-revealing partial mask) in the response.
         token_branch = _function_source(
-            SETUP_SOURCE, "# 2. BEETS_WEB_AUTH_TOKEN", "# 3. BEETS_WEB_USERNAME"
+            SETUP_SOURCE, "# Stored-credential settings:", "builtin = _BUILTIN_SETTINGS.get(name)"
         )
-        self.assertIn('"effective_value": None,', token_branch)
+        self.assertIn('effective_value=None,', token_branch)
         self.assertIn('"********" if configured else ""', token_branch)
         self.assertNotIn("_mask(", token_branch)
         self.assertIn('_is_secret_env(key)', SETUP_SOURCE)

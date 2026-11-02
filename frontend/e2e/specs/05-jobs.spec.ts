@@ -5,31 +5,51 @@ test.afterEach(releaseCleanAll);
 test('job runs with progress, cancels after confirmation, and stays in history with its log', async ({ page }) => {
   holdCleanAll();
   await page.goto('/jobs');
-  await startFreshCleanAll(page);
+  const cancelledRows = page.getByRole('button', { name: /^Cancelled Clean All/ });
+  // 02a-clean-all left a cancelled run in the history: this run must add its own.
+  await expect(cancelledRows.first()).toBeVisible();
+  const cancelledBefore = await cancelledRows.count();
+  const jobId = await startFreshCleanAll(page);
 
   // Progress: 2 of 14 tasks checkpointed before the hold; shown in the page and the nav badge.
   const activity = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Current activity' }) });
-  await expect(activity).toContainText('2 / 14');
-  await expect(activity).toContainText('Root Folder Repair');
-  await expect(page.getByRole('banner').getByText('1 running')).toBeVisible();
+  // Other running jobs have their own cards with their own Cancel buttons.
+  const card = activity.getByTitle('Clean All', { exact: true }).locator('xpath=ancestor::*[.//button[normalize-space()="Cancel"]][1]');
+  // The panel updates by polling, which can outlast the default timeout on a busy machine.
+  await expect(card).toContainText('2 / 14', { timeout: 30_000 });
+  await expect(activity).toContainText('Root Folder Repair', { timeout: 30_000 });
+  // Background jobs come and go, so the badge can read more than 1.
+  const badge = page.getByRole('banner').getByText(/^\d+ running$/);
+  await expect(badge).toBeVisible();
 
-  await activity.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await card.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('dialog', { name: 'Cancel running job?' }).getByRole('button', { name: 'Cancel job' }).click();
-  await expect(activity).toContainText('Cancelled', { timeout: 30_000 });
-  await expect(page.getByRole('banner').getByText('1 running')).toHaveCount(0);
+
+  // Cancelling ends the run, and the badge follows the server once nothing else runs either.
+  await expect
+    .poll(async () => {
+      const { jobs } = (await (await page.request.get('/api/jobs')).json()) as { jobs: { status: string }[] };
+      return { running: jobs.filter((job) => job.status === 'running').length, badge: await badge.count() };
+    }, { timeout: 30_000 })
+    .toEqual({ running: 0, badge: 0 });
 
   // Persisted: survives a reload, filterable, log retrievable.
   await page.reload();
-  const row = page.getByRole('button', { name: /^Cancelled Clean All/ }).first();
-  await expect(row).toBeVisible();
+  await expect(cancelledRows).toHaveCount(cancelledBefore + 1);
+  const row = cancelledRows.first();
   await page.getByRole('button', { name: 'Completed', exact: true }).click();
   await expect(page.getByRole('button', { name: /^Cancelled Clean All/ })).toHaveCount(0);
   await page.getByRole('button', { name: 'Cancelled', exact: true }).click();
   await expect(row).toBeVisible();
 
   const container = row.locator('xpath=ancestor::*[.//button[normalize-space()="View raw log"]][1]');
+  // The button must fetch this run's log, not an earlier run's, and show exactly that in the raw view.
+  const fetched = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/jobs/${jobId}`);
   await container.getByRole('button', { name: 'View raw log' }).click();
-  await expect(page.getByText('Clean All partially completed: cancelled').first()).toBeVisible();
+  const { log } = (await (await fetched).json()) as { log: string[] };
+  expect(log.join('\n')).toContain('Clean All partially completed: cancelled');
+  // Timeline entries can hold their own <pre>; the raw log view comes after them.
+  await expect(page.getByRole('dialog', { name: /Clean All/ }).locator('pre').last()).toHaveText(log.join('\n'));
 });
 
 test('history search finds jobs by name and hides the rest', async ({ page }) => {

@@ -13,5 +13,8 @@ RUN pip install --no-cache-dir -r /tmp/req/requirements-dev.txt
 COPY frontend/package.json frontend/package-lock.json /tmp/pw/
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright PYTHONDONTWRITEBYTECODE=1
 RUN cd /tmp/pw && npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
+# The marker serve.py requires before tolerating /config, which the app writes to here.
+ENV BWM_E2E_THROWAWAY=1
 WORKDIR /src/frontend
-CMD ["sh", "-c", "npm ci --no-audit --no-fund && npm run build && npx playwright test"]
+# Run with --network none: serve.py refuses otherwise. Dependencies and the build come first.
+CMD ["npx", "playwright", "test"]

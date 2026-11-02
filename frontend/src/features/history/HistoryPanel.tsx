@@ -1,3 +1,5 @@
+import { normaliseEpochSeconds } from '../../lib/dates';
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -12,12 +14,6 @@ const CONF_COLOR = {
   medium: 'warning',
   low:    'error',
 } as const;
-
-function normaliseEpochSeconds(ts?: number | string | null) {
-  const value = Number(ts);
-  if (!Number.isFinite(value) || value <= 0) return null;
-  return value > 100000000000 ? value / 1000 : value;
-}
 
 function entryTimestamp(entry: RecentImport) {
   return entry.matched_at ?? entry.imported_at;
@@ -136,7 +132,7 @@ export function HistoryPanel() {
       setRecent(r.imports ?? []);
       setAiHistory(h.history ?? []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -149,7 +145,7 @@ export function HistoryPanel() {
     try {
       await clearRecentImports();
     } catch (err) {
-      setError(`Could not clear the recently imported list: ${err instanceof Error ? err.message : String(err)}. Click Refresh to see the current list, then try again.`);
+      setError(`Could not clear the recently imported list: ${errorMessage(err)}. Click Refresh to see the current list, then try again.`);
       return;
     }
     void load();

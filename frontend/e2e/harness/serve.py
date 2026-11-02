@@ -2,19 +2,23 @@
 
     python frontend/e2e/harness/serve.py --port 18337 [--no-frontend]
 
-The root is rebuilt from nothing on every start, all state paths point inside
-it, and non-loopback sockets are refused and logged in ``blocked-network.log``
-(checked by the suite's global teardown). Provider HTTP is answered at the
-seam provider_boundary calls through (``urllib.request.urlopen`` and
-``open_public_url``) by the canned answers below; anything else is "unreachable",
-which the app must already handle as a provider outage.
+Importing the app has side effects outside any configured path: it moves
+legacy state files out of ``/config``. So this refuses to start wherever that
+could touch real data, and without an empty network namespace (see
+``refuse_unsafe_host``). Inside one, each start gets a new root and all
+overridable state paths point inside it.
+
+An audit hook logs this process's non-loopback sockets and lookups, and any child
+process outside a short list, in ``blocked-network.log``; global teardown fails
+the suite if that file exists. Provider HTTP is answered at the seams it goes through (``urlopen``,
+``open_public_url``, ``requests``) by the canned answers below; anything else is
+"unreachable", which the app must already handle as a provider outage.
 """
 import argparse
 import io
 import json
 import os
 import re
-import shutil
 import socket
 import sys
 import tempfile
@@ -29,15 +33,96 @@ REPO = Path(__file__).resolve().parents[3]
 HARNESS = Path(__file__).resolve().parent
 PASSWORD = "e2e-synthetic-password-not-a-secret"
 #: Settings from the developer's shell must not reach real services.
-_SCRUBBED = re.compile(r"^(BEETS|PLEX|LIDARR|SLSKD|QBIT|QB_|AI_|OPENAI|OPENROUTER|ACOUSTID|DISCOGS|LISTENBRAINZ|SPOTIFY)")
+_SCRUBBED = re.compile(
+    r"^(BEETS|PLEX|LIDARR|SLSKD|QBIT|QB_|AI_|OPENAI|OPENROUTER|ACOUSTID|DISCOGS|LISTENBRAINZ|SPOTIFY|SETUP_|WEB_MANAGER"
+    r"|MUSIC_|DOWNLOAD|YTDLP|IMPORT_REVIEW|METADATA|PLAYLIST|ALLOW_TORRENT|SPOTIFLAC|RECOVER_OWNED|DEMO_MODE|FFREPORT)|_FILE$")
+#: Port 1: nothing listens there, so these look like services that are down.
+_DEAD_URL = "http://127.0.0.1:1"
+#: What the app and ctypes.util.find_library legitimately run. None opens a socket for them.
+_ALLOWED_CHILDREN = {"ffmpeg", "ffprobe", "fpcalc", "ld", "ldconfig"}
+_LOOPBACK = {None, "", b"", "127.0.0.1", "::1", "localhost", b"127.0.0.1", b"::1", b"localhost"}
+
+
+def _mounted(path: Path) -> bool:
+    with open("/proc/self/mountinfo", encoding="utf-8") as f:
+        points = [line.split()[4] for line in f]
+    return any(point == str(path) or point.startswith(f"{path}/") for point in points)
+
+
+def _in_throwaway_container(config: Path) -> bool:
+    """The Dockerfile's marker, in a container, with nothing mounted at /config."""
+    in_container = Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+    return os.environ.get("BWM_E2E_THROWAWAY") == "1" and in_container and not _mounted(config)
+
+
+def _network_sealed() -> bool:
+    """True when this namespace can only reach loopback."""
+    with open("/proc/net/route", encoding="utf-8") as f:
+        if len(f.readlines()) > 1:
+            return False
+    try:
+        with open("/proc/net/ipv6_route", encoding="utf-8") as f:
+            return all(line.split()[-1] == "lo" for line in f)
+    except FileNotFoundError:
+        return True
+
+
+def refuse_unsafe_host(config: Path = Path("/config")) -> None:
+    if os.name != "posix":
+        sys.exit("E2E harness refused: Linux only. On Windows \"/config\" is a real folder on this drive. See frontend/e2e/README.md.")
+    if config.is_symlink():  # the mount check below would look at the link, not at where the app's files end up
+        sys.exit(f"E2E harness refused: {config} is a symlink and importing the app moves files out of it. "
+                 "Run the suite in the throwaway container. See frontend/e2e/README.md.")
+    if config.exists() and not _in_throwaway_container(config):
+        sys.exit(f"E2E harness refused: {config} exists and importing the app moves files out of it. "
+                 "Run the suite in the throwaway container. See frontend/e2e/README.md.")
+    if not _network_sealed():
+        sys.exit("E2E harness refused: this network namespace has routes. Use --network none or unshare -n. "
+                 "See frontend/e2e/README.md.")
 
 
 def isolated_root(port: int) -> Path:
-    root = Path(tempfile.gettempdir()).resolve() / f"bwm-e2e-{port}"
-    shutil.rmtree(root, ignore_errors=True)
-    if root.exists():
-        sys.exit(f"could not clear {root}; is another harness still running?")
+    """A new directory for this run. Never reuses or deletes an existing one: a
+    fixed path could be a host folder mounted there. env.ts makes the run directory."""
+    run_dir = os.environ.get("BWM_E2E_RUN_DIR") or tempfile.mkdtemp(prefix="bwm-e2e-")
+    root = Path(run_dir).resolve() / str(port)
+    try:
+        root.mkdir(parents=True)
+    except FileExistsError:
+        sys.exit(f"E2E harness refused: {root} already exists. Start each run with a new BWM_E2E_RUN_DIR.")
     return root
+
+
+def install_network_audit(root: Path) -> None:
+    """Runs before the app is imported. Audit events fire inside the C socket
+    methods, so connect_ex and sendto are covered and no import can undo it."""
+    log = root / "blocked-network.log"
+    allowed = _LOOPBACK | {socket.gethostname()}
+
+    def refuse(event, target):
+        with log.open("a", encoding="utf-8") as f:
+            f.write(f"{event} {target!r}\n")
+        raise PermissionError(f"E2E harness: {event} refused")
+
+    def hook(event, args):
+        if event in ("socket.connect", "socket.sendto"):
+            address = args[1]
+            host = address[0] if isinstance(address, tuple) else None  # a str is a Unix socket
+            if host not in allowed:
+                refuse(event, host)
+        elif event in ("socket.getaddrinfo", "socket.gethostbyname"):
+            if args[0] not in allowed:
+                refuse(event, args[0])
+        elif event in ("subprocess.Popen", "os.posix_spawn", "os.exec"):
+            # A child's sockets are invisible to this hook, so only known local tools may start.
+            program = args[0] if args[0] else args[1][0]
+            version_probe = list(args[1])[1:] == ["--version"]  # how the app detects yt-dlp's JS runtime
+            if Path(os.fsdecode(program)).name not in _ALLOWED_CHILDREN and not version_probe:
+                refuse(event, os.fsdecode(program))
+        elif event in ("os.system", "os.spawn", "os.fork", "os.forkpty"):
+            refuse(event, str(args)[:200])
+
+    sys.addaudithook(hook)
 
 
 def configure(root: Path, port: int) -> dict:
@@ -55,7 +140,7 @@ def configure(root: Path, port: int) -> dict:
     }), encoding="utf-8")
     (paths["data"] / ".setup_complete").write_text("e2e\n", encoding="utf-8")
 
-    for name in [n for n in os.environ if _SCRUBBED.match(n)]:
+    for name in [n for n in os.environ if _SCRUBBED.search(n)]:
         del os.environ[name]
     os.environ.update({
         "HOME": str(root), "USERPROFILE": str(root), "APPDATA": str(root),
@@ -66,10 +151,14 @@ def configure(root: Path, port: int) -> dict:
         "BEETS_LOG": str(paths["config"] / "beet.log"),
         "MUSIC_ROOT": str(paths["music"]),
         "DOWNLOADS_ROOT": str(paths["downloads"]),
+        # Import accepts sources under these, so a value from the shell would reach host folders.
+        "TORRENT_SOURCE_ROOTS": str(paths["downloads"]),
         "WEB_MANAGER_DATA_DIR": str(paths["data"]),
         "METADATA_CACHE_DIR": str(paths["cache"]),
         "BEETS_TRANSACTION_DIR": str(paths["transactions"]),
         "AI_BATCH_STATE_DIR": str(paths["data"] / "ai_batch_jobs"),
+        "RECOVERY_CARRIER_STATE_DIR": str(paths["data"] / "recovery_carriers"),
+        "UNMATCHED_DRAFT_DIR": str(paths["data"] / "unmatched_drafts"),
         "YTDLP_RUNTIME_BIN_DIR": str(paths["data"] / "yt-dlp"),
         # These default to /config, outside the root, whatever BEETSDIR says.
         "YTDLP_NETRC_FILE": str(paths["config"] / ".netrc"),
@@ -85,6 +174,13 @@ def configure(root: Path, port: int) -> dict:
         "BEETS_WEB_PASSWORD": PASSWORD,
         "PROVIDER_MAX_ATTEMPTS": "1",
         "PLAYLIST_AUTO_SYNC": "0",
+        # Fixture tracks are 1 s; the default treats anything under 45 s as a preview clip.
+        "PLAYLIST_MIN_DOWNLOAD_SECONDS": "0",
+        # Defaults name Compose services ("beets", "lidarr"), or read /config.
+        "BEETS_WEB_URL": _DEAD_URL,
+        "LIDARR_URL": _DEAD_URL,
+        "LIDARR_URL_FILE": str(paths["config"] / "lidarr_url"),
+        "LIDARR_API_KEY_FILE": str(paths["config"] / "lidarr_api_key"),
     })
     return paths
 
@@ -146,19 +242,7 @@ def musicbrainz_answer(path: str, fixture):
 
 
 def install_network_stubs(root: Path, fixture) -> None:
-    blocked_log = root / "blocked-network.log"
     calls_log = root / "provider-calls.log"
-    real_connect = socket.socket.connect
-
-    def guarded_connect(self, address):
-        host = address[0] if isinstance(address, tuple) else ""
-        if host in ("127.0.0.1", "::1", "localhost"):
-            return real_connect(self, address)
-        with blocked_log.open("a", encoding="utf-8") as f:
-            f.write(f"{host}\n")
-        raise OSError("E2E harness: non-loopback connection refused")
-
-    socket.socket.connect = guarded_connect
 
     def stub_urlopen(request, *args, **kwargs):
         url = request if isinstance(request, str) else request.full_url
@@ -234,7 +318,9 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="bind address (0.0.0.0 to debug a container from outside)")
     args = parser.parse_args()
 
+    refuse_unsafe_host()
     root = isolated_root(args.port)
+    install_network_audit(root)
     paths = configure(root, args.port)
     sys.path[:0] = [str(REPO), str(HARNESS)]
     os.chdir(root)

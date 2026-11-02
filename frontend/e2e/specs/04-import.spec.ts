@@ -34,10 +34,16 @@ test('Import All asks first; cancelling starts nothing', async ({ page }) => {
   const source = page.getByRole('tabpanel', { name: /Import Source/ });
   await source.getByRole('button', { name: 'Preview Import All' }).click();
   await expect(source.getByText(FOLDER, { exact: true })).toBeVisible();
+  const importPosts: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().includes('/api/ai-batch-import')) importPosts.push(request.url());
+  });
   await source.getByRole('button', { name: 'Import All', exact: true }).last().click();
   const dialog = page.getByRole('dialog', { name: 'Run Import All?' });
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(dialog).toHaveCount(0);
+  await page.waitForTimeout(1_000); // a wrongly fired request needs a moment to appear; there is no event for "none"
+  expect(importPosts).toEqual([]);
   expect(await libraryAlbums(page)).toHaveLength(before);
   expect(fs.existsSync(root('downloads', FOLDER))).toBe(true);
 });
@@ -50,11 +56,13 @@ test('confirmed Import All runs as a job; an unverifiable folder goes to review,
   await source.getByRole('button', { name: 'Import All', exact: true }).last().click();
   const started = page.waitForResponse((r) => r.url().includes('/api/ai-batch-import') && r.request().method() === 'POST');
   await page.getByRole('dialog', { name: 'Run Import All?' }).getByRole('button', { name: 'Import eligible only' }).click();
-  expect((await started).ok()).toBeTruthy();
+  const response = await started;
+  expect(response.ok()).toBeTruthy();
+  const { job_id: jobId } = (await response.json()) as { job_id: string };
 
-  await page.goto('/jobs');
-  const history = page.getByRole('button', { name: /^Completed .*[Ii]mport/ }).first();
-  await expect(history).toBeVisible({ timeout: 60_000 });
+  const job = async () => (await (await page.request.get(`/api/jobs/${jobId}`)).json()) as { status: string; log: string[] };
+  await expect.poll(async () => (await job()).status, { timeout: 60_000 }).toBe('success');
+  expect((await job()).log.join('\n')).toContain(`review item created: ${root('downloads', FOLDER)}`);
 
   // The stubbed lookup does not confirm this album, so a safe import leaves it unimported.
   const imported = (await libraryAlbums(page)).some((album) => album.album === 'Import Album');

@@ -12,7 +12,7 @@ from backend.config_layers import safe_roots
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under
 
 from flask import jsonify
-from backend.beets_adapter import BeetsError
+from backend.beets_adapter import BeetsAuthError, BeetsError, BeetsUnavailableError
 
 # ── ARCH-001 extracted code ──
 
@@ -468,6 +468,24 @@ def query_int_arg(args: Any, name: str, default: int, hi: int) -> Tuple[int, str
     if value < 0 or value > hi:
         return default, f"{name} must be between 0 and {hi}"
     return value, ""
+
+
+def beets_offline_response(message: str = "Beets library unavailable"):
+    """503 for a route that reports an unreachable engine as ENGINE_OFFLINE."""
+    return jsonify({"ok": False, "error": message, "error_code": "ENGINE_OFFLINE"}), 503
+
+
+def beets_auth_failed_response():
+    return jsonify({"ok": False, "error": "Beets engine authentication failed.", "error_code": "ENGINE_AUTH_FAILED"}), 503
+
+
+def beets_engine_error_response(ex: Exception):
+    """Fixed-text translation of an adapter error: never includes str(ex)."""
+    if isinstance(ex, BeetsAuthError):
+        return jsonify({"ok": False, "error": "Beets engine auth failed", "error_code": "ENGINE_AUTH_ERROR"}), 502
+    if isinstance(ex, BeetsUnavailableError):
+        return jsonify({"ok": False, "error": "Beets engine unavailable", "error_code": "ENGINE_UNAVAILABLE"}), 503
+    return jsonify({"ok": False, "error": "Beets engine error", "error_code": "ENGINE_ERROR"}), 502
 
 
 def json_route_result(body: Any, status: int = 200):

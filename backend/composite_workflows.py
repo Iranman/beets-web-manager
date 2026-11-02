@@ -8,6 +8,7 @@ Orchestrates multi-step, user-confirmed workflows across Beets:
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_text as _write_text_atomic
 
 import base64
 import contextlib
@@ -1184,10 +1185,12 @@ def apply_artist_folder_reconcile(
     meta = tx.get("metadata", {})
     canonical_name = meta.get("canonical_name")
     album_ids = meta.get("album_ids", [])
+    # An empty plan (e.g. a stamping op saved by an older version) would otherwise Complete having done nothing.
+    if not (album_ids and canonical_name):
+        return {"ok": False, "code": "artist_folder_plan_empty", "operation_id": operation_id, "mutated": False,
+                "error": "This artist folder operation has an empty plan; nothing was changed."}
 
     def write() -> Optional[Dict[str, Any]]:
-        if not (album_ids and canonical_name):
-            return None
         res = _engine_ok(_modify(ad, {"albumartist": canonical_name}, album_ids=[int(x) for x in album_ids],
                                  write=True, move=True))
         kept = (res or {}).get("preserved_album_ids") if isinstance(res, dict) else None
@@ -5441,22 +5444,6 @@ def read_playlist_m3u(playlist_key: str, fallback_name: str = "") -> Dict[str, A
     # only) is kept for older callers.
     return {"ok": True, "exists": True, "playlist_key": playlist_key, "items": items,
             "tracks": [it["path"] for it in items], "count": len(items)}
-
-
-def _write_text_atomic(p: Path, text: str) -> None:
-    """Write ``text`` to ``p`` through a same-directory temp file that is
-    removed on every failure path, including a refused replace."""
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        with open(tmp, "x", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, p)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
 
 
 def export_playlist_m3u(playlist_key: str, display_name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:

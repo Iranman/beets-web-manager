@@ -1,3 +1,6 @@
+import type { JobStartResponse } from '../../api/types';
+import { formatScanTime } from '../../lib/dates';
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -100,8 +103,6 @@ interface LibraryHealthResponse {
   empty_album_count: number;
 }
 
-interface JobStartResponse { ok: boolean; job_id: string }
-
 interface LibraryHealthPanelProps {
   active?: boolean;
   autoLoad?: boolean;
@@ -131,16 +132,6 @@ async function pollJob(jobId: string): Promise<'success' | 'failed'> {
     }
   }
   return 'failed';
-}
-
-function formatScanTime(timestamp: number | null) {
-  if (!timestamp) return 'Not scanned this session';
-  return new Date(timestamp).toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
 }
 
 function duplicateGroupKey(group: DupGroup) {
@@ -203,7 +194,7 @@ function DupGroupRow({
       setMsg(`Merged ${sources.length} duplicate row(s) into album_id ${target.album_id}.`);
       onMerged();
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : String(err));
+      setMsg(errorMessage(err));
     } finally {
       setMerging(false);
     }
@@ -304,7 +295,7 @@ function RgidDetailPanel({
       setDetail(res);
       if (!res.ok) setLoadError(res.error || 'Could not load this cluster.');
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
+      setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -326,7 +317,7 @@ function RgidDetailPanel({
         setActionMsg('Job failed — check Jobs for details.');
       }
     } catch (err) {
-      setActionMsg(err instanceof Error ? err.message : String(err));
+      setActionMsg(errorMessage(err));
     }
   };
 
@@ -355,7 +346,7 @@ function RgidDetailPanel({
       await refresh();
       onResolved();
     } catch (err) {
-      setActionMsg(err instanceof Error ? err.message : String(err));
+      setActionMsg(errorMessage(err));
     } finally {
       setBusyAction(null);
     }
@@ -373,7 +364,7 @@ function RgidDetailPanel({
         setActionMsg(res.error || 'Failed to save decision.');
       }
     } catch (err) {
-      setActionMsg(err instanceof Error ? err.message : String(err));
+      setActionMsg(errorMessage(err));
     } finally {
       setBusyAction(null);
     }
@@ -387,7 +378,7 @@ function RgidDetailPanel({
       setActionMsg('Resolution cleared — this cluster may be re-flagged on the next scan.');
       await refresh();
     } catch (err) {
-      setActionMsg(err instanceof Error ? err.message : String(err));
+      setActionMsg(errorMessage(err));
     } finally {
       setBusyAction(null);
     }
@@ -779,7 +770,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
       sessionStorage.setItem(_SESSION_DONE_KEY, '1');
       window.dispatchEvent(new Event('beets:jobs-changed'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -808,7 +799,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
         setOrphanMsg('Dry run job failed — check Jobs for details.');
       }
     } catch (err) {
-      setOrphanMsg(err instanceof Error ? err.message : String(err));
+      setOrphanMsg(errorMessage(err));
     } finally {
       setOrphanBusy(false);
     }
@@ -828,7 +819,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
       const outcome = await pollJob(res.job_id);
       if (outcome === 'success') void load();
     } catch (err) {
-      setOrphanMsg(err instanceof Error ? err.message : String(err));
+      setOrphanMsg(errorMessage(err));
     } finally {
       setOrphanBusy(false);
     }
@@ -845,7 +836,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
         ? `Dry run: would remove ${ids.length} empty album row(s). Run "Remove" to apply.`
         : 'Dry run failed — check Jobs.');
     } catch (err) {
-      setEmptyMsg(err instanceof Error ? err.message : String(err));
+      setEmptyMsg(errorMessage(err));
     } finally {
       setEmptyBusy(false);
     }
@@ -863,7 +854,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
       const outcome = await pollJob(res.job_id);
       if (outcome === 'success') void load();
     } catch (err) {
-      setEmptyMsg(err instanceof Error ? err.message : String(err));
+      setEmptyMsg(errorMessage(err));
     } finally {
       setEmptyBusy(false);
     }
@@ -878,7 +869,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
       const r = await startTemplateTokenCleanup({ dryRun: true });
       setTokenJobId(r.job_id);
     } catch (err) {
-      setTokenMsg(err instanceof Error ? err.message : String(err));
+      setTokenMsg(errorMessage(err));
       setTokenBusy(false);
     } finally {
       setTokenBusy(false);
@@ -896,7 +887,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
       const r = await startTemplateTokenCleanup({ dryRun: false });
       setTokenJobId(r.job_id);
     } catch (err) {
-      setTokenMsg(err instanceof Error ? err.message : String(err));
+      setTokenMsg(errorMessage(err));
       setTokenBusy(false);
     } finally {
       setTokenBusy(false);
@@ -910,7 +901,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
       const res = await getMbidStatus();
       setMbStatus(res);
     } catch (err) {
-      setMbError(err instanceof Error ? err.message : String(err));
+      setMbError(errorMessage(err));
     } finally {
       setMbLoading(false);
     }
@@ -934,7 +925,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
       const r = await startMbidStickingRepair({ dryRun: false, limit: 500 });
       setMbFixJobId(r.job_id);
     } catch (err) {
-      setMbFixMsg(err instanceof Error ? err.message : String(err));
+      setMbFixMsg(errorMessage(err));
     }
   }
 
@@ -995,7 +986,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
         } : d);
       }
     } catch (err) {
-      setMergeAllMsg(err instanceof Error ? err.message : String(err));
+      setMergeAllMsg(errorMessage(err));
     } finally {
       setMergeAllBusy(false);
     }

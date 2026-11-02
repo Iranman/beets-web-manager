@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .models import AcoustIDStatus, TrackAlignmentResult, TrackAssignment, UnmatchedLocalTrack
 from .normalize import (
+    _s,
     normalize_artist,
     normalize_title,
     normalize_track_title_for_matching,
@@ -14,14 +15,6 @@ from .normalize import (
     title_variants,
     track_title_variants_for_matching,
 )
-
-
-def _s(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return str(value)
 
 
 def _int(value: Any, default: int = 0) -> int:

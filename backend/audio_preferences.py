@@ -1,5 +1,6 @@
 """Music format preferences and audio validation helpers."""
 from __future__ import annotations
+from backend.json_state import atomic_write_json
 
 import json
 import os
@@ -147,10 +148,7 @@ def load_music_format_preferences(path: Optional[str] = None) -> Dict[str, Any]:
 def save_music_format_preferences(payload: Dict[str, Any], path: Optional[str] = None) -> Dict[str, Any]:
     prefs = normalize_music_format_preferences(payload)
     prefs_path = _settings_path(path)
-    prefs_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = prefs_path.with_suffix(prefs_path.suffix + ".tmp")
-    tmp.write_text(json.dumps(prefs, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(prefs_path)
+    atomic_write_json(prefs_path, prefs, indent=2, sort_keys=True)
     return prefs
 
 
@@ -572,11 +570,8 @@ def load_replacement_statuses(path: Optional[str] = None) -> Dict[str, Any]:
 
 def save_replacement_statuses(data: Dict[str, Any], path: Optional[str] = None) -> Dict[str, Any]:
     status_path = _replacement_status_path(path)
-    status_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"tracks": list(data.get("tracks") or []), "updated_at": time.time()}
-    tmp = status_path.with_suffix(status_path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(status_path)
+    atomic_write_json(status_path, payload, indent=2, sort_keys=True)
     return payload
 
 
