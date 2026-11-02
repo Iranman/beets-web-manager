@@ -70,11 +70,81 @@ def _mb_first_artist_id(credits: Any) -> str:
     return ""
 
 
+def _mb_medium_track_count(medium: Any) -> Optional[int]:
+    """A medium's track count, or None when MusicBrainz data doesn't state a valid one."""
+    raw = medium.get("track-count") if isinstance(medium, dict) else None
+    if isinstance(raw, str) and raw.strip().isdecimal():
+        return int(raw)
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return None
+
+
+def _mb_total_track_count(media: Any) -> int:
+    """Tracks across a release's media; 0 (unknown) unless every medium states a valid count.
+
+    A partial sum must not read as a release's size: media counted [10, "x"] could
+    otherwise pass as an exact 10-track match and beat a valid edition.
+    """
+    counts = [_mb_medium_track_count(medium) for medium in media or []]
+    return 0 if None in counts else sum(counts)
+
+
 def _mb_release_track_count(release: Dict[str, Any]) -> int:
-    total = 0
-    for medium in release.get("media") or []:
-        total += _mb_int(medium.get("track-count"), 0)
-    return total
+    return _mb_total_track_count(release.get("media"))
+
+
+_VINYL_KEYWORDS = {"vinyl", '7"', '10"', '12"', "shellac", "78"}
+
+
+def _is_vinyl(mediums: List[Dict[str, Any]]) -> bool:
+    return any(k in (m.get("format") or "").lower() for m in mediums for k in _VINYL_KEYWORDS)
+
+
+def _label_details(label_info: Any) -> tuple[str, List[str], List[str], List[Dict[str, str]]]:
+    """(primary label, labels, catalog numbers, label entries) of a release's label-info."""
+    labels: List[str] = []
+    catalog_numbers: List[str] = []
+    entries: List[Dict[str, str]] = []
+    if isinstance(label_info, list):
+        for li in label_info:
+            if not isinstance(li, dict):
+                continue
+            label_name = str((li.get("label") or {}).get("name") or "").strip()
+            catalog = str(li.get("catalog-number") or "").strip()
+            if label_name:
+                labels.append(label_name)
+            if catalog:
+                catalog_numbers.append(catalog)
+            if label_name or catalog:
+                entries.append({"label": label_name, "catalog_number": catalog})
+    return (labels[0] if labels else ""), labels, catalog_numbers, entries
+
+
+def _media_summary(media_list: Any) -> tuple[int, List[str], List[Dict[str, Any]], str]:
+    """(total tracks, formats, mediums, display summary) of a release's media."""
+    formats: List[str] = []
+    mediums: List[Dict[str, Any]] = []
+    for medium in media_list or []:
+        if not isinstance(medium, dict):
+            continue
+        fmt = str(medium.get("format") or "").strip()
+        count = _mb_medium_track_count(medium) or 0
+        if fmt and fmt not in formats:
+            formats.append(fmt)
+        mediums.append({
+            "position": int(medium.get("position") or len(mediums) + 1),
+            "format": fmt,
+            "tracks": count,
+        })
+    summary = " + ".join(f"{m['format'] or 'Medium'} ({m['tracks']})" for m in mediums)
+    return _mb_total_track_count(media_list), formats, mediums, summary
+
+
+def _cover_art_details(caa: Any) -> tuple[Optional[bool], Optional[bool], int]:
+    if isinstance(caa, dict):
+        return bool(caa.get("artwork")), bool(caa.get("front")), int(caa.get("count") or 0)
+    return None, None, 0
 
 
 def _mb_release_track_for_recording(release: Dict[str, Any], mb_trackid: str) -> tuple:
@@ -352,56 +422,6 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
     def _country_rank(c: str) -> int:
         return _COUNTRY_RANK.get((c or "").upper(), 99)
 
-    _VINYL_KEYWORDS = {"vinyl", '7"', '10"', '12"', 'shellac', '78'}
-
-    def _is_vinyl(media_list) -> bool:
-        for m in media_list:
-            fmt = (m.get("format") or "").lower()
-            if any(k in fmt for k in _VINYL_KEYWORDS):
-                return True
-        return False
-
-    def _label_details(label_info) -> tuple[str, List[str], List[str], List[Dict[str, str]]]:
-        labels: List[str] = []
-        catalog_numbers: List[str] = []
-        entries: List[Dict[str, str]] = []
-        if isinstance(label_info, list):
-            for li in label_info:
-                if not isinstance(li, dict):
-                    continue
-                label_name = ((li.get("label") or {}).get("name") or "").strip()
-                catalog = (li.get("catalog-number") or "").strip()
-                if label_name:
-                    labels.append(label_name)
-                if catalog:
-                    catalog_numbers.append(catalog)
-                if label_name or catalog:
-                    entries.append({"label": label_name, "catalog_number": catalog})
-        primary = labels[0] if labels else ""
-        return primary, labels, catalog_numbers, entries
-
-    def _media_summary(media_list) -> tuple[int, List[str], List[Dict[str, Any]], str]:
-        total = 0
-        formats: List[str] = []
-        mediums: List[Dict[str, Any]] = []
-        for medium in media_list or []:
-            if not isinstance(medium, dict):
-                continue
-            fmt = (medium.get("format") or "").strip()
-            count = int(medium.get("track-count") or 0)
-            total += count
-            if fmt and fmt not in formats:
-                formats.append(fmt)
-            mediums.append({
-                "position": int(medium.get("position") or len(mediums) + 1),
-                "format": fmt,
-                "tracks": count,
-            })
-        summary = " + ".join(
-            f"{m['format'] or 'Medium'} ({m['tracks']})" for m in mediums
-        )
-        return total, formats, mediums, summary
-
     def _edition_summary(rel: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "score": rel.get("score", 0),
@@ -447,16 +467,8 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
                              for x in ac if isinstance(x, dict))
         media    = rel.get("media", [])
         r_tracks, r_formats, mediums, format_summary = _media_summary(media)
-        r_vinyl   = _is_vinyl(media)
-        caa = rel.get("cover-art-archive")
-        if isinstance(caa, dict):
-            cover_art = bool(caa.get("artwork"))
-            front_art = bool(caa.get("front"))
-            cover_art_count = int(caa.get("count") or 0)
-        else:
-            cover_art = None
-            front_art = None
-            cover_art_count = 0
+        r_vinyl   = _is_vinyl(mediums)
+        cover_art, front_art, cover_art_count = _cover_art_details(rel.get("cover-art-archive"))
         rg = rel.get("release-group") or {}
         rg_id = str(rg.get("id") or "").strip().lower()
         rg_primary_type = str(rg.get("primary-type") or "").strip()
@@ -493,11 +505,13 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
         vinyl_pen    = 10 if rel["is_vinyl"] else 0
         country_pts  = _country_rank(rel["country"])
         year_miss    = 0 if (not year or rel["year"][:4] == str(year)[:4]) else 2
-        track_delta  = abs(int(rel["tracks"] or 0) - int(track_count or 0)) if track_count else 0
+        # tracks == 0 is an unknown count (_mb_total_track_count): below any valid edition.
+        track_unknown = 1 if track_count and not rel["tracks"] else 0
+        track_delta  = abs(int(rel["tracks"]) - int(track_count)) if track_count and rel["tracks"] else 0
         track_miss   = 0 if (not track_count or rel["tracks"] == track_count) else 1
         score_pts    = -rel["score"]
         if track_count:
-            return (track_miss, track_delta, vinyl_pen, country_pts, year_miss, score_pts)
+            return (track_unknown, track_miss, track_delta, vinyl_pen, country_pts, year_miss, score_pts)
         return (vinyl_pen, country_pts, year_miss, track_miss, score_pts)
 
     groups: dict = OrderedDict()
@@ -566,51 +580,11 @@ def _fetch_mb_release_candidate(mb_id: str) -> Optional[Dict[str, Any]]:
         if isinstance(ac, dict)
     ).strip()
 
-    labels: List[str] = []
-    catalog_numbers: List[str] = []
-    label_entries: List[Dict[str, str]] = []
-    for li in (rel.get("label-info") or []):
-        if not isinstance(li, dict):
-            continue
-        ln = str((li.get("label") or {}).get("name") or "").strip()
-        cat = str(li.get("catalog-number") or "").strip()
-        if ln:
-            labels.append(ln)
-        if cat:
-            catalog_numbers.append(cat)
-        if ln or cat:
-            label_entries.append({"label": ln, "catalog_number": cat})
-
-    media = rel.get("media") or []
-    total_tracks = 0
-    formats: List[str] = []
-    mediums: List[Dict[str, Any]] = []
-    _vinyl_kw = {"vinyl", '7"', '10"', '12"', "shellac", "78"}
-    for medium in media:
-        if not isinstance(medium, dict):
-            continue
-        fmt = str(medium.get("format") or "").strip()
-        cnt = int(medium.get("track-count") or 0)
-        total_tracks += cnt
-        if fmt and fmt not in formats:
-            formats.append(fmt)
-        mediums.append({"position": int(medium.get("position") or len(mediums) + 1),
-                        "format": fmt, "tracks": cnt})
-    is_vinyl = any(any(k in (m.get("format") or "").lower() for k in _vinyl_kw) for m in mediums)
-    format_summary = " + ".join(
-        f"{m['format'] or 'Medium'} ({m['tracks']})" for m in mediums
-    )
-
+    primary_label, labels, catalog_numbers, label_entries = _label_details(rel.get("label-info"))
+    total_tracks, formats, mediums, format_summary = _media_summary(rel.get("media"))
+    is_vinyl = _is_vinyl(mediums)
     full_date = str(rel.get("date") or "")
-    caa = rel.get("cover-art-archive")
-    if isinstance(caa, dict):
-        cover_art = bool(caa.get("artwork"))
-        front_art = bool(caa.get("front"))
-        cover_art_count = int(caa.get("count") or 0)
-    else:
-        cover_art = None
-        front_art = None
-        cover_art_count = 0
+    cover_art, front_art, cover_art_count = _cover_art_details(rel.get("cover-art-archive"))
 
     rg = rel.get("release-group") or {}
     rg_id = str(rg.get("id") or "").strip().lower()
@@ -625,7 +599,7 @@ def _fetch_mb_release_candidate(mb_id: str) -> Optional[Dict[str, Any]]:
         "artist":            artists,
         "year":              full_date[:4],
         "date":              full_date,
-        "label":             labels[0] if labels else "",
+        "label":             primary_label,
         "labels":            labels,
         "catalog_numbers":   catalog_numbers,
         "label_entries":     label_entries,
@@ -911,12 +885,13 @@ def _resolve_release_group_to_release(rg_mbid: str, log: list,
         country = country_rank.get((rel.get("country") or "").upper(), 9)
         date = (rel.get("date") or "")[:4]
         year_miss = 0 if (not year or date == str(year)[:4]) else 2
-        media = rel.get("media") or []
-        tracks = sum(int(m.get("track-count") or 0) for m in media)
+        tracks = _mb_release_track_count(rel)
         if track_count:
+            # tracks == 0 is an unknown count: below any valid edition, whatever its status.
+            track_unknown = 0 if tracks else 1
             track_miss = 0 if tracks == track_count else 1
-            track_delta = abs(tracks - track_count) if tracks else 999
-            return (status_miss, track_miss, track_delta, country, year_miss, date or "9999")
+            track_delta = abs(tracks - track_count) if tracks else 0
+            return (track_unknown, status_miss, track_miss, track_delta, country, year_miss, date or "9999")
         return (status_miss, country, year_miss, date or "9999")
 
     chosen = sorted(releases, key=_rank)[0]
@@ -945,8 +920,7 @@ def _mb_release_group_candidates(rg_mbid: str, log: Optional[list] = None) -> Li
 
     out: List[Dict[str, Any]] = []
     for rel in releases:
-        media = rel.get("media") or []
-        tracks = sum(int(m.get("track-count") or 0) for m in media)
+        tracks = _mb_release_track_count(rel)
         out.append({
             "mb_albumid": (rel.get("id") or "").lower(),
             "title": rel.get("title") or "",

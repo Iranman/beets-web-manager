@@ -142,7 +142,7 @@ per module (handlers over 100 lines):
 
 | Route module | Route lines | >100-line handlers | Largest |
 |---|---|---|---|
-| `routes_library.py` | 4,543 | 13 | `item_attach_recording` (396), `ai_suggest` (338), `apply_album_duplicate_resolver` (256) |
+| `routes_library.py` | ~4,200 | 12 | `item_attach_recording` (396), `apply_album_duplicate_resolver` (256) |
 | `routes_cleanup.py` | 1,938 | 5 | `dedup_ai_review` (430), `apply_folder_placeholder_action_api` (183) |
 | `routes_import.py` | 1,458 | 3 | `import_review_queue` (279), `import_review_revalidate` (121) |
 | `routes_maintenance.py` | 759 | 2 | `start_maintenance_runner` (494), `api_transaction_rollback` (137) |
