@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import base64, copy, difflib, hashlib, json, os, re, shutil, socket, sqlite3, stat, subprocess, threading, time, unicodedata, uuid
+import base64, copy, dataclasses, difflib, hashlib, json, os, re, shutil, socket, sqlite3, stat, subprocess, threading, time, unicodedata, uuid
 import urllib.error
 from collections import Counter, defaultdict, deque
 import backend.job_contract as job_contract
 from backend.matching import evaluate_release_group_candidate
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import PLAYLIST_DOWNLOAD_ALLOWED_ROOTS
 from backend.app_runtime import _app_logger, AUDIO_EXT, LIB_PATH, MUSIC_ROOT, PLAYLIST_AUTO_SYNC_ENABLED, PLAYLIST_AUTO_SYNC_INTERVAL, PLAYLIST_LEGACY_IMPORT_DIR, PLAYLIST_DOWNLOAD_BATCH_SIZE, PLAYLIST_DOWNLOAD_METHODS, PLAYLIST_DOWNLOAD_ROOT, PLAYLIST_EXPORTS_DIR, PLAYLIST_JOB_STATE_DIR, PLAYLIST_MANIFESTS_DIR, PLAYLIST_MEMBERSHIP_DIR, PLAYLIST_MIN_DOWNLOAD_SECONDS, PLAYLIST_PIPELINE_STATES, PLAYLIST_STATE_ROOT, PLEX_API_TIMEOUT, PLEX_PLAYLIST_CHUNK_SIZE, PLEX_SCAN_TIMEOUT, PLEX_SYNC_MAX_UNMATCHED_REPLACE, PLEX_SYNC_MIN_MATCH_RATIO, _MB_UUID_RE, _s, _up, _ur, _ytdlp_ready
 from backend.ytdlp_service import _apply_ytdlp_netrc, _download_method_label, _spotiflac_missing_tracks_download, _ytdlp_js_runtime_options, _ytdlp_missing_tracks_download, _ytdlp_remote_components, _ytdlp_source_extractor_args
@@ -413,11 +413,6 @@ def _playlist_stamp_download_tags(path_value: str, artist: str, title: str, log)
         composite_workflows.write_tags(str(path_value), tags)
     except Exception as ex:
         log(f"  warning: could not stamp playlist tags on {Path(path_value).name}: {ex}")
-
-
-def _write_playlist_import_beets_config(temp_path: str) -> str:
-    """Use the project single-track path format for playlist download imports."""
-    return "/config/config.yaml"
 
 
 def _playlist_identity_status_fields(match: Dict[str, Any]) -> Dict[str, Any]:
@@ -1956,13 +1951,6 @@ def _plex_delete_playlist_by_title_unambiguous(title: str, log=None) -> Tuple[in
 
     pl, key = candidates[0]
     return _plex_delete_playlist_by_rating_key(key, log=log), ""
-
-
-def _plex_delete_playlist_by_title(title, log=None):
-    """Legacy/fallback authority only -- deletes a single matching Plex playlist by title
-    only if exactly one exists on Plex (SEC-002 Wave 11)."""
-    deleted, _ = _plex_delete_playlist_by_title_unambiguous(title, log=log)
-    return deleted
 
 
 def _playlist_other_live_pids_with_name(clean_name: str, exclude_pid: str = "") -> List[str]:
@@ -4851,6 +4839,628 @@ def _playlist_download_missing_tracks(
     }
 
 
+@dataclasses.dataclass
+class _PlaylistPipelineRun:
+    """What the steps of one playlist download job share. ``state`` is the live
+    checkpoint; the two track lists are the job's current wanted tracks."""
+    name: str
+    jid: str
+    playlist_id: str
+    dl_dir: Path
+    state: Dict[str, Any]
+    log: Callable[[str], None]
+    parse_source: str
+    parse_content: str
+    download_methods: List[str]
+    download_only: bool
+    sync_after_import: bool
+    pipeline_action: str
+    cancel_event: Any
+    active_tracks: List[Dict[str, Any]]
+    active_all_tracks: List[Dict[str, Any]]
+
+
+def _pipeline_stop_if_cancelled(run: _PlaylistPipelineRun, *, announce: bool = True) -> Optional[Dict[str, Any]]:
+    """Checkpoint a cancelled/paused job; its job result, or None to carry on."""
+    if run.cancel_event is None or not run.cancel_event.is_set():
+        return None
+    state = run.state
+    paused = bool(state.get("pause_requested"))
+    state["status"] = "paused" if paused else "stopped"
+    state["phase"] = state["status"]
+    state["current"] = "resume from checkpoint" if paused else "stopped by user"
+    _playlist_save_job_state(state)
+    _playlist_record_pipeline(run.name, status=state["status"], action=run.pipeline_action)
+    if announce:
+        run.log("Playlist pipeline paused at checkpoint." if paused else "Playlist pipeline stopped by user.")
+    return {"playlist_job_id": run.jid, "playlist": run.name, "status": state["status"]}
+
+
+def _pipeline_mark_source(state: Dict[str, Any], all_tracks: List[Dict[str, Any]],
+                          matched: List[Dict[str, Any]], missing: List[Dict[str, Any]]) -> None:
+    """Publish the resolved wanted tracks and their first per-track statuses."""
+    state["tracks"] = all_tracks
+    state["matched"] = matched
+    state["missing"] = missing
+    state["matched_initial"] = len(matched)
+    state["missing_initial"] = len(missing)
+    for track in matched:
+        _playlist_set_track_status(
+            state, track, "matched", message="already in Beets",
+            path=_s(track.get("path") or ""), _no_save=True)
+    for track in missing:
+        _playlist_set_track_status(state, track, "missing", message="not in Beets", _no_save=True)
+
+
+def _pipeline_source_from_fetch(run: _PlaylistPipelineRun) -> None:
+    """Fetch the playlist from its source and match it against Beets."""
+    name, state, _log = run.name, run.state, run.log
+    _playlist_save_job_state(state)
+    parse_resp = parse_playlist_request(
+        {"source": run.parse_source or "url", "content": run.parse_content, "skip_match": False})
+    parsed = _json_from_flask_response(parse_resp)
+    if not parsed.get("ok"):
+        raise RuntimeError(parsed.get("error") or "playlist parse failed")
+    active_all_tracks = _playlist_apply_tombstones(name, list(parsed.get("tracks") or []))
+    active_tracks = _playlist_apply_tombstones(name, list(parsed.get("missing") or []))
+    active_keys = {_playlist_status_id(track) for track in active_all_tracks}
+    matched_initial = [
+        track for track in list(parsed.get("matched") or [])
+        if _playlist_status_id(track) in active_keys
+    ]
+    _playlist_write_manifest(
+        name,
+        active_all_tracks,
+        matched_tracks=matched_initial,
+        missing_tracks=active_tracks,
+        source=run.parse_source,
+        content=run.parse_content,
+        log=state["log"],
+    )
+    state["track_statuses"] = {}
+    state["track_status_list"] = []
+    _pipeline_mark_source(state, active_all_tracks, matched_initial, active_tracks)
+    state["total"] = len(active_tracks)
+    if active_all_tracks:
+        _playlist_save_job_state(state)
+    _log(
+        f"Playlist read: {len(active_all_tracks)} track(s), "
+        f"{len(matched_initial)} matched, {len(active_tracks)} missing"
+    )
+    run.active_tracks, run.active_all_tracks = active_tracks, active_all_tracks
+
+
+def _pipeline_source_from_checkpoint(run: _PlaylistPipelineRun, desired: List[Dict[str, Any]]) -> None:
+    """Resume from the saved manifest and checkpoint statuses, without a fetch or library scan."""
+    name, state, _log = run.name, run.state, run.log
+    active_all_tracks = _playlist_apply_tombstones(name, desired)
+    _done_statuses_r = {"available", "matched"}
+    matched_initial = [
+        t for t in active_all_tracks
+        if state["track_statuses"].get(_playlist_status_id(t), {}).get("status") in _done_statuses_r
+    ]
+    active_tracks = [
+        t for t in active_all_tracks
+        if state["track_statuses"].get(_playlist_status_id(t), {}).get("status") not in _done_statuses_r
+    ]
+    active_tracks = _playlist_apply_tombstones(name, active_tracks)
+    _pipeline_mark_source(state, active_all_tracks, matched_initial, active_tracks)
+    state["total"] = len(active_tracks)
+    if active_all_tracks:
+        _playlist_save_job_state(state)
+    _log(
+        f"Resume: {len(matched_initial)} already available, "
+        f"{len(active_tracks)} still need download"
+    )
+    run.active_tracks, run.active_all_tracks = active_tracks, active_all_tracks
+
+
+def _pipeline_resolve_parsed_source(run: _PlaylistPipelineRun) -> None:
+    """Source resolution for a playlist given as a URL/text source."""
+    state, _log = run.state, run.log
+    # On resume with a checkpoint, skip the expensive YouTube re-fetch and
+    # library scan -- use the saved manifest tracks + checkpoint statuses instead.
+    resumed = bool(state.get("resumed") and state.get("track_statuses"))
+    desired: List[Dict[str, Any]] = []
+    state["phase"] = "parse"
+    state["current"] = "reading playlist track list"
+    if resumed:
+        _log("Resume: reading track list from manifest (skipping YouTube fetch and library match)...")
+        desired = _playlist_clean_track_list(
+            _playlist_read_manifest(_clean_playlist_name(run.name)).get("desired_tracks") or [])
+        if not desired:
+            resumed = False
+            _log("Resume: manifest empty — falling back to full playlist fetch...")
+    else:
+        _log("Reading playlist track list and matching against Beets...")
+    if resumed:
+        _pipeline_source_from_checkpoint(run, desired)
+    else:
+        _pipeline_source_from_fetch(run)
+
+
+def _pipeline_resolve_requested_source(run: _PlaylistPipelineRun) -> None:
+    """Source resolution for a track list supplied by the caller."""
+    name, state, _log = run.name, run.state, run.log
+    active_tracks = run.active_tracks
+    active_all_tracks = run.active_all_tracks
+    if not active_all_tracks:
+        active_all_tracks = list(active_tracks)
+    active_all_tracks = _playlist_apply_tombstones(name, active_all_tracks)
+    active_tracks = _playlist_apply_tombstones(name, active_tracks)
+    run.active_all_tracks = active_all_tracks
+    run.active_tracks = active_tracks
+    if not active_all_tracks:
+        return
+    requested_only = bool(active_tracks)
+    if state.get("resumed") and state.get("track_statuses"):
+        # Resume without re-scanning the library — derive from saved statuses.
+        _done_statuses_r = {"available", "matched", "imported"}
+        matched_initial = [
+            t for t in active_all_tracks
+            if state["track_statuses"].get(_playlist_status_id(t), {}).get("status") in _done_statuses_r
+        ]
+        missing_initial = [
+            t for t in active_all_tracks
+            if state["track_statuses"].get(_playlist_status_id(t), {}).get("status") not in _done_statuses_r
+        ]
+        _log(f"Resume: {len(matched_initial)} already available, {len(missing_initial)} still need download")
+    else:
+        state["phase"] = "match"
+        state["current"] = "checking Beets before download"
+        precheck_tracks = list(active_tracks if requested_only else active_all_tracks)
+        if requested_only:
+            _log("Checking requested missing playlist tracks against Beets before download...")
+        else:
+            _log("Checking playlist tracks against Beets before sync...")
+        matched_initial, missing_initial = _match_playlist_tracks(precheck_tracks)
+    _pipeline_mark_source(state, active_all_tracks, matched_initial, missing_initial)
+    run.active_tracks = missing_initial if requested_only else []
+    state["total"] = len(run.active_tracks)
+    if requested_only:
+        _log(
+            f"Pre-download requested-track check: {len(matched_initial)} already available, "
+            f"{len(missing_initial)} still need download"
+        )
+    else:
+        _log(
+            f"Pre-sync Beets check: {len(matched_initial)} matched, "
+            f"{len(missing_initial)} missing"
+        )
+
+
+def _pipeline_import_checkpoint_staged(run: _PlaylistPipelineRun) -> Optional[Dict[str, Any]]:
+    """Resume: reconcile staged files and import them before any new download.
+    The job result when cancelled, else None."""
+    name, state, _log, dl_dir = run.name, run.state, run.log, run.dl_dir
+    active_tracks, playlist_id, cancel_event = run.active_tracks, run.playlist_id, run.cancel_event
+    if not (state.get("resumed") and not run.download_only and active_tracks):
+        return None
+    _log("Resume: reconciling staged downloads from previous checkpoint...")
+    state["phase"] = "reconcile"
+    state["current"] = "reconciling staged files"
+    _playlist_save_job_state(state)
+    _playlist_reconcile_staged_files(
+        name, dl_dir, active_tracks, _log, playlist_id=playlist_id)
+    staged_entries = _playlist_staged_entries(name, playlist_id=playlist_id)
+    active_keys = {_playlist_status_id(t) for t in active_tracks}
+    staged_entries = [
+        (t, p) for t, p in staged_entries
+        if _playlist_status_id(t) in active_keys
+    ]
+    if not staged_entries:
+        _log("Resume: no staged downloads found; starting fresh download round")
+        state["waiting_for_import"] = 0
+        return None
+    _n_staged = len(staged_entries)
+    _log(
+        f"Resume: found {_n_staged} previously downloaded file(s); "
+        "importing before continuing downloads"
+    )
+    state["phase"] = "import"
+    state["current"] = f"importing {_n_staged} staged file(s) from previous run"
+    state["waiting_for_import"] = _n_staged
+    _playlist_save_job_state(state)
+    stopped = _pipeline_stop_if_cancelled(run, announce=False)
+    if stopped:
+        return stopped
+    try:
+        _playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)
+        state["waiting_for_import"] = 0
+        _log(f"Resume: pre-download import of {_n_staged} staged file(s) complete")
+        # Use manifest states to find newly-available tracks instead of
+        # re-scanning the full 30K-item library (which OOMs over NFS).
+        _manifest_states_post = _playlist_manifest_track_states(_clean_playlist_name(name))
+        _done_post = {"available", "matched"}
+        _matched_pre = [
+            t for t in active_tracks
+            if _manifest_states_post.get(_playlist_status_id(t), {}).get("status") in _done_post
+        ]
+        _missing_pre = [
+            t for t in active_tracks
+            if _manifest_states_post.get(_playlist_status_id(t), {}).get("status") not in _done_post
+        ]
+        active_tracks = _missing_pre
+        run.active_tracks = active_tracks
+        state["matched"] = list(state.get("matched") or []) + _matched_pre
+        state["missing"] = active_tracks
+        state["total"] = len(active_tracks)
+        for _trk in _matched_pre:
+            _playlist_set_track_status(
+                state, _trk, "available",
+                message="imported from previous checkpoint",
+                path=_s(_trk.get("path") or ""))
+        _log(
+            f"Resume: {len(_matched_pre)} track(s) imported from checkpoint, "
+            f"{len(active_tracks)} still need download"
+        )
+    except RuntimeError as _ex:
+        state["waiting_for_import"] = 0
+        _log(f"Resume: pre-download import warning — {_ex}")
+    return _pipeline_stop_if_cancelled(run, announce=False)
+
+
+def _pipeline_keep_review_status(state: Dict[str, Any], track: Dict[str, Any]) -> bool:
+    """A review hold outlives later matching passes: only the user clears it."""
+    row = state.get("track_statuses", {}).get(_playlist_status_id(track)) or {}
+    return _s(row.get("status") or "") == "review_required"
+
+
+def _pipeline_sync_eligible(name: str, tracks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Matched tracks that may enter the playlist outputs (no review holds)."""
+    return [
+        track for track in tracks
+        if _s((_playlist_state_for_track(name, track) or {}).get("status") or "") != "review_required"
+    ]
+
+
+def _pipeline_import_round(run: _PlaylistPipelineRun, round_num: int) -> Dict[str, Any]:
+    """Import the round's stable staged files; returns the placement summary."""
+    name, state, _log, playlist_id = run.name, run.state, run.log, run.playlist_id
+    state["phase"] = "import"
+    state["current"] = f"importing stable staged downloads after round {round_num}"
+    state["waiting_for_import"] = _playlist_waiting_import_count_from_state(state)
+    _playlist_save_job_state(state)
+    _log(
+        "Starting Beets singleton import from stable playlist staging "
+        f"({_playlist_imports_dir(name, playlist_id=playlist_id)}) ..."
+    )
+    import_summary = _playlist_run_import_downloaded(
+        name, state["log"], cancel_event=run.cancel_event, playlist_id=playlist_id)
+    state["waiting_for_import"] = 0
+    state["import_returncode"] = 0
+    placement_summary = import_summary.get("placement") or {}
+    state["last_placement"] = placement_summary
+    _playlist_save_job_state(state)
+    _log(
+        f"Beets singleton import round {round_num} complete: "
+        f"{int(import_summary.get('imported_files') or 0)} staged file(s)"
+    )
+    if placement_summary.get("placed"):
+        _log(
+            f"Placed {placement_summary.get('placed')} playlist import(s) "
+            "into normal album folders"
+        )
+    elif placement_summary.get("matched_candidates"):
+        _log(
+            "Playlist import placement found candidates but none could be "
+            "safely resolved to a MusicBrainz album"
+        )
+    else:
+        _log("No new playlist singleton rows needed album placement")
+    return placement_summary
+
+
+def _pipeline_match_round(run: _PlaylistPipelineRun, round_num: int,
+                          previous_missing: List[Dict[str, Any]],
+                          placement_summary: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Re-match every wanted track after an import and update per-track statuses."""
+    state, _log = run.state, run.log
+    state["phase"] = "match"
+    state["current"] = f"matching after round {round_num}"
+    _invalidate_lib_cache()
+    time.sleep(1)
+    matched_round, missing_round = _match_playlist_tracks(run.active_all_tracks, verify_acoustid=True)
+    state["matched"] = matched_round
+    state["matched_after_import"] = len(matched_round)
+    state["missing_after_import"] = len(missing_round)
+    state["missing"] = missing_round
+    matched_keys = {_playlist_status_id(track) for track in matched_round}
+    for track in previous_missing:
+        if _playlist_status_id(track) in matched_keys:
+            acoustid_st = _s(next(
+                (t.get("acoustid_status") for t in matched_round
+                 if _playlist_status_id(t) == _playlist_status_id(track)), ""
+            ))
+            if acoustid_st == "mismatch":
+                _playlist_set_track_status(
+                    state, track, "review_required",
+                    message="imported but AcoustID fingerprint does not match expected track")
+            elif placement_summary.get("failed") and not placement_summary.get("placed"):
+                _playlist_set_track_status(
+                    state,
+                    track,
+                    "review_required",
+                    message="imported, but no MusicBrainz release-group match reached 70% confidence",
+                )
+            else:
+                _playlist_set_track_status(
+                    state, track, "imported", message="imported and matched in Beets")
+    for track in missing_round:
+        if _pipeline_keep_review_status(state, track):
+            continue
+        _playlist_set_track_status(
+            state, track, "missing", message="still missing after import")
+    _log(
+        f"After round {round_num}: {len(matched_round)} matched, "
+        f"{len(missing_round)} still missing"
+    )
+    return matched_round, missing_round
+
+
+def _pipeline_sync_round(run: _PlaylistPipelineRun, round_num: int,
+                         matched_round: List[Dict[str, Any]], missing_round: List[Dict[str, Any]]) -> None:
+    """Incremental M3U + Plex sync after a round, so progress shows while the job runs."""
+    state = run.state
+    state["phase"] = "sync"
+    state["current"] = f"syncing M3U + Plex after round {round_num}"
+    run.log(f"Syncing M3U/Plex playlist after round {round_num} ({len(matched_round)} matched tracks)...")
+    _create_playlist_outputs(
+        run.name, _pipeline_sync_eligible(run.name, matched_round), log=state["log"], replace_plex=True,
+        wait_for_plex_seconds=PLEX_SCAN_TIMEOUT,
+        desired_tracks=run.active_all_tracks,
+        missing_tracks=missing_round,
+        source=run.parse_source,
+        content=run.parse_content)
+    state["phase"] = "match"
+
+
+def _pipeline_download_rounds(run: _PlaylistPipelineRun) -> Optional[Dict[str, Any]]:
+    """Missing-track acquisition: bounded rounds of download, import and re-match.
+    The job result when cancelled, else None."""
+    state, _log = run.state, run.log
+    active_tracks = run.active_tracks
+    max_rounds = max(1, int(os.environ.get("PLAYLIST_DOWNLOAD_MAX_ROUNDS", "8") or "8"))
+    batch_size = int(PLAYLIST_DOWNLOAD_BATCH_SIZE or 0)
+    state["max_rounds"] = max_rounds
+    state["download_batch_size"] = batch_size
+    round_num = 0
+    while active_tracks and round_num < max_rounds:
+        stopped = _pipeline_stop_if_cancelled(run)
+        if stopped:
+            return stopped
+        round_num += 1
+        state["round"] = round_num
+        state["phase"] = "download"
+        batch_tracks = active_tracks[:batch_size] if batch_size > 0 else list(active_tracks)
+        deferred_tracks = active_tracks[len(batch_tracks):] if batch_size > 0 else []
+        if not batch_tracks:
+            break
+        state["download_batch_remaining"] = len(deferred_tracks)
+        state["current"] = (
+            f"download round {round_num}: {len(batch_tracks)} of {len(active_tracks)}"
+            if deferred_tracks else f"download round {round_num}"
+        )
+        previous_missing = list(batch_tracks)
+        previous_missing_keys = {
+            _playlist_requested_track_key(track) for track in previous_missing
+        }
+        previous_matched = len(state.get("matched") or [])
+        _log("")
+        _log(
+            f"{'='*40}\n"
+            f"Missing-track round {round_num}/{max_rounds}: "
+            f"{len(active_tracks)} track(s) still missing"
+        )
+        if deferred_tracks:
+            _log(
+                f"PLAYLIST_DOWNLOAD_BATCH_SIZE={batch_size}: downloading "
+                f"{len(batch_tracks)} of {len(active_tracks)} missing track(s); "
+                f"{len(deferred_tracks)} remain queued"
+            )
+        round_result = _playlist_download_missing_tracks(
+            batch_tracks, run.dl_dir, state, _log, run.download_methods,
+            cancel_event=run.cancel_event)
+        verified_downloaded = int(round_result.get("downloaded") or 0)
+        review_downloaded = int(round_result.get("review_required") or 0)
+        failed_downloads = int(round_result.get("failed") or 0)
+        if review_downloaded:
+            _log(
+                f"Round {round_num} download complete: "
+                f"{verified_downloaded} fingerprint-verified, "
+                f"{review_downloaded} held for review, "
+                f"{failed_downloads} not downloaded"
+            )
+        else:
+            _log(
+                f"Round {round_num} download complete: "
+                f"{verified_downloaded} downloaded, "
+                f"{failed_downloads} not downloaded"
+            )
+        stopped = _pipeline_stop_if_cancelled(run)
+        if stopped:
+            return stopped
+
+        pause_after_this_round = False
+        if review_downloaded > 0:
+            review_total = _playlist_review_required_count_from_state(state)
+            waiting_total = _playlist_waiting_import_count_from_state(state)
+            state["phase"] = "review"
+            state["current"] = f"{review_total} downloaded file(s) need review before import"
+            state["review_required"] = review_total
+            state["waiting_for_import"] = waiting_total
+            _playlist_save_job_state(state)
+            if verified_downloaded <= 0:
+                _log(
+                    f"{review_downloaded} downloaded file(s) require review before import; "
+                    "stopping automatic import for this round."
+                )
+                break
+            # Some tracks in this round need review, but others were
+            # already fingerprint-verified — import those now instead
+            # of discarding a whole round's verified downloads just
+            # because a sibling track needs review. Stop starting new
+            # rounds after this one so the pending review can be
+            # resolved before more downloads pile up.
+            _log(
+                f"{verified_downloaded} fingerprint-verified file(s) will be imported now; "
+                f"{review_downloaded} other downloaded file(s) require review and are held back. "
+                "Stopping further rounds until review is resolved."
+            )
+            pause_after_this_round = True
+
+        if verified_downloaded <= 0:
+            _log(
+                "No new files were downloaded in this round; "
+                "stopping missing-track loop."
+            )
+            break
+        if run.download_only:
+            state["phase"] = "downloaded"
+            state["current"] = "downloaded files are ready to import"
+            if deferred_tracks:
+                _log(
+                    f"Batch limit reached; {len(deferred_tracks)} track(s) "
+                    "remain for the next Download Missing run."
+                )
+            _log("Download Missing complete; staged files are ready for Import Downloaded.")
+            break
+
+        placement_summary = _pipeline_import_round(run, round_num)
+        matched_round, missing_round = _pipeline_match_round(run, round_num, previous_missing, placement_summary)
+        if run.sync_after_import and matched_round:
+            _pipeline_sync_round(run, round_num, matched_round, missing_round)
+
+        if not missing_round:
+            active_tracks = []
+            break
+
+        missing_keys = {
+            _playlist_requested_track_key(track) for track in missing_round
+        }
+        if len(matched_round) <= previous_matched and missing_keys == previous_missing_keys:
+            _log(
+                "Import did not reduce the missing list; "
+                "stopping to avoid retrying the same unresolved tracks forever."
+            )
+            active_tracks = missing_round
+            break
+        active_tracks = missing_round
+        if pause_after_this_round:
+            _log(
+                "Stopping further download rounds until this round's "
+                "review-required file(s) are resolved."
+            )
+            break
+
+    if active_tracks and round_num >= max_rounds:
+        _log(
+            f"Reached PLAYLIST_DOWNLOAD_MAX_ROUNDS={max_rounds}; "
+            f"{len(active_tracks)} track(s) still missing."
+        )
+    elif active_tracks and state["done"] <= 0:
+        review_total = _playlist_review_required_count_from_state(state)
+        if review_total:
+            _log(
+                f"{review_total} downloaded file(s) are held for review; "
+                "syncing existing library matches only"
+            )
+        else:
+            _log("No missing tracks were downloaded; syncing existing library matches only")
+    return None
+
+
+def _pipeline_final_sync(run: _PlaylistPipelineRun) -> None:
+    """Final playlist construction and Plex sync from one last library match."""
+    name, state, _log = run.name, run.state, run.log
+    state["phase"] = "sync"
+    state["current"] = "sync playlist"
+    _invalidate_lib_cache()
+    time.sleep(1)
+    matched, missing = _match_playlist_tracks(run.active_all_tracks, verify_acoustid=True)
+    state["matched"] = matched
+    state["matched_after_import"] = len(matched)
+    state["missing_after_import"] = len(missing)
+    state["missing"] = missing
+    for track in matched:
+        existing_status = _s(
+            (state.get("track_statuses", {}).get(_playlist_status_id(track)) or {}).get("status")
+            or ""
+        )
+        acoustid_st = _s(track.get("acoustid_status") or "")
+        if acoustid_st == "mismatch" and existing_status not in {"review_required"}:
+            _playlist_set_track_status(
+                state, track, "review_required",
+                message="AcoustID fingerprint does not match expected track",
+                path=_s(track.get("path") or ""))
+        elif existing_status not in {"imported", "review_required"}:
+            _playlist_set_track_status(
+                state, track, "available", message="matched in Beets",
+                path=_s(track.get("path") or ""))
+    for track in missing:
+        if _pipeline_keep_review_status(state, track):
+            continue
+        _playlist_set_track_status(
+            state, track, "missing", message="not available in Beets")
+    review_total = _playlist_review_required_count_from_state(state)
+    state["review_required"] = review_total
+    _log(f"Final Beets match: {len(matched)} matched, {len(missing)} still missing")
+    if not matched and not review_total:
+        raise RuntimeError("No playlist tracks matched the Beets library after import")
+    if not matched and review_total:
+        _log(
+            f"No playlist tracks matched Beets yet; {review_total} downloaded file(s) "
+            "are waiting for manual review."
+        )
+    state["playlist"] = _create_playlist_outputs(
+        name, _pipeline_sync_eligible(name, matched), log=state["log"], replace_plex=True,
+        wait_for_plex_seconds=PLEX_SCAN_TIMEOUT,
+        desired_tracks=run.active_all_tracks,
+        missing_tracks=missing,
+        source=run.parse_source,
+        content=run.parse_content)
+    plex_state = (state["playlist"].get("plex") or {}) if isinstance(state.get("playlist"), dict) else {}
+    if plex_state.get("error"):
+        _log("Playlist files saved; Plex sync failed")
+    elif plex_state.get("status") == "partial":
+        _log("Playlist files saved; Plex sync partial")
+    else:
+        _log("Playlist sync complete")
+
+
+def _pipeline_run(run: _PlaylistPipelineRun) -> Dict[str, Any]:
+    """The job body: resolve the source, acquire what is missing, build the playlist."""
+    state = run.state
+    if not state.get("resumed"):
+        for track in run.active_tracks:
+            _playlist_set_track_status(state, track, "missing", message="not in Beets", _no_save=True)
+        if run.active_tracks:
+            _playlist_save_job_state(state)
+    if run.parse_content:
+        _pipeline_resolve_parsed_source(run)
+    else:
+        _pipeline_resolve_requested_source(run)
+    stopped = _pipeline_import_checkpoint_staged(run) or _pipeline_download_rounds(run)
+    if stopped:
+        return stopped
+    if run.sync_after_import:
+        _pipeline_final_sync(run)
+    state["status"] = "done"
+    state["phase"] = "done"
+    state["current"] = ""
+    _playlist_save_job_state(state)
+    _playlist_record_pipeline(run.name, status="done", action=run.pipeline_action)
+    return {
+        "playlist_job_id": run.jid,
+        "playlist": run.name,
+        "matched_after_import": state.get("matched_after_import", 0),
+        "missing_after_import": state.get("missing_after_import", 0),
+        "done": state.get("done", 0),
+        "failed": state.get("failed", 0),
+        "review_required": _playlist_review_required_count_from_state(state),
+    }
+
+
 # Service behind POST /api/playlist/download (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
 def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
@@ -5044,569 +5654,12 @@ def start_playlist_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             state["log"] = job_log
             _playlist_save_job_state(state)
         try:
-            active_tracks = list(tracks or [])
-            active_all_tracks = list(all_tracks or [])
-            if not state.get("resumed"):
-                for track in active_tracks:
-                    _playlist_set_track_status(state, track, "missing", message="not in Beets", _no_save=True)
-                if active_tracks:
-                    _playlist_save_job_state(state)
-            if parse_content:
-                # On resume with a checkpoint, skip the expensive YouTube re-fetch and
-                # library scan — use the saved manifest tracks + checkpoint statuses instead.
-                _resumed_parse = bool(state.get("resumed") and state.get("track_statuses"))
-                state["phase"] = "parse"
-                if _resumed_parse:
-                    state["current"] = "reading playlist track list"
-                    _log("Resume: reading track list from manifest (skipping YouTube fetch and library match)...")
-                    _manifest_for_resume = _playlist_read_manifest(_clean_playlist_name(name))
-                    active_all_tracks = _playlist_clean_track_list(
-                        _manifest_for_resume.get("desired_tracks") or []
-                    )
-                    if not active_all_tracks:
-                        _resumed_parse = False
-                        _log("Resume: manifest empty — falling back to full playlist fetch...")
-                else:
-                    state["current"] = "reading playlist track list"
-                    _log("Reading playlist track list and matching against Beets...")
-                if not _resumed_parse:
-                    _playlist_save_job_state(state)
-                    parse_resp = parse_playlist_request({"source": parse_source or "url", "content": parse_content,
-                              "skip_match": False},
-                    )
-                    parsed = _json_from_flask_response(parse_resp)
-                    if not parsed.get("ok"):
-                        raise RuntimeError(parsed.get("error") or "playlist parse failed")
-                    active_all_tracks = list(parsed.get("tracks") or [])
-                    active_all_tracks = _playlist_apply_tombstones(name, active_all_tracks)
-                    active_tracks = list(parsed.get("missing") or [])
-                    active_tracks = _playlist_apply_tombstones(name, active_tracks)
-                    matched_initial = list(parsed.get("matched") or [])
-                    active_keys = {_playlist_status_id(track) for track in active_all_tracks}
-                    matched_initial = [
-                        track for track in matched_initial
-                        if _playlist_status_id(track) in active_keys
-                    ]
-                    _playlist_write_manifest(
-                        name,
-                        active_all_tracks,
-                        matched_tracks=matched_initial,
-                        missing_tracks=active_tracks,
-                        source=parse_source,
-                        content=parse_content,
-                        log=state["log"],
-                    )
-                    state["tracks"] = active_all_tracks
-                    state["matched"] = matched_initial
-                    state["missing"] = active_tracks
-                    state["matched_initial"] = len(matched_initial)
-                    state["missing_initial"] = len(active_tracks)
-                    state["total"] = len(active_tracks)
-                    state["track_statuses"] = {}
-                    state["track_status_list"] = []
-                    for track in matched_initial:
-                        _playlist_set_track_status(
-                            state, track, "matched", message="already in Beets",
-                            path=_s(track.get("path") or ""), _no_save=True)
-                    for track in active_tracks:
-                        _playlist_set_track_status(state, track, "missing", message="not in Beets", _no_save=True)
-                    if active_all_tracks:
-                        _playlist_save_job_state(state)
-                    _log(
-                        f"Playlist read: {len(active_all_tracks)} track(s), "
-                        f"{len(matched_initial)} matched, {len(active_tracks)} missing"
-                    )
-                else:
-                    active_all_tracks = _playlist_apply_tombstones(name, active_all_tracks)
-                    _done_statuses_r = {"available", "matched"}
-                    matched_initial = [
-                        t for t in active_all_tracks
-                        if state["track_statuses"].get(_playlist_status_id(t), {}).get("status") in _done_statuses_r
-                    ]
-                    active_tracks = [
-                        t for t in active_all_tracks
-                        if state["track_statuses"].get(_playlist_status_id(t), {}).get("status") not in _done_statuses_r
-                    ]
-                    active_tracks = _playlist_apply_tombstones(name, active_tracks)
-                    state["tracks"] = active_all_tracks
-                    state["matched"] = matched_initial
-                    state["missing"] = active_tracks
-                    state["matched_initial"] = len(matched_initial)
-                    state["missing_initial"] = len(active_tracks)
-                    state["total"] = len(active_tracks)
-                    for track in matched_initial:
-                        _playlist_set_track_status(
-                            state, track, "matched", message="already in Beets",
-                            path=_s(track.get("path") or ""), _no_save=True)
-                    for track in active_tracks:
-                        _playlist_set_track_status(state, track, "missing", message="not in Beets", _no_save=True)
-                    if active_all_tracks:
-                        _playlist_save_job_state(state)
-                    _log(
-                        f"Resume: {len(matched_initial)} already available, "
-                        f"{len(active_tracks)} still need download"
-                    )
-            else:
-                if not active_all_tracks:
-                    active_all_tracks = list(active_tracks)
-                active_all_tracks = _playlist_apply_tombstones(name, active_all_tracks)
-                active_tracks = _playlist_apply_tombstones(name, active_tracks)
-                requested_only = bool(active_tracks)
-                if active_all_tracks:
-                    requested_only = bool(active_tracks)
-                    if state.get("resumed") and state.get("track_statuses"):
-                        # Resume without re-scanning the library — derive from saved statuses.
-                        _done_statuses_r = {"available", "matched", "imported"}
-                        matched_initial = [
-                            t for t in active_all_tracks
-                            if state["track_statuses"].get(_playlist_status_id(t), {}).get("status") in _done_statuses_r
-                        ]
-                        missing_initial = [
-                            t for t in active_all_tracks
-                            if state["track_statuses"].get(_playlist_status_id(t), {}).get("status") not in _done_statuses_r
-                        ]
-                        active_tracks = missing_initial
-                        _log(f"Resume: {len(matched_initial)} already available, {len(active_tracks)} still need download")
-                    else:
-                        state["phase"] = "match"
-                        state["current"] = "checking Beets before download"
-                        requested_only = bool(active_tracks)
-                        precheck_tracks = list(active_tracks if requested_only else active_all_tracks)
-                        if requested_only:
-                            _log("Checking requested missing playlist tracks against Beets before download...")
-                        else:
-                            _log("Checking playlist tracks against Beets before sync...")
-                        matched_initial, missing_initial = _match_playlist_tracks(precheck_tracks)
-                    state["tracks"] = active_all_tracks
-                    state["matched"] = matched_initial
-                    state["missing"] = missing_initial
-                    state["matched_initial"] = len(matched_initial)
-                    state["missing_initial"] = len(missing_initial)
-                    for track in matched_initial:
-                        _playlist_set_track_status(
-                            state, track, "matched", message="already in Beets",
-                            path=_s(track.get("path") or ""), _no_save=True)
-                    for track in missing_initial:
-                        _playlist_set_track_status(
-                            state, track, "missing", message="not in Beets", _no_save=True)
-                    if requested_only:
-                        active_tracks = missing_initial
-                    else:
-                        active_tracks = []
-                    state["total"] = len(active_tracks)
-                    if requested_only:
-                        _log(
-                            f"Pre-download requested-track check: {len(matched_initial)} already available, "
-                            f"{len(missing_initial)} still need download"
-                        )
-                    else:
-                        _log(
-                            f"Pre-sync Beets check: {len(matched_initial)} matched, "
-                            f"{len(missing_initial)} missing"
-                        )
-
-            # When resuming with staged files: reconcile + import them before new downloads
-            if state.get("resumed") and not download_only and active_tracks:
-                _log("Resume: reconciling staged downloads from previous checkpoint...")
-                state["phase"] = "reconcile"
-                state["current"] = "reconciling staged files"
-                _playlist_save_job_state(state)
-                _playlist_reconcile_staged_files(
-                    name, dl_dir, active_tracks, _log, playlist_id=playlist_id)
-                staged_entries = _playlist_staged_entries(name, playlist_id=playlist_id)
-                active_keys = {_playlist_status_id(t) for t in active_tracks}
-                staged_entries = [
-                    (t, p) for t, p in staged_entries
-                    if _playlist_status_id(t) in active_keys
-                ]
-                if staged_entries:
-                    _n_staged = len(staged_entries)
-                    _log(
-                        f"Resume: found {_n_staged} previously downloaded file(s); "
-                        "importing before continuing downloads"
-                    )
-                    state["phase"] = "import"
-                    state["current"] = f"importing {_n_staged} staged file(s) from previous run"
-                    state["waiting_for_import"] = _n_staged
-                    _playlist_save_job_state(state)
-                    if cancel_event is not None and cancel_event.is_set():
-                        paused = bool(state.get("pause_requested"))
-                        state["status"] = "paused" if paused else "stopped"
-                        state["phase"] = state["status"]
-                        state["current"] = "resume from checkpoint" if paused else "stopped by user"
-                        _playlist_save_job_state(state)
-                        _playlist_record_pipeline(name, status=state["status"], action=pipeline_action)
-                        return {"playlist_job_id": jid, "playlist": name, "status": state["status"]}
-                    try:
-                        _playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)
-                        state["waiting_for_import"] = 0
-                        _log(f"Resume: pre-download import of {_n_staged} staged file(s) complete")
-                        # Use manifest states to find newly-available tracks instead of
-                        # re-scanning the full 30K-item library (which OOMs over NFS).
-                        _manifest_states_post = _playlist_manifest_track_states(_clean_playlist_name(name))
-                        _done_post = {"available", "matched"}
-                        _matched_pre = [
-                            t for t in active_tracks
-                            if _manifest_states_post.get(_playlist_status_id(t), {}).get("status") in _done_post
-                        ]
-                        _missing_pre = [
-                            t for t in active_tracks
-                            if _manifest_states_post.get(_playlist_status_id(t), {}).get("status") not in _done_post
-                        ]
-                        active_tracks = _missing_pre
-                        state["matched"] = list(state.get("matched") or []) + _matched_pre
-                        state["missing"] = active_tracks
-                        state["total"] = len(active_tracks)
-                        for _trk in _matched_pre:
-                            _playlist_set_track_status(
-                                state, _trk, "available",
-                                message="imported from previous checkpoint",
-                                path=_s(_trk.get("path") or ""))
-                        _log(
-                            f"Resume: {len(_matched_pre)} track(s) imported from checkpoint, "
-                            f"{len(active_tracks)} still need download"
-                        )
-                    except RuntimeError as _ex:
-                        state["waiting_for_import"] = 0
-                        _log(f"Resume: pre-download import warning — {_ex}")
-                    if cancel_event is not None and cancel_event.is_set():
-                        paused = bool(state.get("pause_requested"))
-                        state["status"] = "paused" if paused else "stopped"
-                        state["phase"] = state["status"]
-                        state["current"] = "resume from checkpoint" if paused else "stopped by user"
-                        _playlist_save_job_state(state)
-                        _playlist_record_pipeline(name, status=state["status"], action=pipeline_action)
-                        return {"playlist_job_id": jid, "playlist": name, "status": state["status"]}
-                else:
-                    _log("Resume: no staged downloads found; starting fresh download round")
-                    state["waiting_for_import"] = 0
-
-            max_rounds = max(1, int(os.environ.get("PLAYLIST_DOWNLOAD_MAX_ROUNDS", "8") or "8"))
-            batch_size = int(PLAYLIST_DOWNLOAD_BATCH_SIZE or 0)
-            state["max_rounds"] = max_rounds
-            state["download_batch_size"] = batch_size
-            round_num = 0
-            while active_tracks and round_num < max_rounds:
-                if cancel_event is not None and cancel_event.is_set():
-                    paused = bool(state.get("pause_requested"))
-                    state["status"] = "paused" if paused else "stopped"
-                    state["phase"] = state["status"]
-                    state["current"] = "resume from checkpoint" if paused else "stopped by user"
-                    _playlist_save_job_state(state)
-                    _playlist_record_pipeline(name, status=state["status"], action=pipeline_action)
-                    _log("Playlist pipeline paused at checkpoint." if paused else "Playlist pipeline stopped by user.")
-                    return {"playlist_job_id": jid, "playlist": name, "status": state["status"]}
-                round_num += 1
-                state["round"] = round_num
-                state["phase"] = "download"
-                batch_tracks = active_tracks[:batch_size] if batch_size > 0 else list(active_tracks)
-                deferred_tracks = active_tracks[len(batch_tracks):] if batch_size > 0 else []
-                if not batch_tracks:
-                    break
-                state["download_batch_remaining"] = len(deferred_tracks)
-                state["current"] = (
-                    f"download round {round_num}: {len(batch_tracks)} of {len(active_tracks)}"
-                    if deferred_tracks else f"download round {round_num}"
-                )
-                previous_missing = list(batch_tracks)
-                previous_missing_keys = {
-                    _playlist_requested_track_key(track) for track in previous_missing
-                }
-                previous_matched = len(state.get("matched") or [])
-                round_dl_dir = dl_dir
-                _log("")
-                _log(
-                    f"{'='*40}\n"
-                    f"Missing-track round {round_num}/{max_rounds}: "
-                    f"{len(active_tracks)} track(s) still missing"
-                )
-                if deferred_tracks:
-                    _log(
-                        f"PLAYLIST_DOWNLOAD_BATCH_SIZE={batch_size}: downloading "
-                        f"{len(batch_tracks)} of {len(active_tracks)} missing track(s); "
-                        f"{len(deferred_tracks)} remain queued"
-                    )
-                round_result = _playlist_download_missing_tracks(
-                    batch_tracks, round_dl_dir, state, _log, download_methods,
-                    cancel_event=cancel_event)
-                verified_downloaded = int(round_result.get("downloaded") or 0)
-                review_downloaded = int(round_result.get("review_required") or 0)
-                failed_downloads = int(round_result.get("failed") or 0)
-                if review_downloaded:
-                    _log(
-                        f"Round {round_num} download complete: "
-                        f"{verified_downloaded} fingerprint-verified, "
-                        f"{review_downloaded} held for review, "
-                        f"{failed_downloads} not downloaded"
-                    )
-                else:
-                    _log(
-                        f"Round {round_num} download complete: "
-                        f"{verified_downloaded} downloaded, "
-                        f"{failed_downloads} not downloaded"
-                    )
-                if cancel_event is not None and cancel_event.is_set():
-                    paused = bool(state.get("pause_requested"))
-                    state["status"] = "paused" if paused else "stopped"
-                    state["phase"] = state["status"]
-                    state["current"] = "resume from checkpoint" if paused else "stopped by user"
-                    _playlist_save_job_state(state)
-                    _playlist_record_pipeline(name, status=state["status"], action=pipeline_action)
-                    _log("Playlist pipeline paused at checkpoint." if paused else "Playlist pipeline stopped by user.")
-                    return {"playlist_job_id": jid, "playlist": name, "status": state["status"]}
-
-                pause_after_this_round = False
-                if review_downloaded > 0:
-                    review_total = _playlist_review_required_count_from_state(state)
-                    waiting_total = _playlist_waiting_import_count_from_state(state)
-                    state["phase"] = "review"
-                    state["current"] = f"{review_total} downloaded file(s) need review before import"
-                    state["review_required"] = review_total
-                    state["waiting_for_import"] = waiting_total
-                    _playlist_save_job_state(state)
-                    if verified_downloaded <= 0:
-                        _log(
-                            f"{review_downloaded} downloaded file(s) require review before import; "
-                            "stopping automatic import for this round."
-                        )
-                        break
-                    # Some tracks in this round need review, but others were
-                    # already fingerprint-verified — import those now instead
-                    # of discarding a whole round's verified downloads just
-                    # because a sibling track needs review. Stop starting new
-                    # rounds after this one so the pending review can be
-                    # resolved before more downloads pile up.
-                    _log(
-                        f"{verified_downloaded} fingerprint-verified file(s) will be imported now; "
-                        f"{review_downloaded} other downloaded file(s) require review and are held back. "
-                        "Stopping further rounds until review is resolved."
-                    )
-                    pause_after_this_round = True
-
-                if verified_downloaded <= 0:
-                    _log(
-                        "No new files were downloaded in this round; "
-                        "stopping missing-track loop."
-                    )
-                    break
-                if download_only:
-                    state["phase"] = "downloaded"
-                    state["current"] = "downloaded files are ready to import"
-                    if deferred_tracks:
-                        _log(
-                            f"Batch limit reached; {len(deferred_tracks)} track(s) "
-                            "remain for the next Download Missing run."
-                        )
-                    _log("Download Missing complete; staged files are ready for Import Downloaded.")
-                    break
-
-                state["phase"] = "import"
-                state["current"] = f"importing stable staged downloads after round {round_num}"
-                state["waiting_for_import"] = _playlist_waiting_import_count_from_state(state)
-                _playlist_save_job_state(state)
-                _log(
-                    "Starting Beets singleton import from stable playlist staging "
-                    f"({_playlist_imports_dir(name, playlist_id=playlist_id)}) ..."
-                )
-                import_summary = _playlist_run_import_downloaded(
-                    name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)
-                state["waiting_for_import"] = 0
-                state["import_returncode"] = 0
-                placement_summary = import_summary.get("placement") or {}
-                state["last_placement"] = placement_summary
-                _playlist_save_job_state(state)
-                _log(
-                    f"Beets singleton import round {round_num} complete: "
-                    f"{int(import_summary.get('imported_files') or 0)} staged file(s)"
-                )
-                if placement_summary.get("placed"):
-                    _log(
-                        f"Placed {placement_summary.get('placed')} playlist import(s) "
-                        "into normal album folders"
-                    )
-                elif placement_summary.get("matched_candidates"):
-                    _log(
-                        "Playlist import placement found candidates but none could be "
-                        "safely resolved to a MusicBrainz album"
-                    )
-                else:
-                    _log("No new playlist singleton rows needed album placement")
-                state["phase"] = "match"
-                state["current"] = f"matching after round {round_num}"
-                _invalidate_lib_cache()
-                time.sleep(1)
-                matched_round, missing_round = _match_playlist_tracks(active_all_tracks, verify_acoustid=True)
-                state["matched"] = matched_round
-                state["matched_after_import"] = len(matched_round)
-                state["missing_after_import"] = len(missing_round)
-                state["missing"] = missing_round
-                matched_keys = {_playlist_status_id(track) for track in matched_round}
-                for track in previous_missing:
-                    if _playlist_status_id(track) in matched_keys:
-                        acoustid_st = _s(next(
-                            (t.get("acoustid_status") for t in matched_round
-                             if _playlist_status_id(t) == _playlist_status_id(track)), ""
-                        ))
-                        if acoustid_st == "mismatch":
-                            _playlist_set_track_status(
-                                state, track, "review_required",
-                                message="imported but AcoustID fingerprint does not match expected track")
-                        elif placement_summary.get("failed") and not placement_summary.get("placed"):
-                            _playlist_set_track_status(
-                                state,
-                                track,
-                                "review_required",
-                                message="imported, but no MusicBrainz release-group match reached 70% confidence",
-                            )
-                        else:
-                            _playlist_set_track_status(
-                                state, track, "imported", message="imported and matched in Beets")
-                for track in missing_round:
-                    existing_status = _s(
-                        (state.get("track_statuses", {}).get(_playlist_status_id(track)) or {}).get("status")
-                        or ""
-                    )
-                    if existing_status == "review_required":
-                        continue
-                    _playlist_set_track_status(
-                        state, track, "missing", message="still missing after import")
-                _log(
-                    f"After round {round_num}: {len(matched_round)} matched, "
-                    f"{len(missing_round)} still missing"
-                )
-
-                if sync_after_import and matched_round:
-                    state["phase"] = "sync"
-                    state["current"] = f"syncing M3U + Plex after round {round_num}"
-                    _log(f"Syncing M3U/Plex playlist after round {round_num} ({len(matched_round)} matched tracks)...")
-                    _sync_round = [
-                        t for t in matched_round
-                        if _s((_playlist_state_for_track(name, t) or {}).get("status") or "") != "review_required"
-                    ]
-                    _create_playlist_outputs(
-                        name, _sync_round, log=state["log"], replace_plex=True,
-                        wait_for_plex_seconds=PLEX_SCAN_TIMEOUT,
-                        desired_tracks=active_all_tracks,
-                        missing_tracks=missing_round,
-                        source=parse_source,
-                        content=parse_content)
-                    state["phase"] = "match"
-
-                if not missing_round:
-                    active_tracks = []
-                    break
-
-                missing_keys = {
-                    _playlist_requested_track_key(track) for track in missing_round
-                }
-                if len(matched_round) <= previous_matched and missing_keys == previous_missing_keys:
-                    _log(
-                        "Import did not reduce the missing list; "
-                        "stopping to avoid retrying the same unresolved tracks forever."
-                    )
-                    active_tracks = missing_round
-                    break
-                active_tracks = missing_round
-                if pause_after_this_round:
-                    _log(
-                        "Stopping further download rounds until this round's "
-                        "review-required file(s) are resolved."
-                    )
-                    break
-
-            if active_tracks and round_num >= max_rounds:
-                _log(
-                    f"Reached PLAYLIST_DOWNLOAD_MAX_ROUNDS={max_rounds}; "
-                    f"{len(active_tracks)} track(s) still missing."
-                )
-            elif active_tracks and state["done"] <= 0:
-                review_total = _playlist_review_required_count_from_state(state)
-                if review_total:
-                    _log(
-                        f"{review_total} downloaded file(s) are held for review; "
-                        "syncing existing library matches only"
-                    )
-                else:
-                    _log("No missing tracks were downloaded; syncing existing library matches only")
-
-            if sync_after_import:
-                state["phase"] = "sync"
-                state["current"] = "sync playlist"
-                _invalidate_lib_cache()
-                time.sleep(1)
-                matched, missing = _match_playlist_tracks(active_all_tracks, verify_acoustid=True)
-                state["matched"] = matched
-                state["matched_after_import"] = len(matched)
-                state["missing_after_import"] = len(missing)
-                state["missing"] = missing
-                for track in matched:
-                    existing_status = _s(
-                        (state.get("track_statuses", {}).get(_playlist_status_id(track)) or {}).get("status")
-                        or ""
-                    )
-                    acoustid_st = _s(track.get("acoustid_status") or "")
-                    if acoustid_st == "mismatch" and existing_status not in {"review_required"}:
-                        _playlist_set_track_status(
-                            state, track, "review_required",
-                            message="AcoustID fingerprint does not match expected track",
-                            path=_s(track.get("path") or ""))
-                    elif existing_status not in {"imported", "review_required"}:
-                        _playlist_set_track_status(
-                            state, track, "available", message="matched in Beets",
-                            path=_s(track.get("path") or ""))
-                for track in missing:
-                    existing_status = _s(
-                        (state.get("track_statuses", {}).get(_playlist_status_id(track)) or {}).get("status")
-                        or ""
-                    )
-                    if existing_status == "review_required":
-                        continue
-                    _playlist_set_track_status(
-                        state, track, "missing", message="not available in Beets")
-                review_total = _playlist_review_required_count_from_state(state)
-                state["review_required"] = review_total
-                _log(f"Final Beets match: {len(matched)} matched, {len(missing)} still missing")
-                if not matched and not review_total:
-                    raise RuntimeError("No playlist tracks matched the Beets library after import")
-                if not matched and review_total:
-                    _log(
-                        f"No playlist tracks matched Beets yet; {review_total} downloaded file(s) "
-                        "are waiting for manual review."
-                    )
-                wait_for_plex = PLEX_SCAN_TIMEOUT
-                sync_matched = [
-                    track for track in matched
-                    if _s((_playlist_state_for_track(name, track) or {}).get("status") or "") != "review_required"
-                ]
-                state["playlist"] = _create_playlist_outputs(
-                    name, sync_matched, log=state["log"], replace_plex=True,
-                    wait_for_plex_seconds=wait_for_plex,
-                    desired_tracks=active_all_tracks,
-                    missing_tracks=missing,
-                    source=parse_source,
-                    content=parse_content)
-                plex_state = (state["playlist"].get("plex") or {}) if isinstance(state.get("playlist"), dict) else {}
-                if plex_state.get("error"):
-                    _log("Playlist files saved; Plex sync failed")
-                elif plex_state.get("status") == "partial":
-                    _log("Playlist files saved; Plex sync partial")
-                else:
-                    _log("Playlist sync complete")
-
-            state["status"] = "done"
-            state["phase"] = "done"
-            state["current"] = ""
-            _playlist_save_job_state(state)
-            _playlist_record_pipeline(name, status="done", action=pipeline_action)
-            return {
-                "playlist_job_id": jid,
-                "playlist": name,
-                "matched_after_import": state.get("matched_after_import", 0),
-                "missing_after_import": state.get("missing_after_import", 0),
-                "done": state.get("done", 0),
-                "failed": state.get("failed", 0),
-                "review_required": _playlist_review_required_count_from_state(state),
-            }
+            return _pipeline_run(_PlaylistPipelineRun(
+                name=name, jid=jid, playlist_id=playlist_id, dl_dir=dl_dir, state=state, log=_log,
+                parse_source=parse_source, parse_content=parse_content, download_methods=download_methods,
+                download_only=download_only, sync_after_import=sync_after_import,
+                pipeline_action=pipeline_action, cancel_event=cancel_event,
+                active_tracks=list(tracks or []), active_all_tracks=list(all_tracks or [])))
         except Exception as exc:
             _log(f"Fatal: {exc}")
             state["status"] = "error"
@@ -5793,12 +5846,6 @@ def _playlist_release_group_albumartist_info(mb_releasegroupid: str,
     except Exception as ex:
         _playlist_log(log, f"  [playlist-place] MusicBrainz lookup failed for release group {rgid}: {ex}")
     return {}
-
-
-def _playlist_release_group_albumartist(mb_releasegroupid: str,
-                                        log: Optional[List[str]] = None) -> str:
-    return _playlist_release_group_albumartist_info(
-        mb_releasegroupid, log=log).get("albumartist", "")
 
 
 def _playlist_resolve_albumartist_info_for_release_group(
@@ -7296,44 +7343,51 @@ def _playlist_count_value(value: Any) -> int:
         return 0
 
 
+def _playlist_empty_list_summary(**values: Any) -> Dict[str, Any]:
+    """A playlist list summary: every count zero unless given."""
+    return {
+        "tracks": 0, "available": 0, "missing": 0,
+        "quality_bad": 0, "quality_review": 0, "m3u_tracks": 0,
+        "downloaded": 0, "imported": 0, "failed": 0, "review_required": 0,
+        "removed": 0, "excluded": 0, "plex_synced_count": 0,
+        **values,
+    }
+
+
+def _playlist_list_summary_counts(counts: Dict[str, int]) -> Dict[str, int]:
+    """The list summary's pipeline fields, from per-status counts."""
+    return {
+        "downloaded": counts.get("downloaded", 0) + counts.get("waiting_import", 0),
+        "imported": counts.get("imported", 0) + counts.get("plex_synced", 0),
+        "failed": counts.get("failed", 0),
+        "review_required": counts.get("review_required", 0),
+        "removed": counts.get("removed", 0),
+        "excluded": counts.get("excluded", 0),
+        "plex_synced_count": counts.get("plex_synced", 0),
+    }
+
+
 def _playlist_manifest_list_summary(name: str,
                                     manifest: Dict[str, Any]) -> Optional[Dict[str, int]]:
     desired_raw = manifest.get("desired_tracks") if isinstance(manifest, dict) else []
     if not isinstance(desired_raw, list) or not desired_raw:
         return None
     desired = _playlist_apply_tombstones(name, _playlist_clean_track_list(desired_raw), manifest)
-    states_raw = manifest.get("track_states") if isinstance(manifest.get("track_states"), dict) else {}
-    counts = {status: 0 for status in PLAYLIST_PIPELINE_STATES}
-    for row in states_raw.values():
-        if not isinstance(row, dict):
-            continue
-        status = _s(row.get("status") or "").strip().lower()
-        if status in counts:
-            counts[status] += 1
-    removed = len(manifest.get("removed_tracks") or [])
-    excluded = len(manifest.get("excluded_tracks") or [])
+    counts = _playlist_manifest_state_counts(manifest)
     matched = _playlist_count_value(manifest.get("matched_count"))
     missing = _playlist_count_value(manifest.get("missing_count"))
     if matched == 0 and missing == 0:
         matched = counts.get("available", 0) + counts.get("imported", 0) + counts.get("plex_synced", 0)
         missing = max(0, len(desired) - matched)
-    total = max(len(desired), matched + missing)
-    return {
-        "tracks": total,
-        "available": matched,
-        "missing": missing,
-        "quality_bad": 0,
-        "quality_review": counts.get("review_required", 0),
-        "m3u_tracks": len(desired),
-        "desired_source": _s(manifest.get("source") or "manifest"),
-        "downloaded": counts.get("downloaded", 0) + counts.get("waiting_import", 0),
-        "imported": counts.get("imported", 0) + counts.get("plex_synced", 0),
-        "failed": counts.get("failed", 0),
-        "review_required": counts.get("review_required", 0),
-        "removed": removed,
-        "excluded": excluded,
-        "plex_synced_count": counts.get("plex_synced", 0),
-    }
+    return _playlist_empty_list_summary(
+        tracks=max(len(desired), matched + missing),
+        available=matched,
+        missing=missing,
+        quality_review=counts.get("review_required", 0),
+        m3u_tracks=len(desired),
+        desired_source=_s(manifest.get("source") or "manifest"),
+        **_playlist_list_summary_counts(counts),
+    )
 
 
 def _playlist_summary_waiting_count(summary: Dict[str, Any]) -> int:
@@ -7422,22 +7476,13 @@ def _playlist_checkpoint_list_summary(name: str,
     if checkpoint_tracks <= 0:
         return None
     checkpoint_missing = _playlist_count_value(checkpoint.get("checkpoint_missing"))
-    summary: Dict[str, Any] = {
-        "tracks": checkpoint_tracks,
-        "available": max(0, checkpoint_tracks - checkpoint_missing),
-        "missing": checkpoint_missing,
-        "quality_bad": 0,
-        "quality_review": 0,
-        "m3u_tracks": 0,
-        "desired_source": "checkpoint",
-        "downloaded": _playlist_count_value(checkpoint.get("checkpoint_waiting_for_import")),
-        "imported": 0,
-        "failed": 0,
-        "review_required": 0,
-        "removed": 0,
-        "excluded": 0,
-        "plex_synced_count": 0,
-    }
+    summary = _playlist_empty_list_summary(
+        tracks=checkpoint_tracks,
+        available=max(0, checkpoint_tracks - checkpoint_missing),
+        missing=checkpoint_missing,
+        desired_source="checkpoint",
+        downloaded=_playlist_count_value(checkpoint.get("checkpoint_waiting_for_import")),
+    )
     _playlist_apply_checkpoint_summary(summary, checkpoint)
     return summary
 
@@ -7456,22 +7501,7 @@ def _playlist_engine_m3u_count_summary(name: str,
         return None
     raw_items = res.get("items") if isinstance(res.get("items"), list) else []
     tracks = sum(1 for row in raw_items if isinstance(row, dict))
-    return {
-        "tracks": tracks,
-        "available": 0,
-        "missing": tracks,
-        "quality_bad": 0,
-        "quality_review": 0,
-        "m3u_tracks": tracks,
-        "desired_source": "m3u",
-        "downloaded": 0,
-        "imported": 0,
-        "failed": 0,
-        "review_required": 0,
-        "removed": 0,
-        "excluded": 0,
-        "plex_synced_count": 0,
-    }
+    return _playlist_empty_list_summary(tracks=tracks, missing=tracks, m3u_tracks=tracks, desired_source="m3u")
 
 
 def _playlist_m3u_summary(name: str,
@@ -7498,25 +7528,14 @@ def _playlist_m3u_summary(name: str,
         raise
     matched = rows.get("matched") or []
     missing = rows.get("missing") or []
-    summary = {
-        "tracks": len(rows.get("tracks") or []),
-        "available": len(matched),
-        "missing": len(missing),
-        "quality_bad": 0,
-        "quality_review": 0,
-        "m3u_tracks": int(rows.get("m3u_tracks") or 0),
-        "desired_source": _s(rows.get("desired_source") or "m3u"),
-    }
-    counts = _playlist_pipeline_counts(name, matched, missing)
-    summary.update({
-        "downloaded": counts.get("downloaded", 0) + counts.get("waiting_import", 0),
-        "imported": counts.get("imported", 0) + counts.get("plex_synced", 0),
-        "failed": counts.get("failed", 0),
-        "review_required": counts.get("review_required", 0),
-        "removed": counts.get("removed", 0),
-        "excluded": counts.get("excluded", 0),
-        "plex_synced_count": counts.get("plex_synced", 0),
-    })
+    summary = _playlist_empty_list_summary(
+        tracks=len(rows.get("tracks") or []),
+        available=len(matched),
+        missing=len(missing),
+        m3u_tracks=int(rows.get("m3u_tracks") or 0),
+        desired_source=_s(rows.get("desired_source") or "m3u"),
+        **_playlist_list_summary_counts(_playlist_pipeline_counts(name, matched, missing)),
+    )
     checkpoint = _playlist_latest_job_state_summary(name, checkpoint_states)
     _playlist_apply_checkpoint_summary(summary, checkpoint)
     for item in matched:
@@ -7872,6 +7891,25 @@ def _playlist_manifest_state_counts(manifest: Dict[str, Any]) -> Dict[str, int]:
     return counts
 
 
+def _playlist_detail_common(clean_name: str, manifest: Dict[str, Any],
+                            m3u: str, manifest_tracks: int) -> Dict[str, Any]:
+    """What the summary and full playlist detail payloads share."""
+    last_plex = manifest.get("last_plex") if isinstance(manifest.get("last_plex"), dict) else {}
+    last_pipeline = manifest.get("last_pipeline") if isinstance(manifest.get("last_pipeline"), dict) else {}
+    return {
+        "ok": True,
+        "name": clean_name,
+        "m3u": m3u,
+        "manifest": str(_playlist_manifest_path(clean_name, allocate=False)) if _playlist_manifest_exists_no_create(clean_name) else "",
+        "manifest_tracks": manifest_tracks,
+        "source": _s(manifest.get("source") or "local_m3u"),
+        "source_content": _s(manifest.get("content") or ""),
+        "last_plex": last_plex,
+        "last_pipeline": last_pipeline,
+        "last_sync_status": _s(last_plex.get("status") or "not_run"),
+    }
+
+
 def _playlist_detail_summary_payload(clean_name: str) -> Dict[str, Any]:
     manifest = _playlist_read_manifest(clean_name)
     manifest_tracks = _playlist_clean_track_list(manifest.get("desired_tracks") or [])
@@ -7894,14 +7932,8 @@ def _playlist_detail_summary_payload(clean_name: str) -> Dict[str, Any]:
         available = max(0, total - missing_count)
     key = _playlist_existing_key(clean_name)
     m3u = f"engine:{key}.m3u" if key else ""
-    last_plex = manifest.get("last_plex") if isinstance(manifest.get("last_plex"), dict) else {}
-    last_pipeline = manifest.get("last_pipeline") if isinstance(manifest.get("last_pipeline"), dict) else {}
     return {
-        "ok": True,
-        "name": clean_name,
-        "m3u": str(m3u),
-        "manifest": str(_playlist_manifest_path(clean_name, allocate=False)) if _playlist_manifest_exists_no_create(clean_name) else "",
-        "manifest_tracks": len(manifest_tracks),
+        **_playlist_detail_common(clean_name, manifest, m3u, len(manifest_tracks)),
         "m3u_tracks": _playlist_count_value(summary.get("m3u_tracks")),
         "desired_source": _s(summary.get("desired_source") or manifest.get("source") or "manifest"),
         "tracks": [],
@@ -7909,11 +7941,6 @@ def _playlist_detail_summary_payload(clean_name: str) -> Dict[str, Any]:
         "missing": [],
         "removed_excluded": [],
         "counts": counts,
-        "source": _s(manifest.get("source") or "local_m3u"),
-        "source_content": _s(manifest.get("content") or ""),
-        "last_plex": last_plex,
-        "last_pipeline": last_pipeline,
-        "last_sync_status": _s(last_plex.get("status") or "not_run"),
         "available": available,
         "missing_count": missing_count,
         "total": total,
@@ -8098,14 +8125,8 @@ def _playlist_detail_payload(clean_name: str, index: Optional[Dict[str, Any]] = 
         "downloaded": counts.get("downloaded", 0) + counts.get("waiting_import", 0) + counts.get("importing", 0),
         "counts": counts,
     }, checkpoint)
-    last_plex = manifest.get("last_plex") if isinstance(manifest.get("last_plex"), dict) else {}
-    last_pipeline = manifest.get("last_pipeline") if isinstance(manifest.get("last_pipeline"), dict) else {}
     return {
-        "ok": True,
-        "name": clean_name,
-        "m3u": m3u,
-        "manifest": str(_playlist_manifest_path(clean_name, allocate=False)) if _playlist_manifest_exists_no_create(clean_name) else "",
-        "manifest_tracks": len(manifest_tracks),
+        **_playlist_detail_common(clean_name, manifest, m3u, len(manifest_tracks)),
         "m3u_tracks": int(rows.get("m3u_tracks") or 0),
         "desired_source": _s(rows.get("desired_source") or "m3u"),
         "tracks": tracks,
@@ -8113,11 +8134,6 @@ def _playlist_detail_payload(clean_name: str, index: Optional[Dict[str, Any]] = 
         "missing": missing,
         "removed_excluded": removed,
         "counts": counts,
-        "source": _s(manifest.get("source") or "local_m3u"),
-        "source_content": _s(manifest.get("content") or ""),
-        "last_plex": last_plex,
-        "last_pipeline": last_pipeline,
-        "last_sync_status": _s(last_plex.get("status") or "not_run"),
         "available": len(matched),
         "missing_count": len(missing),
         "total": len(tracks),

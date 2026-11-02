@@ -64,7 +64,7 @@ class PlaylistSavedDiscoveryTests(unittest.TestCase):
             region.index('checkpoint_summary = _playlist_checkpoint_list_summary'),
             region.index('index = index or _playlist_library_index()'),
         )
-        self.assertIn('"desired_source": "checkpoint"', APP_SOURCE)
+        self.assertIn('desired_source="checkpoint"', APP_SOURCE)
         self.assertIn('"duration_ms": duration_ms', APP_SOURCE)
     def test_resume_pipeline_is_primary_for_interrupted_rows(self):
         row_actions = PAGE_SOURCE[PAGE_SOURCE.index('const savedPlaylistRowActions'):PAGE_SOURCE.index('return (', PAGE_SOURCE.index('const savedPlaylistRowActions'))]

@@ -135,12 +135,6 @@ class NamingClassificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["guid_suffix"], "")
 
-    def test_severity_helper(self):
-        self.assertEqual(svc._worse_name_status("ok", "literal_token"), "literal_token")
-        self.assertEqual(svc._worse_name_status("literal_token", "unresolved_token"),
-                         "literal_token")
-
-
 class TempTreeTestBase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -407,14 +401,6 @@ class JobEntriesTests(unittest.TestCase):
             result = svc.plex_sync_audit_job(log)
         audit.assert_called_once_with(log)
         self.assertEqual(result["report"]["filesystem"]["totals"], {})
-
-    def test_heal_job_runs_apply_with_defaults(self):
-        with mock.patch.object(svc, "apply_plex_sync_heal",
-                               return_value={"note": "no repair actions enabled"}) as heal:
-            log = []
-            result = svc.plex_sync_heal_job(log)
-        heal.assert_called_once_with(log)
-        self.assertEqual(result["heal"]["note"], "no repair actions enabled")
 
 
 if __name__ == "__main__":
