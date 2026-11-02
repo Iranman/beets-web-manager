@@ -15,7 +15,7 @@ Every setting in this app belongs to exactly one of four owners, each with its o
 
 Precedence for any given web-manager value, highest first:
 
-1. **Explicit Docker environment variable** (set in the Compose file or host environment). This is what an operator controls at deploy time and it always wins.
+1. **Explicit Docker environment variable** (set in the Compose file or host environment). This is what an operator controls at deploy time and it wins over saved state under the same name. The exception is a deprecated name: a Docker `BEETS_WEB_TOKEN` loses to a saved `BEETS_WEB_AUTH_TOKEN`, because saved settings load into the canonical name and the canonical name wins over its [deprecated aliases](#deprecated-variable-names). Set the canonical name in Docker to be sure it wins.
 2. **Persistent web-manager state** written by the app itself (`/web-manager-data/.env`, `.browser_password`, `.browser_username`, `app_settings.json`). This is what changes when you use the Settings/System UI.
 3. **Built-in application default.**
 
@@ -122,7 +122,7 @@ Each operator-hosted service trusts exactly the scheme, host and port of its own
 | Plex | `PLEX_URL` (or the Beets `config.yaml` `plex:` stanza, as Plex itself resolves it) |
 | Lidarr | `LIDARR_URL` (or `LIDARR_URL_FILE`) |
 | slskd | `SLSKD_URL` |
-| qBittorrent | `QBITTORRENT_URL` / `QBIT_URL` / `QB_URL` (or `QBITTORRENT_URL_FILE`) |
+| qBittorrent | `QBITTORRENT_URL` (or `QBITTORRENT_URL_FILE`) |
 | yt-dlp PO token provider | `YTDLP_PO_PROVIDER_URL` |
 | AI provider | `AI_BASE_URL` |
 
@@ -141,7 +141,7 @@ Only these keys may be saved from the System page, and only these keys are loade
 | `BEETS_WEB_AUTH_TOKEN` | live | Owner API/script bearer token. Auto-generated if unset. |
 | `BEETS_WEB_PASSWORD` | live | Administrator password, stored only as a hash. Prefer the first-run wizard. |
 | `BEETS_WEB_USERNAME` | live | Browser login username, default `admin`. |
-| `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` | restart | Wall-clock limit (default 60 s) for one fetch of a user-supplied or provider-supplied URL (reference URLs, artwork images). It covers trying each DNS answer, every redirect, and reading the whole body, so a server that sends data very slowly cannot hold a worker open. A value that is not a positive number is ignored with a warning in the log, and 60 s is used. |
+| `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` | restart | Wall-clock limit (default 60 s) for one fetch of a user-supplied or provider-supplied URL (reference URLs, artwork images). It covers trying each DNS answer, every redirect, and reading the whole body, so a server that sends data very slowly cannot hold a worker open. A value that is below 0.1 s, not a number, or above the 600 s ceiling is ignored with a warning in the log, and 60 s is used. The other outbound limits have ceilings too: `BEETS_OUTBOUND_TIMEOUT_SECONDS` 300 s, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` 200 MiB, `BEETS_OUTBOUND_MAX_REDIRECTS` 20. |
 
 The provider settings in the next section are application settings too.
 
@@ -161,7 +161,8 @@ Files in `/web-manager-data` that can hold secrets are created at mode 0600: `.e
 |---|---|
 | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL` | Optional AI-assisted candidate ranking. Matching still uses MusicBrainz and AcoustID evidence without AI. |
 | `ACOUSTID_API_KEY`, `ACOUSTID_KEY` | Your AcoustID **application** key (register one at https://acoustid.org/new-application); `ACOUSTID_KEY` is a legacy alias read only when `ACOUSTID_API_KEY` is empty. Required for fingerprint lookups: there is no built-in fallback key. Without it, lookups report `not_configured` (fingerprint evidence unavailable, never "no match", never cached) and the setup status says "AcoustID not configured". Fingerprinting also requires Chroma/fpcalc in the Beets engine. |
-| `DISCOGS_TOKEN`, `DISCOGS_USER_TOKEN` | Optional Discogs metadata. |
+| `ACOUSTID_USER_KEY` | Your AcoustID **user** key, used for fingerprint submissions. Submissions fall back to the application key when it is empty. |
+| `DISCOGS_TOKEN` | Optional Discogs metadata. |
 | `LISTENBRAINZ_TOKEN` | Optional ListenBrainz integration. |
 | `PLEX_URL`, `PLEX_TOKEN` | Optional Plex sync and refresh. Use deployment-specific URLs, not committed private LAN defaults. |
 | `PLAYLIST_AUTO_SYNC`, `PLAYLIST_AUTO_SYNC_INTERVAL` | Automatic playlist sync with Plex. **Opt-in: off by default**; set `PLAYLIST_AUTO_SYNC` to `1`/`true`/`yes`/`on` to enable the background scheduler (manual/explicit sync always works regardless). When enabled it runs every `PLAYLIST_AUTO_SYNC_INTERVAL` seconds (default `300`, minimum `60`), with the first run one full interval after start. Each run is a tracked job on the Jobs page ("Playlist sync (automatic)"); it never overlaps a manual sync (a manual start while one runs answers 409 `job_already_running`) and skips a playlist whose download/import pipeline is running. Errors show in `GET /api/playlists/sync/status` (`last_error`, `last_job_id`, `next_run_at`). The Web Manager list is the master copy: the Plex playlist is updated in place (entries added, removed and moved, so its Plex ID and link stay the same); tracks added in Plex or in the playlist's `.m3u` are merged into the list; a track leaves Plex only when it was removed in Web Manager. A sync with no changes makes no Plex writes. A track listed twice stays twice in the Web Manager list and its `.m3u`; Plex keeps one entry per track, so the repeat is satisfied by that one entry and is not re-sent. The number of tracks added is read back from Plex after the write. Tracks that cannot be placed are listed as pending with a reason (not in the Beets library, or not indexed by Plex yet). Playlists that exist only in Plex are not adopted. Local playlist files are imported once, read-only, when the Playlists page loads or a sync runs, and only when Web Manager has no list with that name: `*.m3u` and `*.playlist.json` in `MUSIC_ROOT/playlists` (older versions and the Beets smartplaylist folder; never written to; a symlinked `playlists` folder, symlinked or non-regular files, files over 5 MB, and files beyond the first 500 per folder are skipped), and `*.m3u` files you place in `WEB_MANAGER_DATA_DIR/playlists` (Web Manager's own exports there, named `<id>_<hash>.m3u`, are not imported). The list name is the file name without `.m3u`; `#EXTINF` "Artist - Title" labels give the tracks, and files in the library are matched by path. Parsing with source `local_m3u` also finds such a file before it is imported. Imports are recorded in `legacy_imports.json` in the playlist state folder, so a deleted list is not imported again. |
@@ -180,6 +181,85 @@ Files in `/web-manager-data` that can hold secrets are created at mode 0600: `.e
 | `YTDLP_COOKIE_FILE`, `YTDLP_ALLOW_BROWSER_COOKIES`, `YTDLP_NETRC_FILE` | Optional direct-source helper configuration. `YTDLP_COOKIE_FILE` is a Netscape-format cookies file you place via the host's secrets mechanism and reference only by path; its contents are never read into logs, API responses or state. It is what authorizes access to your own private/unlisted uploads for **Recover My Uploads** (`POST /api/recover/fetch`), which uses the cookies so owner-only items are not silently missed. The recovery routes never choose, create or rotate the file — that is the operator's decision. `GET /api/recover/cookie-state` reports `none` / `invalid` / `rejected` / `ok` (by path/size/mtime signature only) so a stale export can be refreshed. |
 | `RECOVER_OWNED_ACCOUNTS` | Optional **Recover My Uploads** authorization allowlist. Comma-separated **immutable channel/profile identifiers** — a channel/uploader **ID** or a **canonical channel/profile URL**, never a display name. Per platform: YouTube — a channel ID (`UCxxxxxxxxxxxxxxxxxxxxxx`), a handle URL (`https://www.youtube.com/@mychannel`), or a `.../channel/UCxxxx` / `.../user/myname` URL; SoundCloud — the profile URL (`https://soundcloud.com/myprofile`). Entries shorter than 3 characters are ignored. Recover fetch and import require an `authorization` basis on the request (`original_creation`, `own_account`, `licensed_permission`, or `open_license`); a missing/invalid basis is refused. An `own_account` claim is independently *verified* only when an entry matches one of the source's **immutable identifiers** (yt-dlp `channel_id`/`uploader_id` by exact case-insensitive match, or `channel_url`/`uploader_url` by canonical-URL / `@handle` / `/channel/<id>` / `/user/<name>` path-segment match). The mutable display `uploader`/`channel` name is **never** evidence — so a stranger's upload whose display name merely contains your token does not verify. An `open_license` claim is independently *verified* only when the source's own platform license metadata (yt-dlp's `license` field, captured at probe/fetch) matches an open-license pattern (`creative commons`, `cc-by`, `cc0`, `public domain`, `reuse allowed`) — it is verified by the platform's license, never by the user's claim, and needs no entry here. `original_creation` and `licensed_permission` are always asserted-only. A verified upload proceeds through the normal AcoustID/MusicBrainz identity gate; an asserted-only (unverified) upload is forced to `review_required` and never auto-imported. Blank (default) means no `own_account` claim is ever auto-verified, so those uploads go to operator review. |
 | `DEMO_MODE` | Marks setup/status responses as demo data when using the synthetic demo library. |
+| `PLEX_MUSIC_SECTION` | Plex music library section. It can also be set in the `plex:` section of the Beets `config.yaml`. |
+| `QBITTORRENT_URL`, `QBITTORRENT_USERNAME`, `QBITTORRENT_PASSWORD`, `QBITTORRENT_CATEGORY` | Optional qBittorrent connection for the torrent repair tools. Category defaults to `music`. |
+| `PLAYLIST_MIN_DOWNLOAD_SECONDS` | Length in seconds below which a playlist download counts as a preview clip (default `45`; applies after a restart). A shorter downloaded file is deleted and logged, and a shorter track is flagged `preview_risk`. `0` turns this off. |
+| `BEETS_WEB_AUTH_MIN_LENGTH`, `BEETS_WEB_PASSWORD_MIN_LENGTH` | Shortest accepted API token (default `32`) and password (default `16`). |
+| `BEETS_LONG_OPERATION_POLL_SECONDS`, `BEETS_LONG_OPERATION_MAX_SECONDS`, `BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS` | Polling interval (default `5`) and limit (default `600`) for long Beets operations, and the artist reconcile timeout (default `120`). |
+| `BEETS_OUTBOUND_TIMEOUT_SECONDS`, `BEETS_OUTBOUND_MAX_REDIRECTS`, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` | Outbound fetch limits: timeout per request (default `20`), redirects (default `5`) and response size (default 20 MiB). |
+
+## Deprecated variable names
+
+Each old name below keeps working when its canonical name is blank. Using one logs a warning once, with the name only and never the value. Set the canonical name instead.
+
+| Deprecated | Canonical |
+|---|---|
+| `QBIT_URL`, `QB_URL` | `QBITTORRENT_URL` |
+| `QBIT_USER`, `QB_USER` | `QBITTORRENT_USERNAME` |
+| `QBIT_PASS`, `QB_PASS` | `QBITTORRENT_PASSWORD` |
+| `QBIT_CATEGORY` | `QBITTORRENT_CATEGORY` |
+| `QBIT_FILTER` | `QBITTORRENT_FILTER` |
+| `BEETS_WEB_TOKEN` | `BEETS_WEB_AUTH_TOKEN` |
+| `DISCOGS_USER_TOKEN` | `DISCOGS_TOKEN` |
+| `ACOUSTID_KEY` | `ACOUSTID_API_KEY` |
+| `PLEX_SECTION_KEY` | `PLEX_MUSIC_SECTION` |
+| `BEETS_MUSIC_ROOT` | `PLEX_BEETS_MUSIC_ROOT` |
+| `YTDLP_COOKIES_BROWSER` | `YTDLP_COOKIES_FROM_BROWSER` |
+
+Where each name takes effect: every shipped Compose file forwards `BEETS_WEB_AUTH_TOKEN`, `DISCOGS_TOKEN`, `ACOUSTID_API_KEY` and `ACOUSTID_KEY` from the Compose `.env`, and `docker-compose.full.yml` also forwards `DISCOGS_USER_TOKEN`; no Compose file forwards any other name in this table, so set those under the Web Manager service's `environment:` and recreate the container.
+
+The container path aliases are listed under [Container paths](#3-container-paths-compose-environment). `PLEX_MUSIC_ROOT` is not deprecated: besides being the single-value form of `PLEX_MUSIC_ROOTS`, it is the fallback for `PLAYLIST_PATH_ROOT_ALIASES`.
+
+## Advanced environment-only settings
+
+Most installs never need these. They are read only from the container environment: set them under the Web Manager service's `environment:` in Compose and recreate the container. The System page cannot save them, and they are not loaded from `/web-manager-data/.env`. `WD` below means `WEB_MANAGER_DATA_DIR`. A test keeps this list and the code in step.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BEETS_LOG` | `/config/beet.log` | Beets log file. |
+| `BEETS_WEB_SECRET_KEY`, `BEETS_WEB_SECRET_KEY_FILE` | generated, `WD/.flask_secret_key` | Flask session-signing secret, or the file holding it. |
+| `BEETS_WEB_PASSWORD_FILE` | | File whose first line is the administrator password, used when `BEETS_WEB_PASSWORD` is blank. |
+| `BEETS_WEB_AUTH_TOKEN_FILE`, `BEETS_WEB_INITIAL_PASSWORD_FILE`, `BEETS_WEB_PERSISTED_PASSWORD_FILE`, `BEETS_WEB_PERSISTED_USERNAME_FILE`, `BEETS_WEB_SETUP_STATE_FILE` | `WD/.auth_token`, `WD/.initial_admin_password`, `WD/.browser_password`, `WD/.browser_username`, `WD/.browser_setup_state` | Locations of the credential and setup state files. |
+| `LIDARR_URL_FILE`, `LIDARR_API_KEY_FILE` | `/config/lidarr_url`, `/config/lidarr_api_key` | Files whose first line is used when the variable itself is blank. |
+| `QBITTORRENT_URL_FILE`, `QBITTORRENT_USERNAME_FILE`, `QBITTORRENT_PASSWORD_FILE` | `/config/qbittorrent_url`, `/config/qbittorrent_username`, `/config/qbittorrent_password` | Same, for qBittorrent. |
+| `PLEX_CLIENT_IDENTIFIER_FILE` | `WD/.plex_client_identifier` | Where the Plex client identifier is kept. |
+| `BEETS_WEB_MAX_CONTENT_LENGTH`, `BEETS_WEB_MAX_FORM_MEMORY_SIZE`, `BEETS_WEB_MAX_FORM_PARTS` | 64 MiB, 1 MiB, `100` | Request body and form limits. |
+| `BEETS_CONFIG_CONTENT_MAX_CHARS` | 1 MiB | Largest `config.yaml` text the config routes accept. |
+| `WEBCONTROL_THREADS` | `8` | Web server worker threads (1 to 64). |
+| `BEETS_WEB_DURABLE_JOBS` | on when `WEB_MANAGER_DATA_DIR` is set | `1` or `0` forces durable job records on or off. |
+| `BEETS_ENABLE_LEGACY_LOCAL_SCAN`, `BEETS_SCAN_STATE_FILE` | `0`, | Legacy local library scan switch and its state file. |
+| `BEETS_WEB_URL` | `http://beets:8337` | See the retired settings under *Operator-only settings*. |
+| `BEETS_ALLOWED_ROOTS`, `BEETS_WEBMANAGER_IMPORT_ROOTS` | | Comma-separated overrides of the `webmanager` plugin's `allowed_roots` and `import_roots`. |
+| `PROVIDER_MAX_ATTEMPTS` | per provider | Lowers the retry limit of every provider. |
+| `RECOVERY_ADVANCE_INTERVAL_SECONDS`, `RECOVERY_CARRIER_STATE_DIR` | `120`, `WD/recovery_carriers` | Recovery advancer interval (`0` turns it off) and carrier state folder. |
+| `ACOUSTID_MIN_INTERVAL_SECONDS` | `0.35` | Shortest time between AcoustID requests. |
+| `AI_BATCH_AI_TIMEOUT`, `AI_BATCH_MAX_AI_WORKERS`, `AI_BATCH_STALE_SECONDS` | `180`, `3`, `300` | `AI_BATCH_AI_TIMEOUT` (minimum 30): age in seconds at which a running AI suggestion counts as stuck, so the batch's skip-stale control skips that folder. It is also saved in batch state as `ai_timeout_seconds`. It does not stop a request. `AI_BATCH_MAX_AI_WORKERS` (1 to 10): how many running folders batch status names, also saved as `ai_max_parallel`. It does not limit how many run. `AI_BATCH_STALE_SECONDS` (minimum 60): how long since its last heartbeat a running batch with no live worker counts as stale. |
+| `AI_BATCH_STATE_DIR`, `AI_PENDING_REVIEW_FILE` | `WD/ai_batch_jobs`, `WD/ai_pending_review.json` | AI batch state locations. |
+| `BEETS_SUBMISSION_DRAFTS` | `/config/submission_drafts.json` | Submission drafts file. |
+| `IMPORT_REVIEW_AUTO_IMPORTS_FILE`, `IMPORT_TARGET_PREVIEW_CACHE_TTL` | `/config/import_review_auto_imports.json`, `20` | Import review record file, and import target preview cache seconds. |
+| `UNMATCHED_DRAFT_DIR`, `METADATA_CACHE_DIR` | `WD/unmatched_drafts`, `/config/.cache/metadata` | Unmatched draft folder and metadata cache folder. |
+| `MB_RELEASE_TRACKLIST_DISK_CACHE_TTL` | `604800` | MusicBrainz tracklist cache seconds. |
+| `AUDIO_FFPROBE_TIMEOUT`, `AUDIO_FFPROBE_FAST_TIMEOUT`, `AUDIO_FFMPEG_TIMEOUT`, `AUDIO_DECODE_MD5_TIMEOUT` | `20`, `20`, `180`, `120` | Audio tool timeouts in seconds. |
+| `MUSIC_FORMAT_PREFS_FILE`, `MUSIC_FORMAT_REPLACEMENT_STATUS_FILE` | `/config/music_format_preferences.json`, `/config/music_format_replacements.json` | Music format state files. |
+| `MUSIC_FORMAT_REPLACEMENT_MAX_ATTEMPTS`, `MUSIC_FORMAT_REPLACEMENT_BACKOFF_SECONDS` | `3`, `900` | Replacement download attempts and wait between them. |
+| `PLAYLIST_DOWNLOAD_ROOT`, `PLAYLIST_JOB_STATE_DIR` | see *Container paths* | Playlist download folder and job checkpoints. |
+| `PLAYLIST_DOWNLOAD_BATCH_SIZE`, `PLAYLIST_DOWNLOAD_MAX_ROUNDS` | `0`, `8` | Tracks per download round (`0` means all) and most rounds per job. |
+| `PLAYLIST_SLSKD_BUSY_RETRIES`, `PLAYLIST_SLSKD_TIMEOUT` | `3`, `90` | slskd retries and wait seconds per playlist track. |
+| `PLAYLIST_MB_REPAIR_TITLE_SCORE`, `PLAYLIST_MB_REPAIR_ARTIST_SCORE`, `PLAYLIST_MB_REPAIR_MIN_MB_SCORE` | `0.86`, `0.68`, `70` | Lowest scores a playlist MusicBrainz repair accepts. |
+| `PLAYLIST_CHANNEL_ARTIST_ALIASES` | built-in list | `Channel=Artist` pairs for channel names in playlist sources. |
+| `PLAYLIST_WARM_INDEX` | `0` | Warms the playlist index at startup. |
+| `PLEX_BEETS_MUSIC_ROOT` | `MUSIC_ROOT` | Library root as Beets sees it, for Plex path mapping. |
+| `PLEX_MUSIC_ROOT` | | Single-value form of `PLEX_MUSIC_ROOTS`; also the fallback for `PLAYLIST_PATH_ROOT_ALIASES`. |
+| `PLEX_SCAN_TIMEOUT`, `PLEX_INDEX_PAGE_SIZE`, `PLEX_INDEX_CACHE_TTL`, `PLEX_PLAYLIST_CHUNK_SIZE` | `90`, `500`, `600`, `200` | Plex scan timeout, index page size, index cache seconds, and playlist write chunk size (25 to 500). |
+| `PLEX_SYNC_MIN_MATCH_RATIO`, `PLEX_SYNC_MAX_UNMATCHED_REPLACE` | `0.85`, `25` | `PLEX_SYNC_MIN_MATCH_RATIO`: when a playlist sync matches no track in Plex, path mapping is unverified and the ratio is below this, the sync reports a path mapping failure. `PLEX_SYNC_MAX_UNMATCHED_REPLACE`: when a Plex sync fails with more unmatched tracks than this, per-track Plex stamps are skipped and the failure is kept in the playlist summary. Neither limits changes to the Plex playlist. |
+| `QBITTORRENT_FILTER`, `QBIT_PATH_ALIASES` | `errored`, | Torrent list filter for repair tools, and qBittorrent path mappings. |
+| `TORRENT_SOURCE_ROOTS`, `QBIT_REPAIR_ALLOWED_ROOTS`, `ALLOW_TORRENT_SOURCE_MOVE` | `DOWNLOADS_ROOT`, `DOWNLOADS_ROOT`, `0` | See `DOWNLOADS_ROOT` under *Container paths*. |
+| `SPOTIFLAC_INPUT_SOURCES`, `SPOTIFLAC_PIP_PACKAGE`, `SPOTIFLAC_TIMEOUT` | `soundcloud`, `SpotiFLAC`, `1200` | SpotiFLAC input sources and run timeout. `SPOTIFLAC_PIP_PACKAGE` is only the package name shown in SpotiFLAC status: runtime installs are disabled, so it installs nothing. |
+| `YTDLP_PIP_PACKAGE`, `YTDLP_PIP_FALLBACK_PACKAGE`, `YTDLP_BGUTIL_PIP_PACKAGE` | `yt-dlp[default,curl-cffi]`, `yt-dlp[default]`, `bgutil-ytdlp-pot-provider==2.0.2` | Package names shown in yt-dlp status only. Runtime installs are disabled, so these install nothing; the image ships the tools. |
+| `YTDLP_RUNTIME_BIN_DIR` | `/config/yt-dlp/bin` | Folder added to the front of `PATH` and searched for runtime tools. |
+| `YTDLP_REQUIRE_YOUTUBE_AUTH`, `YTDLP_AUTH_SMOKE_URL`, `YTDLP_AUTH_SMOKE_TTL`, `YTDLP_YOUTUBE_TEST_URL` | `0`, built-in, `300`, built-in | YouTube authentication requirement and its test URLs. |
+| `YTDLP_YOUTUBE_CLIENTS`, `YTDLP_YOUTUBE_IMPERSONATE` | built-in, `chrome` | YouTube client order and browser impersonation target. |
+| `YTDLP_COOKIES_FROM_BROWSER`, `YTDLP_COOKIES_FROM_BROWSER_FALLBACK` | | Browser cookie stores for yt-dlp; they need `YTDLP_ALLOW_BROWSER_COOKIES`. |
 
 ## Beets config
 

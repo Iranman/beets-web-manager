@@ -5,8 +5,8 @@
    "name": "_get_or_create_flask_secret_key",
    "module": "app.py",
    "lines": [
-    111,
-    127
+    117,
+    133
    ],
    "size": 17,
    "body_lines": 16,
@@ -25,8 +25,8 @@
    "name": "_enforce_security_boundary",
    "module": "app.py",
    "lines": [
-    150,
-    195
+    156,
+    201
    ],
    "size": 46,
    "body_lines": 45,
@@ -58,8 +58,8 @@
    "name": "_compress_response",
    "module": "app.py",
    "lines": [
-    203,
-    251
+    209,
+    257
    ],
    "size": 49,
    "body_lines": 28,
@@ -76,8 +76,8 @@
    "name": "_set_security_headers",
    "module": "app.py",
    "lines": [
-    255,
-    269
+    261,
+    275
    ],
    "size": 15,
    "body_lines": 14,
@@ -96,8 +96,8 @@
    "name": "_safe_static_file",
    "module": "app.py",
    "lines": [
-    272,
-    288
+    278,
+    294
    ],
    "size": 17,
    "body_lines": 16,
@@ -119,8 +119,8 @@
    "name": "_handle_http_error",
    "module": "app.py",
    "lines": [
-    293,
-    294
+    299,
+    300
    ],
    "size": 2,
    "body_lines": 1,
@@ -137,8 +137,8 @@
    "name": "_handle_ai_batch_state_conflict",
    "module": "app.py",
    "lines": [
-    306,
-    317
+    312,
+    323
    ],
    "size": 12,
    "body_lines": 1,
@@ -155,8 +155,8 @@
    "name": "_handle_provider_unavailable",
    "module": "app.py",
    "lines": [
-    320,
-    326
+    326,
+    332
    ],
    "size": 7,
    "body_lines": 4,
@@ -173,8 +173,8 @@
    "name": "_handle_unexpected_error",
    "module": "app.py",
    "lines": [
-    329,
-    336
+    335,
+    342
    ],
    "size": 8,
    "body_lines": 7,
@@ -193,8 +193,8 @@
    "name": "index",
    "module": "app.py",
    "lines": [
-    342,
-    343
+    348,
+    349
    ],
    "size": 2,
    "body_lines": 1,
@@ -242,8 +242,8 @@
    "name": "react_assets",
    "module": "app.py",
    "lines": [
-    346,
-    351
+    352,
+    357
    ],
    "size": 6,
    "body_lines": 4,
@@ -265,8 +265,8 @@
    "name": "react_next_static",
    "module": "app.py",
    "lines": [
-    355,
-    360
+    361,
+    366
    ],
    "size": 6,
    "body_lines": 4,
@@ -288,8 +288,8 @@
    "name": "favicon",
    "module": "app.py",
    "lines": [
-    364,
-    371
+    370,
+    377
    ],
    "size": 8,
    "body_lines": 7,
@@ -309,8 +309,8 @@
    "name": "_health_checks",
    "module": "app.py",
    "lines": [
-    374,
-    400
+    380,
+    406
    ],
    "size": 27,
    "body_lines": 26,
@@ -329,8 +329,8 @@
    "name": "health",
    "module": "app.py",
    "lines": [
-    404,
-    410
+    410,
+    416
    ],
    "size": 7,
    "body_lines": 1,
@@ -361,8 +361,8 @@
    "name": "health_detail",
    "module": "app.py",
    "lines": [
-    414,
-    428
+    420,
+    434
    ],
    "size": 15,
    "body_lines": 13,
@@ -384,8 +384,8 @@
    "name": "render_index",
    "module": "app.py",
    "lines": [
-    475,
-    485
+    481,
+    491
    ],
    "size": 11,
    "body_lines": 9,
@@ -405,8 +405,8 @@
    "name": "react_index_response",
    "module": "app.py",
    "lines": [
-    488,
-    498
+    494,
+    504
    ],
    "size": 11,
    "body_lines": 10,
@@ -428,8 +428,8 @@
    "name": "react_spa_fallback",
    "module": "app.py",
    "lines": [
-    502,
-    515
+    508,
+    521
    ],
    "size": 14,
    "body_lines": 12,
@@ -452,8 +452,8 @@
    "name": "__getattr__",
    "module": "app.py",
    "lines": [
-    563,
-    573
+    569,
+    579
    ],
    "size": 11,
    "body_lines": 10,
@@ -470,8 +470,8 @@
    "name": "_load_route_module",
    "module": "app.py",
    "lines": [
-    591,
-    604
+    597,
+    610
    ],
    "size": 14,
    "body_lines": 13,
@@ -669,8 +669,8 @@
    "name": "validated_downloads_root",
    "module": "backend/app_runtime.py",
    "lines": [
-    352,
-    357
+    354,
+    359
    ],
    "size": 6,
    "body_lines": 3,
@@ -690,8 +690,8 @@
    "name": "_is_valid_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    522,
-    523
+    513,
+    514
    ],
    "size": 2,
    "body_lines": 1,
@@ -715,8 +715,8 @@
    "name": "_extract_mb_uuid",
    "module": "backend/app_runtime.py",
    "lines": [
-    616,
-    623
+    607,
+    614
    ],
    "size": 8,
    "body_lines": 6,
@@ -750,8 +750,8 @@
    "name": "_read_beets_plugin_list",
    "module": "backend/app_runtime.py",
    "lines": [
-    632,
-    652
+    623,
+    643
    ],
    "size": 21,
    "body_lines": 19,
@@ -770,8 +770,8 @@
    "name": "_redact_secret_assignment_match",
    "module": "backend/app_runtime.py",
    "lines": [
-    695,
-    698
+    686,
+    689
    ],
    "size": 4,
    "body_lines": 3,
@@ -790,8 +790,8 @@
    "name": "_redact_security_text",
    "module": "backend/app_runtime.py",
    "lines": [
-    715,
-    719
+    706,
+    710
    ],
    "size": 5,
    "body_lines": 4,
@@ -833,8 +833,8 @@
    "name": "_split_mbid_values",
    "module": "backend/app_runtime.py",
    "lines": [
-    722,
-    732
+    713,
+    723
    ],
    "size": 11,
    "body_lines": 10,
@@ -856,8 +856,8 @@
    "name": "_path_is_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    735,
-    740
+    726,
+    731
    ],
    "size": 6,
    "body_lines": 5,
@@ -900,8 +900,8 @@
    "name": "_split_beets_multi",
    "module": "backend/app_runtime.py",
    "lines": [
-    743,
-    754
+    734,
+    745
    ],
    "size": 12,
    "body_lines": 10,
@@ -925,8 +925,8 @@
    "name": "_split_collab_credit",
    "module": "backend/app_runtime.py",
    "lines": [
-    757,
-    774
+    748,
+    765
    ],
    "size": 18,
    "body_lines": 11,
@@ -948,8 +948,8 @@
    "name": "_path_lexically_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    777,
-    784
+    768,
+    775
    ],
    "size": 8,
    "body_lines": 7,
@@ -972,8 +972,8 @@
    "name": "_path_has_symlink_component_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    787,
-    801
+    778,
+    792
    ],
    "size": 15,
    "body_lines": 14,
@@ -1001,8 +1001,8 @@
    "name": "_normalize_name",
    "module": "backend/app_runtime.py",
    "lines": [
-    831,
-    834
+    822,
+    825
    ],
    "size": 4,
    "body_lines": 3,
@@ -1026,8 +1026,8 @@
    "name": "_path_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    837,
-    847
+    828,
+    838
    ],
    "size": 11,
    "body_lines": 10,
@@ -1061,8 +1061,8 @@
    "name": "_safe_path_component",
    "module": "backend/app_runtime.py",
    "lines": [
-    850,
-    864
+    841,
+    855
    ],
    "size": 15,
    "body_lines": 14,
@@ -1087,8 +1087,8 @@
    "name": "_same_resolved_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    867,
-    871
+    858,
+    862
    ],
    "size": 5,
    "body_lines": 4,
@@ -1109,8 +1109,8 @@
    "name": "_safe_beets_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    874,
-    893
+    865,
+    884
    ],
    "size": 20,
    "body_lines": 11,
@@ -1131,8 +1131,8 @@
    "name": "_safe_inventory_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    896,
-    905
+    887,
+    896
    ],
    "size": 10,
    "body_lines": 7,
@@ -1155,8 +1155,8 @@
    "name": "_safe_operation_status_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    908,
-    917
+    899,
+    908
    ],
    "size": 10,
    "body_lines": 7,
@@ -1177,8 +1177,8 @@
    "name": "_safe_apply_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    920,
-    930
+    911,
+    921
    ],
    "size": 11,
    "body_lines": 7,
@@ -1199,8 +1199,8 @@
    "name": "_norm",
    "module": "backend/app_runtime.py",
    "lines": [
-    935,
-    936
+    926,
+    927
    ],
    "size": 2,
    "body_lines": 1,
@@ -1243,8 +1243,8 @@
    "name": "_db",
    "module": "backend/app_runtime.py",
    "lines": [
-    941,
-    949
+    932,
+    940
    ],
    "size": 9,
    "body_lines": 2,
@@ -1261,8 +1261,8 @@
    "name": "_durable_jobs_dir",
    "module": "backend/app_runtime.py",
    "lines": [
-    965,
-    970
+    956,
+    961
    ],
    "size": 6,
    "body_lines": 3,
@@ -1279,8 +1279,8 @@
    "name": "register_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    983,
-    985
+    974,
+    976
    ],
    "size": 3,
    "body_lines": 2,
@@ -1297,8 +1297,8 @@
    "name": "registered_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    988,
-    991
+    979,
+    982
    ],
    "size": 4,
    "body_lines": 3,
@@ -1317,8 +1317,8 @@
    "name": "_yt_bot_check_message",
    "module": "backend/auth_service.py",
    "lines": [
-    23,
-    28
+    24,
+    29
    ],
    "size": 6,
    "body_lines": 5,
@@ -1338,8 +1338,8 @@
    "name": "_yt_browser_cookie_unavailable_message",
    "module": "backend/auth_service.py",
    "lines": [
-    31,
-    39
+    32,
+    40
    ],
    "size": 9,
    "body_lines": 8,
@@ -1358,8 +1358,8 @@
    "name": "_yt_auth_source_failed_message",
    "module": "backend/auth_service.py",
    "lines": [
-    42,
-    43
+    43,
+    44
    ],
    "size": 2,
    "body_lines": 1,
@@ -1383,8 +1383,8 @@
    "name": "_app_config_store_for_target",
    "module": "backend/auth_service.py",
    "lines": [
-    46,
-    63
+    47,
+    64
    ],
    "size": 18,
    "body_lines": 9,
@@ -1403,8 +1403,8 @@
    "name": "_persist_app_config_text",
    "module": "backend/auth_service.py",
    "lines": [
-    66,
-    82
+    67,
+    83
    ],
    "size": 17,
    "body_lines": 16,
@@ -1426,8 +1426,8 @@
    "name": "_persist_file_atomically",
    "module": "backend/auth_service.py",
    "lines": [
-    85,
-    86
+    86,
+    87
    ],
    "size": 2,
    "body_lines": 1,
@@ -1449,8 +1449,8 @@
    "name": "_first_config_secret",
    "module": "backend/auth_service.py",
    "lines": [
-    132,
-    137
+    133,
+    138
    ],
    "size": 6,
    "body_lines": 5,
@@ -1463,18 +1463,17 @@
     "_cleanup_initial_browser_password_if_replaced",
     "_has_explicit_browser_password",
     "_migrate_or_initialize_setup_state",
-    "_security_auth_password",
-    "_security_auth_token"
+    "_security_auth_password"
    ],
-   "caller_count": 5,
+   "caller_count": 4,
    "dependencies": []
   },
   {
    "name": "_security_auth_token",
    "module": "backend/auth_service.py",
    "lines": [
-    140,
-    141
+    141,
+    142
    ],
    "size": 2,
    "body_lines": 1,
@@ -1489,16 +1488,14 @@
     "_security_auth_configured"
    ],
    "caller_count": 3,
-   "dependencies": [
-    "_first_config_secret"
-   ]
+   "dependencies": []
   },
   {
    "name": "_security_auth_password",
    "module": "backend/auth_service.py",
    "lines": [
-    164,
-    190
+    165,
+    191
    ],
    "size": 27,
    "body_lines": 26,
@@ -1522,8 +1519,8 @@
    "name": "_security_auth_username",
    "module": "backend/auth_service.py",
    "lines": [
-    193,
-    204
+    194,
+    205
    ],
    "size": 12,
    "body_lines": 11,
@@ -1544,8 +1541,8 @@
    "name": "_browser_password_min_length",
    "module": "backend/auth_service.py",
    "lines": [
-    210,
-    211
+    211,
+    212
    ],
    "size": 2,
    "body_lines": 1,
@@ -1567,8 +1564,8 @@
    "name": "_password_looks_placeholder",
    "module": "backend/auth_service.py",
    "lines": [
-    214,
-    224
+    215,
+    225
    ],
    "size": 11,
    "body_lines": 10,
@@ -1588,8 +1585,8 @@
    "name": "_browser_password_is_usable",
    "module": "backend/auth_service.py",
    "lines": [
-    227,
-    235
+    228,
+    236
    ],
    "size": 9,
    "body_lines": 8,
@@ -1618,8 +1615,8 @@
    "name": "_password_requirements_unmet",
    "module": "backend/auth_service.py",
    "lines": [
-    238,
-    246
+    239,
+    247
    ],
    "size": 9,
    "body_lines": 7,
@@ -1641,8 +1638,8 @@
    "name": "generate_secure_browser_password",
    "module": "backend/auth_service.py",
    "lines": [
-    249,
-    262
+    250,
+    263
    ],
    "size": 14,
    "body_lines": 12,
@@ -1662,8 +1659,8 @@
    "name": "_auth_secret_is_usable",
    "module": "backend/auth_service.py",
    "lines": [
-    265,
-    277
+    266,
+    278
    ],
    "size": 13,
    "body_lines": 12,
@@ -1684,8 +1681,8 @@
    "name": "_has_explicit_browser_password",
    "module": "backend/auth_service.py",
    "lines": [
-    280,
-    299
+    281,
+    300
    ],
    "size": 20,
    "body_lines": 19,
@@ -1707,8 +1704,8 @@
    "name": "_security_auth_disabled",
    "module": "backend/auth_service.py",
    "lines": [
-    302,
-    303
+    303,
+    304
    ],
    "size": 2,
    "body_lines": 1,
@@ -1734,8 +1731,8 @@
    "name": "generate_secure_auth_token",
    "module": "backend/auth_service.py",
    "lines": [
-    306,
-    309
+    307,
+    310
    ],
    "size": 4,
    "body_lines": 1,
@@ -1754,8 +1751,8 @@
    "name": "_persist_generated_auth_token",
    "module": "backend/auth_service.py",
    "lines": [
-    312,
-    314
+    313,
+    315
    ],
    "size": 3,
    "body_lines": 1,
@@ -1776,8 +1773,8 @@
    "name": "_constant_time_equal",
    "module": "backend/auth_service.py",
    "lines": [
-    317,
-    318
+    318,
+    319
    ],
    "size": 2,
    "body_lines": 1,
@@ -1799,8 +1796,8 @@
    "name": "_verify_password",
    "module": "backend/auth_service.py",
    "lines": [
-    321,
-    336
+    322,
+    337
    ],
    "size": 16,
    "body_lines": 9,
@@ -1824,8 +1821,8 @@
    "name": "_check_password_value",
    "module": "backend/auth_service.py",
    "lines": [
-    339,
-    349
+    340,
+    350
    ],
    "size": 11,
    "body_lines": 10,
@@ -1848,8 +1845,8 @@
    "name": "_auth_ip_limit",
    "module": "backend/auth_service.py",
    "lines": [
-    352,
-    356
+    353,
+    357
    ],
    "size": 5,
    "body_lines": 4,
@@ -1871,8 +1868,8 @@
    "name": "_auth_account_limit",
    "module": "backend/auth_service.py",
    "lines": [
-    359,
-    363
+    360,
+    364
    ],
    "size": 5,
    "body_lines": 4,
@@ -1895,8 +1892,8 @@
    "name": "_password_attempts_limited",
    "module": "backend/auth_service.py",
    "lines": [
-    369,
-    374
+    370,
+    375
    ],
    "size": 6,
    "body_lines": 5,
@@ -1920,8 +1917,8 @@
    "name": "_record_account_auth_failure",
    "module": "backend/auth_service.py",
    "lines": [
-    377,
-    379
+    378,
+    380
    ],
    "size": 3,
    "body_lines": 2,
@@ -1943,8 +1940,8 @@
    "name": "_bearer_authorized",
    "module": "backend/auth_service.py",
    "lines": [
-    382,
-    386
+    383,
+    387
    ],
    "size": 5,
    "body_lines": 4,
@@ -1967,8 +1964,8 @@
    "name": "_basic_authorized",
    "module": "backend/auth_service.py",
    "lines": [
-    389,
-    404
+    390,
+    405
    ],
    "size": 16,
    "body_lines": 15,
@@ -1994,8 +1991,8 @@
    "name": "_session_authorized",
    "module": "backend/auth_service.py",
    "lines": [
-    407,
-    412
+    408,
+    413
    ],
    "size": 6,
    "body_lines": 5,
@@ -2015,8 +2012,8 @@
    "name": "_request_authorized",
    "module": "backend/auth_service.py",
    "lines": [
-    415,
-    417
+    416,
+    418
    ],
    "size": 3,
    "body_lines": 2,
@@ -2041,8 +2038,8 @@
    "name": "probe_may_use_stored_secret",
    "module": "backend/auth_service.py",
    "lines": [
-    420,
-    438
+    421,
+    439
    ],
    "size": 19,
    "body_lines": 11,
@@ -2062,8 +2059,8 @@
    "name": "_trusted_proxy_cidrs",
    "module": "backend/auth_service.py",
    "lines": [
-    441,
-    443
+    442,
+    444
    ],
    "size": 3,
    "body_lines": 2,
@@ -2082,8 +2079,8 @@
    "name": "_valid_client_ip",
    "module": "backend/auth_service.py",
    "lines": [
-    446,
-    452
+    447,
+    453
    ],
    "size": 7,
    "body_lines": 6,
@@ -2102,8 +2099,8 @@
    "name": "_request_client_identity",
    "module": "backend/auth_service.py",
    "lines": [
-    455,
-    482
+    456,
+    483
    ],
    "size": 28,
    "body_lines": 19,
@@ -2126,8 +2123,8 @@
    "name": "_rate_limit_subject",
    "module": "backend/auth_service.py",
    "lines": [
-    485,
-    491
+    486,
+    492
    ],
    "size": 7,
    "body_lines": 6,
@@ -2150,8 +2147,8 @@
    "name": "_rate_limit_profile_for_request",
    "module": "backend/auth_service.py",
    "lines": [
-    494,
-    517
+    495,
+    518
    ],
    "size": 24,
    "body_lines": 23,
@@ -2170,8 +2167,8 @@
    "name": "_rate_limit_peek",
    "module": "backend/auth_service.py",
    "lines": [
-    520,
-    529
+    521,
+    530
    ],
    "size": 10,
    "body_lines": 8,
@@ -2191,8 +2188,8 @@
    "name": "_rate_limited",
    "module": "backend/auth_service.py",
    "lines": [
-    532,
-    546
+    533,
+    547
    ],
    "size": 15,
    "body_lines": 14,
@@ -2213,8 +2210,8 @@
    "name": "_rate_limit_response",
    "module": "backend/auth_service.py",
    "lines": [
-    549,
-    553
+    550,
+    554
    ],
    "size": 5,
    "body_lines": 4,
@@ -2234,8 +2231,8 @@
    "name": "_same_origin_url",
    "module": "backend/auth_service.py",
    "lines": [
-    556,
-    564
+    557,
+    565
    ],
    "size": 9,
    "body_lines": 8,
@@ -2254,8 +2251,8 @@
    "name": "_explicit_authorization_header_present",
    "module": "backend/auth_service.py",
    "lines": [
-    567,
-    569
+    568,
+    570
    ],
    "size": 3,
    "body_lines": 2,
@@ -2274,8 +2271,8 @@
    "name": "_csrf_request_allowed",
    "module": "backend/auth_service.py",
    "lines": [
-    572,
-    598
+    573,
+    599
    ],
    "size": 27,
    "body_lines": 26,
@@ -2299,8 +2296,8 @@
    "name": "_json_security_error",
    "module": "backend/auth_service.py",
    "lines": [
-    601,
-    606
+    602,
+    607
    ],
    "size": 6,
    "body_lines": 5,
@@ -2321,8 +2318,8 @@
    "name": "_sanitize_confirmation_reason",
    "module": "backend/auth_service.py",
    "lines": [
-    612,
-    630
+    613,
+    631
    ],
    "size": 19,
    "body_lines": 10,
@@ -2344,8 +2341,8 @@
    "name": "_is_public_endpoint",
    "module": "backend/auth_service.py",
    "lines": [
-    633,
-    636
+    634,
+    637
    ],
    "size": 4,
    "body_lines": 3,
@@ -2364,8 +2361,8 @@
    "name": "_auth_failure_rate_limit_response",
    "module": "backend/auth_service.py",
    "lines": [
-    639,
-    657
+    640,
+    658
    ],
    "size": 19,
    "body_lines": 18,
@@ -2392,8 +2389,8 @@
    "name": "_inline_script_csp_hashes",
    "module": "backend/auth_service.py",
    "lines": [
-    663,
-    673
+    664,
+    674
    ],
    "size": 11,
    "body_lines": 10,
@@ -2412,8 +2409,8 @@
    "name": "_content_security_policy",
    "module": "backend/auth_service.py",
    "lines": [
-    676,
-    689
+    677,
+    690
    ],
    "size": 14,
    "body_lines": 13,
@@ -2434,8 +2431,8 @@
    "name": "_client_ip_is_lan",
    "module": "backend/auth_service.py",
    "lines": [
-    692,
-    698
+    693,
+    699
    ],
    "size": 7,
    "body_lines": 6,
@@ -2456,8 +2453,8 @@
    "name": "_transaction_user_label",
    "module": "backend/auth_service.py",
    "lines": [
-    701,
-    715
+    702,
+    716
    ],
    "size": 15,
    "body_lines": 11,
@@ -3552,10 +3549,10 @@
    "module": "backend/plex_service.py",
    "lines": [
     125,
-    164
+    162
    ],
-   "size": 40,
-   "body_lines": 39,
+   "size": 38,
+   "body_lines": 37,
    "route": null,
    "mutation_capable": false,
    "domain": "PLEX",
@@ -3589,8 +3586,8 @@
    "name": "_plex_split_roots",
    "module": "backend/plex_service.py",
    "lines": [
-    172,
-    178
+    170,
+    176
    ],
    "size": 7,
    "body_lines": 6,
@@ -3612,8 +3609,8 @@
    "name": "_plex_music_roots",
    "module": "backend/plex_service.py",
    "lines": [
-    181,
-    188
+    179,
+    186
    ],
    "size": 8,
    "body_lines": 7,
@@ -3639,8 +3636,8 @@
    "name": "_plex_beets_music_root",
    "module": "backend/plex_service.py",
    "lines": [
-    191,
-    193
+    189,
+    191
    ],
    "size": 3,
    "body_lines": 2,
@@ -3666,8 +3663,8 @@
    "name": "_plex_norm_path",
    "module": "backend/plex_service.py",
    "lines": [
-    196,
-    215
+    194,
+    213
    ],
    "size": 20,
    "body_lines": 19,
@@ -3699,8 +3696,8 @@
    "name": "_plex_path_case_key",
    "module": "backend/plex_service.py",
    "lines": [
-    218,
-    219
+    216,
+    217
    ],
    "size": 2,
    "body_lines": 1,
@@ -3724,8 +3721,8 @@
    "name": "_plex_path_is_under",
    "module": "backend/plex_service.py",
    "lines": [
-    222,
-    226
+    220,
+    224
    ],
    "size": 5,
    "body_lines": 4,
@@ -3747,8 +3744,8 @@
    "name": "_plex_relative_path",
    "module": "backend/plex_service.py",
    "lines": [
-    229,
-    239
+    227,
+    237
    ],
    "size": 11,
    "body_lines": 10,
@@ -3771,8 +3768,8 @@
    "name": "_plex_effective_music_roots",
    "module": "backend/plex_service.py",
    "lines": [
-    242,
-    256
+    240,
+    254
    ],
    "size": 15,
    "body_lines": 13,
@@ -3796,8 +3793,8 @@
    "name": "_plex_selected_path_map",
    "module": "backend/plex_service.py",
    "lines": [
-    259,
-    278
+    257,
+    276
    ],
    "size": 20,
    "body_lines": 18,
@@ -3823,8 +3820,8 @@
    "name": "_plex_translate_beets_path",
    "module": "backend/plex_service.py",
    "lines": [
-    281,
-    339
+    279,
+    337
    ],
    "size": 59,
    "body_lines": 55,
@@ -3854,8 +3851,8 @@
    "name": "_plex_suffix_keys_for_path",
    "module": "backend/plex_service.py",
    "lines": [
-    342,
-    354
+    340,
+    352
    ],
    "size": 13,
    "body_lines": 12,
@@ -3878,8 +3875,8 @@
    "name": "_plex_mapped_beets_paths",
    "module": "backend/plex_service.py",
    "lines": [
-    357,
-    366
+    355,
+    364
    ],
    "size": 10,
    "body_lines": 6,
@@ -3901,8 +3898,8 @@
    "name": "_plex_timeout_error",
    "module": "backend/plex_service.py",
    "lines": [
-    369,
-    376
+    367,
+    374
    ],
    "size": 8,
    "body_lines": 7,
@@ -3925,8 +3922,8 @@
    "name": "_plex_client_identifier_file",
    "module": "backend/plex_service.py",
    "lines": [
-    382,
-    385
+    380,
+    383
    ],
    "size": 4,
    "body_lines": 3,
@@ -3945,8 +3942,8 @@
    "name": "_plex_client_identifier",
    "module": "backend/plex_service.py",
    "lines": [
-    388,
-    416
+    386,
+    414
    ],
    "size": 29,
    "body_lines": 19,
@@ -3967,8 +3964,8 @@
    "name": "_plex_client_headers",
    "module": "backend/plex_service.py",
    "lines": [
-    419,
-    426
+    417,
+    424
    ],
    "size": 8,
    "body_lines": 7,
@@ -3989,8 +3986,8 @@
    "name": "_plex_response_socket",
    "module": "backend/plex_service.py",
    "lines": [
-    429,
-    432
+    427,
+    430
    ],
    "size": 4,
    "body_lines": 2,
@@ -4009,8 +4006,8 @@
    "name": "_plex_request",
    "module": "backend/plex_service.py",
    "lines": [
-    435,
-    494
+    433,
+    492
    ],
    "size": 60,
    "body_lines": 53,
@@ -4045,8 +4042,8 @@
    "name": "_plex_machine_identifier",
    "module": "backend/plex_service.py",
    "lines": [
-    497,
-    502
+    495,
+    500
    ],
    "size": 6,
    "body_lines": 5,
@@ -4069,8 +4066,8 @@
    "name": "_plex_find_music_section",
    "module": "backend/plex_service.py",
    "lines": [
-    505,
-    534
+    503,
+    532
    ],
    "size": 30,
    "body_lines": 28,
@@ -4096,8 +4093,8 @@
    "name": "_plex_section_locations",
    "module": "backend/plex_service.py",
    "lines": [
-    537,
-    575
+    535,
+    573
    ],
    "size": 39,
    "body_lines": 38,
@@ -4121,8 +4118,8 @@
    "name": "_trigger_plex_refresh",
    "module": "backend/plex_service.py",
    "lines": [
-    581,
-    622
+    579,
+    620
    ],
    "size": 42,
    "body_lines": 40,
@@ -4166,8 +4163,8 @@
    "name": "_plex_is_final_library_path",
    "module": "backend/plex_service.py",
    "lines": [
-    625,
-    647
+    623,
+    645
    ],
    "size": 23,
    "body_lines": 22,
@@ -4194,8 +4191,8 @@
    "name": "_plex_beets_path_candidates",
    "module": "backend/plex_service.py",
    "lines": [
-    650,
-    688
+    648,
+    686
    ],
    "size": 39,
    "body_lines": 37,
@@ -4221,8 +4218,8 @@
    "name": "_plex_path_keys_for_beets_item",
    "module": "backend/plex_service.py",
    "lines": [
-    691,
-    696
+    689,
+    694
    ],
    "size": 6,
    "body_lines": 4,
@@ -4244,8 +4241,8 @@
    "name": "_plex_path_keys_for_plex_file",
    "module": "backend/plex_service.py",
    "lines": [
-    699,
-    711
+    697,
+    709
    ],
    "size": 13,
    "body_lines": 11,
@@ -4269,8 +4266,8 @@
    "name": "_plex_track_part_paths",
    "module": "backend/plex_service.py",
    "lines": [
-    714,
-    721
+    712,
+    719
    ],
    "size": 8,
    "body_lines": 7,
@@ -4294,8 +4291,8 @@
    "name": "_plex_duration_seconds",
    "module": "backend/plex_service.py",
    "lines": [
-    724,
-    733
+    722,
+    731
    ],
    "size": 10,
    "body_lines": 9,
@@ -4315,8 +4312,8 @@
    "name": "_plex_track_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    736,
-    744
+    734,
+    742
    ],
    "size": 9,
    "body_lines": 8,
@@ -4338,8 +4335,8 @@
    "name": "_plex_item_duration",
    "module": "backend/plex_service.py",
    "lines": [
-    747,
-    748
+    745,
+    746
    ],
    "size": 2,
    "body_lines": 1,
@@ -4361,8 +4358,8 @@
    "name": "_plex_duration_values",
    "module": "backend/plex_service.py",
    "lines": [
-    751,
-    753
+    749,
+    751
    ],
    "size": 3,
    "body_lines": 2,
@@ -4384,8 +4381,8 @@
    "name": "_plex_track_mbids",
    "module": "backend/plex_service.py",
    "lines": [
-    756,
-    761
+    754,
+    759
    ],
    "size": 6,
    "body_lines": 5,
@@ -4406,8 +4403,8 @@
    "name": "_plex_item_lookup_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    764,
-    783
+    762,
+    781
    ],
    "size": 20,
    "body_lines": 19,
@@ -4431,8 +4428,8 @@
    "name": "_plex_track_lookup_rows",
    "module": "backend/plex_service.py",
    "lines": [
-    786,
-    808
+    784,
+    806
    ],
    "size": 23,
    "body_lines": 22,
@@ -4458,8 +4455,8 @@
    "name": "_plex_find_track",
    "module": "backend/plex_service.py",
    "lines": [
-    811,
-    824
+    809,
+    822
    ],
    "size": 14,
    "body_lines": 11,
@@ -4481,8 +4478,8 @@
    "name": "_plex_section_track_index",
    "module": "backend/plex_service.py",
    "lines": [
-    827,
-    998
+    825,
+    996
    ],
    "size": 172,
    "body_lines": 170,
@@ -4518,8 +4515,8 @@
    "name": "_plex_unique_index_value",
    "module": "backend/plex_service.py",
    "lines": [
-    1001,
-    1005
+    999,
+    1003
    ],
    "size": 5,
    "body_lines": 4,
@@ -4538,8 +4535,8 @@
    "name": "_plex_pending_match_reason",
    "module": "backend/plex_service.py",
    "lines": [
-    1008,
-    1035
+    1006,
+    1033
    ],
    "size": 28,
    "body_lines": 24,
@@ -4563,8 +4560,8 @@
    "name": "_plex_pending_match_row",
    "module": "backend/plex_service.py",
    "lines": [
-    1038,
-    1054
+    1036,
+    1052
    ],
    "size": 17,
    "body_lines": 13,
@@ -4587,8 +4584,8 @@
    "name": "_plex_track_keys_for_items",
    "module": "backend/plex_service.py",
    "lines": [
-    1057,
-    1365
+    1055,
+    1363
    ],
    "size": 309,
    "body_lines": 306,
@@ -4630,8 +4627,8 @@
    "name": "_playlist_path_keys",
    "module": "backend/plex_service.py",
    "lines": [
-    1368,
-    1405
+    1366,
+    1403
    ],
    "size": 38,
    "body_lines": 37,
@@ -4656,8 +4653,8 @@
    "name": "_plex_track_file",
    "module": "backend/plex_service.py",
    "lines": [
-    1408,
-    1410
+    1406,
+    1408
    ],
    "size": 3,
    "body_lines": 2,
@@ -4678,8 +4675,8 @@
    "name": "_plex_failure",
    "module": "backend/plex_service.py",
    "lines": [
-    1413,
-    1437
+    1411,
+    1435
    ],
    "size": 25,
    "body_lines": 21,
@@ -4704,8 +4701,8 @@
    "name": "_plex_configured",
    "module": "backend/plex_service.py",
    "lines": [
-    1440,
-    1443
+    1438,
+    1441
    ],
    "size": 4,
    "body_lines": 2,
@@ -4729,8 +4726,8 @@
    "name": "_plex_display_url",
    "module": "backend/plex_service.py",
    "lines": [
-    1446,
-    1448
+    1444,
+    1446
    ],
    "size": 3,
    "body_lines": 1,
@@ -4749,8 +4746,8 @@
    "name": "_plex_status_payload",
    "module": "backend/plex_service.py",
    "lines": [
-    1451,
-    1491
+    1449,
+    1489
    ],
    "size": 41,
    "body_lines": 40,
@@ -4778,8 +4775,8 @@
    "name": "_playlist_status_id",
    "module": "backend/plex_service.py",
    "lines": [
-    1493,
-    1496
+    1491,
+    1494
    ],
    "size": 4,
    "body_lines": 3,
@@ -5638,8 +5635,8 @@
    "name": "_beets_config_discogs_token",
    "module": "backend/artwork_service.py",
    "lines": [
-    23,
-    45
+    24,
+    46
    ],
    "size": 23,
    "body_lines": 22,
@@ -38664,7 +38661,7 @@
    "lines": 11
   }
  },
- "app_py_lines": 635,
+ "app_py_lines": 641,
  "extracted_modules": [
   "backend/app_runtime.py",
   "backend/auth_service.py",

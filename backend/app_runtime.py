@@ -251,6 +251,8 @@ LIDARR_KEY    = (
 
 from backend import config_layers as _config_layers  # noqa: E402  (leaf module, no backend imports)
 
+_config_layers.warn_legacy_env_aliases()
+
 WEB_MANAGER_DATA_DIR = Path(os.environ["WEB_MANAGER_DATA_DIR"])
 
 
@@ -371,39 +373,31 @@ TORRENT_SOURCE_MOVE_ALLOWED = _env_flag("ALLOW_TORRENT_SOURCE_MOVE", False)
 
 
 QBIT_URL = (
-    os.environ.get("QBITTORRENT_URL", "").strip()
-    or os.environ.get("QBIT_URL", "").strip()
-    or os.environ.get("QB_URL", "").strip()
+    _config_layers.legacy_env_value("QBITTORRENT_URL").strip()
     or _config_file_first_line("QBITTORRENT_URL_FILE", "/config/qbittorrent_url")
 ).rstrip("/")
 
 
 QBIT_USERNAME = (
-    os.environ.get("QBITTORRENT_USERNAME", "").strip()
-    or os.environ.get("QBIT_USER", "").strip()
-    or os.environ.get("QB_USER", "").strip()
+    _config_layers.legacy_env_value("QBITTORRENT_USERNAME").strip()
     or _config_file_first_line("QBITTORRENT_USERNAME_FILE", "/config/qbittorrent_username")
 )
 
 
 QBIT_PASSWORD = (
-    os.environ.get("QBITTORRENT_PASSWORD", "").strip()
-    or os.environ.get("QBIT_PASS", "").strip()
-    or os.environ.get("QB_PASS", "").strip()
+    _config_layers.legacy_env_value("QBITTORRENT_PASSWORD").strip()
     or _config_file_first_line("QBITTORRENT_PASSWORD_FILE", "/config/qbittorrent_password")
 )
 
 
 QBIT_CATEGORY = (
-    os.environ.get("QBITTORRENT_CATEGORY", "").strip()
-    or os.environ.get("QBIT_CATEGORY", "").strip()
+    _config_layers.legacy_env_value("QBITTORRENT_CATEGORY").strip()
     or "music"
 )
 
 
 QBIT_FILTER = (
-    os.environ.get("QBITTORRENT_FILTER", "").strip()
-    or os.environ.get("QBIT_FILTER", "").strip()
+    _config_layers.legacy_env_value("QBITTORRENT_FILTER").strip()
     or "errored"
 )
 
@@ -441,10 +435,7 @@ YTDLP_ALLOW_BROWSER_COOKIES = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 
-YTDLP_COOKIES_FROM_BROWSER = (
-    os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "")
-    or os.environ.get("YTDLP_COOKIES_BROWSER", "")
-).strip()
+YTDLP_COOKIES_FROM_BROWSER = _config_layers.legacy_env_value("YTDLP_COOKIES_FROM_BROWSER").strip()
 
 
 YTDLP_COOKIES_FROM_BROWSER_FALLBACK = os.environ.get(
