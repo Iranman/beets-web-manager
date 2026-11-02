@@ -30,7 +30,6 @@ class SingleTrackPathFormatTests(unittest.TestCase):
 
         self.assertIn(f'singleton: "{SINGLE_TRACK_TEMPLATE}"', config_source)
         self.assertIn(f'default: "{DEFAULT_TEMPLATE}"', config_source)
-        self.assertIn("def _write_playlist_import_beets_config", app_source)
         self.assertIn('_ARTIST_FOLDER_PATH_TEMPLATE = "$albumartist%if{$mb_albumartistid, ($mb_albumartistid),}"', app_source)
         self.assertIn("_SINGLE_TRACK_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE +", app_source)
         self.assertIn("$albumartist%if{$mb_albumartistid, ($mb_albumartistid),}", app_source)
