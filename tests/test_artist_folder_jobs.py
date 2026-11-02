@@ -26,6 +26,14 @@ class ArtistFolderJobsTests(unittest.TestCase):
             app_source.index('@app.post("/api/clean/artist-folders/stamp-mbid")'):
             app_source.index("# \u2500\u2500 Playlist helpers")
         ]
+        # The apply job is the shared Clean All step, so the stamp flow is the
+        # route plus that step.
+        self.assertIn("_maintenance_artist_folder_merge_step(", stamp_route)
+        maintenance_source = (root / "backend" / "maintenance_service.py").read_text(encoding="utf-8")
+        stamp_route += maintenance_source[
+            maintenance_source.index("def _maintenance_artist_folder_merge_step("):
+            maintenance_source.index("def _maintenance_running_job(")
+        ]
         panel_source = (
             root / "frontend" / "src" / "features" / "artistfolders" / "ArtistFoldersPanel.tsx"
         ).read_text(encoding="utf-8")

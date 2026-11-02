@@ -2,9 +2,10 @@
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
-import json, os, re, sqlite3, threading, time, uuid
+import json, os, re, sqlite3, threading, time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -3718,6 +3719,251 @@ def _find_applied_folder_op(source: Any, store: Any = None) -> Optional[Dict[str
     return None
 
 
+def _run_folder_rename_batch(
+    folders: List[str],
+    *,
+    classify: Any,
+    preview_task: str,
+    apply_task: str,
+    dry_run: bool,
+    approved_by: str,
+    cancel_event: Optional[Any],
+    update_state: Optional[Any],
+    resume_done: Optional[set],
+    prior_operations: Optional[List[Dict[str, Any]]],
+    batch_limit: int,
+    adapter: Any,
+    store: Any,
+) -> Dict[str, Any]:
+    """The one checkpointed rename loop behind the placeholder and MBID applies.
+
+    ``classify(source)`` decides what a folder should become and returns its
+    audit ``record`` plus an ``action``: ``skip`` (with ``reason``, ``note`` and
+    optional ``extra``), ``already_correct``, ``relocate`` (with ``album_id``) or
+    ``rename`` (with ``target``). This runner owns everything that keeps a batch
+    safe and resumable: cancel, resume, the live source/target gates, the batch
+    budget, preview, the write-ahead checkpoint, and the summary.
+
+    An exception from ``classify`` (a provider failure) aborts the run.
+    """
+    resume_done_originals = list(resume_done or [])
+    resume_keys = {_placeholder_norm_path(f) for f in resume_done_originals}
+
+    # Carry a resumed run's earlier ops forward so one rollback-by-job undoes
+    # the whole batch even if it was applied across several resumed jobs.
+    operations: List[Dict[str, Any]] = list(prior_operations or [])
+    applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    already_correct: List[Dict[str, Any]] = []
+    done_folders: List[str] = list(resume_done_originals)
+    processed = 0
+    attempted = 0  # F3: only actionable rows (a mutation, or a dry-run would-change)
+    #                count against batch_limit, never a skip -- else a leading
+    #                persistent skip consumes the batch budget and resume stalls.
+    total = len(folders)
+
+    def _emit(current: Optional[str] = None, result: Optional[str] = None) -> None:
+        if not update_state:
+            return
+        update_state({
+            "category": "Cleanup",
+            "current_task": preview_task if dry_run else apply_task,
+            "current_path": current,
+            "total_count": total,
+            "scanned_count": processed,
+            "remaining_count": max(0, total - processed),
+            "changed_count": len(applied),
+            "already_correct_count": len(already_correct),
+            "skipped_count": len(skipped),
+            "error_count": len(errors),
+            "current_result": result,
+            # Durable progress: resume reads this to skip finished folders, and
+            # rollback reads ``operations`` to undo the batch.
+            "checkpoint": {"done_folders": list(done_folders), "operations": list(operations)},
+        })
+
+    def _relocate_tracked(aid: int, record: Dict[str, Any]) -> None:
+        """Write-ahead album relocation: the real op id is recorded BEFORE the
+        move, so a crash is always reachable by rollback-by-job (kind album)."""
+        plan = composite_workflows.plan_album_relocation(album_id=int(aid), mode="rename",
+                                                         adapter=adapter, store=store)
+        if not plan.get("ok"):
+            errors.append({**record, "code": plan.get("code"), "error": plan.get("error")})
+            _emit(record["folder"], f"error: {plan.get('code')}")
+            return
+        op_id = plan["operation_id"]
+        operations.append({"operation_id": op_id, "kind": "album"})
+        _emit(record["folder"], "relocating")
+        from backend.resource_locks import approve_preview, cancel_unclaimed_on_error
+        if approve_preview(store, op_id, approved_by) is None:
+            errors.append({**record, "code": "not_preview", "operation_ids": [op_id]})
+            _emit(record["folder"], "error: not_preview")
+            return
+        try:
+            with cancel_unclaimed_on_error(store, op_id):
+                res = composite_workflows.apply_album_relocation(op_id, adapter=adapter, store=store)
+        except Exception as exc:
+            errors.append({**record, "code": "apply_raised", "error": type(exc).__name__,
+                           "operation_ids": [op_id]})
+            _emit(record["folder"], f"error: {type(exc).__name__}")
+            return
+        if res.get("ok"):
+            done_folders.append(record["folder"])
+            applied.append({**record, "operation_ids": [op_id], "dest_dir": res.get("dest_dir")})
+            _emit(record["folder"], "relocated")
+        else:
+            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
+                           "operation_ids": [op_id]})
+            _emit(record["folder"], f"error: {res.get('code')}")
+
+    for folder in folders:
+        if cancel_event and cancel_event.is_set():
+            break
+        if _placeholder_norm_path(folder) in resume_keys:
+            continue
+        processed += 1
+        source = Path(folder)
+        decision = classify(source)
+        record = decision["record"]
+        action = decision["action"]
+
+        if action == "skip":
+            skipped.append({**record, "reason": decision["reason"], **decision.get("extra", {})})
+            _emit(str(source), decision["note"])
+            continue
+        if action == "already_correct":
+            already_correct.append({**record, "reason": "already_correct"})
+            _emit(str(source), "already correct")
+            continue
+
+        # Hard gates (re-verified live) -- never touch a collision or a no-op.
+        if action == "rename":
+            target = decision["target"]
+            if not source.exists():
+                # Already renamed (resumed), or a prior run crashed after the
+                # rename but before its op reached the checkpoint. Recover the op
+                # (F2) so rollback-by-job can still undo it; don't silently drop it.
+                # Preview never emits ops, so recovery is apply-only.
+                if not dry_run and not _ops_cover_source(operations, source):
+                    recovered = _find_applied_folder_op(source, store)
+                    # C4: dedupe by operation_id. Carried prior_operations and
+                    # F1-captured failure ops have no "source" key, so
+                    # _ops_cover_source can't see them; without this, a resume
+                    # re-recovers an op already present, which then rolls back
+                    # twice and reports rollback_not_eligible on the second pass.
+                    if recovered and not any(
+                            o.get("operation_id") == recovered["operation_id"] for o in operations):
+                        operations.append(recovered)
+                skipped.append({**record, "reason": "source_missing"})
+                done_folders.append(str(source))
+                _emit(str(source), "skipped (source already gone)")
+                continue
+            if target.exists():
+                skipped.append({**record, "reason": "target_exists"})
+                _emit(str(source), "skipped (target exists -- needs review)")
+                continue
+
+        # F3: only an actionable row consumes the batch budget.
+        if batch_limit and attempted >= batch_limit:
+            processed -= 1  # not acted this run; resume retries it
+            break
+        attempted += 1
+
+        if dry_run:
+            would = "relocate" if action == "relocate" else "rename"
+            applied.append({**record, "would": would})
+            _emit(str(source), f"would {would}")
+            continue
+
+        if action == "relocate":
+            _relocate_tracked(decision["album_id"], record)
+            continue
+
+        # F2 write-ahead: persist the intent to the checkpoint BEFORE the
+        # rename, so a crash between the rename and recording the op still
+        # leaves a breadcrumb that rollback-by-job resolves to the applied op.
+        marker = {"pending": True, "kind": "folder", "source": str(source)}
+        operations.append(marker)
+        _emit(str(source), "renaming")
+        try:
+            res = composite_workflows.safe_rename_library_folder(
+                str(source), str(target), approved_by, store=store)
+        except Exception as exc:
+            # Crash/transport mid-apply: leave the marker in ``operations`` so
+            # rollback-by-job recovers the op from the store (F2); count it as
+            # an error so the job is not reported successful (F4).
+            errors.append({**record, "code": "apply_raised", "error": type(exc).__name__})
+            _emit(str(source), f"error: {type(exc).__name__}")
+            continue
+
+        operations[:] = [o for o in operations if o is not marker]
+        if res.get("ok"):
+            new_ops = res.get("operations") or (
+                [{"operation_id": res["operation_id"], "kind": "folder"}]
+                if res.get("operation_id") else [])
+            operations.extend(new_ops)
+            done_folders.append(str(source))
+            applied.append({**record, "operation_ids": [o["operation_id"] for o in new_ops]})
+            _emit(str(source), "renamed")
+        elif res.get("code") == "folder_cleanup_db_references" or res.get("step_error_code") == "PATH_IS_TRACKED":
+            # Beets refused: the folder still holds tracked items -- caught by
+            # the plan-time DB-reference check (``folder_cleanup_db_references``)
+            # OR the plugin's apply-time guard (``PATH_IS_TRACKED``), which reads
+            # the live Beets DB directly. Web Manager's own path view missed it
+            # (a disk-only row that just gained items, or a path-representation
+            # gap between the adapter and Beets), so it was routed here as a bare
+            # rename. Both guards precede the on-disk rename, so NOTHING was
+            # mutated: refund the budget (C5) and HOLD for a direct relocation,
+            # never record a failed job on a folder that is actually tracked.
+            attempted -= 1
+            skipped.append({**record, "reason": "became_tracked_needs_relocation",
+                            "error": res.get("error")})
+            _emit(str(source), "skipped (DB-tracked -- needs relocation)")
+        else:
+            # F1: a failure after a rollback record was written leaves its op
+            # in ``operations`` so rollback-by-job can reach the partial apply.
+            new_ops = list(res.get("operations") or [])
+            if not new_ops and res.get("operation_id"):
+                new_ops = [{"operation_id": res["operation_id"], "kind": "folder"}]
+            operations.extend(new_ops)
+            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
+                           "operation_ids": [o["operation_id"] for o in new_ops]})
+            _emit(str(source), f"error: {res.get('code')}")
+
+    cancelled = bool(cancel_event and cancel_event.is_set())
+    skipped_by_reason: Dict[str, int] = {}
+    for s in skipped:
+        skipped_by_reason[s["reason"]] = skipped_by_reason.get(s["reason"], 0) + 1
+    summary = {
+        "dry_run": dry_run,
+        "total_selected": total,
+        "processed": processed,
+        "changed_count": len(applied) if not dry_run else 0,
+        "would_change_count": len(applied) if dry_run else 0,
+        "already_correct_count": len(already_correct),
+        "skipped_count": len(skipped),
+        "skipped_by_reason": skipped_by_reason,
+        "error_count": len(errors),
+        "remaining_count": max(0, total - processed),
+        "cancelled": cancelled,
+    }
+    return {
+        # F4: a run with any error is NOT a success -- job_engine.reports_failure
+        # records it as a failed job. All recovery/audit records are preserved
+        # (operations, applied, skipped, errors) so the operator can roll back.
+        "ok": len(errors) == 0,
+        "dry_run": dry_run,
+        "operations": operations,
+        "applied": applied,
+        "skipped": skipped,
+        "errors": errors,
+        "already_correct": already_correct,
+        "done_folders": done_folders,
+        "final_summary": summary,
+    }
+
+
 def _apply_folder_name_placeholders(
     folders: Optional[List[str]] = None,
     *,
@@ -3760,8 +4006,6 @@ def _apply_folder_name_placeholders(
     partial/failed apply is never recorded as a successful job (F4).
     """
     from backend.cleanup_service import _canonical_folder_name
-    resume_done_originals = list(resume_done or [])
-    resume_done = {_placeholder_norm_path(f) for f in resume_done_originals}
 
     if folders is None:
         scan_rows = _scan_folder_name_placeholders(cancel_event=cancel_event)
@@ -3770,52 +4014,11 @@ def _apply_folder_name_placeholders(
 
     folder_db = _placeholder_folder_db(adapter)
 
-    # Carry a resumed run's earlier ops forward so one rollback-by-job undoes
-    # the whole batch even if it was applied across several resumed jobs.
-    operations: List[Dict[str, Any]] = list(prior_operations or [])
-    applied: List[Dict[str, Any]] = []
-    skipped: List[Dict[str, Any]] = []
-    errors: List[Dict[str, Any]] = []
-    done_folders: List[str] = list(resume_done_originals)
-    processed = 0
-    attempted = 0  # F3: only actionable rows (a rename, or a dry-run would-change)
-    #                count against batch_limit, never a skip -- else a leading
-    #                persistent skip consumes the batch budget and resume stalls.
-    total = len(folders)
-
-    def _emit(current: Optional[str] = None, result: Optional[str] = None) -> None:
-        if not update_state:
-            return
-        update_state({
-            "category": "Cleanup",
-            "current_task": "Previewing placeholder folder renames" if dry_run
-                            else "Renaming placeholder folders",
-            "current_path": current,
-            "total_count": total,
-            "scanned_count": processed,
-            "remaining_count": max(0, total - processed),
-            "changed_count": len(applied),
-            "skipped_count": len(skipped),
-            "error_count": len(errors),
-            "current_result": result,
-            # Durable progress: resume reads this to skip finished folders, and
-            # rollback reads ``operations`` to undo the batch.
-            "checkpoint": {"done_folders": list(done_folders), "operations": list(operations)},
-        })
-
-    for folder in folders:
-        if cancel_event and cancel_event.is_set():
-            break
-        key = _placeholder_norm_path(folder)
-        if key in resume_done:
-            continue
-        processed += 1
-        source = Path(folder)
+    def _classify(source: Path) -> Dict[str, Any]:
         proposed = _canonical_folder_name(source)
         # C6: descendant-aware, matching the engine's DB-reference refusal, so a
         # disc-subfolder album is held in preview and apply alike (preview==apply).
-        album_ids, item_count = _placeholder_folder_tracked(folder_db, folder)
-        tracked = item_count > 0
+        album_ids, item_count = _placeholder_folder_tracked(folder_db, str(source))
         record = {
             "folder": str(source),
             "proposed_folder": str(proposed) if proposed else None,
@@ -3823,132 +4026,26 @@ def _apply_folder_name_placeholders(
             "db_album_ids": album_ids,
             "mechanism": "folder_rename",
         }
-
         # F5: a DB-tracked folder is held for review, never bare-renamed. Its
         # clean destination is the Beets template, which this flow cannot
-        # preview and which could merge into an existing folder. Decided before
-        # the dry_run branch so preview and apply agree (preview == apply).
-        if tracked:
-            skipped.append({**record, "reason": "tracked_needs_relocation",
-                            "error": "DB-tracked folder; relocate the album(s) directly."})
-            _emit(str(source), "skipped (DB-tracked -- relocate the album directly)")
-            continue
-
-        # Hard gates (re-verified live) -- never touch a collision or a no-op.
+        # preview and which could merge into an existing folder.
+        if item_count > 0:
+            return {"record": record, "action": "skip", "reason": "tracked_needs_relocation",
+                    "extra": {"error": "DB-tracked folder; relocate the album(s) directly."},
+                    "note": "skipped (DB-tracked -- relocate the album directly)"}
         if proposed is None:
-            skipped.append({**record, "reason": "no_clean_name"})
-            _emit(str(source), "skipped (no clean name)")
-            continue
-        if not source.exists():
-            # Already renamed (resumed), or a prior run crashed after the
-            # rename but before its op reached the checkpoint. Recover the op
-            # (F2) so rollback-by-job can still undo it; don't silently drop it.
-            # Preview never emits ops, so recovery is apply-only.
-            if not dry_run and not _ops_cover_source(operations, source):
-                recovered = _find_applied_folder_op(source, store)
-                # C4: dedupe by operation_id. Carried prior_operations and
-                # F1-captured failure ops have no "source" key, so
-                # _ops_cover_source can't see them; without this, a resume
-                # re-recovers an op already present, which then rolls back
-                # twice and reports rollback_not_eligible on the second pass.
-                if recovered and not any(
-                        o.get("operation_id") == recovered["operation_id"] for o in operations):
-                    operations.append(recovered)
-            skipped.append({**record, "reason": "source_missing"})
-            done_folders.append(str(source))
-            _emit(str(source), "skipped (source already gone)")
-            continue
-        if proposed.exists():
-            skipped.append({**record, "reason": "target_exists"})  # the 52 review cases
-            _emit(str(source), "skipped (target exists -- needs review)")
-            continue
+            return {"record": record, "action": "skip", "reason": "no_clean_name",
+                    "note": "skipped (no clean name)"}
+        return {"record": record, "action": "rename", "target": proposed}
 
-        # F3: only an actionable row consumes the batch budget.
-        if batch_limit and attempted >= batch_limit:
-            processed -= 1  # not acted this run; resume retries it
-            break
-        attempted += 1
-
-        if dry_run:
-            record["would"] = "rename"
-            applied.append(record)
-            _emit(str(source), "would rename")
-            continue
-
-        # F2 write-ahead: persist the intent to the checkpoint BEFORE the
-        # rename, so a crash between the rename and recording the op still
-        # leaves a breadcrumb that rollback-by-job resolves to the applied op.
-        marker = {"pending": True, "kind": "folder", "source": str(source)}
-        operations.append(marker)
-        _emit(str(source), "renaming")
-        try:
-            res = composite_workflows.safe_rename_library_folder(
-                str(source), str(proposed), approved_by, store=store)
-        except Exception as exc:
-            # Crash/transport mid-apply: leave the marker in ``operations`` so
-            # rollback-by-job recovers the op from the store (F2); count it as
-            # an error so the job is not reported successful (F4).
-            errors.append({**record, "code": "apply_raised", "error": type(exc).__name__})
-            _emit(str(source), f"error: {type(exc).__name__}")
-            continue
-
-        operations[:] = [o for o in operations if o is not marker]
-        if res.get("ok"):
-            new_ops = res.get("operations") or (
-                [{"operation_id": res["operation_id"], "kind": "folder"}]
-                if res.get("operation_id") else [])
-            operations.extend(new_ops)
-            done_folders.append(str(source))
-            applied.append({**record, "operation_ids": [o["operation_id"] for o in new_ops]})
-            _emit(str(source), "renamed")
-        elif res.get("code") == "folder_cleanup_db_references":
-            # A disk-only row that gained Beets items under it since the
-            # folder_db snapshot (a genuine race; the common disc-subfolder
-            # case is now held at the top gate, C6). Never bare-renamed;
-            # surfaced for a manual relocation instead.
-            # C5: nothing mutated, so refund the batch budget -- only rows that
-            # actually mutated count against batch_limit, else a persistent
-            # became_tracked skip consumes the budget and resume stalls.
-            attempted -= 1
-            skipped.append({**record, "reason": "became_tracked_needs_relocation",
-                            "error": res.get("error")})
-            _emit(str(source), "skipped (now DB-tracked -- needs relocation)")
-        else:
-            # F1: a failure after a rollback record was written leaves its op
-            # in ``operations`` so rollback-by-job can reach the partial apply.
-            new_ops = list(res.get("operations") or [])
-            if not new_ops and res.get("operation_id"):
-                new_ops = [{"operation_id": res["operation_id"], "kind": "folder"}]
-            operations.extend(new_ops)
-            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
-                           "operation_ids": [o["operation_id"] for o in new_ops]})
-            _emit(str(source), f"error: {res.get('code')}")
-
-    cancelled = bool(cancel_event and cancel_event.is_set())
-    summary = {
-        "dry_run": dry_run,
-        "total_selected": total,
-        "processed": processed,
-        "changed_count": len(applied) if not dry_run else 0,
-        "would_change_count": len(applied) if dry_run else 0,
-        "skipped_count": len(skipped),
-        "error_count": len(errors),
-        "remaining_count": max(0, total - processed),
-        "cancelled": cancelled,
-    }
-    return {
-        # F4: a run with any error is NOT a success -- job_engine.reports_failure
-        # records it as a failed job. All recovery/audit records are preserved
-        # (operations, applied, skipped, errors) so the operator can roll back.
-        "ok": len(errors) == 0,
-        "dry_run": dry_run,
-        "operations": operations,
-        "applied": applied,
-        "skipped": skipped,
-        "errors": errors,
-        "done_folders": done_folders,
-        "final_summary": summary,
-    }
+    return _run_folder_rename_batch(
+        folders, classify=_classify,
+        preview_task="Previewing placeholder folder renames",
+        apply_task="Renaming placeholder folders",
+        dry_run=dry_run, approved_by=approved_by, cancel_event=cancel_event,
+        update_state=update_state, resume_done=resume_done,
+        prior_operations=prior_operations, batch_limit=batch_limit,
+        adapter=adapter, store=store)
 
 
 def _rollback_folder_placeholder_apply(
@@ -4168,18 +4265,14 @@ def _apply_folder_mbid_names(
 
     st = store if store is not None else composite_workflows.get_default_store()
 
-    resume_done_originals = list(resume_done or [])
-    resume_done = {_placeholder_norm_path(f) for f in resume_done_originals}
-
     if folders is None:
         folders = [str(d) for d in _iter_album_folders(cancel_event=cancel_event)]
 
     # Scope the Lidarr fetch to the artists actually present on disk instead of
     # pulling Lidarr's ENTIRE album DB (37k+ albums / ~315 MB, which times out on
-    # a large Lidarr). The rename loop below already derives one artist MBID per
-    # folder; collect the DISTINCT set and fetch only those artists' albums. A
-    # provider failure still propagates and aborts the run. (library-transaction
-    # owns this module; scoping this resolver call is the only change here.)
+    # a large Lidarr). Each folder yields one artist MBID; collect the DISTINCT
+    # set and fetch only those artists' albums. A provider failure propagates
+    # and aborts the run.
     if resolver is None:
         needed_artist_mbids = {_artist_mbid_from_folder(Path(f).parent.name) for f in folders}
         needed_artist_mbids.discard("")
@@ -4188,81 +4281,10 @@ def _apply_folder_mbid_names(
 
     folder_db = _placeholder_folder_db(adapter)
 
-    operations: List[Dict[str, Any]] = list(prior_operations or [])
-    applied: List[Dict[str, Any]] = []
-    skipped: List[Dict[str, Any]] = []
-    errors: List[Dict[str, Any]] = []
-    already_correct: List[Dict[str, Any]] = []
-    done_folders: List[str] = list(resume_done_originals)
-    processed = 0
-    attempted = 0  # F3: only an actionable row (a mutation, or a dry-run would-change)
-    total = len(folders)
-
-    def _emit(current: Optional[str] = None, result: Optional[str] = None) -> None:
-        if not update_state:
-            return
-        update_state({
-            "category": "Cleanup",
-            "current_task": "Previewing MBID folder renames" if dry_run
-                            else "Renaming folders to Album (Year) {release-group-mbid}",
-            "current_path": current,
-            "total_count": total,
-            "scanned_count": processed,
-            "remaining_count": max(0, total - processed),
-            "changed_count": len(applied),
-            "already_correct_count": len(already_correct),
-            "skipped_count": len(skipped),
-            "error_count": len(errors),
-            "current_result": result,
-            "checkpoint": {"done_folders": list(done_folders), "operations": list(operations)},
-        })
-
-    def _relocate_tracked(aid: int, record: Dict[str, Any]) -> None:
-        """Write-ahead album relocation: the real op id is recorded BEFORE the
-        move, so a crash is always reachable by rollback-by-job (kind album)."""
-        plan = composite_workflows.plan_album_relocation(album_id=int(aid), mode="rename",
-                                                         adapter=adapter, store=st)
-        if not plan.get("ok"):
-            errors.append({**record, "code": plan.get("code"), "error": plan.get("error")})
-            _emit(record["folder"], f"error: {plan.get('code')}")
-            return
-        op_id = plan["operation_id"]
-        operations.append({"operation_id": op_id, "kind": "album"})
-        _emit(record["folder"], "relocating")
-        from backend.resource_locks import approve_preview, cancel_unclaimed_on_error
-        if approve_preview(st, op_id, approved_by) is None:
-            errors.append({**record, "code": "not_preview", "operation_ids": [op_id]})
-            _emit(record["folder"], "error: not_preview")
-            return
-        try:
-            with cancel_unclaimed_on_error(st, op_id):
-                res = composite_workflows.apply_album_relocation(op_id, adapter=adapter, store=st)
-        except Exception as exc:
-            errors.append({**record, "code": "apply_raised", "error": type(exc).__name__,
-                           "operation_ids": [op_id]})
-            _emit(record["folder"], f"error: {type(exc).__name__}")
-            return
-        if res.get("ok"):
-            done_folders.append(record["folder"])
-            applied.append({**record, "operation_ids": [op_id], "dest_dir": res.get("dest_dir")})
-            _emit(record["folder"], "relocated")
-        else:
-            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
-                           "operation_ids": [op_id]})
-            _emit(record["folder"], f"error: {res.get('code')}")
-
-    for folder in folders:
-        if cancel_event and cancel_event.is_set():
-            break
-        key = _placeholder_norm_path(folder)
-        if key in resume_done:
-            continue
-        processed += 1
-        source = Path(folder)
+    def _classify(source: Path) -> Dict[str, Any]:
         parsed = _album_cleanup_parse_folder_name(source.name)
         artist_mbid = _artist_mbid_from_folder(source.parent.name)
-        album_ids, item_count = _placeholder_folder_tracked(folder_db, folder)
-        tracked = item_count > 0
+        album_ids, item_count = _placeholder_folder_tracked(folder_db, str(source))
         record: Dict[str, Any] = {
             "folder": str(source),
             "artist_mbid": artist_mbid,
@@ -4272,13 +4294,15 @@ def _apply_folder_mbid_names(
             "db_album_ids": album_ids,
         }
 
+        def _skip(reason: str, note: str, **extra: Any) -> Dict[str, Any]:
+            return {"record": record, "action": "skip", "reason": reason, "note": note, "extra": extra}
+
         verdict = resolver.resolve(artist_mbid=artist_mbid, album_title=parsed["title"],
                                    album_year=parsed["year"], album_basename=source.name)
         if verdict.get("status") != "resolved":
-            skipped.append({**record, "reason": verdict.get("reason") or "unresolved",
-                            "resolver_status": "unresolved"})
-            _emit(str(source), f"skipped (unresolved: {verdict.get('reason')})")
-            continue
+            return _skip(verdict.get("reason") or "unresolved",
+                         f"skipped (unresolved: {verdict.get('reason')})",
+                         resolver_status="unresolved")
 
         rgid = verdict["release_group_mbid"]
         target_name = _album_cleanup_canonical_name(parsed["title"], parsed["year"], rgid)
@@ -4288,156 +4312,48 @@ def _apply_folder_mbid_names(
 
         # Idempotent: the folder is already named exactly as the resolver says.
         if source.name == target_name:
-            already_correct.append({**record, "reason": "already_correct"})
-            _emit(str(source), "already correct")
-            continue
+            return {"record": record, "action": "already_correct"}
 
-        if tracked:
-            # A DB-tracked album is renamed only by moving its files through
-            # Beets (relocate), so its DB paths follow. relocate writes the
-            # folder name from the DB's template (the DB mb_releasegroupid) --
-            # so we relocate ONLY when the DB already carries the resolver's
-            # MBID, never writing a non-resolver MBID.
-            record["mechanism"] = "album_relocation"
-            if len(album_ids) != 1:
-                skipped.append({**record, "reason": "tracked_multiple_albums",
-                                "error": f"Folder maps to {len(album_ids)} albums; relocate each directly."})
-                _emit(str(source), "skipped (multiple tracked albums)")
-                continue
-            db_rgid = _album_rgid_via_adapter(adapter, album_ids)
-            if db_rgid != rgid:
-                skipped.append({**record, "reason": "tracked_rgid_mismatch",
-                                "db_release_group_mbid": db_rgid,
-                                "error": "DB release-group MBID differs from Lidarr's; held for review."})
-                _emit(str(source), "skipped (DB rgid != resolver rgid)")
-                continue
-            # Never clobber an existing same-parent target (the common case).
-            if target_path.exists() and _placeholder_norm_path(target_path) != key:
-                skipped.append({**record, "reason": "target_exists"})
-                _emit(str(source), "skipped (target exists -- needs review)")
-                continue
-            # Strip-desync: the DB may name paths an earlier rename already moved
-            # away. Relocation moves files FROM the DB paths, so a stale DB would
-            # skip every track and leave DB/disk inconsistent. HOLD for a resync
-            # (preview == apply), never error, never lose a file.
-            if _album_db_paths_stale(adapter, album_ids[0]):
-                skipped.append({**record, "reason": "needs_db_resync",
-                                "error": "Beets points this album at paths that are no longer on disk; "
-                                         "resync the DB to the current folder, then rename."})
-                _emit(str(source), "skipped (needs DB resync)")
-                continue
-            if batch_limit and attempted >= batch_limit:
-                processed -= 1
-                break
-            attempted += 1
-            if dry_run:
-                applied.append({**record, "would": "relocate"})
-                _emit(str(source), "would relocate")
-                continue
-            _relocate_tracked(album_ids[0], record)
-            continue
+        if item_count <= 0:
+            # Disk-only: rename the folder through folder_cleanup_v1.
+            record["mechanism"] = "folder_rename"
+            return {"record": record, "action": "rename", "target": target_path}
 
-        # Disk-only: rename the folder through folder_cleanup_v1.
-        record["mechanism"] = "folder_rename"
-        if not source.exists():
-            # Resumed/crashed: recover the applied op (F2) so rollback-by-job
-            # still reaches it; preview never emits ops.
-            if not dry_run and not _ops_cover_source(operations, source):
-                recovered = _find_applied_folder_op(source, st)
-                if recovered and not any(
-                        o.get("operation_id") == recovered["operation_id"] for o in operations):
-                    operations.append(recovered)
-            skipped.append({**record, "reason": "source_missing"})
-            done_folders.append(str(source))
-            _emit(str(source), "skipped (source already gone)")
-            continue
-        if target_path.exists():
-            skipped.append({**record, "reason": "target_exists"})
-            _emit(str(source), "skipped (target exists -- needs review)")
-            continue
+        # A DB-tracked album is renamed only by moving its files through Beets
+        # (relocate), so its DB paths follow. relocate writes the folder name
+        # from the DB's template (the DB mb_releasegroupid) -- so we relocate
+        # ONLY when the DB already carries the resolver's MBID, never writing a
+        # non-resolver MBID.
+        record["mechanism"] = "album_relocation"
+        if len(album_ids) != 1:
+            return _skip("tracked_multiple_albums", "skipped (multiple tracked albums)",
+                         error=f"Folder maps to {len(album_ids)} albums; relocate each directly.")
+        db_rgid = _album_rgid_via_adapter(adapter, album_ids)
+        if db_rgid != rgid:
+            return _skip("tracked_rgid_mismatch", "skipped (DB rgid != resolver rgid)",
+                         db_release_group_mbid=db_rgid,
+                         error="DB release-group MBID differs from Lidarr's; held for review.")
+        # Never clobber an existing same-parent target (the common case).
+        if target_path.exists() and _placeholder_norm_path(target_path) != _placeholder_norm_path(source):
+            return _skip("target_exists", "skipped (target exists -- needs review)")
+        # Strip-desync: the DB may name paths an earlier rename already moved
+        # away. Relocation moves files FROM the DB paths, so a stale DB would
+        # skip every track and leave DB/disk inconsistent. HOLD for a resync
+        # (preview == apply), never error, never lose a file.
+        if _album_db_paths_stale(adapter, album_ids[0]):
+            return _skip("needs_db_resync", "skipped (needs DB resync)",
+                         error="Beets points this album at paths that are no longer on disk; "
+                               "resync the DB to the current folder, then rename.")
+        return {"record": record, "action": "relocate", "album_id": album_ids[0]}
 
-        if batch_limit and attempted >= batch_limit:
-            processed -= 1
-            break
-        attempted += 1
-
-        if dry_run:
-            applied.append({**record, "would": "rename"})
-            _emit(str(source), "would rename")
-            continue
-
-        marker = {"pending": True, "kind": "folder", "source": str(source)}
-        operations.append(marker)
-        _emit(str(source), "renaming")
-        try:
-            res = composite_workflows.safe_rename_library_folder(
-                str(source), str(target_path), approved_by, store=st)
-        except Exception as exc:
-            errors.append({**record, "code": "apply_raised", "error": type(exc).__name__})
-            _emit(str(source), f"error: {type(exc).__name__}")
-            continue
-
-        operations[:] = [o for o in operations if o is not marker]
-        if res.get("ok"):
-            new_ops = res.get("operations") or (
-                [{"operation_id": res["operation_id"], "kind": "folder"}]
-                if res.get("operation_id") else [])
-            operations.extend(new_ops)
-            done_folders.append(str(source))
-            applied.append({**record, "operation_ids": [o["operation_id"] for o in new_ops]})
-            _emit(str(source), "renamed")
-        elif res.get("code") == "folder_cleanup_db_references" or res.get("step_error_code") == "PATH_IS_TRACKED":
-            # Beets refused: the folder still holds tracked items -- caught by
-            # the plan-time DB-reference check (``folder_cleanup_db_references``)
-            # OR the plugin's apply-time guard (``PATH_IS_TRACKED``), which reads
-            # the live Beets DB directly. Web Manager's own path view missed it
-            # (a disk-only row that just gained items, or a path-representation
-            # gap between the adapter and Beets), so it was routed here as a bare
-            # rename. Both guards precede the on-disk rename, so NOTHING was
-            # mutated: refund the budget and HOLD for a direct relocation, never
-            # record a failed job on a folder that is actually tracked (the live
-            # folder_cleanup_rename_failed / PATH_IS_TRACKED error).
-            attempted -= 1
-            skipped.append({**record, "reason": "became_tracked_needs_relocation",
-                            "error": res.get("error")})
-            _emit(str(source), "skipped (DB-tracked -- needs relocation)")
-        else:
-            new_ops = list(res.get("operations") or [])
-            if not new_ops and res.get("operation_id"):
-                new_ops = [{"operation_id": res["operation_id"], "kind": "folder"}]
-            operations.extend(new_ops)
-            errors.append({**record, "code": res.get("code"), "error": res.get("error"),
-                           "operation_ids": [o["operation_id"] for o in new_ops]})
-            _emit(str(source), f"error: {res.get('code')}")
-
-    cancelled = bool(cancel_event and cancel_event.is_set())
-    skipped_by_reason: Dict[str, int] = {}
-    for s in skipped:
-        skipped_by_reason[s["reason"]] = skipped_by_reason.get(s["reason"], 0) + 1
-    summary = {
-        "dry_run": dry_run,
-        "total_selected": total,
-        "processed": processed,
-        "changed_count": len(applied) if not dry_run else 0,
-        "would_change_count": len(applied) if dry_run else 0,
-        "already_correct_count": len(already_correct),
-        "skipped_count": len(skipped),
-        "skipped_by_reason": skipped_by_reason,
-        "error_count": len(errors),
-        "remaining_count": max(0, total - processed),
-        "cancelled": cancelled,
-    }
-    return {
-        "ok": len(errors) == 0,
-        "dry_run": dry_run,
-        "operations": operations,
-        "applied": applied,
-        "skipped": skipped,
-        "errors": errors,
-        "already_correct": already_correct,
-        "done_folders": done_folders,
-        "final_summary": summary,
-    }
+    return _run_folder_rename_batch(
+        folders, classify=_classify,
+        preview_task="Previewing MBID folder renames",
+        apply_task="Renaming folders to Album (Year) {release-group-mbid}",
+        dry_run=dry_run, approved_by=approved_by, cancel_event=cancel_event,
+        update_state=update_state, resume_done=resume_done,
+        prior_operations=prior_operations, batch_limit=batch_limit,
+        adapter=adapter, store=st)
 
 
 def _root_folder_repair_scan(root: Optional[Path] = None) -> Dict[str, Any]:
@@ -4685,10 +4601,7 @@ def _root_folder_repair_save_report(report: Dict[str, Any], log: Optional[List[s
     payload = dict(report)
     payload["updated_at"] = time.time()
     try:
-        ROOT_FOLDER_REPAIR_LAST_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = ROOT_FOLDER_REPAIR_LAST_FILE.with_suffix(f".{uuid.uuid4().hex}.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
-        tmp.replace(ROOT_FOLDER_REPAIR_LAST_FILE)
+        atomic_write_json(ROOT_FOLDER_REPAIR_LAST_FILE, payload, ensure_ascii=False, indent=2, sort_keys=True, default=str)
     except Exception as exc:
         if log is not None:
             log.append(f"[root-folder-repair] WARN: could not save report: {exc}")

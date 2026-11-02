@@ -4,6 +4,7 @@ Registered after app.py initializes. Keeps submission-only Beets commands out of
 the main app module while reusing the existing JobStore and Beets config helpers.
 """
 import backend.provider_boundary as provider_boundary
+from backend.json_state import atomic_write_json
 import hashlib
 import importlib.util
 import json
@@ -172,10 +173,7 @@ def _submission_json_load(path: Path, default: Any) -> Any:
 
 
 def _submission_json_save(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_json(path, payload, indent=2, sort_keys=True)
 
 
 def _submission_key(target_type: str, target_ref: Any) -> str:

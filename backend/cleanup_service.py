@@ -2,6 +2,7 @@
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json, load_json_object
 
 import hashlib, json, os, re, shutil, sqlite3, time, traceback, unicodedata, uuid
 from backend.matching import track_filename_has_source_id_suffix as _canonical_track_filename_has_source_id_suffix
@@ -887,25 +888,12 @@ def _load_rgid_resolutions() -> Dict[str, Any]:
     generic resolution/exception-persistence mechanism in the app; without it
     a "Keep separate" click has no effect on the next scan.
     """
-    try:
-        if RGID_RESOLUTION_STATE_FILE.exists():
-            data = json.loads(RGID_RESOLUTION_STATE_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
-    return {}
+    return load_json_object(RGID_RESOLUTION_STATE_FILE)
 
 
 def _save_rgid_resolutions(state: Dict[str, Any]) -> None:
     try:
-        RGID_RESOLUTION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = RGID_RESOLUTION_STATE_FILE.with_suffix(f".{uuid.uuid4().hex}.tmp")
-        tmp.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True, default=str),
-            encoding="utf-8",
-        )
-        tmp.replace(RGID_RESOLUTION_STATE_FILE)
+        atomic_write_json(RGID_RESOLUTION_STATE_FILE, state, ensure_ascii=False, indent=2, sort_keys=True, default=str)
     except Exception:
         pass
 
@@ -1423,10 +1411,7 @@ def _album_cleanup_save_report(report: Dict[str, Any], log: Optional[List[str]] 
     payload = dict(report)
     payload["updated_at"] = time.time()
     try:
-        ALBUM_FOLDER_CLEANUP_LAST_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = ALBUM_FOLDER_CLEANUP_LAST_FILE.with_suffix(f".{uuid.uuid4().hex}.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
-        tmp.replace(ALBUM_FOLDER_CLEANUP_LAST_FILE)
+        atomic_write_json(ALBUM_FOLDER_CLEANUP_LAST_FILE, payload, ensure_ascii=False, indent=2, sort_keys=True, default=str)
     except Exception as exc:
         if log is not None:
             log.append(f"[album-folder-cleanup] WARN: could not save report: {exc}")

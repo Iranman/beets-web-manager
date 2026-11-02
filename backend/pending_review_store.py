@@ -5,6 +5,7 @@ web-manager state, never Beets library state.
 """
 
 from __future__ import annotations
+from backend.json_state import atomic_write_json
 
 import json, os, threading, time
 from pathlib import Path
@@ -621,10 +622,7 @@ def _load_recorded_import_skips() -> List[Dict[str, Any]]:
 
 def _write_recorded_import_skips(rows: List[Dict[str, Any]]) -> None:
     """Atomic write; the caller holds _import_skipped_lock."""
-    _IMPORT_SKIPPED_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _IMPORT_SKIPPED_FILE.with_name(_IMPORT_SKIPPED_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(rows, indent=2))
-    os.replace(tmp, _IMPORT_SKIPPED_FILE)
+    atomic_write_json(_IMPORT_SKIPPED_FILE, rows, indent=2)
 
 
 def _record_import_skips(source: str, skipped: List[Dict[str, Any]]) -> None:

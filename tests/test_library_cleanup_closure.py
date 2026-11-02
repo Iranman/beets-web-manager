@@ -108,7 +108,8 @@ class LibraryCleanupWebManagerTests(unittest.TestCase):
         # authority (re-verified pairs, engine quarantine, verification).
         self.assertIn("composite_workflows.plan_library_cleanup", self._function_source("run_dedup_cleanup"))
         self.assertIn("_duplicate_cleanup.plan_reviewed_cleanup", self._function_source("run_dedup_cleanup"))
-        self.assertIn("_duplicate_cleanup.apply_reviewed_cleanup", self._function_source("run_dedup_cleanup"))
+        self.assertIn("_approve_and_apply_reviewed_cleanup(", self._function_source("run_dedup_cleanup"))
+        self.assertIn("_duplicate_cleanup.apply_reviewed_cleanup", self._function_source("_approve_and_apply_reviewed_cleanup"))
         self.assertNotIn("apply_library_cleanup", self._function_source("run_dedup_cleanup"))
         self.assertIn("composite_workflows.plan_folder_cleanup", self._function_source("_album_cleanup_remove_empty_tree"))
 

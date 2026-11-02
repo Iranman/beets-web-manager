@@ -69,9 +69,10 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
         # purely by rank; verify it now fingerprint-checks before deleting so a
         # bad MB re-match that collides two *different* songs into one track slot
         # doesn't silently destroy one of them.
-        start = self.app_source.index('def album_deduplicate(aid):')
-        end = self.app_source.index('@app.get("/api/albums/<int:aid>/duplicate-resolver")')
-        dedup_album_source = self.app_source[start:end]
+        self.assertIn("_album_dedup_quarantine_proven(", self.app_source)
+        service = (Path(__file__).resolve().parents[1] / "backend" / "dedup_service.py").read_text(encoding="utf-8")
+        dedup_album_source = service[service.index("def _album_dedup_quarantine_proven("):
+                                     service.index("def run_dedup_cleanup(")]
         # Wave 0 (MI-3): positive same-recording proof is now REQUIRED (unknown
         # evidence spares the copy) and removal goes through the reviewed
         # duplicate cleanup (quarantine), never album maintenance.
