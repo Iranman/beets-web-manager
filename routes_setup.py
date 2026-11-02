@@ -272,7 +272,7 @@ def _mask(value: str) -> str:
 
 def _is_secret_env(name: str) -> bool:
     upper = name.upper()
-    return any(part in upper for part in _SECRET_ENV_PARTS)
+    return config_layers.is_secret_name(upper) or any(part in upper for part in _SECRET_ENV_PARTS)
 
 
 def _decode_env_value(raw: str) -> str:
@@ -411,7 +411,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_LONG_OPERATION_MAX_SECONDS": {
         "section": "System & Environment",
-        "default": "1800",
+        "default": "600",
         "description": "Maximum execution window for long background operations before timeout",
         "secret": False,
         "editable": True,
@@ -420,7 +420,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_LONG_OPERATION_POLL_SECONDS": {
         "section": "System & Environment",
-        "default": "2",
+        "default": "5",
         "description": "Status polling interval in seconds for background jobs",
         "secret": False,
         "editable": True,
@@ -487,7 +487,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "BEETS_OUTBOUND_TIMEOUT_SECONDS": {
         "section": "Authentication & Security",
-        "default": "30",
+        "default": "20",
         "description": "Outbound HTTP request timeout in seconds",
         "secret": False,
         "editable": True,

@@ -226,6 +226,8 @@ ENV_ONLY_KEYS = frozenset({
     "QBIT_URL", "QB_URL", "QBIT_USER", "QB_USER", "QBIT_PASS", "QB_PASS",
     "QBIT_CATEGORY", "QBIT_FILTER", "BEETS_WEB_TOKEN", "PLEX_SECTION_KEY",
     "BEETS_MUSIC_ROOT", "YTDLP_COOKIES_BROWSER",
+    # Retired; only beets_embedded.LEGACY_SETTINGS reads it, to report it as ignored.
+    "BEETS_WEBMANAGER_API_KEY_FILE",
     # Credentials and state files.
     "BEETS_WEB_AUTH_TOKEN_FILE", "BEETS_WEB_INITIAL_PASSWORD_FILE", "BEETS_WEB_PASSWORD_FILE",
     "BEETS_WEB_PERSISTED_PASSWORD_FILE", "BEETS_WEB_PERSISTED_USERNAME_FILE",
@@ -338,6 +340,11 @@ def reported_layer(name: str) -> str:
     value that API has always returned for them."""
     layer = classify(name)
     return LAYER_UNKNOWN if layer == LAYER_ENV_ONLY else layer
+
+
+def is_secret_name(name: str) -> bool:
+    """True for a secret variable, or a legacy alias of one."""
+    return name in SECRET_KEYS or LEGACY_ENV_ALIASES.get(name) in SECRET_KEYS
 
 
 def apply_mode(name: str) -> str:

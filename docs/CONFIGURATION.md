@@ -183,7 +183,7 @@ Files in `/web-manager-data` that can hold secrets are created at mode 0600: `.e
 | `DEMO_MODE` | Marks setup/status responses as demo data when using the synthetic demo library. |
 | `PLEX_MUSIC_SECTION` | Plex music library section. It can also be set in the `plex:` section of the Beets `config.yaml`. |
 | `QBITTORRENT_URL`, `QBITTORRENT_USERNAME`, `QBITTORRENT_PASSWORD`, `QBITTORRENT_CATEGORY` | Optional qBittorrent connection for the torrent repair tools. Category defaults to `music`. |
-| `PLAYLIST_MIN_DOWNLOAD_SECONDS` | Shortest audio, in seconds, a playlist download accepts (default `45`; applies after a restart). |
+| `PLAYLIST_MIN_DOWNLOAD_SECONDS` | Length in seconds below which a playlist download counts as a preview clip (default `45`; applies after a restart). A shorter downloaded file is deleted and logged, and a shorter track is flagged `preview_risk`. `0` turns this off. |
 | `BEETS_WEB_AUTH_MIN_LENGTH`, `BEETS_WEB_PASSWORD_MIN_LENGTH` | Shortest accepted API token (default `32`) and password (default `16`). |
 | `BEETS_LONG_OPERATION_POLL_SECONDS`, `BEETS_LONG_OPERATION_MAX_SECONDS`, `BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS` | Polling interval (default `5`) and limit (default `600`) for long Beets operations, and the artist reconcile timeout (default `120`). |
 | `BEETS_OUTBOUND_TIMEOUT_SECONDS`, `BEETS_OUTBOUND_MAX_REDIRECTS`, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` | Outbound fetch limits: timeout per request (default `20`), redirects (default `5`) and response size (default 20 MiB). |
@@ -206,6 +206,8 @@ Each old name below keeps working when its canonical name is blank. Using one lo
 | `BEETS_MUSIC_ROOT` | `PLEX_BEETS_MUSIC_ROOT` |
 | `YTDLP_COOKIES_BROWSER` | `YTDLP_COOKIES_FROM_BROWSER` |
 
+Where each name takes effect: every shipped Compose file forwards `BEETS_WEB_AUTH_TOKEN`, `DISCOGS_TOKEN`, `ACOUSTID_API_KEY` and `ACOUSTID_KEY` from the Compose `.env`, and `docker-compose.full.yml` also forwards `DISCOGS_USER_TOKEN`; no Compose file forwards any other name in this table, so set those under the Web Manager service's `environment:` and recreate the container.
+
 The container path aliases are listed under [Container paths](#3-container-paths-compose-environment). `PLEX_MUSIC_ROOT` is not deprecated: besides being the single-value form of `PLEX_MUSIC_ROOTS`, it is the fallback for `PLAYLIST_PATH_ROOT_ALIASES`.
 
 ## Advanced environment-only settings
@@ -216,7 +218,7 @@ Most installs never need these. They are read only from the container environmen
 |---|---|---|
 | `BEETS_LOG` | `/config/beet.log` | Beets log file. |
 | `BEETS_WEB_SECRET_KEY`, `BEETS_WEB_SECRET_KEY_FILE` | generated, `WD/.flask_secret_key` | Flask session-signing secret, or the file holding it. |
-| `BEETS_WEB_PASSWORD_FILE` | | File holding the administrator password. |
+| `BEETS_WEB_PASSWORD_FILE` | | File whose first line is the administrator password, used when `BEETS_WEB_PASSWORD` is blank. |
 | `BEETS_WEB_AUTH_TOKEN_FILE`, `BEETS_WEB_INITIAL_PASSWORD_FILE`, `BEETS_WEB_PERSISTED_PASSWORD_FILE`, `BEETS_WEB_PERSISTED_USERNAME_FILE`, `BEETS_WEB_SETUP_STATE_FILE` | `WD/.auth_token`, `WD/.initial_admin_password`, `WD/.browser_password`, `WD/.browser_username`, `WD/.browser_setup_state` | Locations of the credential and setup state files. |
 | `LIDARR_URL_FILE`, `LIDARR_API_KEY_FILE` | `/config/lidarr_url`, `/config/lidarr_api_key` | Files whose first line is used when the variable itself is blank. |
 | `QBITTORRENT_URL_FILE`, `QBITTORRENT_USERNAME_FILE`, `QBITTORRENT_PASSWORD_FILE` | `/config/qbittorrent_url`, `/config/qbittorrent_username`, `/config/qbittorrent_password` | Same, for qBittorrent. |
@@ -231,7 +233,7 @@ Most installs never need these. They are read only from the container environmen
 | `PROVIDER_MAX_ATTEMPTS` | per provider | Lowers the retry limit of every provider. |
 | `RECOVERY_ADVANCE_INTERVAL_SECONDS`, `RECOVERY_CARRIER_STATE_DIR` | `120`, `WD/recovery_carriers` | Recovery advancer interval (`0` turns it off) and carrier state folder. |
 | `ACOUSTID_MIN_INTERVAL_SECONDS` | `0.35` | Shortest time between AcoustID requests. |
-| `AI_BATCH_AI_TIMEOUT`, `AI_BATCH_MAX_AI_WORKERS`, `AI_BATCH_STALE_SECONDS` | `180`, `3`, `300` | AI batch request timeout (minimum 30), workers (1 to 10), and age at which a batch counts as stale (minimum 60). |
+| `AI_BATCH_AI_TIMEOUT`, `AI_BATCH_MAX_AI_WORKERS`, `AI_BATCH_STALE_SECONDS` | `180`, `3`, `300` | `AI_BATCH_AI_TIMEOUT` (minimum 30): age in seconds at which a running AI suggestion counts as stuck, so the batch's skip-stale control skips that folder. It is also saved in batch state as `ai_timeout_seconds`. It does not stop a request. `AI_BATCH_MAX_AI_WORKERS` (1 to 10): how many running folders batch status names, also saved as `ai_max_parallel`. It does not limit how many run. `AI_BATCH_STALE_SECONDS` (minimum 60): how long since its last heartbeat a running batch with no live worker counts as stale. |
 | `AI_BATCH_STATE_DIR`, `AI_PENDING_REVIEW_FILE` | `WD/ai_batch_jobs`, `WD/ai_pending_review.json` | AI batch state locations. |
 | `BEETS_SUBMISSION_DRAFTS` | `/config/submission_drafts.json` | Submission drafts file. |
 | `IMPORT_REVIEW_AUTO_IMPORTS_FILE`, `IMPORT_TARGET_PREVIEW_CACHE_TTL` | `/config/import_review_auto_imports.json`, `20` | Import review record file, and import target preview cache seconds. |
@@ -249,11 +251,12 @@ Most installs never need these. They are read only from the container environmen
 | `PLEX_BEETS_MUSIC_ROOT` | `MUSIC_ROOT` | Library root as Beets sees it, for Plex path mapping. |
 | `PLEX_MUSIC_ROOT` | | Single-value form of `PLEX_MUSIC_ROOTS`; also the fallback for `PLAYLIST_PATH_ROOT_ALIASES`. |
 | `PLEX_SCAN_TIMEOUT`, `PLEX_INDEX_PAGE_SIZE`, `PLEX_INDEX_CACHE_TTL`, `PLEX_PLAYLIST_CHUNK_SIZE` | `90`, `500`, `600`, `200` | Plex scan timeout, index page size, index cache seconds, and playlist write chunk size (25 to 500). |
-| `PLEX_SYNC_MIN_MATCH_RATIO`, `PLEX_SYNC_MAX_UNMATCHED_REPLACE` | `0.85`, `25` | Safety limits for replacing a Plex playlist's contents. |
+| `PLEX_SYNC_MIN_MATCH_RATIO`, `PLEX_SYNC_MAX_UNMATCHED_REPLACE` | `0.85`, `25` | `PLEX_SYNC_MIN_MATCH_RATIO`: when a playlist sync matches no track in Plex, path mapping is unverified and the ratio is below this, the sync reports a path mapping failure. `PLEX_SYNC_MAX_UNMATCHED_REPLACE`: when a Plex sync fails with more unmatched tracks than this, per-track Plex stamps are skipped and the failure is kept in the playlist summary. Neither limits changes to the Plex playlist. |
 | `QBITTORRENT_FILTER`, `QBIT_PATH_ALIASES` | `errored`, | Torrent list filter for repair tools, and qBittorrent path mappings. |
 | `TORRENT_SOURCE_ROOTS`, `QBIT_REPAIR_ALLOWED_ROOTS`, `ALLOW_TORRENT_SOURCE_MOVE` | `DOWNLOADS_ROOT`, `DOWNLOADS_ROOT`, `0` | See `DOWNLOADS_ROOT` under *Container paths*. |
-| `SPOTIFLAC_INPUT_SOURCES`, `SPOTIFLAC_PIP_PACKAGE`, `SPOTIFLAC_TIMEOUT` | `soundcloud`, `SpotiFLAC`, `1200` | SpotiFLAC input sources, install package and run timeout. |
-| `YTDLP_PIP_PACKAGE`, `YTDLP_PIP_FALLBACK_PACKAGE`, `YTDLP_BGUTIL_PIP_PACKAGE`, `YTDLP_RUNTIME_BIN_DIR` | see `backend/app_runtime.py`, `/config/yt-dlp/bin` | yt-dlp install packages and runtime binary folder. |
+| `SPOTIFLAC_INPUT_SOURCES`, `SPOTIFLAC_PIP_PACKAGE`, `SPOTIFLAC_TIMEOUT` | `soundcloud`, `SpotiFLAC`, `1200` | SpotiFLAC input sources and run timeout. `SPOTIFLAC_PIP_PACKAGE` is only the package name shown in SpotiFLAC status: runtime installs are disabled, so it installs nothing. |
+| `YTDLP_PIP_PACKAGE`, `YTDLP_PIP_FALLBACK_PACKAGE`, `YTDLP_BGUTIL_PIP_PACKAGE` | `yt-dlp[default,curl-cffi]`, `yt-dlp[default]`, `bgutil-ytdlp-pot-provider==2.0.2` | Package names shown in yt-dlp status only. Runtime installs are disabled, so these install nothing; the image ships the tools. |
+| `YTDLP_RUNTIME_BIN_DIR` | `/config/yt-dlp/bin` | Folder added to the front of `PATH` and searched for runtime tools. |
 | `YTDLP_REQUIRE_YOUTUBE_AUTH`, `YTDLP_AUTH_SMOKE_URL`, `YTDLP_AUTH_SMOKE_TTL`, `YTDLP_YOUTUBE_TEST_URL` | `0`, built-in, `300`, built-in | YouTube authentication requirement and its test URLs. |
 | `YTDLP_YOUTUBE_CLIENTS`, `YTDLP_YOUTUBE_IMPERSONATE` | built-in, `chrome` | YouTube client order and browser impersonation target. |
 | `YTDLP_COOKIES_FROM_BROWSER`, `YTDLP_COOKIES_FROM_BROWSER_FALLBACK` | | Browser cookie stores for yt-dlp; they need `YTDLP_ALLOW_BROWSER_COOKIES`. |

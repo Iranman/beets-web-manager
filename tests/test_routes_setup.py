@@ -696,6 +696,39 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertTrue(variables["PLEX_TOKEN"]["has_value"])
         self.assertNotIn("supersecretvalue", str(body))
 
+    def test_secret_aliases_are_masked_and_not_saveable(self):
+        self.env_file.write_text("QBIT_PASS=fake-saved-qbit\nQB_PASS=fake-saved-qb\n", encoding="utf-8")
+        os.environ["QBIT_PASS"] = "fake-env-qbit"
+        fakes = ("fake-saved-qbit", "fake-saved-qb", "fake-env-qbit")
+
+        r = self.client.get("/api/setup/env")
+        self.assertEqual(r.status_code, 200)
+        variables = {item["name"]: item for item in r.get_json()["variables"]}
+        self.assertTrue(variables["QBIT_PASS"]["secret"])
+        self.assertTrue(variables["QB_PASS"]["secret"])
+        for fake in fakes:
+            self.assertNotIn(fake, r.get_data(as_text=True))
+
+        r = self.client.post("/api/setup/env", json={"variables": {"DEMO_MODE": "0"}})
+        self.assertEqual(r.status_code, 200)
+        for fake in fakes:
+            self.assertNotIn(fake, r.get_data(as_text=True))
+
+        r = self.client.post("/api/setup/env", json={"variables": {"QBIT_PASS": "fake-new"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertNotIn("fake-new", self.env_file.read_text(encoding="utf-8"))
+
+    def test_env_only_names_keep_their_api_layer_labels(self):
+        self.env_file.write_text("WEBCONTROL_THREADS=4\nQBIT_URL=http://qbit:8080\n", encoding="utf-8")
+        variables = {item["name"]: item for item in self.client.get("/api/setup/env").get_json()["variables"]}
+        for name in ("WEBCONTROL_THREADS", "QBIT_URL"):
+            self.assertEqual(variables[name]["layer"], "unknown", name)
+            self.assertEqual(variables[name]["apply"], "restart", name)
+            self.assertFalse(variables[name]["editable"], name)
+        r = self.client.post("/api/setup/env", json={"variables": {"WEBCONTROL_THREADS": "5"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("it is a unknown setting", r.get_json()["error"])
+
     def test_env_save_updates_file_and_applies_process_env(self):
         self.env_file.write_text("PLEX_URL=http://old:32400\nPLEX_TOKEN=oldsecretvalue\n", encoding="utf-8")
         r = self.client.post("/api/setup/env", json={
