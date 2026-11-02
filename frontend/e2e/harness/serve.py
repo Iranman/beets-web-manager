@@ -35,7 +35,7 @@ PASSWORD = "e2e-synthetic-password-not-a-secret"
 #: Settings from the developer's shell must not reach real services.
 _SCRUBBED = re.compile(
     r"^(BEETS|PLEX|LIDARR|SLSKD|QBIT|QB_|AI_|OPENAI|OPENROUTER|ACOUSTID|DISCOGS|LISTENBRAINZ|SPOTIFY|SETUP_|WEB_MANAGER"
-    r"|MUSIC_|DOWNLOAD|YTDLP|IMPORT_REVIEW|METADATA|PLAYLIST|ALLOW_TORRENT|SPOTIFLAC|RECOVER_OWNED|DEMO_MODE)|_FILE$")
+    r"|MUSIC_|DOWNLOAD|YTDLP|IMPORT_REVIEW|METADATA|PLAYLIST|ALLOW_TORRENT|SPOTIFLAC|RECOVER_OWNED|DEMO_MODE|FFREPORT)|_FILE$")
 #: Port 1: nothing listens there, so these look like services that are down.
 _DEAD_URL = "http://127.0.0.1:1"
 #: What the app and ctypes.util.find_library legitimately run. None opens a socket for them.
@@ -140,7 +140,7 @@ def configure(root: Path, port: int) -> dict:
     }), encoding="utf-8")
     (paths["data"] / ".setup_complete").write_text("e2e\n", encoding="utf-8")
 
-    for name in [n for n in os.environ if _SCRUBBED.match(n)]:
+    for name in [n for n in os.environ if _SCRUBBED.search(n)]:
         del os.environ[name]
     os.environ.update({
         "HOME": str(root), "USERPROFILE": str(root), "APPDATA": str(root),
