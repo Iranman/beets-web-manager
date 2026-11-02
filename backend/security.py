@@ -51,9 +51,26 @@ _SENSITIVE_REDIRECT_HEADERS = {
     "x-mediabrowser-token",
     "x-listenbrainz-token",
 }
-_DEFAULT_TIMEOUT = float(os.environ.get("BEETS_OUTBOUND_TIMEOUT_SECONDS", "20") or "20")
-_DEFAULT_MAX_BYTES = int(os.environ.get("BEETS_OUTBOUND_MAX_RESPONSE_BYTES", str(20 * 1024 * 1024)) or str(20 * 1024 * 1024))
-_DEFAULT_MAX_REDIRECTS = int(os.environ.get("BEETS_OUTBOUND_MAX_REDIRECTS", "5") or "5")
+def _env_limit(name: str, default: Any, cast: Any, minimum: Any) -> Any:
+    """A numeric limit from the environment or saved settings. A bad saved
+    value falls back to the default, because this runs at import and must not
+    stop the app (and the Settings page that could fix it) from starting."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        value = None
+    if value is None or not minimum <= value < float("inf"):
+        LOG.warning("%s is invalid; using the default %s.", name, default)
+        return default
+    return value
+
+
+_DEFAULT_TIMEOUT = _env_limit("BEETS_OUTBOUND_TIMEOUT_SECONDS", 20.0, float, 0.1)
+_DEFAULT_MAX_BYTES = _env_limit("BEETS_OUTBOUND_MAX_RESPONSE_BYTES", 20 * 1024 * 1024, int, 1)
+_DEFAULT_MAX_REDIRECTS = _env_limit("BEETS_OUTBOUND_MAX_REDIRECTS", 5, int, 0)
 # Wall-clock budget for one user-supplied-URL fetch (every DNS answer tried,
 # every redirect hop, and the whole body read). The per-operation timeout
 # above only bounds a single socket wait, so a server dripping one byte per

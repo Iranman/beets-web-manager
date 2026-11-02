@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 from backend import config_layers as cl  # noqa: E402
 
 FORWARDERS = {"_env_flag", "_env_int", "_env_float", "_config_file_first_line",
-              "_audio_probe_timeout", "container_path", "legacy_env_value"}
+              "_audio_probe_timeout", "container_path", "legacy_env_value", "_env_limit"}
 
 
 def _sources():
@@ -136,36 +136,154 @@ class ReaderAliasTests(unittest.TestCase):
 
 
 class SettingMetadataDefaultTests(unittest.TestCase):
+    """Every row with a default names the reader it must match, or says why not.
+    A row with default None reports nothing as effective, so needs neither."""
+
     READERS = {
+        "WEBCONTROL_PORT": "backend/app_runtime.py",
+        "DEMO_MODE": "routes_setup.py",
+        "BEETS_LOG": "backend/app_runtime.py",
         "BEETS_LONG_OPERATION_MAX_SECONDS": "backend/import_reconciliation_service.py",
         "BEETS_LONG_OPERATION_POLL_SECONDS": "backend/import_reconciliation_service.py",
+        "BEETS_TRUSTED_PROXIES": "backend/auth_service.py",
+        "BEETS_WEB_SESSION_COOKIE_SECURE": "app.py",
         "BEETS_OUTBOUND_TIMEOUT_SECONDS": "backend/security.py",
+        "BEETS_OUTBOUND_MAX_REDIRECTS": "backend/security.py",
+        "BEETS_OUTBOUND_MAX_RESPONSE_BYTES": "backend/security.py",
+        "BEETS_OUTBOUND_ALLOWLIST": "backend/security.py",
+        "AI_BASE_URL": "backend/matching_service.py",
+        "BEETS_CONFIG": "backend/config_layers.py",
+        "MUSIC_FORMAT_QUARANTINE_DIR": "backend/audio_preferences.py",
+        "SPOTIFY_CLIENT_ID": "backend/playlist_service.py",
+        "PLEX_URL": "backend/app_runtime.py",
+        "PLEX_MUSIC_SECTION": "backend/plex_service.py",
+        "LIDARR_URL": "backend/app_runtime.py",
+        "SLSKD_URL": "backend/app_runtime.py",
+        "QBITTORRENT_URL": "backend/app_runtime.py",
+        "QBITTORRENT_USERNAME": "backend/app_runtime.py",
+        "QBITTORRENT_CATEGORY": "backend/app_runtime.py",
+        "PLAYLIST_AUTO_SYNC": "backend/app_runtime.py",
+        "PLAYLIST_AUTO_SYNC_INTERVAL": "backend/app_runtime.py",
+        "PLAYLIST_DOWNLOAD_METHODS": "backend/app_runtime.py",
+        "PLAYLIST_MIN_DOWNLOAD_SECONDS": "backend/app_runtime.py",
+        "YTDLP_JS_RUNTIMES": "backend/ytdlp_service.py",
+        "SPOTIFLAC_SERVICES": "backend/ytdlp_service.py",
     }
+    EXEMPT = {
+        "PUID": "_BUILTIN_SETTINGS: reported from the running process, not this default",
+        "PGID": "_BUILTIN_SETTINGS: reported from the running process, not this default",
+        "TZ": "_BUILTIN_SETTINGS: reported from the system timezone, not this default",
+        "BEETS_WEB_USERNAME": "auth_service returns the literal admin in a later statement, not in the read",
+        "BEETS_WEB_AUTH_DISABLED": "the reader's blank means the same as 0: auth stays on",
+        "AI_MODEL": "matching_service takes the fallback from each call site; the row matches the setup probe",
+    }
+    _READ_CALLS = {"get", "getenv", "legacy_env_value", "container_path", "_env_limit"}
 
-    @staticmethod
-    def _reader_default(path, name):
-        for node in ast.walk(ast.parse((ROOT / path).read_text(encoding="utf-8"))):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
-                    and len(node.args) == 2 and getattr(node.args[0], "value", None) == name):
-                return node.args[1].value
+    @classmethod
+    def _reader_default(cls, path, name):
+        """The value the first read of ``name`` yields when it is unset."""
+        tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        constants = {n.targets[0].id: n.value for n in tree.body
+                     if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
+        calls = sorted((n for n in ast.walk(tree) if isinstance(n, ast.Call)), key=lambda n: n.lineno)
+        for node in calls:
+            called = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if called not in cls._READ_CALLS or not node.args or getattr(node.args[0], "value", None) != name:
+                continue
+            found = node.args[1] if len(node.args) > 1 else ast.Constant("")
+            up = parents[node]
+            while isinstance(up, ast.Attribute) or (isinstance(up, ast.Call) and up.func in parents and up.args == []):
+                up = parents[up]
+            if isinstance(up, ast.BoolOp) and isinstance(up.values[-1], ast.Constant):
+                found = up.values[-1]
+            return str(cls._literal(found, constants))
         raise AssertionError(f"{name} reader not found in {path}")
+
+    @classmethod
+    def _literal(cls, node, constants):
+        """A reader's default: a constant, a module constant, a product, or str() of one."""
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            return cls._literal(constants[node.id], constants)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            return cls._literal(node.left, constants) * cls._literal(node.right, constants)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "str" and len(node.args) == 1:
+            return str(cls._literal(node.args[0], constants))
+        raise AssertionError(f"not a static default: {ast.unparse(node)}")
 
     @staticmethod
     def _metadata_defaults():
         tree = ast.parse((ROOT / "routes_setup.py").read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "_SETTING_METADATA":
-                return {
-                    k.value: next(v.value for f, v in zip(entry.keys, entry.values) if f.value == "default")
-                    for k, entry in zip(node.value.keys, node.value.values)
-                    if k.value in SettingMetadataDefaultTests.READERS
-                }
+                rows = {}
+                for key, entry in zip(node.value.keys, node.value.values):
+                    fields = {f.value: v for f, v in zip(entry.keys, entry.values)}
+                    rows[key.value] = fields["default"].value if "default" in fields else None
+                return rows
         raise AssertionError("_SETTING_METADATA not found")
+
+    @staticmethod
+    def _same(left, right):
+        try:
+            return float(left) == float(right)
+        except ValueError:
+            return left == right
+
+    def test_every_row_with_a_default_matches_its_reader_or_is_exempt(self):
+        with_default = {k for k, v in self._metadata_defaults().items() if v is not None}
+        self.assertEqual(sorted(with_default - set(self.READERS) - set(self.EXEMPT)), [],
+                         "name this row's reader in READERS, or justify it in EXEMPT")
+        self.assertEqual(sorted((set(self.READERS) | set(self.EXEMPT)) - with_default), [], "stale entries")
 
     def test_metadata_defaults_match_the_readers(self):
         defaults = self._metadata_defaults()
         for name, path in self.READERS.items():
-            self.assertEqual(defaults[name], self._reader_default(path, name), name)
+            reader = self._reader_default(path, name)
+            self.assertTrue(self._same(defaults[name], reader), f"{name}: row {defaults[name]!r}, reader {reader!r}")
+
+
+class BootOrderTests(unittest.TestCase):
+    """A real ``import app``: saved settings must reach modules that read at import."""
+
+    def _boot(self, saved, code):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("BEETS_OUTBOUND_", "BEETS_LONG_OPERATION_"))}
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".env").write_text(saved, encoding="utf-8")
+            env.update(WEB_MANAGER_DATA_DIR=tmp, SETUP_ENV_FILE=str(Path(tmp, ".env")), PYTHONPATH=str(ROOT),
+                       BEETS_CONFIG=str(Path(tmp, "config.yaml")), BEETSDIR=tmp, BEETS_LOG=str(Path(tmp, "b.log")),
+                       MUSIC_ROOT=tmp, DOWNLOADS_ROOT=tmp)
+            done = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env, text=True,
+                                  capture_output=True, timeout=300)
+        self.assertEqual(done.returncode, 0, done.stderr[-1500:])
+        return json.loads(done.stdout.strip().splitlines()[-1]), done.stderr
+
+    CODE = (
+        "import json, app\n"
+        "from backend import security as s, import_reconciliation_service as i\n"
+        "print(json.dumps([s._DEFAULT_TIMEOUT, s._DEFAULT_MAX_BYTES, s._DEFAULT_MAX_REDIRECTS,\n"
+        "                  i.BEETS_LONG_OPERATION_MAX_SECONDS, i.BEETS_LONG_OPERATION_POLL_SECONDS]))\n"
+    )
+
+    def test_saved_limits_take_effect_at_boot(self):
+        saved = ("BEETS_OUTBOUND_TIMEOUT_SECONDS=7\nBEETS_OUTBOUND_MAX_RESPONSE_BYTES=1234\n"
+                 "BEETS_OUTBOUND_MAX_REDIRECTS=1\nBEETS_LONG_OPERATION_MAX_SECONDS=77\n"
+                 "BEETS_LONG_OPERATION_POLL_SECONDS=3\n")
+        self.assertEqual(self._boot(saved, self.CODE)[0], [7.0, 1234, 1, 77.0, 3.0])
+
+    def test_bad_saved_limits_warn_and_do_not_stop_the_app(self):
+        saved = ("BEETS_OUTBOUND_TIMEOUT_SECONDS=soon\nBEETS_OUTBOUND_MAX_RESPONSE_BYTES=-1\n"
+                 "BEETS_OUTBOUND_MAX_REDIRECTS=1.5\n")
+        limits, stderr = self._boot(saved, self.CODE)
+        self.assertEqual(limits[:3], [20.0, 20 * 1024 * 1024, 5])
+        self.assertIn("BEETS_OUTBOUND_TIMEOUT_SECONDS is invalid", stderr)
+
+    def test_import_time_limits_report_restart(self):
+        for name in ("BEETS_OUTBOUND_TIMEOUT_SECONDS", "BEETS_OUTBOUND_MAX_REDIRECTS", "BEETS_OUTBOUND_MAX_RESPONSE_BYTES",
+                     "BEETS_LONG_OPERATION_MAX_SECONDS", "BEETS_LONG_OPERATION_POLL_SECONDS", "SPOTIFLAC_SERVICES"):
+            self.assertEqual(cl.apply_mode(name), cl.APPLY_RESTART, name)
 
 
 class SecretNameTests(unittest.TestCase):

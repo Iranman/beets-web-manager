@@ -8,6 +8,10 @@ lives in owned services (backend/*_service.py) over the one stock Beets
 engine (backend.beets_adapter); see docs/arch001_service_decomposition.md.
 """
 import datetime, gzip, os, re, secrets, sys, threading
+# First: importing app_runtime loads saved settings into the environment, and
+# backend.security reads its outbound limits when imported. Before saved
+# settings load it opens no connection and imports nothing but the stdlib.
+import backend.app_runtime  # noqa: F401
 from backend.security import install_secure_urllib
 install_secure_urllib()
 from backend.ai_batch_state_store import AiBatchStateConflictError

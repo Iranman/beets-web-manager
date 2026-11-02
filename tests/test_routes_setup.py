@@ -718,6 +718,28 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertNotIn("fake-new", self.env_file.read_text(encoding="utf-8"))
 
+    def test_url_query_credential_is_masked_and_survives_an_echo(self):
+        raw = "https://ai.test/v1?api_key=fake-query-credential"
+        self.env_file.write_text(f"AI_BASE_URL={raw}\n", encoding="utf-8")
+        r = self.client.get("/api/setup/env")
+        self.assertNotIn("fake-query-credential", r.get_data(as_text=True))
+        variables = {item["name"]: item for item in r.get_json()["variables"]}
+        self.assertEqual(variables["AI_BASE_URL"]["value"], "https://ai.test/v1")
+        r = self.client.post("/api/setup/env", json={"variables": {"AI_BASE_URL": "https://ai.test/v1"}})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("fake-query-credential", r.get_data(as_text=True))
+        self.assertIn(raw, self.env_file.read_text(encoding="utf-8"))
+
+    def test_diagnostic_text_redacts_secret_alias_assignments(self):
+        for text in ("QBIT_PASS=fake-diag", "failed: qb_pass: fake-diag", 'QB_PASS="fake-diag"'):
+            redacted = self.module._redact_diagnostic_text(text)
+            self.assertNotIn("fake-diag", redacted, text)
+            self.assertEqual(self.module._redact_diagnostic_text(redacted), redacted)
+
+    def test_unread_setting_is_retired_not_editable(self):
+        variables = {item["name"] for item in self.client.get("/api/setup/env").get_json()["variables"]}
+        self.assertNotIn("BEETS_VERSION_PROBE_TIMEOUT_SECONDS", variables)
+
     def test_env_only_names_keep_their_api_layer_labels(self):
         self.env_file.write_text("WEBCONTROL_THREADS=4\nQBIT_URL=http://qbit:8080\n", encoding="utf-8")
         variables = {item["name"]: item for item in self.client.get("/api/setup/env").get_json()["variables"]}

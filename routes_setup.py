@@ -599,15 +599,6 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "restart_required": True,
         "type": "string",
     },
-    "BEETS_VERSION_PROBE_TIMEOUT_SECONDS": {
-        "section": "Beets Core & Engine",
-        "default": "45",
-        "description": "Timeout in seconds for remote Beets engine diagnostics probes",
-        "secret": False,
-        "editable": True,
-        "restart_required": False,
-        "type": "integer",
-    },
 
     # 5. Storage & Paths
     "MUSIC_PATH": {
@@ -652,9 +643,8 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "IMPORT_REVIEW_QUARANTINE_DIR": {
         "section": "Storage & Paths",
-        "default": "/config/quarantine",
-        "container_path": "/config/quarantine",
-        "description": "Quarantine storage path for ambiguous or conflicting import files",
+        "default": None,
+        "description": "Quarantine storage path for ambiguous or conflicting import files. When blank, the code picks a folder named import_review_quarantine",
         "secret": False,
         "editable": True,
         "restart_required": False,
@@ -735,7 +725,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     # 7. Media Server Integrations
     "PLEX_URL": {
         "section": "Media Server Integrations",
-        "default": "http://localhost:32400",
+        "default": "",
         "description": "Plex Media Server URL (e.g. http://plex:32400)",
         "secret": False,
         "editable": True,
@@ -763,7 +753,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "LIDARR_URL": {
         "section": "Media Server Integrations",
-        "default": "http://localhost:8686",
+        "default": "http://lidarr:8686",
         "description": "Lidarr server URL (e.g. http://lidarr:8686)",
         "secret": False,
         "editable": True,
@@ -801,8 +791,8 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "QBITTORRENT_URL": {
         "section": "Media Server Integrations",
-        "default": "http://localhost:8080",
-        "description": "qBittorrent WebUI URL for torrent management",
+        "default": "",
+        "description": "qBittorrent WebUI URL for torrent management (e.g. http://qbittorrent:8080)",
         "secret": False,
         "editable": True,
         "restart_required": False,
@@ -810,7 +800,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "QBITTORRENT_USERNAME": {
         "section": "Media Server Integrations",
-        "default": "admin",
+        "default": "",
         "description": "qBittorrent WebUI authentication username",
         "secret": False,
         "editable": True,
@@ -840,7 +830,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     # 8. Playlists & Download Providers
     "PLAYLIST_AUTO_SYNC": {
         "section": "Playlists & Download Providers",
-        "default": "1",
+        "default": "0",
         "description": "Enable automated background playlist acquisition and sync",
         "secret": False,
         "editable": True,
@@ -858,8 +848,8 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
     "PLAYLIST_DOWNLOAD_METHODS": {
         "section": "Playlists & Download Providers",
-        "default": "slskd,spotiflac,ytdlp,soundcloud",
-        "description": "Priority order of acquisition providers for missing tracks",
+        "default": "slskd,ytdlp,soundcloud",
+        "description": "Priority order of acquisition providers for missing tracks. SpotiFLAC is opt-in: add spotiflac to use it",
         "secret": False,
         "editable": True,
         "restart_required": False,
@@ -1215,19 +1205,25 @@ def _is_url_setting(name: str) -> bool:
     return name.endswith("_URL")
 
 
+def _url_needs_redaction(value: str) -> bool:
+    """Userinfo, a query or a fragment can each hold a credential, and
+    redact_url_userinfo removes all three."""
+    return config_layers.url_has_userinfo(value) or "?" in value or "#" in value
+
+
 def _redact_url_setting(name: str, item: Dict[str, Any], raw_values: Iterable[str]) -> None:
-    """#183 F1 / #208: never return user:pass@ of a URL setting from
-    GET /api/setup/env, in any field, status_message included."""
+    """#183 F1 / #208: never return user:pass@ or a query string of a URL
+    setting from GET /api/setup/env, in any field, status_message included."""
     if not _is_url_setting(name):
         return
     for field in _URL_DISPLAY_FIELDS:
         value = item.get(field)
-        if isinstance(value, str) and config_layers.url_has_userinfo(value):
+        if isinstance(value, str) and _url_needs_redaction(value):
             item[field] = config_layers.redact_url_userinfo(value)
     message = item.get("status_message")
     if isinstance(message, str):
         for raw in raw_values:
-            if raw and config_layers.url_has_userinfo(raw):
+            if raw and _url_needs_redaction(raw):
                 message = message.replace(raw, config_layers.redact_url_userinfo(raw))
         item["status_message"] = message
 
@@ -1238,7 +1234,7 @@ def _is_redacted_url_echo(name: str, value: str, stored: Iterable[str]) -> bool:
     if not _is_url_setting(name):
         return False
     return any(
-        raw and raw != value and config_layers.url_has_userinfo(raw)
+        raw and raw != value and _url_needs_redaction(raw)
         and value == config_layers.redact_url_userinfo(raw)
         for raw in stored
     )
@@ -1563,6 +1559,17 @@ _SECRET_KV_RE = re.compile(
     re.VERBOSE,
 )
 
+# Secret variable names and their legacy aliases, which the generic pattern
+# above may not match (QBIT_PASS, QB_PASS).
+_SECRET_NAME_KV_RE = re.compile(
+    r"""(?i)\b(%s)(\s*[:=]\s*)(?!['"]?\[redacted\]['"]?)(?:"[^"]*"|'[^']*'|[^\s,;}\]&]+)"""
+    % "|".join(sorted(
+        re.escape(name)
+        for name in (*config_layers.SECRET_KEYS, *config_layers.LEGACY_ENV_ALIASES)
+        if config_layers.is_secret_name(name)
+    ))
+)
+
 # Authorization / Proxy-Authorization headers, with or without a Bearer/Basic
 # scheme prefix (the scheme itself is not secret and is kept for context).
 _AUTH_HEADER_RE = re.compile(r"(?i)\b(Authorization|Proxy-Authorization)(\s*:\s*)(?:(Bearer|Basic)(\s+))?(\S+)")
@@ -1624,6 +1631,7 @@ def _redact_diagnostic_text(text: str) -> str:
     redacted = _COOKIE_HEADER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
     redacted = _URL_CREDENTIAL_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}@", redacted)
     redacted = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
+    redacted = _SECRET_NAME_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
     redacted = _STRAY_REDACTED_BRACKET_RE.sub(lambda m: m.group(1), redacted)
     return redacted
 
