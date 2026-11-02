@@ -47,8 +47,8 @@ from app import (  # noqa: E402
 from backend.beets_adapter import (
     BeetsAdapterError as BeetsError,
     BeetsAdapterConnectionError as BeetsUnavailableError,
-    BeetsAdapterAuthError as BeetsAuthError,
 )
+from backend.serializers import beets_engine_error_response
 from backend.security import OutboundPolicyError, resolve_public_target
 from backend.identity_contract import verify_album_identity
 
@@ -929,27 +929,9 @@ def submission_target():
         path = _s(request.args.get("path") or "").strip()
         singleton = str(request.args.get("singleton") or "").strip().lower() in {"1", "true", "yes"}
         target_type, target_id, summary, tracks = _resolve_submission_target(album_id=album_id, item_id=item_id, path=path, singleton=singleton)
-    except BeetsUnavailableError as ex:
-        app.logger.warning("submission_target engine unavailable for path=%r: %s", path, ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine unavailable",
-            "error_code": "ENGINE_UNAVAILABLE",
-        }), 503
-    except BeetsAuthError as ex:
-        app.logger.warning("submission_target auth failed for path=%r: %s", path, ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine auth failed",
-            "error_code": "ENGINE_AUTH_ERROR",
-        }), 502
     except BeetsError as ex:
-        app.logger.warning("submission_target engine error for path=%r: %s", path, ex)
-        return jsonify({
-            "ok": False,
-            "error": "Beets engine error",
-            "error_code": "ENGINE_ERROR",
-        }), 502
+        app.logger.warning("submission_target %s for path=%r: %s", type(ex).__name__, path, ex)
+        return beets_engine_error_response(ex)
     except KeyError as ex:
         return jsonify({"ok": False, "error": str(ex)}), 404
     except ValueError as ex:

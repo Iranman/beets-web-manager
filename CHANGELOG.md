@@ -7,6 +7,8 @@ The project uses Semantic Versioning.
 ## Unreleased
 
 ### Changed
+
+- **Backend consolidation with no API change (#505).** Library job-start routes share one helper (`_start_job` in `routes_library.py`); `_resolve_setting_item` in `routes_setup.py` is one metadata table and one item builder instead of nine hand-written 22-key dictionaries; Beets error translation lives in `backend/serializers.py` (`beets_offline_response`, `beets_auth_failed_response`, `beets_engine_error_response`); the MusicBrainz-coverage and album-tracks payloads moved from their route handlers into `backend/library_service.py`. Some log lines for Beets failures now carry the exception class name instead of a per-class sentence.
 - Playlist downloads: split the 600-line job body in `start_playlist_download` into named steps (source resolution, checkpoint import, download rounds, final sync). No behavior change; golden traces of 25 pipeline scenarios (resume, partial completion, review holds, cancel) were recorded before the split and still match. Playlist list and detail payloads now share one builder per shape, with identical keys and values (#505).
 
 ### Removed

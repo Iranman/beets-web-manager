@@ -23,7 +23,7 @@ import backend.composite_workflows as composite_workflows
 from backend.library_cache import library_cache
 import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags, same_recording_proof
-from backend.artwork_service import _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
+from backend.artwork_service import _album_dir_for_art, _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _load_album_mb_suggestions, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
@@ -5551,3 +5551,202 @@ def library_missing_mb_payload(*, kind: str = "all", search: str = "", offset: i
                                                          evidence=row.get("evidence") or {}))
     return {"ok": True, "items": page, "total": len(rows), "offset": offset, "limit": limit,
             "counts": counts_out}
+
+
+def library_mbid_status_payload() -> Dict[str, Any]:
+    """MusicBrainz coverage for albums/tracks already under the music root."""
+    total_albums = missing_album_mb = total_tracks = missing_track_mb = 0
+    item_release_gap_rows = 0
+    albums_with_item_release_gaps = 0
+    track_recording_gap_rows = 0
+    albums_with_track_recording_gaps = 0
+    inferred_album_mbid_rows = 0
+    albums_with_template_tokens = 0
+    template_token_rows = 0
+    examples: List[Dict[str, Any]] = []
+    release_gap_examples: List[Dict[str, Any]] = []
+    track_gap_examples: List[Dict[str, Any]] = []
+    template_token_examples: List[Dict[str, Any]] = []
+    for album in lib.albums([]):
+        items = list(album.items())
+        music_items = [i for i in items if _is_music_root_path(getattr(i, "path", ""))]
+        if not music_items:
+            continue
+        total_albums += 1
+        total_tracks += len(music_items)
+        album_mb = _s(getattr(album, "mb_albumid", "") or "").strip().lower()
+        if not album_mb:
+            missing_album_mb += 1
+            item_release_ids = {
+                _s(getattr(i, "mb_albumid", "") or "").strip().lower()
+                for i in music_items
+                if _s(getattr(i, "mb_albumid", "") or "").strip()
+            }
+            if len(item_release_ids) == 1:
+                inferred_album_mbid_rows += 1
+            if len(examples) < 12:
+                examples.append({
+                    "album_id": album.id,
+                    "artist": _s(getattr(album, "albumartist", "") or ""),
+                    "album": _s(getattr(album, "album", "") or ""),
+                    "tracks": len(music_items),
+                    "year": int(getattr(album, "year", 0) or 0),
+                })
+        album_release_gaps = 0
+        album_track_gaps = 0
+        album_template_tokens = 0
+        for item in music_items:
+            item_mb = _s(getattr(item, "mb_albumid", "") or "").strip().lower()
+            if album_mb and (not item_mb or item_mb != album_mb):
+                item_release_gap_rows += 1
+                album_release_gaps += 1
+                if len(release_gap_examples) < 8:
+                    release_gap_examples.append({
+                        "album_id": album.id,
+                        "item_id": getattr(item, "id", 0),
+                        "artist": _s(getattr(album, "albumartist", "") or ""),
+                        "album": _s(getattr(album, "album", "") or ""),
+                        "title": _s(getattr(item, "title", "") or ""),
+                        "album_mb_albumid": album_mb,
+                        "item_mb_albumid": item_mb,
+                    })
+            if not _s(getattr(item, "mb_trackid", "") or "").strip():
+                missing_track_mb += 1
+                track_recording_gap_rows += 1
+                album_track_gaps += 1
+                if len(track_gap_examples) < 8:
+                    track_gap_examples.append({
+                        "album_id": album.id,
+                        "item_id": getattr(item, "id", 0),
+                        "artist": _s(getattr(album, "albumartist", "") or ""),
+                        "album": _s(getattr(album, "album", "") or ""),
+                        "title": _s(getattr(item, "title", "") or ""),
+                        "track": int(getattr(item, "track", 0) or 0),
+                        "disc": int(getattr(item, "disc", 1) or 1),
+                    })
+            item_path = _s(getattr(item, "path", "") or "")
+            if item_path and _UNRESOLVED_TEMPLATE_TOKEN_RE.search(item_path):
+                template_token_rows += 1
+                album_template_tokens += 1
+                if len(template_token_examples) < 8:
+                    template_token_examples.append({
+                        "album_id": album.id,
+                        "item_id": getattr(item, "id", 0),
+                        "artist": _s(getattr(album, "albumartist", "") or ""),
+                        "album": _s(getattr(album, "album", "") or ""),
+                        "title": _s(getattr(item, "title", "") or ""),
+                        "path": item_path,
+                    })
+        if album_release_gaps:
+            albums_with_item_release_gaps += 1
+        if album_track_gaps:
+            albums_with_track_recording_gaps += 1
+        if album_template_tokens:
+            albums_with_template_tokens += 1
+    return {
+        "ok": True,
+        "root": str(MUSIC_ROOT),
+        "total_albums": total_albums,
+        "missing_album_mb": missing_album_mb,
+        "total_tracks": total_tracks,
+        "missing_track_mb": missing_track_mb,
+        "item_release_gap_rows": item_release_gap_rows,
+        "albums_with_item_release_gaps": albums_with_item_release_gaps,
+        "track_recording_gap_rows": track_recording_gap_rows,
+        "albums_with_track_recording_gaps": albums_with_track_recording_gaps,
+        "inferred_album_mbid_rows": inferred_album_mbid_rows,
+        "template_token_rows": template_token_rows,
+        "albums_with_template_tokens": albums_with_template_tokens,
+        "examples": examples,
+        "release_gap_examples": release_gap_examples,
+        "track_gap_examples": track_gap_examples,
+        "template_token_examples": template_token_examples,
+    }
+
+
+def album_tracks_with_disk_files(album: Any, aid: int) -> List[Dict[str, Any]]:
+    """The album's tracks plus audio files in its folder that are not its items
+    (imported under another album, or not imported at all)."""
+    items = sorted(album.items(), key=lambda i: (i.disc or 0, i.track or 0))
+    tracks = [_library_track_dict(i) for i in items]
+    known_paths = {
+        str(Path(t.get("path") or "").resolve(strict=False)).lower()
+        for t in tracks
+        if t.get("path")
+    }
+    all_path_items: Dict[str, Any] = {}
+    try:
+        for other in lib.items([]):
+            raw_path = _s(getattr(other, "path", "") or "")
+            if not raw_path:
+                continue
+            abs_path = raw_path if Path(raw_path).is_absolute() else str(MUSIC_ROOT / raw_path)
+            all_path_items[str(Path(abs_path).resolve(strict=False)).lower()] = other
+    except Exception:
+        all_path_items = {}
+    album_dir = _album_dir_for_art(album)
+    if album_dir and album_dir.exists():
+        disc_sub_re = re.compile(r'^(?:cd|disc|disk)\s*0*(\d+)$', re.IGNORECASE)
+        disk_files: List[Path] = []
+        try:
+            disk_files.extend(
+                sorted(
+                    [p for p in album_dir.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXT],
+                    key=lambda p: p.name.lower(),
+                )
+            )
+            for sub in sorted([p for p in album_dir.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+                if not disc_sub_re.match(sub.name):
+                    continue
+                disk_files.extend(
+                    sorted(
+                        [p for p in sub.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXT],
+                        key=lambda p: p.name.lower(),
+                    )
+                )
+        except Exception:
+            disk_files = []
+
+        for fpath in disk_files:
+            key = str(fpath.resolve(strict=False)).lower()
+            if key in known_paths:
+                continue
+            other_item = all_path_items.get(key)
+            if other_item:
+                other_album_id = int(getattr(other_item, "album_id", 0) or 0)
+                if other_album_id == aid:
+                    continue
+                if other_album_id:
+                    row = _library_track_dict(other_item)
+                    row["status"] = "other_album"
+                    row["other_album_id"] = other_album_id
+                    row["imported"] = True
+                    row["disk_only"] = False
+                    row["missing"] = False
+                    tracks.append(row)
+                    continue
+            disc = 1
+            dm = disc_sub_re.match(fpath.parent.name)
+            if dm:
+                disc = int(dm.group(1))
+            tracks.append({
+                "id": 0,
+                "album_id": aid,
+                "path": str(fpath),
+                "title": fpath.stem,
+                "track": 0,
+                "disc": disc,
+                "tracktotal": 0,
+                "ok": False,
+                "missing": False,
+                "imported": False,
+                "disk_only": True,
+                "status": "not_imported",
+                "mb_trackid": "",
+            })
+    tracks.sort(key=lambda t: (
+        int(t.get("disc") or 1),
+        int(t.get("track") or 999),
+        _s(t.get("title") or "").lower(),
+    ))
+    return tracks
