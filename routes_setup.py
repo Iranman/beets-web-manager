@@ -925,16 +925,70 @@ def _detect_system_timezone() -> Optional[str]:
     return None
 
 
+def _app_path_override(attr: str, fallback: Any) -> Any:
+    """The path ``app`` exposes under ``attr`` when loaded, else ``fallback``."""
+    import sys
+    app_m = sys.modules.get("app")
+    return getattr(app_m, attr) if app_m and hasattr(app_m, attr) else fallback
+
+
+def _non_empty_file(path: Optional[Path]) -> bool:
+    return bool(path and path.exists() and path.stat().st_size > 0)
+
+
+# Non-secret settings with a built-in fallback:
+# name -> (default reported to the UI, restart_required, noun in the override message).
+_BUILTIN_SETTINGS: Dict[str, Tuple[str, bool, str]] = {
+    "BEETS_WEB_USERNAME": ("admin", False, "username"),
+    "PUID": ("1000", True, "value"),
+    "PGID": ("1000", True, "value"),
+    "TZ": ("UTC", True, "timezone"),
+    "AI_BASE_URL": ("https://api.openai.com/v1", False, "value"),
+    "AI_MODEL": ("gpt-4o-mini", False, "value"),
+}
+_OPENROUTER_DEFAULTS = {"AI_BASE_URL": "https://openrouter.ai/api/v1", "AI_MODEL": "openai/gpt-4o-mini"}
+
+
+def _builtin_setting_fallback(name: str, persisted: Dict[str, str]) -> Tuple[str, str]:
+    """(value, source) of a _BUILTIN_SETTINGS entry with no env or saved value."""
+    if name in ("PUID", "PGID", "TZ"):
+        runtime = None
+        if name == "TZ":
+            runtime = _detect_system_timezone()
+        else:
+            getter = getattr(os, "getuid" if name == "PUID" else "getgid", None)
+            try:
+                runtime = str(getter()) if getter else None
+            except Exception:
+                pass
+        if runtime:
+            return runtime, "runtime"
+    if name in _OPENROUTER_DEFAULTS:
+        has_openrouter = os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")
+        has_openai = os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")
+        if has_openrouter and not has_openai:
+            return _OPENROUTER_DEFAULTS[name], "default"
+    return _BUILTIN_SETTINGS[name][0], "default"
+
+
+def _saved_username(persisted_val: str) -> Optional[str]:
+    user_file = _app_path_override("_PERSISTED_BROWSER_USERNAME_FILE", _PERSISTED_BROWSER_USERNAME_FILE)
+    file_user = ""
+    if user_file and user_file.exists():
+        try:
+            file_user = user_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+        except Exception:
+            pass
+    return file_user or persisted_val or None
+
+
 def _resolve_setting_item(
     name: str,
     meta: Dict[str, Any],
     persisted: Dict[str, str],
 ) -> Dict[str, Any]:
     secret = bool(meta.get("secret") or _is_secret_env(name))
-    section = meta.get("section") or "General"
     default_val = meta.get("default")
-    container_path = meta.get("container_path")
-    host_path = meta.get("host_path")
     description = meta.get("description")
     editable = meta.get("editable", True)
     restart_required = bool(meta.get("restart_required", False))
@@ -945,436 +999,130 @@ def _resolve_setting_item(
     has_persisted = name in persisted and bool(persisted_val)
     env_val = os.environ.get(name, "").strip()
 
-    # 1. BEETS_WEB_PASSWORD
-    if name == "BEETS_WEB_PASSWORD":
-        pass_file = _PERSISTED_BROWSER_PASSWORD_FILE
-        init_file = _INITIAL_BROWSER_PASSWORD_FILE
-        try:
-            import sys
-            app_m = sys.modules.get("app")
-            if app_m and hasattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE"):
-                pass_file = getattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE")
-            if app_m and hasattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE"):
-                init_file = getattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE")
-        except Exception:
-            pass
+    def item(**fields: Any) -> Dict[str, Any]:
+        return {
+            "name": name,
+            "section": meta.get("section") or "General",
+            "container_path": meta.get("container_path"),
+            "host_path": meta.get("host_path"),
+            "runtime_has_value": bool(env_val),
+            "has_value": fields["configured"],
+            **fields,
+        }
 
-        has_stored = bool((pass_file and pass_file.exists() and pass_file.stat().st_size > 0) or
-                          (init_file and init_file.exists() and init_file.stat().st_size > 0) or
-                          has_persisted)
+    # Stored-credential settings: the value is never returned, only "********".
+    if name in ("BEETS_WEB_PASSWORD", "BEETS_WEB_AUTH_TOKEN"):
+        is_password = name == "BEETS_WEB_PASSWORD"
+        if is_password:
+            has_stored = bool(
+                _non_empty_file(_app_path_override("_PERSISTED_BROWSER_PASSWORD_FILE", _PERSISTED_BROWSER_PASSWORD_FILE))
+                or _non_empty_file(_app_path_override("_INITIAL_BROWSER_PASSWORD_FILE", _INITIAL_BROWSER_PASSWORD_FILE))
+                or has_persisted
+            )
+            status_message = "Stored as a one-way password hash"
+        else:
+            has_stored = bool(
+                has_persisted
+                or _non_empty_file(_app_path_override("_GENERATED_AUTH_TOKEN_FILE", _GENERATED_AUTH_TOKEN_FILE))
+                or _non_empty_file(_FALLBACK_AUTH_TOKEN_FILE)
+            )
+            status_message = "Active (Environment)" if env_val else "Saved"
         configured = bool(env_val or has_stored)
-        source = "environment" if env_val else ("persisted" if has_stored else "not_configured")
-        is_overridden = bool(env_val and has_stored)
+        return item(
+            secret=True,
+            revealable=not is_password,
+            configured=configured,
+            editable=True if is_password else editable,
+            restart_required=False,
+            type="password" if is_password else "secret",
+            value="********" if configured else "",
+            effective_value=None,
+            saved_value="********" if has_stored else None,
+            has_saved_value=has_stored,
+            is_overridden=bool(env_val and has_stored),
+            default=None if is_password else default_val,
+            description=(description or "Password for browser login (stored securely as a one-way hash)") if is_password else description,
+            source="environment" if env_val else ("persisted" if has_stored else "not_configured"),
+            status_message=status_message if configured else "Not configured",
+            runtime_value="********" if env_val else "",
+        )
 
-        return {
-            "name": name,
-            "section": section,
-            "secret": True,
-            "revealable": False,
-            "configured": configured,
-            "editable": True,
-            "restart_required": False,
-            "type": "password",
-            "value": "********" if configured else "",
-            "effective_value": None,
-            "saved_value": "********" if has_stored else None,
-            "has_saved_value": has_stored,
-            "is_overridden": is_overridden,
-            "default": None,
-            "container_path": container_path,
-            "host_path": host_path,
-            "description": description or "Password for browser login (stored securely as a one-way hash)",
-            "source": source,
-            "status_message": "Stored as a one-way password hash" if configured else "Not configured",
-            "has_value": configured,
-            "runtime_has_value": bool(env_val),
-            "runtime_value": "********" if env_val else "",
-        }
+    builtin = _BUILTIN_SETTINGS.get(name)
 
-    # 2. BEETS_WEB_AUTH_TOKEN
-    if name == "BEETS_WEB_AUTH_TOKEN":
-        token_file = _GENERATED_AUTH_TOKEN_FILE
-        try:
-            import sys
-            app_m = sys.modules.get("app")
-            if app_m and hasattr(app_m, "_GENERATED_AUTH_TOKEN_FILE"):
-                token_file = getattr(app_m, "_GENERATED_AUTH_TOKEN_FILE")
-        except Exception:
-            pass
-        has_stored = bool(has_persisted or
-                          (token_file and token_file.exists() and token_file.stat().st_size > 0) or
-                          (_FALLBACK_AUTH_TOKEN_FILE.exists() and _FALLBACK_AUTH_TOKEN_FILE.stat().st_size > 0))
-        configured = bool(env_val or has_stored)
-        source = "environment" if env_val else ("persisted" if has_stored else "not_configured")
-        is_overridden = bool(env_val and has_stored)
-
-        return {
-            "name": name,
-            "section": section,
-            "secret": True,
-            "revealable": True,
-            "configured": configured,
-            "editable": editable,
-            "restart_required": False,
-            "type": "secret",
-            "value": "********" if configured else "",
-            "effective_value": None,
-            "saved_value": "********" if has_stored else None,
-            "has_saved_value": has_stored,
-            "is_overridden": is_overridden,
-            "default": default_val,
-            "container_path": container_path,
-            "host_path": host_path,
-            "description": description,
-            "source": source,
-            "status_message": "Active (Environment)" if source == "environment" else ("Saved" if configured else "Not configured"),
-            "has_value": configured,
-            "runtime_has_value": bool(env_val),
-            "runtime_value": "********" if env_val else "",
-        }
-
-    # 3. BEETS_WEB_USERNAME
-    if name == "BEETS_WEB_USERNAME":
-        user_file = _PERSISTED_BROWSER_USERNAME_FILE
-        try:
-            import sys
-            app_m = sys.modules.get("app")
-            if app_m and hasattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE"):
-                user_file = getattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE")
-        except Exception:
-            pass
-        file_user = ""
-        if user_file and user_file.exists():
-            try:
-                file_user = user_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-            except Exception:
-                pass
-        saved_val = file_user or persisted_val or None
-        has_saved = bool(saved_val)
-
-        if env_val:
-            eff_val = env_val
-            source = "environment"
-            is_overridden = bool(saved_val and saved_val != env_val)
-        elif saved_val:
-            eff_val = saved_val
-            source = "persisted"
-            is_overridden = False
-        else:
-            eff_val = "admin"
-            source = "default"
-            is_overridden = False
-
-        return {
-            "name": name,
-            "section": section,
-            "secret": False,
-            "revealable": False,
-            "configured": True,
-            "editable": editable,
-            "restart_required": False,
-            "type": "string",
-            "value": eff_val,
-            "effective_value": eff_val,
-            "saved_value": saved_val,
-            "has_saved_value": has_saved,
-            "is_overridden": is_overridden,
-            "default": "admin",
-            "container_path": container_path,
-            "host_path": host_path,
-            "description": description,
-            "source": source,
-            "status_message": f"Docker environment overrides saved username ({saved_val})" if is_overridden else "Active",
-            "has_value": True,
-            "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or eff_val,
-        }
-
-    # 4. PUID / PGID
-    if name in ("PUID", "PGID"):
-        runtime_detected = None
-        if name == "PUID" and hasattr(os, "getuid"):
-            try:
-                runtime_detected = str(os.getuid())
-            except Exception:
-                pass
-        elif name == "PGID" and hasattr(os, "getgid"):
-            try:
-                runtime_detected = str(os.getgid())
-            except Exception:
-                pass
-
-        saved_val = persisted_val or None
-        has_saved = bool(saved_val)
-
-        if env_val:
-            eff_val = env_val
-            source = "environment"
-            is_overridden = bool(saved_val and saved_val != env_val)
-        elif saved_val:
-            eff_val = saved_val
-            source = "persisted"
-            is_overridden = False
-        elif runtime_detected:
-            eff_val = runtime_detected
-            source = "runtime"
-            is_overridden = False
-        else:
-            eff_val = "1000"
-            source = "default"
-            is_overridden = False
-
-        return {
-            "name": name,
-            "section": section,
-            "secret": False,
-            "revealable": False,
-            "configured": True,
-            "editable": editable,
-            "restart_required": True,
-            "type": "string",
-            "value": eff_val,
-            "effective_value": eff_val,
-            "saved_value": saved_val,
-            "has_saved_value": has_saved,
-            "is_overridden": is_overridden,
-            "default": "1000",
-            "container_path": container_path,
-            "host_path": host_path,
-            "description": description,
-            "source": source,
-            "status_message": f"Docker environment overrides saved value ({saved_val})" if is_overridden else ("Saved — restart required" if source == "persisted" else "Active"),
-            "has_value": True,
-            "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or eff_val,
-        }
-
-    # 5. TZ
-    if name == "TZ":
-        detected_tz = _detect_system_timezone()
-        saved_val = persisted_val or None
-        has_saved = bool(saved_val)
-
-        if env_val:
-            eff_val = env_val
-            source = "environment"
-            is_overridden = bool(saved_val and saved_val != env_val)
-        elif saved_val:
-            eff_val = saved_val
-            source = "persisted"
-            is_overridden = False
-        elif detected_tz:
-            eff_val = detected_tz
-            source = "runtime"
-            is_overridden = False
-        else:
-            eff_val = "UTC"
-            source = "default"
-            is_overridden = False
-
-        return {
-            "name": name,
-            "section": section,
-            "secret": False,
-            "revealable": False,
-            "configured": True,
-            "editable": editable,
-            "restart_required": True,
-            "type": "string",
-            "value": eff_val,
-            "effective_value": eff_val,
-            "saved_value": saved_val,
-            "has_saved_value": has_saved,
-            "is_overridden": is_overridden,
-            "default": "UTC",
-            "container_path": container_path,
-            "host_path": host_path,
-            "description": description,
-            "source": source,
-            "status_message": f"Docker environment overrides saved timezone ({saved_val})" if is_overridden else ("Saved — restart required" if source == "persisted" else "Active"),
-            "has_value": True,
-            "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or eff_val,
-        }
-
-    # 6. AI_BASE_URL
-    if name == "AI_BASE_URL":
-        saved_val = persisted_val or None
-        has_saved = bool(saved_val)
-        if env_val:
-            eff_val = env_val
-            source = "environment"
-            is_overridden = bool(saved_val and saved_val != env_val)
-        elif saved_val:
-            eff_val = saved_val
-            source = "persisted"
-            is_overridden = False
-        elif (os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")) and not (os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")):
-            eff_val = "https://openrouter.ai/api/v1"
-            source = "default"
-            is_overridden = False
-        else:
-            eff_val = "https://api.openai.com/v1"
-            source = "default"
-            is_overridden = False
-
-        return {
-            "name": name,
-            "section": section,
-            "secret": False,
-            "revealable": False,
-            "configured": True,
-            "editable": editable,
-            "restart_required": False,
-            "type": "string",
-            "value": eff_val,
-            "effective_value": eff_val,
-            "saved_value": saved_val,
-            "has_saved_value": has_saved,
-            "is_overridden": is_overridden,
-            "default": "https://api.openai.com/v1",
-            "container_path": container_path,
-            "host_path": host_path,
-            "description": description,
-            "source": source,
-            "status_message": f"Docker environment overrides saved value ({saved_val})" if is_overridden else "Active",
-            "has_value": True,
-            "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or eff_val,
-        }
-
-    # 7. AI_MODEL
-    if name == "AI_MODEL":
-        saved_val = persisted_val or None
-        has_saved = bool(saved_val)
-        if env_val:
-            eff_val = env_val
-            source = "environment"
-            is_overridden = bool(saved_val and saved_val != env_val)
-        elif saved_val:
-            eff_val = saved_val
-            source = "persisted"
-            is_overridden = False
-        elif (os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")) and not (os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")):
-            eff_val = "openai/gpt-4o-mini"
-            source = "default"
-            is_overridden = False
-        else:
-            eff_val = "gpt-4o-mini"
-            source = "default"
-            is_overridden = False
-
-        return {
-            "name": name,
-            "section": section,
-            "secret": False,
-            "revealable": False,
-            "configured": True,
-            "editable": editable,
-            "restart_required": False,
-            "type": "string",
-            "value": eff_val,
-            "effective_value": eff_val,
-            "saved_value": saved_val,
-            "has_saved_value": has_saved,
-            "is_overridden": is_overridden,
-            "default": "gpt-4o-mini",
-            "container_path": container_path,
-            "host_path": host_path,
-            "description": description,
-            "source": source,
-            "status_message": f"Docker environment overrides saved value ({saved_val})" if is_overridden else "Active",
-            "has_value": True,
-            "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or eff_val,
-        }
-
-    # 8. Generic Secret Variable
-    if secret:
+    # Generic secret: the value is only ever returned masked.
+    if secret and not builtin:
         has_stored = has_persisted
         if name == "SLSKD_API_KEY":
-            slskd_key_file = Path(os.environ.get("SLSKD_API_KEY_FILE", "/config/slskd_api_key"))
-            if slskd_key_file.exists() and slskd_key_file.stat().st_size > 0:
+            if _non_empty_file(Path(os.environ.get("SLSKD_API_KEY_FILE", "/config/slskd_api_key"))):
                 has_stored = True
-
         configured = bool(env_val or has_stored)
         # D12: the saved file is loaded into os.environ at boot, so an env value
         # equal to the saved one that Docker did not set is the saved key.
         from_docker = bool(env_val) and (config_layers.pinned_by_boot_environment(name) or env_val != persisted_val)
-        source = "environment" if from_docker else ("persisted" if (has_stored or env_val) else "not_configured")
         is_overridden = bool(from_docker and has_stored)
-        masked_val = _mask(env_val or persisted_val) if configured else ""
+        return item(
+            secret=True,
+            revealable=revealable,
+            configured=configured,
+            editable=editable,
+            restart_required=restart_required,
+            type="secret",
+            value=_mask(env_val or persisted_val) if configured else "",
+            effective_value=None,
+            saved_value="••••••••••••••••" if has_stored else None,
+            has_saved_value=has_stored,
+            is_overridden=is_overridden,
+            default=default_val,
+            description=description,
+            source="environment" if from_docker else ("persisted" if (has_stored or env_val) else "not_configured"),
+            status_message="Docker environment overrides saved key" if is_overridden else ("Configured" if configured else "Not configured"),
+            runtime_value=_mask(env_val) if env_val else "",
+        )
 
-        return {
-            "name": name,
-            "section": section,
-            "secret": True,
-            "revealable": revealable,
-            "configured": configured,
-            "editable": editable,
-            "restart_required": restart_required,
-            "type": "secret",
-            "value": masked_val,
-            "effective_value": None,
-            "saved_value": "••••••••••••••••" if has_stored else None,
-            "has_saved_value": has_stored,
-            "is_overridden": is_overridden,
-            "default": default_val,
-            "container_path": container_path,
-            "host_path": host_path,
-            "description": description,
-            "source": source,
-            "status_message": "Docker environment overrides saved key" if is_overridden else ("Configured" if configured else "Not configured"),
-            "has_value": configured,
-            "runtime_has_value": bool(env_val),
-            "runtime_value": _mask(env_val) if env_val else "",
-        }
-
-    # 9. Generic Non-Secret Variable
-    saved_val = persisted_val or None
-    has_saved = bool(saved_val)
+    # Plain settings: environment, then saved, then the fallback.
+    saved_val = _saved_username(persisted_val) if name == "BEETS_WEB_USERNAME" else (persisted_val or None)
+    noun = "value"
+    if builtin:
+        default_val, restart_required, noun = builtin
+        var_type = "string"
+    is_overridden = False
     if env_val:
-        eff_val = env_val
-        source = "environment"
+        eff_val, source = env_val, "environment"
         is_overridden = bool(saved_val and saved_val != env_val)
     elif saved_val:
-        eff_val = saved_val
-        source = "persisted"
-        is_overridden = False
+        eff_val, source = saved_val, "persisted"
+    elif builtin:
+        eff_val, source = _builtin_setting_fallback(name, persisted)
     elif default_val is not None and default_val != "":
-        eff_val = str(default_val)
-        source = "default"
-        is_overridden = False
+        eff_val, source = str(default_val), "default"
     else:
-        eff_val = ""
-        source = "not_configured"
-        is_overridden = False
+        eff_val, source = "", "not_configured"
 
     configured = bool(eff_val)
-    return {
-        "name": name,
-        "section": section,
-        "secret": False,
-        "revealable": False,
-        "configured": configured,
-        "editable": editable,
-        "restart_required": restart_required,
-        "type": var_type,
-        "value": eff_val,
-        "effective_value": eff_val,
-        "saved_value": saved_val,
-        "has_saved_value": has_saved,
-        "is_overridden": is_overridden,
-        "default": default_val,
-        "container_path": container_path,
-        "host_path": host_path,
-        "description": description,
-        "source": source,
-        "status_message": f"Docker environment overrides saved value ({saved_val})" if is_overridden else ("Saved — restart required" if (source == "persisted" and restart_required) else ("Active" if configured else "Not configured")),
-        "has_value": configured,
-        "runtime_has_value": bool(env_val),
-        "runtime_value": env_val or eff_val,
-    }
+    if is_overridden:
+        status_message = f"Docker environment overrides saved {noun} ({saved_val})"
+    elif source == "persisted" and restart_required:
+        status_message = "Saved — restart required"
+    else:
+        status_message = "Active" if configured else "Not configured"
+    return item(
+        secret=False,
+        revealable=False,
+        configured=configured,
+        editable=editable,
+        restart_required=restart_required,
+        type=var_type,
+        value=eff_val,
+        effective_value=eff_val,
+        saved_value=saved_val,
+        has_saved_value=bool(saved_val),
+        is_overridden=is_overridden,
+        default=default_val,
+        description=description,
+        source=source,
+        status_message=status_message,
+        runtime_value=env_val or eff_val,
+    )
 
 
 BEETS_LOCATION = "Beets inside Web Manager"

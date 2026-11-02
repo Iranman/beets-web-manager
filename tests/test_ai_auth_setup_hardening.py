@@ -398,9 +398,9 @@ class AuthTokenRegenerateEndpointTests(unittest.TestCase):
         # effective_value and (b) only ever expose a fixed-length placeholder
         # (never a value-length-revealing partial mask) in the response.
         token_branch = _function_source(
-            SETUP_SOURCE, "# 2. BEETS_WEB_AUTH_TOKEN", "# 3. BEETS_WEB_USERNAME"
+            SETUP_SOURCE, "# Stored-credential settings:", "builtin = _BUILTIN_SETTINGS.get(name)"
         )
-        self.assertIn('"effective_value": None,', token_branch)
+        self.assertIn('effective_value=None,', token_branch)
         self.assertIn('"********" if configured else ""', token_branch)
         self.assertNotIn("_mask(", token_branch)
         self.assertIn('_is_secret_env(key)', SETUP_SOURCE)
