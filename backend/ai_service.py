@@ -2979,6 +2979,10 @@ def _auto_merge_case_duplicate_artist_folder(root: str, albumartist: str,
         if log is not None:
             log.append(f"  [auto-dedup] artist-folder merge failed: {ex}")
         return False
+    if summary.get("ok") is False:
+        if log is not None:
+            log.append(f"  [auto-dedup] artist-folder merge not performed: {summary.get('error')}")
+        return False
     if log is not None and summary.get("folders"):
         log.append(f"  [auto-dedup] Merged {summary['folders']} duplicate artist folder(s) for '{name}' "
                     f"found on disk (case/punctuation variant of an existing folder).")

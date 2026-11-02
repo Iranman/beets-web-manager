@@ -36,8 +36,9 @@ Guards (`tests/test_arch001_architecture.py`):
   zero ARCH-002 matching-pattern hits and every function in it is APP_GLUE;
 - no `globals()` lookups and no `global` rebinding of a name another module
   imports;
-- the Flask URL map equals the v0.1.30 baseline (259 rules: same rule,
-  endpoint and methods) — `tests/arch001_route_baseline.json`;
+- every rule in the v0.1.30 baseline (257 entries: same rule, endpoint and
+  methods, `tests/arch001_route_baseline.json`) still exists, and any route
+  added since must be listed in the test's `added_since` set;
 - the unattended duplicate-deletion rule (below) is checked behaviorally.
 
 ## Layer order (extraction order)

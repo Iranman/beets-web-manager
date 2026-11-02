@@ -393,7 +393,7 @@ _ARTIST_RECONCILE_TERMINAL_FAILURE_STATUSES = {"Failed", "Rolled Back", "Partial
 
 def _apply_artist_folder_reconcile_resilient(
     op_id: str, log: List[str], *, cancel_event: Any = None, log_prefix: str = "Artist folder reconcile",
-    _acceptance_failpoint: Optional[str] = None, skip_initial_apply: bool = False,
+    skip_initial_apply: bool = False,
 ) -> Dict[str, Any]:
     """Apply an already-planned artist_folder_reconcile_v1 operation and
     survive a lost HTTP response without ever calling Apply a second time
@@ -426,10 +426,11 @@ def _apply_artist_folder_reconcile_resilient(
     status, bounded by BEETS_LONG_OPERATION_MAX_SECONDS. It never re-calls
     apply_artist_folder_reconcile() itself under any circumstance.
 
-    _acceptance_failpoint is test-only infrastructure passed straight
-    through to composite_workflows.apply_artist_folder_reconcile() -- the engine
-    ignores it entirely unless booted with BEETS_ACCEPTANCE_MODE=1, which
-    no real deployment ever sets. Always None in real production calls.
+    Any other exception is a bug or a local failure, not a lost response:
+    Apply runs in-process, so nothing is left running once it has raised, and
+    _apply_claimed() has already recorded the outcome of a claimed transaction.
+    It fails immediately. Polling would wait out the deadline on a transaction
+    nothing is working on.
 
     Error classification matters here: a definite HTTP/application
     rejection (400/401/403/404) means the request WAS answered -- the
@@ -453,9 +454,7 @@ def _apply_artist_folder_reconcile_resilient(
         # error_code/status_code/diagnostics are agent-controlled structured
         # fields, not exception text, and remain safe to expose.
         try:
-            return composite_workflows.apply_artist_folder_reconcile(
-                op_id, acceptance_failpoint=_acceptance_failpoint, timeout=BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS,
-            )
+            return composite_workflows.apply_artist_folder_reconcile(op_id)
         except (BeetsBadRequestError, BeetsAuthError, BeetsNotFoundError) as ex:
             _app_logger.error("%s: apply definitively rejected for op_id=%s: %s", log_prefix, op_id, ex, exc_info=True)
             safe_reason = _safe_apply_error_message(ex)
@@ -470,15 +469,18 @@ def _apply_artist_folder_reconcile_resilient(
         except (BeetsUnavailableError, BeetsError) as ex:
             _app_logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
             log.append(
-                f"{log_prefix}: Apply response was lost ({_safe_apply_error_message(ex)}). The engine "
-                f"operation may still be running -- monitoring its transaction state instead of retrying Apply."
+                f"{log_prefix}: Apply raised an error ({_safe_apply_error_message(ex)}). Not retrying it; "
+                f"reading the outcome recorded on its transaction."
             )
         except Exception as ex:
-            _app_logger.warning("%s: unexpected apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
-            log.append(
-                f"{log_prefix}: Apply response was lost (unexpected error). The engine operation may "
-                f"still be running -- monitoring its transaction state instead of retrying Apply."
-            )
+            _app_logger.error("%s: apply failed unexpectedly for op_id=%s: %s", log_prefix, op_id, ex, exc_info=True)
+            log.append(f"{log_prefix}: Apply failed with an internal error. Not retried and not polled.")
+            return {
+                "ok": False,
+                "operation_id": op_id,
+                "error": _safe_apply_error_message(ex),
+                "error_code": "apply_internal_error",
+            }
         return None
 
     if skip_initial_apply:

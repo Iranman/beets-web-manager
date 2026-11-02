@@ -1992,7 +1992,7 @@ def clean_artist_folders_merge():
         return jsonify({"ok": True, "dry_run": True, "summary": summary, "log": log})
 
     def _do(log, cancel_event=None):
-        _apply_artist_folder_groups(root, keys, False, log)
+        return _apply_artist_folder_groups(root, keys, False, log)
 
     job = jobs.start_python(
         _do,
@@ -2019,11 +2019,6 @@ def clean_artist_folders_stamp_mbid():
     root_str = str(root_path)
     dry_run = bool(payload.get("dry_run", True))
     compact_log = bool(payload.get("compact_log", False))
-    # Test-only acceptance failpoint passthrough (hotfix v0.1.17 pattern,
-    # see composite_workflows.apply_artist_folder_reconcile()'s docstring): a
-    # no-op in real deployments, since the engine only honors it when that
-    # container was booted with BEETS_ACCEPTANCE_MODE=1.
-    acceptance_failpoint = _s(payload.get("_acceptance_failpoint")) or None
 
     if dry_run:
         log: List[str] = []
@@ -2046,7 +2041,7 @@ def clean_artist_folders_stamp_mbid():
 
     def _do(log, cancel_event=None):
         result = _maintenance_artist_folder_merge_step(
-            log, cancel_event, root_str, acceptance_failpoint=acceptance_failpoint)
+            log, cancel_event, root_str)
         # Nothing was planned, so there is nothing to recover: fail the job
         # (retryable) instead of reporting a scan failure as "nothing to do". A
         # failure after planning returns its operation_id on a failed job.

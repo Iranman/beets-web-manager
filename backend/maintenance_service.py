@@ -357,7 +357,6 @@ def _maintenance_artist_folder_merge_step(
     *,
     resume_operation_id: str = "",
     on_operation_planned: Optional[Any] = None,
-    acceptance_failpoint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run (or resume) the artist-folder MBID-stamping/merge step, shared by
     the /api/clean/artist-folders/stamp-mbid route and Clean All's
@@ -446,17 +445,22 @@ def _maintenance_artist_folder_merge_step(
                 resume_operation_id, log, cancel_event=cancel_event, log_prefix="Artist folder merge",
                 skip_initial_apply=(status == "Running"),
             )
-            if not apply_res.get("ok"):
+            if apply_res.get("code") == "artist_folder_plan_empty":
+                # A checkpoint from before plans were refused: nothing ran, so a fresh scan is safe.
+                log.append(f"Artist folder merge: saved operation {resume_operation_id} has an empty plan and "
+                           f"was not applied. Re-scanning.")
+            elif not apply_res.get("ok"):
                 return {
                     "ok": False, "operation_id": resume_operation_id,
                     "renamed": 0, "merged": 0, "skipped": 0, "error": apply_res.get("error"),
                     "still_running": bool(apply_res.get("still_running")),
                 }
-            return {
-                "ok": True, "operation_id": resume_operation_id,
-                "renamed": int(apply_res.get("moved_files") or 0), "merged": int(apply_res.get("quarantined_files") or 0),
-                "skipped": 0,
-            }
+            else:
+                return {
+                    "ok": True, "operation_id": resume_operation_id,
+                    "renamed": int(apply_res.get("moved_files") or 0), "merged": int(apply_res.get("quarantined_files") or 0),
+                    "skipped": 0,
+                }
 
     root_path = Path(root)
     scan = _stamp_artist_folder_scan(root_path)
@@ -500,7 +504,8 @@ def _maintenance_artist_folder_merge_step(
 
     if not plan_res.get("ok"):
         log.append(f"Refusing to operate: {plan_res.get('error')}")
-        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": plan_res.get("error")}
+        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": plan_res.get("error"),
+                "error_code": plan_res.get("code", "")}
 
     op_id = plan_res.get("operation_id")
     if not op_id:
@@ -512,7 +517,6 @@ def _maintenance_artist_folder_merge_step(
 
     apply_res = _apply_artist_folder_reconcile_resilient(
         op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping",
-        _acceptance_failpoint=acceptance_failpoint,
     )
     if not apply_res.get("ok"):
         log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")

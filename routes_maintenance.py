@@ -423,7 +423,15 @@ def start_maintenance_runner():
                     renamed = int((result or {}).get("renamed") or 0) if isinstance(result, dict) else 0
                     merged = int((result or {}).get("merged") or 0) if isinstance(result, dict) else 0
                     _maintenance_save_last_report({"artist_folder_merge": result}, log)
-                    if (result or {}).get("ok", True):
+                    if (result or {}).get("error_code") == "artist_folder_mode_unsupported":
+                        # Decided gap, not a failure (TECHNICAL_DEBT): Clean All finishes without it.
+                        # The result has no counts, so set_task keeps the reason as the task's detail.
+                        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
+                        reason = _s(result.get("error"))
+                        log.append(f"[Artist Folder Merge] skipped: {reason}")
+                        set_task("artist_folder_merge", "skipped", reason,
+                                 {"error_code": result["error_code"], "reason": reason})
+                    elif (result or {}).get("ok", True):
                         tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
                         set_task(
                             "artist_folder_merge", "complete",
