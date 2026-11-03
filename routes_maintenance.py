@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import functools, time
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from flask import Response, jsonify, request
 from backend.beets_adapter import BeetsError, BeetsUnavailableError
@@ -158,496 +159,11 @@ def start_maintenance_runner():
         resume_snapshot=resume_snapshot,
         resume_requested=resume_requested,
     ):
-        tasks = [dict(task) for task in (resume_snapshot.get("tasks") or _maintenance_initial_task_state())]
-        task_index = {task["id"]: idx for idx, task in enumerate(tasks)}
-        raw_results = resume_snapshot.get("results") if resume_requested else {}
-        results: Dict[str, Any] = dict(raw_results) if isinstance(raw_results, dict) else {}
-        total = len(tasks)
-        run_started_at = time.time()
-        def emit(current_id: str = "", message: str = ""):
-            completed = sum(1 for task in tasks if task["status"] in {"complete", "failed", "skipped"})
-            current = next((task for task in tasks if task["id"] == current_id), None)
-            current_task = current["label"] if current else (message or "Clean All")
-            current_phase = CLEAN_ALL_TASK_PHASES.get(current_id, "Scanning" if not completed else "Syncing")
-            payload = {
-                "category": "Cleanup",
-                "workflow": "clean-all",
-                "current_task": current_task,
-                "current_result": message,
-                "current_phase": current_phase,
-                "last_completed_action": message,
-                "last_heartbeat_at": time.time(),
-                "maintenance_status": "running",
-                "maintenance_tasks": tasks,
-                "clean_all_pipeline": CLEAN_ALL_PIPELINE_STEPS,
-                "clean_all_counts": _maintenance_clean_all_counts(tasks, results),
-                "progress_percent": round((completed / total) * 100),
-                "scanned_count": completed,
-                "total_count": total,
-                "remaining_count": max(0, total - completed),
-            }
-            if update_state:
-                update_state(payload)
-
-        def next_resume_task() -> Optional[Dict[str, Any]]:
-            return next((task for task in tasks if task.get("status") not in {"complete", "skipped"}), None)
-
-        def persist_checkpoint(status: str = "running", error: str = ""):
-            next_task = next_resume_task()
-            last_run = {
-                "status": status,
-                "workflow": "clean-all",
-                "started_at": run_started_at,
-                "updated_at": time.time(),
-                "resumed": resume_requested,
-                "completed_task_ids": [task.get("id") for task in tasks if task.get("status") in {"complete", "skipped"}],
-                "next_task": next_task.get("id") if next_task else "",
-                "next_task_label": next_task.get("label") if next_task else "",
-                "tasks": tasks,
-                "result_task_ids": sorted(str(key) for key in results.keys()),
-            }
-            if status == "complete":
-                last_run["completed_at"] = time.time()
-            if status in {"failed", "cancelled", "partial"}:
-                last_run["failed_at"] = time.time()
-            if error:
-                last_run["error"] = error
-            _maintenance_save_last_report({"last_run": last_run}, log)
-            if update_state:
-                # The resumable position, also in the durable job record.
-                update_state({"checkpoint": {
-                    "workflow": "maintenance-runner", "stage": status,
-                    "completed_task_ids": last_run["completed_task_ids"], "next_task": last_run["next_task"],
-                    "at": last_run["updated_at"]}})
-
-        def task_is_complete(task_id: str) -> bool:
-            task = tasks[task_index[task_id]]
-            return task.get("status") in {"complete", "skipped"}
-
-        def skip_completed_task(task_id: str) -> bool:
-            if not task_is_complete(task_id):
-                return False
-            task = tasks[task_index[task_id]]
-            message = f"Resuming from checkpoint; {task['label']} already {task['status']}"
-            log.append(f"[Clean All Resume] {message}.")
-            emit(task_id, message)
-            return True
-        def set_task(task_id: str, status: str, detail: str = "", result: Any = None):
-            if status == "running" and task_id in CLEAN_ALL_MUTATING_TASKS and update_state:
-                # #317: from here a cancel may leave the library partly changed.
-                update_state({"mutation_started": True})
-            idx = task_index[task_id]
-            tasks[idx] = {**tasks[idx], "status": status}
-            if detail:
-                tasks[idx]["detail"] = detail
-            if result is not None:
-                summary = _maintenance_task_result_summary(result)
-                if summary:
-                    tasks[idx]["detail"] = summary
-                results[task_id] = result
-                if status in {"complete", "skipped"}:
-                    _maintenance_save_last_report({task_id: result}, log)
-            emit(task_id, detail)
-            persist_checkpoint('running')
-
-        def ensure_not_cancelled():
-            if cancel_event and cancel_event.is_set():
-                raise RuntimeError("cancelled")
-
-        def finish_partial(failed_message: str, status: str = "partial") -> Dict[str, Any]:
-            clean_counts = _maintenance_clean_all_counts(tasks, results)
-            progress_percent = round(
-                (sum(1 for task in tasks if task["status"] in {"complete", "failed", "skipped"}) / total) * 100
-            )
-            next_task = next_resume_task()
-            if update_state:
-                update_state({
-                    "category": "Cleanup",
-                    "workflow": "clean-all",
-                    "maintenance_status": "partial",
-                    "current_task": next_task["label"] if next_task else "Clean All paused",
-                    "current_result": failed_message,
-                    "current_phase": CLEAN_ALL_TASK_PHASES.get((next_task or {}).get("id", ""), "Verifying"),
-                    "last_completed_action": failed_message,
-                    "last_heartbeat_at": time.time(),
-                    "error_summary": failed_message,
-                    "maintenance_tasks": tasks,
-                    "clean_all_pipeline": CLEAN_ALL_PIPELINE_STEPS,
-                    "clean_all_counts": clean_counts,
-                    "progress_percent": progress_percent,
-                    "final_summary": {
-                        "status": "partial",
-                        "tasks_complete": sum(1 for task in tasks if task["status"] == "complete"),
-                        "tasks_skipped": sum(1 for task in tasks if task["status"] == "skipped"),
-                        "tasks_failed": sum(1 for task in tasks if task["status"] == "failed"),
-                        "clean_all_counts": clean_counts,
-                    },
-                })
-            persist_checkpoint(status, failed_message)  # D15: "cancelled" when the operator cancelled
-            log.append(f"Clean All partially completed: {failed_message}")
-            return {"ok": False, "partial": True, "status": status, "error": failed_message, "tasks": tasks, "results": results}
-
-        root_repair_error = ""
-        log.append("Clean All started.")
-        if resume_requested:
-            log.append(
-                "[Clean All Resume] Resuming from checkpoint: "
-                f"{resume_snapshot.get('completed_count', 0)} completed task(s); "
-                f"next: {resume_snapshot.get('next_task_label') or 'next pending task'}."
-            )
-        emit("", "Resuming Clean All" if resume_requested else "Starting Clean All")
-        persist_checkpoint("running")
-        try:
-            # 1. Library DB health establishes current duplicate and path state.
-            ensure_not_cancelled()
-            if skip_completed_task("library_health"):
-                health = results.get("library_health") if isinstance(results.get("library_health"), dict) else {}
-            else:
-                set_task("library_health", "running", "Running DB health check")
-                health = _library_health_payload(progress=lambda updates: emit("library_health", _s(updates.get("current_result") or "")))
-                log.append(
-                    "[Library DB Health] "
-                    f"{health.get('duplicate_album_count', 0)} duplicate album group(s), "
-                    f"{health.get('rgid_duplicate_group_count', 0)} same Release Group ID group(s), "
-                    f"{health.get('orphaned_item_count', 0)} missing file row(s), "
-                    f"{health.get('empty_album_count', 0)} empty album row(s)."
-                )
-                set_task("library_health", "complete", "DB health report refreshed", health)
-
-
-            # 2. Missing files are reported before mutation; DB rows are not blindly removed.
-            ensure_not_cancelled()
-            if skip_completed_task("missing_files"):
-                missing_summary = results.get("missing_files") if isinstance(results.get("missing_files"), dict) else {}
-                if int(missing_summary.get("removed_db_rows") or 0) > 0:
-                    health = _library_health_payload(progress=lambda updates: emit("library_health", _s(updates.get("current_result") or "")))
-            else:
-                set_task("missing_files", "running", "Reconciling missing file DB rows")
-                missing_summary = _maintenance_remove_missing_file_rows(health, log)
-                if int(missing_summary.get("removed_db_rows") or 0) > 0:
-                    health = _library_health_payload(progress=lambda updates: emit("library_health", _s(updates.get("current_result") or "")))
-                skip_reason = _s(missing_summary.get("skip_reason") or "")
-                log.append(
-                    f"[Missing Files Scan] {missing_summary['missing_files']} missing file row(s); "
-                    f"removed {missing_summary['removed_db_rows']} DB row(s)."
-                    + (f" skipped: {skip_reason}." if skip_reason else "")
-                )
-                set_task("missing_files", "complete", "Missing files reconciled", missing_summary)
-
-            # 3. Re-home root-level album/singleton folders missing their
-            #    artist-folder wrapper before anything downstream assumes a
-            #    clean two-level artist/album layout.
-            ensure_not_cancelled()
-            if skip_completed_task("root_folder_repair"):
-                pass
-            else:
-                set_task("root_folder_repair", "running", "Repairing misplaced root-level folders")
-                try:
-                    root_repair_result = _maintenance_root_folder_repair(
-                        log,
-                        cancel_event=cancel_event,
-                        progress=lambda updates: emit("root_folder_repair", _s(updates.get("current_result") or "")),
-                    )
-                except Exception as ex:
-                    # #298 N5: one stuck folder no longer stops Clean All. The
-                    # failure is recorded, the layout-dependent folder merges
-                    # wait for the next run, every independent task still runs,
-                    # and the job ends failed.
-                    if _s(ex).strip().lower() == "cancelled" or (cancel_event and cancel_event.is_set()):
-                        raise
-                    root_repair_error = _s(ex) or "root folder repair failed"
-                    log.append(f"[root-folder-repair] failed: {root_repair_error}; continuing with the "
-                               "tasks that do not depend on the folder layout.")
-                    set_task("root_folder_repair", "failed", f"Root folder repair failed: {root_repair_error}")
-                else:
-                    set_task(
-                        "root_folder_repair",
-                        "complete" if not root_repair_result.get("skipped") else "skipped",
-                        "Root folder repair complete",
-                        root_repair_result,
-                    )
-
-            # 4. Resolve artist identity variants before album-level moves.
-            ensure_not_cancelled()
-            if skip_completed_task("artist_alias"):
-                pass
-            else:
-                set_task("artist_alias", "running", "Checking MusicBrainz artist alias groups")
-                try:
-                    alias_groups = _artist_id_alias_groups()
-                    alias_result = {
-                        "ok": True,
-                        "count": len(alias_groups),
-                        "groups": alias_groups[:50],
-                        "truncated": len(alias_groups) > 50,
-                        "final_summary": {"count": len(alias_groups)},
-                    }
-                    log.append(f"[Artist Alias Check] {len(alias_groups)} same-MusicBrainz artist alias group(s).")
-                    _maintenance_save_last_report({"artist_alias": alias_result}, log)
-                    set_task("artist_alias", "complete", "Artist alias report refreshed", alias_result)
-                except Exception as ex:
-                    alias_result = {"ok": False, "count": 0, "error": str(ex)}
-                    log.append(f"[Artist Alias Check] skipped: {ex}")
-                    set_task("artist_alias", "skipped", "Artist alias check skipped", alias_result)
-
-
-            ensure_not_cancelled()
-            if skip_completed_task("artist_folder_merge"):
-                pass
-            elif root_repair_error:
-                set_task("artist_folder_merge", "failed",
-                         "Not run: root folder repair failed; retried on the next run")
-            else:
-                resume_op_id = _s(tasks[task_index["artist_folder_merge"]].get("operation_id")).strip()
-                set_task("artist_folder_merge", "running", "Merging safe MusicBrainz artist folder variants")
-                if not resume_op_id and _running_job_of_type({"artist-folder-merge", "stamp-mbid-folders"}):
-                    set_task("artist_folder_merge", "skipped", "Artist folder merge already running")
-                else:
-                    if resume_op_id:
-                        log.append(
-                            f"[Clean All Resume] Artist folder merge: found a saved engine operation "
-                            f"({resume_op_id}) from before this run was interrupted; checking its status "
-                            f"before creating any new plan."
-                        )
-
-                    def _persist_artist_folder_merge_operation_id(op_id: str) -> None:
-                        idx = task_index["artist_folder_merge"]
-                        tasks[idx] = {**tasks[idx], "operation_id": op_id}
-                        persist_checkpoint("running")
-
-                    result = _maintenance_artist_folder_merge_step(
-                        log, cancel_event, str(MUSIC_ROOT),
-                        resume_operation_id=resume_op_id,
-                        on_operation_planned=_persist_artist_folder_merge_operation_id,
-                    )
-                    renamed = int((result or {}).get("renamed") or 0) if isinstance(result, dict) else 0
-                    merged = int((result or {}).get("merged") or 0) if isinstance(result, dict) else 0
-                    _maintenance_save_last_report({"artist_folder_merge": result}, log)
-                    if (result or {}).get("error_code") == "artist_folder_mode_unsupported":
-                        # Decided gap, not a failure (TECHNICAL_DEBT): Clean All finishes without it.
-                        # The result has no counts, so set_task keeps the reason as the task's detail.
-                        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
-                        reason = _s(result.get("error"))
-                        log.append(f"[Artist Folder Merge] skipped: {reason}")
-                        set_task("artist_folder_merge", "skipped", reason,
-                                 {"error_code": result["error_code"], "reason": reason})
-                    elif (result or {}).get("ok", True):
-                        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
-                        set_task(
-                            "artist_folder_merge", "complete",
-                            f"Artist folder merge complete: {renamed} renamed, {merged} merged", result,
-                        )
-                    elif (result or {}).get("still_running"):
-                        # The engine operation's outcome is still genuinely
-                        # unresolved (Apply's response was lost and the poll
-                        # deadline was reached while status was still
-                        # "Running") -- this is not a failure of the merge
-                        # itself, just of Web Manager's ability to keep
-                        # watching it in this run. Raise into the existing
-                        # partial-run handling below rather than marking it
-                        # "failed": the task stays "running" with its
-                        # operation_id intact (see the except block's
-                        # special-case guard for this task id), so a later
-                        # resume checks that same operation's authoritative
-                        # status instead of discarding it and creating a
-                        # duplicate one.
-                        raise RuntimeError(
-                            f"Artist folder merge: engine operation "
-                            f"{(result or {}).get('operation_id', '')} is still in progress; will be "
-                            f"reconciled on the next run."
-                        )
-                    else:
-                        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
-                        set_task(
-                            "artist_folder_merge", "failed",
-                            f"Artist folder merge failed: {(result or {}).get('error', '')}", result,
-                        )
-
-            # 5. Release Group ID drives album-folder consolidation.
-            ensure_not_cancelled()
-            if skip_completed_task("release_group_merge"):
-                pass
-            elif root_repair_error:
-                set_task("release_group_merge", "failed",
-                         "Not run: root folder repair failed; retried on the next run")
-            else:
-                set_task("release_group_merge", "running", "Merging duplicate Release Group album folders")
-                result = _maintenance_release_group_merge(
-                    log,
-                    cancel_event=cancel_event,
-                    progress=lambda updates: emit("release_group_merge", _s(updates.get("current_result") or "")),
-                )
-                set_task("release_group_merge", "complete" if not result.get("skipped") else "skipped", "Release Group merge complete", result)
-
-            # 6. Full duplicate scan and verified duplicate cleanup.
-            ensure_not_cancelled()
-            if skip_completed_task("duplicates"):
-                pass
-            else:
-                set_task("duplicates", "running", "Running full duplicate track scan")
-                result = _maintenance_full_duplicate_scan(
-                    log,
-                    cancel_event=cancel_event,
-                    progress=lambda updates: emit("duplicates", _s(updates.get("current_result") or "")),
-                )
-                set_task("duplicates", "complete" if not result.get("skipped") else "skipped", "Duplicate track scan complete", result)
-
-            # 7. Placeholder scan stays diagnostic after RGID repair; no blind rename.
-            ensure_not_cancelled()
-            set_task("folder_scan", "running", "Scanning remaining folder placeholder names")
-            scan_meta: Dict[str, Any] = {}
-            rows = _scan_folder_name_placeholders(
-                progress=lambda updates: emit("folder_scan", _s(updates.get("current_result") or "")),
-                cancel_event=cancel_event,
-                scan_meta=scan_meta,
-            )
-            folder_scan_result = {
-                "total": len(rows),
-                "safe_rename": 0,
-                "skipped_unsafe": len(rows),
-                "final_summary": _folder_placeholder_summary(
-                    rows,
-                    total_scanned=scan_meta.get("total_folders_scanned"),
-                ),
-            }
-            log.append(
-                f"[Folder Name Scan] {len(rows)} placeholder folder(s) remain after identity repair; "
-                "unresolved folders were left for review/submission instead of blind rename."
-            )
-            set_task("folder_scan", "complete", "Folder placeholder scan complete", folder_scan_result)
-
-            ensure_not_cancelled()
-            set_task("folder_safe_renames", "skipped", "Placeholder-only renames disabled; Release Group merge handles resolvable IDs", {
-                "renamed": 0,
-                "skipped_unsafe": len(rows),
-                "final_summary": {"renamed": 0, "skipped_unsafe": len(rows)},
-            })
-
-            # 8. Artwork and genres run after filesystem consolidation.
-            ensure_not_cancelled()
-            if skip_completed_task("artwork"):
-                pass
-            else:
-                if _running_job_of_type({"fetch-missing-art", "album-art-rebuild"}):
-                    set_task("artwork", "skipped", "Artwork job already running")
-                else:
-                    set_task("artwork", "running", "Fetching missing artwork only")
-                    child_id = _maintenance_extract_child_job_id(start_fetch_missing_art({}))
-                    result = _wait_for_child_job(child_id, log, cancel_event, prefix="artwork", timeout=3600)
-                    set_task("artwork", "complete", "Missing artwork fetch complete", result)
-
-            ensure_not_cancelled()
-            if skip_completed_task("genres"):
-                pass
-            else:
-                if _running_job_of_type({"fix-genres"}):
-                    set_task("genres", "skipped", "Genre tagging already running")
-                else:
-                    set_task("genres", "running", "Tagging missing genres only")
-                    child_id = _maintenance_extract_child_job_id(start_library_fix_genres({"force": False, "use_ai": False}))
-                    result = _wait_for_child_job(child_id, log, cancel_event, prefix="genres", timeout=3600)
-                    set_task("genres", "complete", "Missing genre tagging complete", result)
-
-            # 9. Final verification reports remaining identity and path issues.
-            ensure_not_cancelled()
-            if skip_completed_task("final_verification"):
-                pass
-            else:
-                set_task("final_verification", "running", "Verifying final cleanup state")
-                result = _maintenance_final_verification(
-                    log,
-                    cancel_event=cancel_event,
-                    progress=lambda updates: emit("final_verification", _s(updates.get("current_result") or "")),
-                )
-                set_task("final_verification", "complete", "Final verification complete", result)
-
-            ensure_not_cancelled()
-            set_task("stale_jobs", "running", "Pruning stale completed job history")
-            jobs.prune_finished(max_age_seconds=21600, metadata_max_age_seconds=604800, max_finished=250)
-            stale_result = {"pruned": True, "removed_running_jobs": 0}
-            log.append("[Stale Job Cleanup] pruned old finished jobs within retention limits.")
-            set_task("stale_jobs", "complete", "Old successful job history pruned", stale_result)
-
-            ensure_not_cancelled()
-            set_task("playlist_refs", "running", "Checking playlist references")
-            playlist_report = playlist_sync_status_payload()
-            log.append(
-                "[Playlist Reference Check] "
-                f"enabled={bool(playlist_report.get('enabled'))}, "
-                f"running={bool(playlist_report.get('running'))}."
-            )
-            set_task("playlist_refs", "complete", "Playlist reference status checked", playlist_report)
-
-            failed_tasks = [task["label"] for task in tasks if task["status"] == "failed"]
-            if failed_tasks:
-                return finish_partial("Finished with failed task(s): " + ", ".join(failed_tasks))
-            if update_state:
-                clean_counts = _maintenance_clean_all_counts(tasks, results)
-                update_state({
-                    "category": "Cleanup",
-                    "workflow": "clean-all",
-                    "maintenance_status": "complete",
-                    "current_task": "Clean All complete",
-                    "current_result": "All current cleanup steps finished",
-                    "current_phase": "Syncing",
-                    "last_completed_action": "All current cleanup steps finished",
-                    "last_heartbeat_at": time.time(),
-                    "maintenance_tasks": tasks,
-                    "clean_all_pipeline": CLEAN_ALL_PIPELINE_STEPS,
-                    "clean_all_counts": clean_counts,
-                    "progress_percent": 100,
-                    "scanned_count": total,
-                    "total_count": total,
-                    "remaining_count": 0,
-                    "final_summary": {
-                        "tasks_complete": sum(1 for task in tasks if task["status"] == "complete"),
-                        "tasks_skipped": sum(1 for task in tasks if task["status"] == "skipped"),
-                        "tasks_failed": sum(1 for task in tasks if task["status"] == "failed"),
-                        "clean_all_counts": clean_counts,
-                    },
-                })
-            persist_checkpoint("complete")
-            log.append("Clean All complete.")
-            return {"ok": True, "tasks": tasks, "results": results}
-        except Exception as exc:
-            failed_message = _s(exc) or "maintenance failed"
-            cancelled = failed_message.strip().lower() == "cancelled" or bool(cancel_event and cancel_event.is_set())
-            completed_before_failure = sum(1 for task in tasks if task["status"] in {"complete", "skipped"})
-            running_task = next((task for task in tasks if task["status"] == "running"), None)
-            # Clean All resume reattachment: a running_task carrying a saved
-            # artist-folder-merge operation_id is not a crash -- it is a
-            # real engine operation whose outcome is still genuinely
-            # unresolved (see the "still_running" raise above). Forcing it
-            # to "failed" here would make the next resume treat a
-            # possibly-still-active or already-completed engine operation
-            # as conclusively dead and start a duplicate one; leave it
-            # "running" (with operation_id intact) so resume checks its
-            # authoritative transaction status first.
-            if running_task and not (running_task.get("id") == "artist_folder_merge" and running_task.get("operation_id")):
-                set_task(running_task["id"], "failed", failed_message)
-            if completed_before_failure > 0:
-                return finish_partial(failed_message, "cancelled" if cancelled else "partial")
-            if update_state:
-                update_state({
-                    "category": "Cleanup",
-                    "workflow": "clean-all",
-                    "maintenance_status": "failed",
-                    "current_task": running_task["label"] if running_task else "Clean All failed",
-                    "current_result": failed_message,
-                    "current_phase": CLEAN_ALL_TASK_PHASES.get((running_task or {}).get("id", ""), "Verifying"),
-                    "last_completed_action": failed_message,
-                    "last_heartbeat_at": time.time(),
-                    "error_summary": failed_message,
-                    "maintenance_tasks": tasks,
-                    "clean_all_pipeline": CLEAN_ALL_PIPELINE_STEPS,
-                    "clean_all_counts": _maintenance_clean_all_counts(tasks, results),
-                    "progress_percent": round(
-                        (sum(1 for task in tasks if task["status"] in {"complete", "failed", "skipped"}) / total) * 100
-                    ),
-                })
-            persist_checkpoint("cancelled" if cancelled else "failed", failed_message)
-            log.append(f"Clean All failed: {failed_message}")
-            raise
+        # A new context per invocation: a re-run starts from the snapshot, not
+        # from the previous invocation's task state.
+        return _clean_all_execute(
+            _clean_all_run_context(log, cancel_event, update_state, resume_snapshot, resume_requested)
+        )
     try:
         # D1: the workflow key makes the running check and the start one atomic
         # step under the JobStore lock; the check above is only a fast path. The
@@ -679,6 +195,615 @@ def start_maintenance_runner():
         "resumed": resume_requested,
         "resume": resume_payload,
     })
+
+
+# The Clean All job body. These stay directly after the route: tests slice the
+# source from the route onward, and tests patch collaborators on this module.
+
+
+def _clean_all_finished_count(tasks) -> int:
+    return sum(1 for task in tasks if task["status"] in {"complete", "failed", "skipped"})
+
+
+def _clean_all_next_resume_task(tasks) -> Optional[Dict[str, Any]]:
+    return next((task for task in tasks if task.get("status") not in {"complete", "skipped"}), None)
+
+
+def _clean_all_final_summary(tasks, clean_counts) -> Dict[str, Any]:
+    return {
+        "tasks_complete": sum(1 for task in tasks if task["status"] == "complete"),
+        "tasks_skipped": sum(1 for task in tasks if task["status"] == "skipped"),
+        "tasks_failed": sum(1 for task in tasks if task["status"] == "failed"),
+        "clean_all_counts": clean_counts,
+    }
+
+
+def _clean_all_progress_payload(tasks, results, total, current_id: str, message: str) -> Dict[str, Any]:
+    completed = _clean_all_finished_count(tasks)
+    current = next((task for task in tasks if task["id"] == current_id), None)
+    current_task = current["label"] if current else (message or "Clean All")
+    current_phase = CLEAN_ALL_TASK_PHASES.get(current_id, "Scanning" if not completed else "Syncing")
+    return {
+        "category": "Cleanup",
+        "workflow": "clean-all",
+        "current_task": current_task,
+        "current_result": message,
+        "current_phase": current_phase,
+        "last_completed_action": message,
+        "last_heartbeat_at": time.time(),
+        "maintenance_status": "running",
+        "maintenance_tasks": tasks,
+        "clean_all_pipeline": CLEAN_ALL_PIPELINE_STEPS,
+        "clean_all_counts": _maintenance_clean_all_counts(tasks, results),
+        "progress_percent": round((completed / total) * 100),
+        "scanned_count": completed,
+        "total_count": total,
+        "remaining_count": max(0, total - completed),
+    }
+
+
+def _clean_all_checkpoint_record(tasks, results, run_started_at, resume_requested, status: str, error: str) -> Dict[str, Any]:
+    next_task = _clean_all_next_resume_task(tasks)
+    last_run = {
+        "status": status,
+        "workflow": "clean-all",
+        "started_at": run_started_at,
+        "updated_at": time.time(),
+        "resumed": resume_requested,
+        "completed_task_ids": [task.get("id") for task in tasks if task.get("status") in {"complete", "skipped"}],
+        "next_task": next_task.get("id") if next_task else "",
+        "next_task_label": next_task.get("label") if next_task else "",
+        "tasks": tasks,
+        "result_task_ids": sorted(str(key) for key in results.keys()),
+    }
+    if status == "complete":
+        last_run["completed_at"] = time.time()
+    if status in {"failed", "cancelled", "partial"}:
+        last_run["failed_at"] = time.time()
+    if error:
+        last_run["error"] = error
+    return last_run
+
+
+def _clean_all_partial_payload(tasks, next_task, clean_counts, progress_percent, failed_message: str) -> Dict[str, Any]:
+    return {
+        "category": "Cleanup",
+        "workflow": "clean-all",
+        "maintenance_status": "partial",
+        "current_task": next_task["label"] if next_task else "Clean All paused",
+        "current_result": failed_message,
+        "current_phase": CLEAN_ALL_TASK_PHASES.get((next_task or {}).get("id", ""), "Verifying"),
+        "last_completed_action": failed_message,
+        "last_heartbeat_at": time.time(),
+        "error_summary": failed_message,
+        "maintenance_tasks": tasks,
+        "clean_all_pipeline": CLEAN_ALL_PIPELINE_STEPS,
+        "clean_all_counts": clean_counts,
+        "progress_percent": progress_percent,
+        "final_summary": {"status": "partial", **_clean_all_final_summary(tasks, clean_counts)},
+    }
+
+
+def _clean_all_complete_payload(tasks, results, total) -> Dict[str, Any]:
+    clean_counts = _maintenance_clean_all_counts(tasks, results)
+    return {
+        "category": "Cleanup",
+        "workflow": "clean-all",
+        "maintenance_status": "complete",
+        "current_task": "Clean All complete",
+        "current_result": "All current cleanup steps finished",
+        "current_phase": "Syncing",
+        "last_completed_action": "All current cleanup steps finished",
+        "last_heartbeat_at": time.time(),
+        "maintenance_tasks": tasks,
+        "clean_all_pipeline": CLEAN_ALL_PIPELINE_STEPS,
+        "clean_all_counts": clean_counts,
+        "progress_percent": 100,
+        "scanned_count": total,
+        "total_count": total,
+        "remaining_count": 0,
+        "final_summary": _clean_all_final_summary(tasks, clean_counts),
+    }
+
+
+def _clean_all_failed_payload(tasks, results, total, running_task, failed_message: str) -> Dict[str, Any]:
+    return {
+        "category": "Cleanup",
+        "workflow": "clean-all",
+        "maintenance_status": "failed",
+        "current_task": running_task["label"] if running_task else "Clean All failed",
+        "current_result": failed_message,
+        "current_phase": CLEAN_ALL_TASK_PHASES.get((running_task or {}).get("id", ""), "Verifying"),
+        "last_completed_action": failed_message,
+        "last_heartbeat_at": time.time(),
+        "error_summary": failed_message,
+        "maintenance_tasks": tasks,
+        "clean_all_pipeline": CLEAN_ALL_PIPELINE_STEPS,
+        "clean_all_counts": _maintenance_clean_all_counts(tasks, results),
+        "progress_percent": round((_clean_all_finished_count(tasks) / total) * 100),
+    }
+
+
+def _clean_all_run_context(log, cancel_event, update_state, resume_snapshot, resume_requested) -> SimpleNamespace:
+    """One invocation's task state and the helpers that change it.
+
+    The helpers are closures with plain names, and the steps below unpack them,
+    because existing source-text tests pin call forms such as
+    ``if skip_completed_task("library_health"):``.
+    """
+    tasks = [dict(task) for task in (resume_snapshot.get("tasks") or _maintenance_initial_task_state())]
+    task_index = {task["id"]: idx for idx, task in enumerate(tasks)}
+    raw_results = resume_snapshot.get("results") if resume_requested else {}
+    results: Dict[str, Any] = dict(raw_results) if isinstance(raw_results, dict) else {}
+    total = len(tasks)
+    run_started_at = time.time()
+
+    def emit(current_id: str = "", message: str = ""):
+        payload = _clean_all_progress_payload(tasks, results, total, current_id, message)
+        if update_state:
+            update_state(payload)
+
+    def persist_checkpoint(status: str = "running", error: str = ""):
+        last_run = _clean_all_checkpoint_record(tasks, results, run_started_at, resume_requested, status, error)
+        _maintenance_save_last_report({"last_run": last_run}, log)
+        if update_state:
+            # The resumable position, also in the durable job record.
+            update_state({"checkpoint": {
+                "workflow": "maintenance-runner", "stage": status,
+                "completed_task_ids": last_run["completed_task_ids"], "next_task": last_run["next_task"],
+                "at": last_run["updated_at"]}})
+
+    def skip_completed_task(task_id: str) -> bool:
+        task = tasks[task_index[task_id]]
+        if task.get("status") not in {"complete", "skipped"}:
+            return False
+        message = f"Resuming from checkpoint; {task['label']} already {task['status']}"
+        log.append(f"[Clean All Resume] {message}.")
+        emit(task_id, message)
+        return True
+
+    def set_task(task_id: str, status: str, detail: str = "", result: Any = None):
+        if status == "running" and task_id in CLEAN_ALL_MUTATING_TASKS and update_state:
+            # #317: from here a cancel may leave the library partly changed.
+            update_state({"mutation_started": True})
+        idx = task_index[task_id]
+        tasks[idx] = {**tasks[idx], "status": status}
+        if detail:
+            tasks[idx]["detail"] = detail
+        if result is not None:
+            summary = _maintenance_task_result_summary(result)
+            if summary:
+                tasks[idx]["detail"] = summary
+            results[task_id] = result
+            if status in {"complete", "skipped"}:
+                _maintenance_save_last_report({task_id: result}, log)
+        emit(task_id, detail)
+        persist_checkpoint('running')
+
+    def ensure_not_cancelled():
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+
+    def finish_partial(failed_message: str, status: str = "partial") -> Dict[str, Any]:
+        clean_counts = _maintenance_clean_all_counts(tasks, results)
+        progress_percent = round((_clean_all_finished_count(tasks) / total) * 100)
+        next_task = _clean_all_next_resume_task(tasks)
+        if update_state:
+            update_state(_clean_all_partial_payload(tasks, next_task, clean_counts, progress_percent, failed_message))
+        persist_checkpoint(status, failed_message)  # D15: "cancelled" when the operator cancelled
+        log.append(f"Clean All partially completed: {failed_message}")
+        return {"ok": False, "partial": True, "status": status, "error": failed_message, "tasks": tasks, "results": results}
+
+    return SimpleNamespace(
+        log=log, cancel_event=cancel_event, update_state=update_state,
+        resume_snapshot=resume_snapshot, resume_requested=resume_requested,
+        tasks=tasks, task_index=task_index, results=results, total=total,
+        emit=emit, persist_checkpoint=persist_checkpoint, skip_completed_task=skip_completed_task,
+        set_task=set_task, ensure_not_cancelled=ensure_not_cancelled, finish_partial=finish_partial,
+    )
+
+
+def _clean_all_progress(run, task_id: str):
+    return lambda updates: run.emit(task_id, _s(updates.get("current_result") or ""))
+
+
+def _clean_all_library_health(run) -> Dict[str, Any]:
+    """1. Library DB health establishes current duplicate and path state."""
+    log, results, set_task, skip_completed_task = run.log, run.results, run.set_task, run.skip_completed_task
+    if skip_completed_task("library_health"):
+        return results.get("library_health") if isinstance(results.get("library_health"), dict) else {}
+    set_task("library_health", "running", "Running DB health check")
+    health = _library_health_payload(progress=_clean_all_progress(run, "library_health"))
+    log.append(
+        "[Library DB Health] "
+        f"{health.get('duplicate_album_count', 0)} duplicate album group(s), "
+        f"{health.get('rgid_duplicate_group_count', 0)} same Release Group ID group(s), "
+        f"{health.get('orphaned_item_count', 0)} missing file row(s), "
+        f"{health.get('empty_album_count', 0)} empty album row(s)."
+    )
+    set_task("library_health", "complete", "DB health report refreshed", health)
+    return health
+
+
+def _clean_all_missing_files(run, health) -> None:
+    """2. Missing files are reported before mutation; DB rows are not blindly removed."""
+    log, results, set_task, skip_completed_task = run.log, run.results, run.set_task, run.skip_completed_task
+    if skip_completed_task("missing_files"):
+        missing_summary = results.get("missing_files") if isinstance(results.get("missing_files"), dict) else {}
+        if int(missing_summary.get("removed_db_rows") or 0) > 0:
+            _library_health_payload(progress=_clean_all_progress(run, "library_health"))
+        return
+    set_task("missing_files", "running", "Reconciling missing file DB rows")
+    missing_summary = _maintenance_remove_missing_file_rows(health, log)
+    if int(missing_summary.get("removed_db_rows") or 0) > 0:
+        _library_health_payload(progress=_clean_all_progress(run, "library_health"))
+    skip_reason = _s(missing_summary.get("skip_reason") or "")
+    log.append(
+        f"[Missing Files Scan] {missing_summary['missing_files']} missing file row(s); "
+        f"removed {missing_summary['removed_db_rows']} DB row(s)."
+        + (f" skipped: {skip_reason}." if skip_reason else "")
+    )
+    set_task("missing_files", "complete", "Missing files reconciled", missing_summary)
+
+
+def _clean_all_root_folder_repair(run) -> str:
+    """3. Re-home root-level album/singleton folders missing their artist-folder
+    wrapper before anything downstream assumes a clean two-level artist/album
+    layout. Returns the failure text, or "" when the folder merges may run."""
+    log, cancel_event, set_task = run.log, run.cancel_event, run.set_task
+    if run.skip_completed_task("root_folder_repair"):
+        return ""
+    set_task("root_folder_repair", "running", "Repairing misplaced root-level folders")
+    try:
+        root_repair_result = _maintenance_root_folder_repair(
+            log,
+            cancel_event=cancel_event,
+            progress=_clean_all_progress(run, "root_folder_repair"),
+        )
+    except Exception as ex:
+        # #298 N5: one stuck folder no longer stops Clean All. The
+        # failure is recorded, the layout-dependent folder merges
+        # wait for the next run, every independent task still runs,
+        # and the job ends failed.
+        if _s(ex).strip().lower() == "cancelled" or (cancel_event and cancel_event.is_set()):
+            raise
+        root_repair_error = _s(ex) or "root folder repair failed"
+        log.append(f"[root-folder-repair] failed: {root_repair_error}; continuing with the "
+                   "tasks that do not depend on the folder layout.")
+        set_task("root_folder_repair", "failed", f"Root folder repair failed: {root_repair_error}")
+        return root_repair_error
+    set_task(
+        "root_folder_repair",
+        "complete" if not root_repair_result.get("skipped") else "skipped",
+        "Root folder repair complete",
+        root_repair_result,
+    )
+    return ""
+
+
+def _clean_all_artist_alias(run) -> None:
+    """4. Resolve artist identity variants before album-level moves."""
+    log, set_task, skip_completed_task = run.log, run.set_task, run.skip_completed_task
+    if skip_completed_task("artist_alias"):
+        return
+    set_task("artist_alias", "running", "Checking MusicBrainz artist alias groups")
+    try:
+        alias_groups = _artist_id_alias_groups()
+        alias_result = {
+            "ok": True,
+            "count": len(alias_groups),
+            "groups": alias_groups[:50],
+            "truncated": len(alias_groups) > 50,
+            "final_summary": {"count": len(alias_groups)},
+        }
+        log.append(f"[Artist Alias Check] {len(alias_groups)} same-MusicBrainz artist alias group(s).")
+        _maintenance_save_last_report({"artist_alias": alias_result}, log)
+        set_task("artist_alias", "complete", "Artist alias report refreshed", alias_result)
+    except Exception as ex:
+        alias_result = {"ok": False, "count": 0, "error": str(ex)}
+        log.append(f"[Artist Alias Check] skipped: {ex}")
+        set_task("artist_alias", "skipped", "Artist alias check skipped", alias_result)
+
+
+def _clean_all_artist_folder_merge(run, root_repair_error: str) -> None:
+    log, tasks, task_index, set_task, skip_completed_task = run.log, run.tasks, run.task_index, run.set_task, run.skip_completed_task
+    persist_checkpoint = run.persist_checkpoint
+    if skip_completed_task("artist_folder_merge"):
+        return
+    if root_repair_error:
+        set_task("artist_folder_merge", "failed",
+                 "Not run: root folder repair failed; retried on the next run")
+        return
+    resume_op_id = _s(tasks[task_index["artist_folder_merge"]].get("operation_id")).strip()
+    set_task("artist_folder_merge", "running", "Merging safe MusicBrainz artist folder variants")
+    if not resume_op_id and _running_job_of_type({"artist-folder-merge", "stamp-mbid-folders"}):
+        set_task("artist_folder_merge", "skipped", "Artist folder merge already running")
+        return
+    if resume_op_id:
+        log.append(
+            f"[Clean All Resume] Artist folder merge: found a saved engine operation "
+            f"({resume_op_id}) from before this run was interrupted; checking its status "
+            f"before creating any new plan."
+        )
+
+    def _persist_artist_folder_merge_operation_id(op_id: str) -> None:
+        idx = task_index["artist_folder_merge"]
+        tasks[idx] = {**tasks[idx], "operation_id": op_id}
+        persist_checkpoint("running")
+
+    result = _maintenance_artist_folder_merge_step(
+        log, run.cancel_event, str(MUSIC_ROOT),
+        resume_operation_id=resume_op_id,
+        on_operation_planned=_persist_artist_folder_merge_operation_id,
+    )
+    _clean_all_record_artist_folder_merge(run, result)
+
+
+def _clean_all_record_artist_folder_merge(run, result) -> None:
+    log, tasks, task_index, set_task = run.log, run.tasks, run.task_index, run.set_task
+    renamed = int((result or {}).get("renamed") or 0) if isinstance(result, dict) else 0
+    merged = int((result or {}).get("merged") or 0) if isinstance(result, dict) else 0
+    _maintenance_save_last_report({"artist_folder_merge": result}, log)
+    if (result or {}).get("error_code") == "artist_folder_mode_unsupported":
+        # Decided gap, not a failure (TECHNICAL_DEBT): Clean All finishes without it.
+        # The result has no counts, so set_task keeps the reason as the task's detail.
+        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
+        reason = _s(result.get("error"))
+        log.append(f"[Artist Folder Merge] skipped: {reason}")
+        set_task("artist_folder_merge", "skipped", reason,
+                 {"error_code": result["error_code"], "reason": reason})
+    elif (result or {}).get("ok", True):
+        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
+        set_task(
+            "artist_folder_merge", "complete",
+            f"Artist folder merge complete: {renamed} renamed, {merged} merged", result,
+        )
+    elif (result or {}).get("still_running"):
+        # The engine operation's outcome is still genuinely
+        # unresolved (Apply's response was lost and the poll
+        # deadline was reached while status was still
+        # "Running") -- this is not a failure of the merge
+        # itself, just of Web Manager's ability to keep
+        # watching it in this run. Raise into the existing
+        # partial-run handling rather than marking it
+        # "failed": the task stays "running" with its
+        # operation_id intact (see _clean_all_handle_failure's
+        # special-case guard for this task id), so a later
+        # resume checks that same operation's authoritative
+        # status instead of discarding it and creating a
+        # duplicate one.
+        raise RuntimeError(
+            f"Artist folder merge: engine operation "
+            f"{(result or {}).get('operation_id', '')} is still in progress; will be "
+            f"reconciled on the next run."
+        )
+    else:
+        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
+        set_task(
+            "artist_folder_merge", "failed",
+            f"Artist folder merge failed: {(result or {}).get('error', '')}", result,
+        )
+
+
+def _clean_all_release_group_merge(run, root_repair_error: str) -> None:
+    """5. Release Group ID drives album-folder consolidation."""
+    set_task, skip_completed_task = run.set_task, run.skip_completed_task
+    if skip_completed_task("release_group_merge"):
+        return
+    if root_repair_error:
+        set_task("release_group_merge", "failed",
+                 "Not run: root folder repair failed; retried on the next run")
+        return
+    set_task("release_group_merge", "running", "Merging duplicate Release Group album folders")
+    result = _maintenance_release_group_merge(
+        run.log,
+        cancel_event=run.cancel_event,
+        progress=_clean_all_progress(run, "release_group_merge"),
+    )
+    set_task("release_group_merge", "complete" if not result.get("skipped") else "skipped", "Release Group merge complete", result)
+
+
+def _clean_all_track_scan(run) -> None:
+    """6. Full duplicate scan and verified duplicate cleanup."""
+    set_task, skip_completed_task = run.set_task, run.skip_completed_task
+    if skip_completed_task("duplicates"):
+        return
+    set_task("duplicates", "running", "Running full duplicate track scan")
+    result = _maintenance_full_duplicate_scan(
+        run.log,
+        cancel_event=run.cancel_event,
+        progress=_clean_all_progress(run, "duplicates"),
+    )
+    set_task("duplicates", "complete" if not result.get("skipped") else "skipped", "Duplicate track scan complete", result)
+
+
+def _clean_all_folder_scan(run) -> list:
+    """7. Placeholder scan stays diagnostic after RGID repair; no blind rename.
+    It has no resume skip: every run repeats it."""
+    set_task = run.set_task
+    set_task("folder_scan", "running", "Scanning remaining folder placeholder names")
+    scan_meta: Dict[str, Any] = {}
+    rows = _scan_folder_name_placeholders(
+        progress=_clean_all_progress(run, "folder_scan"),
+        cancel_event=run.cancel_event,
+        scan_meta=scan_meta,
+    )
+    folder_scan_result = {
+        "total": len(rows),
+        "safe_rename": 0,
+        "skipped_unsafe": len(rows),
+        "final_summary": _folder_placeholder_summary(
+            rows,
+            total_scanned=scan_meta.get("total_folders_scanned"),
+        ),
+    }
+    run.log.append(
+        f"[Folder Name Scan] {len(rows)} placeholder folder(s) remain after identity repair; "
+        "unresolved folders were left for review/submission instead of blind rename."
+    )
+    set_task("folder_scan", "complete", "Folder placeholder scan complete", folder_scan_result)
+    return rows
+
+
+def _clean_all_folder_safe_renames(run, rows) -> None:
+    run.set_task("folder_safe_renames", "skipped", "Placeholder-only renames disabled; Release Group merge handles resolvable IDs", {
+        "renamed": 0,
+        "skipped_unsafe": len(rows),
+        "final_summary": {"renamed": 0, "skipped_unsafe": len(rows)},
+    })
+
+
+def _clean_all_artwork(run) -> None:
+    """8. Artwork and genres run after filesystem consolidation."""
+    log, cancel_event, set_task = run.log, run.cancel_event, run.set_task
+    if run.skip_completed_task("artwork"):
+        return
+    if _running_job_of_type({"fetch-missing-art", "album-art-rebuild"}):
+        set_task("artwork", "skipped", "Artwork job already running")
+        return
+    set_task("artwork", "running", "Fetching missing artwork only")
+    child_id = _maintenance_extract_child_job_id(start_fetch_missing_art({}))
+    result = _wait_for_child_job(child_id, log, cancel_event, prefix="artwork", timeout=3600)
+    set_task("artwork", "complete", "Missing artwork fetch complete", result)
+
+
+def _clean_all_genres(run) -> None:
+    log, cancel_event, set_task = run.log, run.cancel_event, run.set_task
+    if run.skip_completed_task("genres"):
+        return
+    if _running_job_of_type({"fix-genres"}):
+        set_task("genres", "skipped", "Genre tagging already running")
+        return
+    set_task("genres", "running", "Tagging missing genres only")
+    child_id = _maintenance_extract_child_job_id(start_library_fix_genres({"force": False, "use_ai": False}))
+    result = _wait_for_child_job(child_id, log, cancel_event, prefix="genres", timeout=3600)
+    set_task("genres", "complete", "Missing genre tagging complete", result)
+
+
+def _clean_all_final_verification(run) -> None:
+    """9. Final verification reports remaining identity and path issues."""
+    set_task = run.set_task
+    if run.skip_completed_task("final_verification"):
+        return
+    set_task("final_verification", "running", "Verifying final cleanup state")
+    result = _maintenance_final_verification(
+        run.log,
+        cancel_event=run.cancel_event,
+        progress=_clean_all_progress(run, "final_verification"),
+    )
+    set_task("final_verification", "complete", "Final verification complete", result)
+
+
+def _clean_all_stale_jobs(run) -> None:
+    set_task = run.set_task
+    set_task("stale_jobs", "running", "Pruning stale completed job history")
+    jobs.prune_finished(max_age_seconds=21600, metadata_max_age_seconds=604800, max_finished=250)
+    stale_result = {"pruned": True, "removed_running_jobs": 0}
+    run.log.append("[Stale Job Cleanup] pruned old finished jobs within retention limits.")
+    set_task("stale_jobs", "complete", "Old successful job history pruned", stale_result)
+
+
+def _clean_all_playlist_refs(run) -> None:
+    set_task = run.set_task
+    set_task("playlist_refs", "running", "Checking playlist references")
+    playlist_report = playlist_sync_status_payload()
+    run.log.append(
+        "[Playlist Reference Check] "
+        f"enabled={bool(playlist_report.get('enabled'))}, "
+        f"running={bool(playlist_report.get('running'))}."
+    )
+    set_task("playlist_refs", "complete", "Playlist reference status checked", playlist_report)
+
+
+def _clean_all_finish(run) -> Dict[str, Any]:
+    log, tasks, results, update_state, persist_checkpoint = run.log, run.tasks, run.results, run.update_state, run.persist_checkpoint
+    failed_tasks = [task["label"] for task in tasks if task["status"] == "failed"]
+    if failed_tasks:
+        return run.finish_partial("Finished with failed task(s): " + ", ".join(failed_tasks))
+    if update_state:
+        update_state(_clean_all_complete_payload(tasks, results, run.total))
+    persist_checkpoint("complete")
+    log.append("Clean All complete.")
+    return {"ok": True, "tasks": tasks, "results": results}
+
+
+def _clean_all_run_steps(run) -> Dict[str, Any]:
+    """The pipeline: its order, and a cancel check before every task."""
+    ensure_not_cancelled = run.ensure_not_cancelled
+    ensure_not_cancelled()
+    health = _clean_all_library_health(run)
+    ensure_not_cancelled()
+    _clean_all_missing_files(run, health)
+    ensure_not_cancelled()
+    root_repair_error = _clean_all_root_folder_repair(run)
+    ensure_not_cancelled()
+    _clean_all_artist_alias(run)
+    ensure_not_cancelled()
+    _clean_all_artist_folder_merge(run, root_repair_error)
+    ensure_not_cancelled()
+    _clean_all_release_group_merge(run, root_repair_error)
+    ensure_not_cancelled()
+    _clean_all_track_scan(run)
+    ensure_not_cancelled()
+    rows = _clean_all_folder_scan(run)
+    ensure_not_cancelled()
+    _clean_all_folder_safe_renames(run, rows)
+    ensure_not_cancelled()
+    _clean_all_artwork(run)
+    ensure_not_cancelled()
+    _clean_all_genres(run)
+    ensure_not_cancelled()
+    _clean_all_final_verification(run)
+    ensure_not_cancelled()
+    _clean_all_stale_jobs(run)
+    ensure_not_cancelled()
+    _clean_all_playlist_refs(run)
+    return _clean_all_finish(run)
+
+
+def _clean_all_handle_failure(run, exc: Exception) -> Dict[str, Any]:
+    """Called from the job's except block; the final bare raise re-raises exc."""
+    log, tasks, results, update_state, set_task = run.log, run.tasks, run.results, run.update_state, run.set_task
+    persist_checkpoint, finish_partial = run.persist_checkpoint, run.finish_partial
+    failed_message = _s(exc) or "maintenance failed"
+    cancelled = failed_message.strip().lower() == "cancelled" or bool(run.cancel_event and run.cancel_event.is_set())
+    completed_before_failure = sum(1 for task in tasks if task["status"] in {"complete", "skipped"})
+    running_task = next((task for task in tasks if task["status"] == "running"), None)
+    # Clean All resume reattachment: a running_task carrying a saved
+    # artist-folder-merge operation_id is not a crash -- it is a
+    # real engine operation whose outcome is still genuinely
+    # unresolved (see the "still_running" raise above). Forcing it
+    # to "failed" here would make the next resume treat a
+    # possibly-still-active or already-completed engine operation
+    # as conclusively dead and start a duplicate one; leave it
+    # "running" (with operation_id intact) so resume checks its
+    # authoritative transaction status first.
+    if running_task and not (running_task.get("id") == "artist_folder_merge" and running_task.get("operation_id")):
+        set_task(running_task["id"], "failed", failed_message)
+    if completed_before_failure > 0:
+        return finish_partial(failed_message, "cancelled" if cancelled else "partial")
+    if update_state:
+        update_state(_clean_all_failed_payload(tasks, results, run.total, running_task, failed_message))
+    persist_checkpoint("cancelled" if cancelled else "failed", failed_message)
+    log.append(f"Clean All failed: {failed_message}")
+    raise
+
+
+def _clean_all_execute(run) -> Dict[str, Any]:
+    log, resume_requested, resume_snapshot = run.log, run.resume_requested, run.resume_snapshot
+    log.append("Clean All started.")
+    if resume_requested:
+        log.append(
+            "[Clean All Resume] Resuming from checkpoint: "
+            f"{resume_snapshot.get('completed_count', 0)} completed task(s); "
+            f"next: {resume_snapshot.get('next_task_label') or 'next pending task'}."
+        )
+    run.emit("", "Resuming Clean All" if resume_requested else "Starting Clean All")
+    run.persist_checkpoint("running")
+    try:
+        return _clean_all_run_steps(run)
+    except Exception as exc:
+        return _clean_all_handle_failure(run, exc)
 
 
 @app.get("/api/transactions/settings")
