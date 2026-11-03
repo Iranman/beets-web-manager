@@ -83,6 +83,7 @@ class World:
             self.cancel.set()
         self.cancel_on_log = cancel_on_log
         self.job = {}
+        self.thread = threading.current_thread()
 
     def clean(self, value):
         if isinstance(value, Log):
@@ -143,6 +144,9 @@ class World:
         return _Held()
 
     def start_python(self, fn, label="", metadata=None):
+        # jobs is shared: the app's recovery schedule can tick while this patch is on.
+        if threading.current_thread() is not self.thread:
+            return None
         self.job = {"fn": fn, "label": self.clean(label), "metadata": self.clean(metadata)}
         return types.SimpleNamespace(job_id="job-1")
 
@@ -718,6 +722,16 @@ class ImportJobGoldenTests(unittest.TestCase):
                 held = [e for e in self.golden[key]["trace"] if e[0] in ("held-enter", "held-exit")]
                 self.assertEqual(held, order)
         self.assertIsInstance(isvc._IMPORT_JOB_LOCK, type(threading.Lock()))
+
+
+class SharedJobStoreTests(unittest.TestCase):
+    def test_a_job_started_from_another_thread_does_not_replace_the_import_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            world = World(tmp)
+            tick = threading.Thread(target=world.start_python, args=(print,), kwargs={"label": "tick"})
+            tick.start()
+            tick.join()
+            self.assertEqual(world.job, {})
 
 
 class StepsRunAloneTests(unittest.TestCase):
