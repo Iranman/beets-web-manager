@@ -544,7 +544,7 @@ def _dedup_match_fuzzy(artist: str, title: str, index: Dict[str, Any]) -> Tuple[
     if not cand_payload:
         return None, ""
     score = float(cand_payload.get("score") or 0)
-    if score < 0.88:
+    if not score >= 0.88:  # also true for NaN
         return None, ""
     # Resolve to the real Beets item so release-slot
     # evidence (album, disc, track, IDs) stays intact.

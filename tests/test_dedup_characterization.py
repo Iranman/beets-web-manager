@@ -135,6 +135,9 @@ SCENARIOS = {
     "scan_index_variant_error_is_ignored": {"items": [LIB1], "sources": [SRC1], "variants_error": [1]},
     "scan_index_candidate_rows": {"items": [LIB1, item(2, "Art/Alb/02 feat.flac", title="Song Two (feat. Guest)", artist="Artist & Guest")],
                                   "sources": [SRC1], "dump_candidates": True},
+    "scan_index_repeated_variants_make_one_row": {
+        "items": [LIB1], "sources": [SRC1], "dump_candidates": True,
+        "variant_rows": {"1": [["Artist", "Song One"], ["ARTIST", "song one"], ["Artist", ""], ["Other", "Song One"]]}},
     "scan_real_fuzzy_lookup": {"items": [LIB1, item(2, "Art/Alb/02.flac", title="Other Tune", artist="Someone")],
                                "sources": [SRC1], "real_fuzzy": True},
     "scan_real_fuzzy_no_match": {"items": [LIB1], "sources": [src("New/x.flac", tags={"artist": "Nobody", "title": "Nothing Alike"})],
@@ -177,6 +180,10 @@ SCENARIOS = {
     "match_fuzzy_below_threshold": fuzzy_case(0.8799),
     "match_fuzzy_score_over_one_is_clamped": fuzzy_case(1.2),
     "match_fuzzy_score_missing": fuzzy_case(None),
+    "match_fuzzy_score_nan_is_no_match": fuzzy_case(float("nan")),
+    # On a case-sensitive disk, a path differing only by case still counts as the same file.
+    "match_path_key_ignores_case": {"payload": {"path": "<TMP>/music"}, "items": [item(1, "Art/Alb/Song.flac", size=4444)],
+                                    "sources": [src("../music/Art/Alb/SONG.flac", size=4444, tags={"title": "Tagged"})]},
     "match_fuzzy_no_title_is_skipped": {"items": [LIB1], "sources": [src("New/.flac", tags={})], "fuzzy": {"": {"id": 1, "score": 1.0}}},
     "match_fuzzy_unknown_id_builds_a_stand_in": fuzzy_case(0.9, item_id=999, path="<TMP>/music/Art/Alb/01 Song One.flac",
                                                            title="Stand In", artist="Who", album="What"),
@@ -196,6 +203,10 @@ SCENARIOS = {
         items=[item(1, "Art/Alb/a.flac", mb_trackid=REC, title="Tune A", album="Album A"),
                item(2, "Art/Alb/b.flac", mb_trackid=REC2, title="Tune B", album="Album B")],
         fp_ids={"a.flac": [REC2]}),
+    "match_fingerprint_own_recording_first": tracked(
+        items=[item(1, "Art/Alb/a.flac", mb_trackid=REC, title="Tune A", album="Album A"),
+               item(2, "Art/Alb/b.flac", mb_trackid=REC2, title="Tune B", album="Album B")],
+        fp_ids={"a.flac": [REC, REC2]}),
     "match_fingerprint_self_first_in_bucket": tracked(
         items=[item(1, "Art/Alb/a.flac", mb_trackid=REC, title="Tune A", album="Album A"),
                item(2, "Art/Alb/b.flac", title="Tune B", album="Album B")],
@@ -316,6 +327,7 @@ SCENARIOS = {
     "ai_reply_refusal_skips_batch_bookkeeping": ai_case("refusal:" + "n" * 150, ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
     "ai_reply_network_error_continues": ai_case("raise:down", ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
     "ai_reply_bad_json_continues": ai_case("content:not json", ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
+    "ai_reply_null_matches_is_a_batch_error": ai_case({"matches": None}, ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
     "ai_reply_no_choices": ai_case("empty"),
     "ai_reply_not_an_object": ai_case("content:[1]"),
     "ai_reply_bad_match_loses_rest_of_batch": ai_case(ai(m(), {"file_idx": "x"}, m(2)), sources=[SRC1, src("New/two.flac", tags={"artist": "Artist", "title": "Song One"})]),
@@ -340,6 +352,8 @@ SCENARIOS = {
                                                      sources=[src("New/one.flac", tags={"artist": "Artist", "title": "!!!"})]),
     "ai_title_guard_falls_back_to_stem": ai_case(ai(m()), items=[item(1, "A/1.flac", title="Song One", artist="Artist")],
                                                  sources=[src("New/Song One.flac", tags={"artist": "Artist"})]),
+    "ai_title_guard_stem_when_derived_title_empty": ai_case(ai(m()), items=[item(1, "A/1.flac", title="01", artist="Artist")],
+                                                            sources=[src("New/01 - .flac", tags={"artist": "Artist"})]),
     # ── AI review: the fingerprint decides, the AI does not ──
     "ai_fingerprint_shared_upgrades_to_high": ai_case(ai(m(confidence="medium")), fp_match={"one.flac": [REC, [REC], [REC]]}),
     "ai_fingerprint_disagrees_rejected": ai_case(ai(m(), m()), fp_match={"one.flac": [None, [REC], [REC2]]}),
@@ -548,7 +562,8 @@ class World:
             self.arm()
             if row.id in self.cfg.get("variants_error", []):
                 raise ValueError("bad variant")
-            return real(row)
+            rows = self.cfg.get("variant_rows", {}).get(str(row.id))
+            return [tuple(pair) for pair in rows] if rows else real(row)
         return run
 
     def arm(self):

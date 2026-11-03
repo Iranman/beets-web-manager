@@ -337,9 +337,9 @@
       "CANDIDATE_GENERATION_ONLY",
       "Builds the candidate record from evidence already decided. (Moved out of start_dedup_scan.)"
     ],
-    "routes_cleanup.py::<module>": [
-      "DISPLAY_ONLY",
-      "Module-level import and constants for the AI review; each consumer is classified separately."
+    "routes_cleanup.py::_ai_review_request_body": [
+      "CANDIDATE_GENERATION_ONLY",
+      "AI reply schema with its confidence labels. (Moved out of dedup_ai_review.)"
     ],
     "routes_cleanup.py::_ai_review_title_similarity": [
       "CANDIDATE_GENERATION_ONLY",

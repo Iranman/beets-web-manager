@@ -123,28 +123,6 @@ def dedup_ai_review():
 
 _AI_REVIEW_BATCH = 20
 
-_AI_REVIEW_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "matches": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "file_idx":   {"type": "integer"},
-                    "lib_id":     {"type": "integer"},
-                    "confidence": {"type": "string", "enum": ["high", "medium"]},
-                    "reason":     {"type": "string"},
-                },
-                "required": ["file_idx", "lib_id", "confidence", "reason"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["matches"],
-    "additionalProperties": False,
-}
-
 
 def _ai_review_result(state: Dict[str, Any], scan_jid: Any) -> Dict[str, Any]:
     result = _dedup_job_result("ai_review", state)
@@ -279,19 +257,40 @@ def _ai_review_prompt(file_meta: List[Dict], relevant: List[Dict]) -> str:
 
 
 def _ai_review_request_body(prompt: str, model: str) -> bytes:
+    schema = {
+        "type": "object",
+        "properties": {
+            "matches": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file_idx":   {"type": "integer"},
+                        "lib_id":     {"type": "integer"},
+                        "confidence": {"type": "string", "enum": ["high", "medium"]},
+                        "reason":     {"type": "string"},
+                    },
+                    "required": ["file_idx", "lib_id", "confidence", "reason"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["matches"],
+        "additionalProperties": False,
+    }
     return json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": "dedup_matches", "strict": True, "schema": _AI_REVIEW_SCHEMA},
+            "json_schema": {"name": "dedup_matches", "strict": True, "schema": schema},
         },
     }).encode()
 
 
-def _ai_review_call_provider(endpoint: str, req_body: bytes, api_key: str, state: Dict[str, Any]) -> Optional[List[Any]]:
-    """The AI's suggestions for one batch; None when it refused."""
+def _ai_review_call_provider(endpoint: str, req_body: bytes, api_key: str) -> Dict[str, Any]:
+    """The AI's reply message for one batch."""
     req = _ur.Request(
         endpoint,
         data=req_body,
@@ -300,12 +299,7 @@ def _ai_review_call_provider(endpoint: str, req_body: bytes, api_key: str, state
     )
     with provider_boundary.opened("ai", req, timeout=45) as r:
         resp_data = json.loads(r.read())
-    msg = (resp_data.get("choices") or [{}])[0].get("message") or {}
-    if msg.get("refusal"):
-        state["log"].append(f"  AI refusal: {msg['refusal'][:100]}")
-        return None
-    parsed = json.loads(msg["content"])
-    return parsed.get("matches", []) if isinstance(parsed, dict) else []
+    return (resp_data.get("choices") or [{}])[0].get("message") or {}
 
 
 def _ai_review_apply_match(m: Dict[str, Any], file_meta: List[Dict], lib_index: List[Dict], new_dupes: List[Dict],
@@ -415,9 +409,12 @@ def _ai_review_batch(batch_start: int, unmatched: List[Path], lib_index: List[Di
     req_body = _ai_review_request_body(prompt, _ai_model)
 
     try:
-        matches = _ai_review_call_provider(_ai_endpoint, req_body, api_key, state)
-        if matches is None:
+        msg = _ai_review_call_provider(_ai_endpoint, req_body, api_key)
+        if msg.get("refusal"):
+            state["log"].append(f"  AI refusal: {msg['refusal'][:100]}")
             return
+        parsed = json.loads(msg["content"])
+        matches = parsed.get("matches", []) if isinstance(parsed, dict) else []
         for m in matches:
             _ai_review_apply_match(m, file_meta, lib_index, new_dupes, state, update_state)
     except Exception as exc:
