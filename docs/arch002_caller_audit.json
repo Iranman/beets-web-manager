@@ -337,6 +337,10 @@
       "COMPATIBILITY_WRAPPER",
       "Mutation requires canonical preflight.ok (or explicit manual override) and the engine deterministic-identity gate. (ARCH-001: body moved from the route into this request-free service.)"
     ],
+    "backend/acquisition_service.py::_queue_requested_tracks_for_review": [
+      "DISPLAY_ONLY",
+      "Review label. (Moved out of start_album_download's job body.)"
+    ],
     "backend/album_match.py::build_album_match_plan": [
       "COMPATIBILITY_WRAPPER",
       "Caller supplies the canonical match function."
