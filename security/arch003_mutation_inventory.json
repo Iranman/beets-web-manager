@@ -531,12 +531,12 @@
       "reviewed_in_pr": null
     },
     {
-      "key": "backend/audio_preferences.py:inspect_audio_file:7329bd008d68",
+      "key": "backend/audio_preferences.py:inspect_audio_file:73471b292be2",
       "file": "backend/audio_preferences.py",
       "function": "inspect_audio_file",
       "line": 296,
       "kind": "subprocess",
-      "call_text": "subprocess.run( [ ffprobe, \"-v\", \"error\", \"-read_intervals\", \"0%+30\", \"-select_streams\", \"a:0\", \"-show_entries\", \"stream=codec_name,codec_long_name,profile,chan",
+      "call_text": "subprocess.run( [ ffprobe, \"-v\", \"error\", \"-probesize\", \"1000000\", \"-analyzeduration\", \"1000000\", \"-select_streams\", \"a:0\", \"-show_entries\", \"stream=codec_name,",
       "classification": "CONFIG_STATE",
       "transaction_family": "",
       "domain": "config",

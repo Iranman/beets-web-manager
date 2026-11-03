@@ -292,14 +292,13 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
             text=True,
         )
     except subprocess.TimeoutExpired as exc:
+        # Fallback: bound the demuxer probe so a damaged stream fails fast
+        # (``-read_intervals`` limits nothing without ``-show_packets``).
         try:
             proc = subprocess.run(
                 [
                     ffprobe,
                     "-v", "error",
-                    # Bound the demuxer probe so a damaged stream fails fast
-                    # instead of being scanned (``-read_intervals`` does not
-                    # limit this without ``-show_packets``/``-show_frames``).
                     "-probesize", "1000000",
                     "-analyzeduration", "1000000",
                     "-select_streams", "a:0",
