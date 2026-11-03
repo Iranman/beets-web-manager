@@ -1315,6 +1315,7 @@ function MaintenanceRunnerBar({
   const reportResume = report?.resume;
   const checkpointResumable = !running && (Boolean(report?.resumable || reportResume?.resumable) || hasStateCheckpoint);
   const checkpointNextLabel = String(reportResume?.next_task_label || nextIncompleteTask?.label || 'next pending phase');
+  const artistFolderSkip = tasks.find((task) => task.id === 'artist_folder_merge' && task.status === 'skipped' && task.detail);
 
   useEffect(() => {
     let cancelled = false;
@@ -1459,6 +1460,9 @@ function MaintenanceRunnerBar({
                   Discard checkpoint and start fresh instead.
                 </Button>
               </div>
+            ) : null}
+            {artistFolderSkip ? (
+              <div className="mt-2 text-xs text-amber-300">Artist Folder Merge skipped: {artistFolderSkip.detail}</div>
             ) : null}
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">

@@ -202,7 +202,7 @@ Every import is Beets' own importer, run inside Web Manager by the `webmanager` 
 ## Frontend Architecture
 
 - `frontend/src/app/*/page.tsx` files are thin route entries.
-- `frontend/src/views/` contains major page shells such as Import, Library, Jobs, Playlists, Submissions, Clean, Config, and System.
+- `frontend/src/views/` contains major page shells such as Import, Library, Jobs, Playlists, Submissions, Config, and System. There is no Clean view; the `/clean` route re-exports the root page.
 - `frontend/src/features/` contains feature panels and larger workflow UI.
 - `frontend/src/api/client.ts` centralizes API calls and CSRF header handling.
 - `frontend/src/api/types.ts` defines many API response types.

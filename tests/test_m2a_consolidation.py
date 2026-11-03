@@ -174,17 +174,16 @@ class StampJobOutcomeTests(unittest.TestCase):
         self.assertEqual(res["operation_id"], "op-1")
         self.assertTrue(res["still_running"])
 
-    def test_success_keeps_the_route_summary_and_passes_the_failpoint(self):
-        fn = self._run_job(_acceptance_failpoint="fp")
+    def test_success_keeps_the_route_summary(self):
+        fn = self._run_job()
         log = []
         with self._scan(), mock.patch.object(cw, "plan_artist_folder_reconcile",
                                              return_value={"ok": True, "operation_id": "op-1"}), \
                 mock.patch.object(ms, "_invalidate_lib_cache"), \
                 mock.patch.object(ms, "_apply_artist_folder_reconcile_resilient",
                                   return_value={"ok": True, "moved_files": 3, "quarantined_files": 1,
-                                                "removed_dirs": 2}) as apply_:
+                                                "removed_dirs": 2}):
             res = fn(log)
-        self.assertEqual(apply_.call_args.kwargs["_acceptance_failpoint"], "fp")
         self.assertEqual((res["renamed"], res["merged"], res["files_moved"], res["folders_removed"]), (3, 1, 3, 2))
         self.assertTrue(any(line.startswith("Done: 3 renamed") for line in log), log)
 

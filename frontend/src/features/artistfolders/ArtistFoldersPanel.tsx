@@ -16,6 +16,10 @@ import { useJobPoll } from '../../lib/hooks';
 // Empty = the server's configured library root (MUSIC_ROOT).
 const DEFAULT_ROOT = '';
 
+// Scanning still works; changing folders has no backend (docs/TECHNICAL_DEBT.md).
+const CHANGES_UNAVAILABLE_REASON =
+  'Artist folder stamping and merging are not available in this version, so these buttons are disabled. Scanning still works, and no folders are changed.';
+
 function jobsUrl(jobId: string | null) {
   return jobId ? `/jobs?q=${encodeURIComponent(jobId)}` : '/jobs';
 }
@@ -81,7 +85,6 @@ export function ArtistFoldersPanel() {
   const [error, setError] = useState('');
 
   // Stamp MB IDs section
-  const [stampBusy, setStampBusy] = useState(false);
   const [stampLog, setStampLog] = useState<string[]>([]);
   const [stampJobId, setStampJobId] = useState<string | null>(null);
   const [stampMsg, setStampMsg] = useState('');
@@ -171,7 +174,6 @@ export function ArtistFoldersPanel() {
   };
 
   const runStamp = async (dryRun: boolean) => {
-    setStampBusy(true);
     setStampJobId(null);
     setStampLog([]);
     setStampMsg('');
@@ -190,8 +192,6 @@ export function ArtistFoldersPanel() {
       }
     } catch (err) {
       setStampMsg(errorMessage(err));
-    } finally {
-      setStampBusy(false);
     }
   };
 
@@ -218,6 +218,8 @@ export function ArtistFoldersPanel() {
           </Button>
         ) : null}
       />
+
+      <Alert severity="info">{CHANGES_UNAVAILABLE_REASON}</Alert>
 
       <CleanActionBar>
         <TextField
@@ -276,12 +278,12 @@ export function ArtistFoldersPanel() {
                 <div className="flex-1" />
                 {selected.size > 0 && (
                   <div className="flex gap-2">
-                    <Button size="small" variant="outlined" onClick={() => void runMerge(true)}>
+                    <Button disabled size="small" variant="outlined" onClick={() => void runMerge(true)}>
                       Dry run
                     </Button>
                     <Button
                       color="warning"
-                      disabled={merging}
+                      disabled
                       size="small"
                       variant="contained"
                       onClick={() => void runMerge(false)}
@@ -365,7 +367,7 @@ export function ArtistFoldersPanel() {
       >
         <div className="flex gap-2">
           <Button
-            disabled={stampBusy || stampJob?.status === 'running'}
+            disabled
             size="small"
             variant="outlined"
             onClick={() => void runStamp(true)}
@@ -374,7 +376,7 @@ export function ArtistFoldersPanel() {
           </Button>
           <Button
             color="warning"
-            disabled={stampBusy || stampJob?.status === 'running'}
+            disabled
             size="small"
             variant="contained"
             onClick={() => {
