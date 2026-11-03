@@ -185,6 +185,17 @@ def app_unit_source(name: str) -> str:
     raise KeyError(name)
 
 
+def dedup_scan_source() -> str:
+    """Source of start_dedup_scan and the steps its job runs."""
+    return "".join(app_unit_source(n) for n in (
+        "start_dedup_scan", "_dedup_scan_job", "_dedup_list_scan_sources", "_dedup_build_library_index",
+        "_dedup_prepare_source", "_dedup_scan_sources", "_dedup_scan_one_source", "_dedup_evaluate_source",
+        "_dedup_find_candidate", "_dedup_match_track_id", "_dedup_match_size", "_dedup_match_fuzzy",
+        "_dedup_match_fingerprint", "_dedup_verify_candidate", "_dedup_confidence_and_reason",
+        "_dedup_duplicate_record", "_dedup_evidence_tag", "_dedup_scan_finish",
+    ))
+
+
 def _title_normalize_helpers() -> Dict[str, Any]:
     """SEC-5 linear normalizers that extracted modules import (imports are not
     part of the family source, so exec'd units need them supplied)."""
