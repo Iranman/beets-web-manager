@@ -649,7 +649,7 @@ class World:
             mock.patch.object(dedup_service, "_running_job_of_type", lambda *_a: self.cfg.get("scan_running", False)),
             mock.patch.object(maintenance_service, "_maintenance_load_last_report", lambda: {}),
             mock.patch.object(routes_cleanup, "_ai_api_key", lambda: self.cfg.get("api_key", "synthetic-key")),
-            mock.patch.object(routes_cleanup, "_ai_model_and_endpoint", lambda default: (f"model:{default}", "https://ai.invalid/v1")),
+            mock.patch.object(routes_cleanup, "_ai_model_and_endpoint", lambda default, _key=None: (f"model:{default}", "https://ai.invalid/v1")),
             mock.patch.object(routes_cleanup.provider_boundary, "opened", self.opened),
             mock.patch.object(Path, "stat", stat),
             mock.patch.dict(dedup_service._dedup_scans, clear=True),

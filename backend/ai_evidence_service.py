@@ -317,7 +317,7 @@ def _ai_suggest_genre(albumartist: str, album: str, year, api_key: str, log: lis
         "'Alternative Rock', 'R&B'. Use standard MusicBrainz/Last.fm genre names. "
         "No explanation, no punctuation beyond the genre name itself."
     )
-    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini", api_key)
     body = json.dumps({
         "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],

@@ -678,7 +678,7 @@ def _ai_suggest_album_internal(
                      "label", "country", "confidence", "reason"],
         "additionalProperties": False,
     }
-    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o")
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o", api_key)
     oai_payload = json.dumps({
         "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],
@@ -1487,7 +1487,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                      "label", "country", "confidence", "reason"],
         "additionalProperties": False,
     }
-    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o")
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o", api_key)
     req_payload = json.dumps({
         "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],

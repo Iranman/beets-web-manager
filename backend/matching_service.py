@@ -1529,7 +1529,12 @@ def _ai_provider() -> Tuple[str, str]:
         if openrouter_key:
             return _OPENROUTER_BASE_URL, openrouter_key
         return _OPENAI_BASE_URL, generic_key
-    host = "." + (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    try:
+        host = "." + (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    except ValueError:
+        # Unparseable (e.g. NFKC-invalid netloc). Never send a key there, and
+        # never surface the error: its text quotes the netloc, password included.
+        return base_url, ""
     if host.endswith(".api.openai.com"):
         return base_url, openai_key or generic_key
     own_name = "OPENROUTER_API_KEY" if host.endswith(".openrouter.ai") else "AI_API_KEY"
@@ -1541,12 +1546,23 @@ def _ai_provider() -> Tuple[str, str]:
     return base_url, openai_key
 
 
+class _AiKey(str):
+    """An AI API key plus the base URL it was resolved for. Callers read the
+    key once and the endpoint later; carrying the URL with the key means an
+    AI_BASE_URL saved in between can't receive the old key (#523 F3)."""
+    base_url = ""
+
+
 def _ai_api_key() -> str:
-    """The API key for outbound AI requests; see _ai_provider()."""
-    return _ai_provider()[1]
+    """The API key for outbound AI requests; see _ai_provider(). Pass it to
+    _ai_model_and_endpoint() so the request goes to the URL it belongs to."""
+    base_url, key = _ai_provider()
+    bound = _AiKey(key)
+    bound.base_url = base_url
+    return bound
 
 
-def _ai_model_and_endpoint(default_model: str) -> Tuple[str, str]:
+def _ai_model_and_endpoint(default_model: str, api_key: Optional[str]) -> Tuple[str, str]:
     """Resolve (model, chat-completions URL) for an outbound AI request from
     the same AI_MODEL/AI_BASE_URL environment variables the System page's
     "AI & LLM Services" section displays as live, effective settings.
@@ -1555,15 +1571,17 @@ def _ai_model_and_endpoint(default_model: str) -> Tuple[str, str]:
     and "https://api.openai.com/v1/chat/completions" URL -- the System page
     could show AI_MODEL=some-other-model / AI_BASE_URL=https://openrouter.ai/...
     as "configured" while every real AI request silently ignored both and
-    always talked to OpenAI's gpt-4o/gpt-4o-mini. The URL comes from
-    _ai_provider(), so it always matches the key _ai_api_key() returns.
+    always talked to OpenAI's gpt-4o/gpt-4o-mini. The URL is the one
+    `api_key` (from _ai_api_key()) was resolved for; without a bound key it
+    is resolved now.
 
     `default_model` preserves each call site's own historical choice
     (gpt-4o for higher-stakes album/folder matching, gpt-4o-mini for
     cheaper lookups like genre) when AI_MODEL is not set.
     """
     model = os.environ.get("AI_MODEL", "").strip() or default_model
-    return model, f"{_ai_provider()[0]}/chat/completions"
+    base_url = getattr(api_key, "base_url", "") or _ai_provider()[0]
+    return model, f"{base_url}/chat/completions"
 
 
 def _load_album_mb_suggestions() -> Dict[str, Any]:
@@ -2134,7 +2152,7 @@ def _ai_review_album_track_candidates(album_info: Dict[str, Any],
         "required": ["decisions"],
         "additionalProperties": False,
     }
-    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini", api_key)
     req_body = json.dumps({
         "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],
