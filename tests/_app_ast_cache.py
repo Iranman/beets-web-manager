@@ -185,6 +185,31 @@ def app_unit_source(name: str) -> str:
     raise KeyError(name)
 
 
+def dedup_scan_source() -> str:
+    """Source of start_dedup_scan and everything split out of it."""
+    return "".join(app_unit_source(n) for n in (
+        "start_dedup_scan", "_YT_STRIP", "_DEDUP_BATCH_SIZE", "_DEDUP_IO_WORKERS", "_DEDUP_SPLIT_SLOT_RELATIONS",
+        "_parse_filename_tags", "_item_library_path", "_path_key", "_dedup_record_listing_failure",
+        "_dedup_folder_totals", "_dedup_group_by_folder", "_dedup_scan_job", "_dedup_list_scan_sources",
+        "_dedup_add_fuzzy_rows", "_dedup_build_library_index", "_dedup_prepare_source", "_dedup_scan_sources",
+        "_dedup_scan_one_source", "_dedup_scan_progress_text", "_dedup_evaluate_source",
+        "_dedup_find_candidate", "_dedup_match_track_id", "_dedup_match_size", "_dedup_match_fuzzy",
+        "_dedup_match_fingerprint", "_dedup_verify_candidate", "_dedup_confidence_and_reason",
+        "_dedup_duplicate_record", "_dedup_evidence_tag", "_dedup_scan_finish",
+    ))
+
+
+def dedup_ai_review_source() -> str:
+    """Source of dedup_ai_review and everything split out of it."""
+    return "".join(app_unit_source(n) for n in (
+        "dedup_ai_review", "_AI_REVIEW_BATCH", "_ai_review_result", "_ai_review_norm_words",
+        "_ai_review_title_similarity", "_ai_review_library_index", "_ai_review_file_meta",
+        "_ai_review_relevant_tracks", "_ai_review_prompt", "_ai_review_request_body",
+        "_ai_review_call_provider", "_ai_review_apply_match", "_ai_review_batch",
+        "_ai_review_finish_nothing_to_do", "_ai_review_finish", "_ai_review_job",
+    ))
+
+
 def _title_normalize_helpers() -> Dict[str, Any]:
     """SEC-5 linear normalizers that extracted modules import (imports are not
     part of the family source, so exec'd units need them supplied)."""

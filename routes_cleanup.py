@@ -6,6 +6,7 @@ from __future__ import annotations
 import backend.provider_boundary as provider_boundary
 import json, os, re, time
 from collections import Counter, defaultdict
+from difflib import SequenceMatcher as _SM
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from flask import jsonify, request
@@ -17,7 +18,7 @@ from backend.identity_contract import verify_album_identity as _verify_album_ide
 from backend.acoustid_service import AUDIO_EXTS, _acoustid_fingerprint_match, _album_track_norm, _read_file_media_tags
 from backend.app_runtime import ALBUM_FOLDER_CLEANUP_LAST_FILE, METADATA_CACHE_ROOT, MUSIC_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, _LITERAL_PLACEHOLDER_RE, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _app_logger, _path_under, _s, _ur, jobs
 from backend.cleanup_service import _album_cleanup_apply_issue, _album_cleanup_running_job, _album_cleanup_save_report, _album_folder_cleanup_apply_safe, _album_folder_cleanup_plan, _clean_remove_empty_albums, _clean_remove_orphaned_items, _clear_rgid_resolution, _delete_no_audio_folders, _folder_clean_root, _folder_cleanup_db_items, _folder_cleanup_is_approved_root, _folder_cleanup_merge_preview, _folder_cleanup_path, _folder_cleanup_review_for, _load_rgid_resolutions, _scan_no_audio_folder_candidates, _set_rgid_resolution
-from backend.dedup_service import _dedup_final_summary, _dedup_job_result, _dedup_raise_if_cancelled, _dedup_resolve_source_scan, _dedup_scans, _dedup_state_response, _dedup_structured_state, _library_duplicate_merge_safety, run_dedup_cleanup, start_dedup_scan
+from backend.dedup_service import _dedup_final_summary, _dedup_folder_totals, _dedup_group_by_folder, _dedup_job_result, _dedup_raise_if_cancelled, _dedup_record_listing_failure, _dedup_resolve_source_scan, _dedup_scans, _dedup_state_response, _dedup_structured_state, _library_duplicate_merge_safety, run_dedup_cleanup, start_dedup_scan
 from backend.job_service import _root_folder_repair_running_job
 from backend.library_service import _album_source_folder, _append_stamp_candidate_log, _append_stamp_skipped_log, _apply_artist_folder_groups, _artist_folder_repair_root, _resolve_album_release_for_import, _rgid_group_albums, _root_folder_repair_apply_safe, _root_folder_repair_save_report, _root_folder_repair_scan, _scan_artist_folder_groups, _scan_folder_name_placeholders, _stamp_artist_folder_scan
 from backend.maintenance_service import _ALBUM_FOLDER_CLEANUP_LOCK, _ROOT_FOLDER_REPAIR_LOCK, _library_health_payload
@@ -105,393 +106,7 @@ def dedup_ai_review():
     }
 
     def _run(log, cancel, update_state=None):
-        from difflib import SequenceMatcher as _SM
-
-        state["log"] = log
-        if update_state:
-            update_state(_dedup_structured_state(
-                state,
-                current_task="Listing unmatched files for AI duplicate review",
-                current_result="Scanning source path",
-            ))
-        state["log"].append(f"🤖 AI Review: scanning {scan_path} for unmatched files…")
-        try:
-            all_files = sorted(
-                p for p in scan_path.rglob("*")
-                if p.is_file() and p.suffix.lower() in AUDIO_EXTS
-            )
-        except Exception as exc:
-            state["log"].append(f"ERROR listing files: {exc}")
-            state["status"] = "done"
-            state["final_summary"] = {"scanned_files": 0, "duplicate_tracks_found": 0, "error": str(exc)}
-            if update_state:
-                update_state(_dedup_structured_state(
-                    state,
-                    current_task="Listing unmatched files for AI duplicate review",
-                    current_result="Failed to list source files",
-                    error_count=1,
-                    error_summary=f"Could not list source files: {exc}",
-                    final_summary=state["final_summary"],
-                ))
-            return
-
-        unmatched = [f for f in all_files if str(f) not in already_matched]
-        state["total"] = len(unmatched)
-        if update_state:
-            update_state(_dedup_structured_state(
-                state,
-                current_task="Preparing AI duplicate review batches",
-                current_result=f"{len(unmatched)} unmatched file(s) to review",
-            ))
-        state["log"].append(
-            f"{len(all_files)} total file(s) · "
-            f"{len(already_matched)} already matched · "
-            f"{len(unmatched)} to review with AI"
-        )
-        if not unmatched:
-            state["log"].append("Nothing left to review — done.")
-            state["status"] = "done"
-            state["final_summary"] = _dedup_final_summary(state, source_files=all_files)
-            if update_state:
-                update_state(_dedup_structured_state(
-                    state,
-                    current_task="AI duplicate review complete",
-                    current_item=None,
-                    current_path=None,
-                    current_result="No unmatched files needed AI review",
-                    final_summary=state["final_summary"],
-                ))
-            result = _dedup_job_result("ai_review", state)
-            result["source_scan_jid"] = scan_jid
-            return result
-
-        # ── Build compact library index ────────────────────────────────────
-        lib_index: List[Dict] = []
-        _dedup_raise_if_cancelled(cancel, state)
-        if update_state:
-            update_state(_dedup_structured_state(
-                state,
-                current_task="Building library comparison index",
-                current_result="Reading library tracks",
-            ))
-        for item in lib.items([]):
-            _dedup_raise_if_cancelled(cancel, state)
-            lib_index.append({
-                "id":     item.id,
-                "artist": (_s(getattr(item, "artist", "") or "")).strip(),
-                "title":  (_s(getattr(item, "title",  "") or "")).strip(),
-                "album":  (_s(getattr(item, "album",  "") or "")).strip(),
-            })
-        state["log"].append(f"Library has {len(lib_index)} track(s) to compare against")
-
-        def _norm_words(s: str):
-            return set(re.sub(r'[^a-z0-9]', ' ', s.lower()).split())
-
-        BATCH = 20
-        new_dupes: List[Dict] = []
-        folder_totals: Dict[str, int] = defaultdict(int)
-        for f in unmatched:
-            folder_totals[str(f.parent)] += 1
-
-        for batch_start in range(0, len(unmatched), BATCH):
-            _dedup_raise_if_cancelled(cancel, state)
-            batch = unmatched[batch_start: batch_start + BATCH]
-            state["scanned"] = batch_start + len(batch)
-            state["current_task"] = "Reviewing unmatched files with AI"
-            state["current_item"] = (
-                f"Batch {batch_start // BATCH + 1} of "
-                f"{(len(unmatched) + BATCH - 1) // BATCH}"
-            )
-            state["current_path"] = str(batch[0]) if batch else ""
-            state["current_result"] = f"{state.get('found', 0)} duplicate file(s) found so far"
-            if update_state:
-                update_state(_dedup_structured_state(state))
-
-            # ── Read embedded tags for each file in batch ──────────────────
-            file_meta: List[Dict] = []
-            for f in batch:
-                fm: Dict = {"path": str(f), "filename": f.name,
-                            "artist": "", "title": "", "album": ""}
-                tags = _read_file_media_tags(str(f))
-                fm["artist"] = (_s(tags.get("artist") or "")).strip()
-                fm["title"]  = (_s(tags.get("title") or "")).strip()
-                fm["album"]  = (_s(tags.get("album") or "")).strip()
-                # Fallback: parse artist from filename  "Artist - Title.mp3"
-                if not fm["artist"]:
-                    stem = re.sub(r'^\d+\s*[-\.]\s*', '', f.stem)
-                    for sep in (' - ', ' – '):
-                        if sep in stem:
-                            fm["artist"] = stem.split(sep)[0].strip()
-                            break
-                file_meta.append(fm)
-
-            # ── Find relevant library tracks for this batch ────────────────
-            # Build artist-word set AND title-word set for filtering
-            batch_artist_words: set = set()
-            batch_title_words:  set = set()
-            for fm in file_meta:
-                if fm["artist"]:
-                    batch_artist_words.update(_norm_words(fm["artist"]))
-                if fm["album"]:
-                    batch_artist_words.update(_norm_words(fm["album"]))
-                # Extract title from tag or filename (strip leading track number)
-                fm_title = fm["title"] or re.sub(r'^\d+\s*[-_.]\s*', '', Path(fm["path"]).stem)
-                fm["_derived_title"] = fm_title   # store for post-validation
-                if fm_title:
-                    batch_title_words.update(_norm_words(fm_title))
-
-            # Per-file top-3 library candidates by title fuzzy similarity.
-            # First filter by artist-word overlap, then rank by SequenceMatcher title sim.
-            # This prevents sending 150-track batches where most are irrelevant.
-            per_file_top3: Dict[str, List] = {}
-            for fm in file_meta:
-                fm_title = fm.get("_derived_title") or fm.get("title") or ""
-                fm_artist_words = _norm_words(fm.get("artist") or fm.get("album") or "")
-                if fm_artist_words:
-                    artist_pool = [
-                        it for it in lib_index
-                        if _norm_words(it["artist"]) & fm_artist_words
-                    ]
-                else:
-                    artist_pool = lib_index
-                if fm_title:
-                    scored = sorted(
-                        ((
-                            _SM(None,
-                                re.sub(r'[^a-z0-9 ]', '', fm_title.lower()),
-                                re.sub(r'[^a-z0-9 ]', '', it["title"].lower())
-                            ).ratio(),
-                            it,
-                        ) for it in artist_pool),
-                        key=lambda x: -x[0],
-                    )
-                    per_file_top3[fm["path"]] = [it for _, it in scored[:3] if _ > 0]
-                else:
-                    per_file_top3[fm["path"]] = artist_pool[:3]
-
-            seen_ids: set = set()
-            relevant = []
-            for cands in per_file_top3.values():
-                for it in cands:
-                    if it["id"] not in seen_ids:
-                        seen_ids.add(it["id"])
-                        relevant.append(it)
-
-            # ── Build prompt ───────────────────────────────────────────────
-            files_str = "\n".join(
-                f'{i+1}. filename={fm["filename"]!r}  '
-                f'artist={fm["artist"]!r}  title={fm["_derived_title"]!r}  album={fm["album"]!r}'
-                for i, fm in enumerate(file_meta)
-            )
-            lib_str = "\n".join(
-                f'  id={it["id"]}  artist={it["artist"]!r}  '
-                f'title={it["title"]!r}  album={it["album"]!r}'
-                for it in relevant
-            )
-
-            prompt = (
-                "You are a music duplicate-detection expert.\n\n"
-                "The files below are in a DOWNLOADS folder and may already exist in the library.\n"
-                "Decide which download files are the SAME SONG as a library track.\n\n"
-                f"DOWNLOAD FILES:\n{files_str}\n\n"
-                f"LIBRARY TRACKS:\n{lib_str}\n\n"
-                "Rules (READ CAREFULLY):\n"
-                "• TITLE must match — 'Young Girls' cannot match 'That's What I Like'. "
-                "Different song titles = different songs. Never match on artist alone.\n"
-                "• Allow minor title variations: punctuation, 'feat.' tags, 'Remaster' suffixes.\n"
-                "• Do NOT match remixes, live versions, or acoustic versions to studio originals.\n"
-                "• Only include matches you are CERTAIN about (title genuinely the same song).\n"
-                '• Return JSON: {"matches": [{"file_idx": <1-based int>, '
-                '"lib_id": <int>, "confidence": "high"|"medium", '
-                '"reason": "one sentence"}]}\n'
-                '• If no file has a genuine title match, return {"matches": []}.'
-            )
-
-            _dedup_schema = {
-                "type": "object",
-                "properties": {
-                    "matches": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "file_idx":   {"type": "integer"},
-                                "lib_id":     {"type": "integer"},
-                                "confidence": {"type": "string", "enum": ["high", "medium"]},
-                                "reason":     {"type": "string"},
-                            },
-                            "required": ["file_idx", "lib_id", "confidence", "reason"],
-                            "additionalProperties": False,
-                        },
-                    }
-                },
-                "required": ["matches"],
-                "additionalProperties": False,
-            }
-            _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
-            req_body = json.dumps({
-                "model": _ai_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {"name": "dedup_matches", "strict": True, "schema": _dedup_schema},
-                },
-            }).encode()
-
-            try:
-                req = _ur.Request(
-                    _ai_endpoint,
-                    data=req_body,
-                    headers={"Authorization": f"Bearer {api_key}",
-                             "Content-Type": "application/json"},
-                )
-                with provider_boundary.opened("ai", req, timeout=45) as r:
-                    resp_data = json.loads(r.read())
-                msg = (resp_data.get("choices") or [{}])[0].get("message") or {}
-                if msg.get("refusal"):
-                    state["log"].append(f"  AI refusal: {msg['refusal'][:100]}")
-                    continue
-                parsed = json.loads(msg["content"])
-                matches = parsed.get("matches", []) if isinstance(parsed, dict) else []
-
-                for m in matches:
-                    fidx    = int(m.get("file_idx", 0)) - 1
-                    lib_id  = int(m.get("lib_id", 0))
-                    conf    = str(m.get("confidence", "medium")).lower()
-                    reason  = str(m.get("reason", ""))
-                    if fidx < 0 or fidx >= len(file_meta): continue
-                    if conf not in ("high", "medium"): continue
-
-                    # Look up the library item to get its real path
-                    lib_item_obj = lib.get_item(lib_id)
-                    if not lib_item_obj: continue
-                    lib_path = _s(getattr(lib_item_obj, "path", "") or "")
-                    if lib_path and not lib_path.startswith("/"):
-                        lib_path = str(MUSIC_ROOT / lib_path)
-                    if not Path(lib_path).exists(): continue
-
-                    fm  = file_meta[fidx]
-                    src = Path(fm["path"])
-                    if str(src) == lib_path: continue  # same file
-
-                    # ── Hard title-similarity guard ────────────────────────
-                    # Reject AI matches where titles don't actually align —
-                    # this catches hallucinations like "Young Girls" → "24K Magic"
-                    def _tsim(a: str, b: str) -> float:
-                        a2 = re.sub(r'[^a-z0-9 ]', '', a.lower())
-                        b2 = re.sub(r'[^a-z0-9 ]', '', b.lower())
-                        if not a2 or not b2: return 0.0
-                        return _SM(None, a2, b2).ratio()
-
-                    lib_meta_tmp = next((x for x in lib_index if x["id"] == lib_id), {})
-                    file_title_chk = fm.get("_derived_title") or fm.get("title") or src.stem
-                    lib_title_chk  = lib_meta_tmp.get("title", "")
-                    sim = _tsim(file_title_chk, lib_title_chk)
-                    if sim < 0.50:
-                        state["log"].append(
-                            f"  REJECT hallucination: {src.name!r} → {lib_title_chk!r} "
-                            f"(title sim={sim:.2f}, reason={reason!r})"
-                        )
-                        continue
-
-                    # ── AcoustID fingerprint verification ───────────────────
-                    # GPT can hallucinate matches on title similarity alone; a
-                    # confirmed fingerprint mismatch rejects the AI candidate
-                    # outright, and a confirmed match upgrades confidence.
-                    shared_id, src_fp_ids, lib_fp_ids = _acoustid_fingerprint_match(str(src), lib_path)
-                    fingerprint_verified = bool(shared_id)
-                    if src_fp_ids and lib_fp_ids and not shared_id:
-                        state["log"].append(
-                            f"  ✗ REJECTED AI match: {src.name!r} → {lib_title_chk!r} "
-                            f"— AcoustID fingerprint disagrees (reason={reason!r})"
-                        )
-                        continue
-                    if fingerprint_verified:
-                        conf = "high"
-
-                    # Find matching lib_index entry for display metadata
-                    lib_meta = next((x for x in lib_index if x["id"] == lib_id), {})
-                    dup = {
-                        "source_path":          str(src),
-                        "source_filename":      src.name,
-                        "source_artist":        fm.get("artist", ""),
-                        "source_title":         file_title_chk,
-                        "source_size":          src.stat().st_size if src.exists() else 0,
-                        "lib_path":             lib_path,
-                        "lib_title":            lib_meta.get("title", ""),
-                        "lib_artist":           lib_meta.get("artist", ""),
-                        "lib_album":            lib_meta.get("album", ""),
-                        "lib_id":               lib_id,
-                        "match_type":           f"AI duplicate{' + fingerprint-verified' if fingerprint_verified else ''}",
-                        "confidence":           conf,
-                        "reason":               f"AI: {reason}" + (
-                            f" Confirmed by AcoustID audio fingerprint (recording {shared_id})."
-                            if fingerprint_verified else ""
-                        ),
-                        "fingerprint_verified": fingerprint_verified,
-                    }
-                    new_dupes.append(dup)
-                    state["found"] += 1
-                    state["duplicate_type"] = "AI duplicate"
-                    state["current_result"] = "AI duplicate candidate found"
-                    if update_state:
-                        update_state(_dedup_structured_state(state))
-                    state["log"].append(
-                        f"  🤖 [{conf}]{' [fingerprint-verified]' if fingerprint_verified else ''} {src.name}"
-                        f"  →  {lib_meta.get('artist','')} – {lib_meta.get('title','')}"
-                        f"  ({reason})"
-                    )
-
-            except Exception as exc:
-                state["log"].append(
-                    f"  ⚠ Batch {batch_start//BATCH + 1} error: {exc}")
-
-            state["log"].append(
-                f"  Batch {batch_start//BATCH + 1}/{(len(unmatched)+BATCH-1)//BATCH} done")
-            # Update incrementally so the client can show partial results
-            state["duplicates"] = list(new_dupes)
-            if update_state:
-                update_state(_dedup_structured_state(
-                    state,
-                    current_result=f"{len(new_dupes)} duplicate file(s) found so far",
-                ))
-
-        # ── Group by source folder (same structure as regular scan) ───────
-        folder_dups: Dict[str, list] = defaultdict(list)
-        for dup in new_dupes:
-            folder_dups[str(Path(dup["source_path"]).parent)].append(dup)
-        folders_out = []
-        for fpath in sorted(folder_dups.keys()):
-            fdups  = folder_dups[fpath]
-            ftotal = folder_totals.get(fpath, 0)
-            folders_out.append({
-                "path":        fpath,
-                "name":        Path(fpath).name,
-                "total_files": ftotal,
-                "dup_count":   len(fdups),
-                "all_dupes":   len(fdups) >= ftotal > 0,
-                "files":       fdups,
-            })
-        state["folders"] = folders_out
-        state["status"]  = "done"
-        state["final_summary"] = _dedup_final_summary(state, source_files=unmatched)
-        if update_state:
-            update_state(_dedup_structured_state(
-                state,
-                current_task="AI duplicate review complete",
-                current_item=None,
-                current_path=None,
-                current_result=f"{len(new_dupes)} additional duplicate file(s) found",
-                final_summary=state["final_summary"],
-            ))
-        state["log"].append(
-            f"🤖 AI review complete — {len(new_dupes)} additional "
-            f"duplicate{'s' if len(new_dupes)!=1 else ''} found"
-        )
-        result = _dedup_job_result("ai_review", state)
-        result["source_scan_jid"] = scan_jid
-        return result
+        return _ai_review_job(state, scan_path, already_matched, scan_jid, api_key, log, cancel, update_state)
 
     job = jobs.start_python(
         _run,
@@ -504,6 +119,397 @@ def dedup_ai_review():
     )
     _dedup_scans[job.job_id] = state
     return jsonify({"ok": True, "job_id": job.job_id})
+
+
+_AI_REVIEW_BATCH = 20
+
+
+def _ai_review_result(state: Dict[str, Any], scan_jid: Any) -> Dict[str, Any]:
+    result = _dedup_job_result("ai_review", state)
+    result["source_scan_jid"] = scan_jid
+    return result
+
+
+def _ai_review_norm_words(s: str):
+    return set(re.sub(r'[^a-z0-9]', ' ', s.lower()).split())
+
+
+def _ai_review_title_similarity(a: str, b: str) -> float:
+    a2 = re.sub(r'[^a-z0-9 ]', '', a.lower())
+    b2 = re.sub(r'[^a-z0-9 ]', '', b.lower())
+    if not a2 or not b2: return 0.0
+    return _SM(None, a2, b2).ratio()
+
+
+def _ai_review_library_index(cancel, state: Dict[str, Any], update_state) -> List[Dict]:
+    """Compact library index."""
+    lib_index: List[Dict] = []
+    _dedup_raise_if_cancelled(cancel, state)
+    if update_state:
+        update_state(_dedup_structured_state(
+            state,
+            current_task="Building library comparison index",
+            current_result="Reading library tracks",
+        ))
+    for item in lib.items([]):
+        _dedup_raise_if_cancelled(cancel, state)
+        lib_index.append({
+            "id":     item.id,
+            "artist": (_s(getattr(item, "artist", "") or "")).strip(),
+            "title":  (_s(getattr(item, "title",  "") or "")).strip(),
+            "album":  (_s(getattr(item, "album",  "") or "")).strip(),
+        })
+    state["log"].append(f"Library has {len(lib_index)} track(s) to compare against")
+    return lib_index
+
+
+def _ai_review_file_meta(batch: List[Path]) -> List[Dict]:
+    """Embedded tags of each file in a batch, with filename fallbacks."""
+    file_meta: List[Dict] = []
+    for f in batch:
+        fm: Dict = {"path": str(f), "filename": f.name,
+                    "artist": "", "title": "", "album": ""}
+        tags = _read_file_media_tags(str(f))
+        fm["artist"] = (_s(tags.get("artist") or "")).strip()
+        fm["title"]  = (_s(tags.get("title") or "")).strip()
+        fm["album"]  = (_s(tags.get("album") or "")).strip()
+        # Fallback: parse artist from filename  "Artist - Title.mp3"
+        if not fm["artist"]:
+            stem = re.sub(r'^\d+\s*[-\.]\s*', '', f.stem)
+            for sep in (' - ', ' – '):
+                if sep in stem:
+                    fm["artist"] = stem.split(sep)[0].strip()
+                    break
+        # Extract title from tag or filename (strip leading track number)
+        fm["_derived_title"] = fm["title"] or re.sub(r'^\d+\s*[-_.]\s*', '', Path(fm["path"]).stem)   # store for post-validation
+        file_meta.append(fm)
+    return file_meta
+
+
+def _ai_review_relevant_tracks(file_meta: List[Dict], lib_index: List[Dict]) -> List[Dict]:
+    """Per-file top-3 library candidates by title fuzzy similarity.
+    First filter by artist-word overlap, then rank by SequenceMatcher title sim.
+    This prevents sending 150-track batches where most are irrelevant."""
+    per_file_top3: Dict[str, List] = {}
+    for fm in file_meta:
+        fm_title = fm.get("_derived_title") or fm.get("title") or ""
+        fm_artist_words = _ai_review_norm_words(fm.get("artist") or fm.get("album") or "")
+        if fm_artist_words:
+            artist_pool = [
+                it for it in lib_index
+                if _ai_review_norm_words(it["artist"]) & fm_artist_words
+            ]
+        else:
+            artist_pool = lib_index
+        if fm_title:
+            scored = sorted(
+                ((
+                    _SM(None,
+                        re.sub(r'[^a-z0-9 ]', '', fm_title.lower()),
+                        re.sub(r'[^a-z0-9 ]', '', it["title"].lower())
+                    ).ratio(),
+                    it,
+                ) for it in artist_pool),
+                key=lambda x: -x[0],
+            )
+            per_file_top3[fm["path"]] = [it for _, it in scored[:3] if _ > 0]
+        else:
+            per_file_top3[fm["path"]] = artist_pool[:3]
+
+    seen_ids: set = set()
+    relevant = []
+    for cands in per_file_top3.values():
+        for it in cands:
+            if it["id"] not in seen_ids:
+                seen_ids.add(it["id"])
+                relevant.append(it)
+    return relevant
+
+
+def _ai_review_prompt(file_meta: List[Dict], relevant: List[Dict]) -> str:
+    files_str = "\n".join(
+        f'{i+1}. filename={fm["filename"]!r}  '
+        f'artist={fm["artist"]!r}  title={fm["_derived_title"]!r}  album={fm["album"]!r}'
+        for i, fm in enumerate(file_meta)
+    )
+    lib_str = "\n".join(
+        f'  id={it["id"]}  artist={it["artist"]!r}  '
+        f'title={it["title"]!r}  album={it["album"]!r}'
+        for it in relevant
+    )
+    return (
+        "You are a music duplicate-detection expert.\n\n"
+        "The files below are in a DOWNLOADS folder and may already exist in the library.\n"
+        "Decide which download files are the SAME SONG as a library track.\n\n"
+        f"DOWNLOAD FILES:\n{files_str}\n\n"
+        f"LIBRARY TRACKS:\n{lib_str}\n\n"
+        "Rules (READ CAREFULLY):\n"
+        "• TITLE must match — 'Young Girls' cannot match 'That's What I Like'. "
+        "Different song titles = different songs. Never match on artist alone.\n"
+        "• Allow minor title variations: punctuation, 'feat.' tags, 'Remaster' suffixes.\n"
+        "• Do NOT match remixes, live versions, or acoustic versions to studio originals.\n"
+        "• Only include matches you are CERTAIN about (title genuinely the same song).\n"
+        '• Return JSON: {"matches": [{"file_idx": <1-based int>, '
+        '"lib_id": <int>, "confidence": "high"|"medium", '
+        '"reason": "one sentence"}]}\n'
+        '• If no file has a genuine title match, return {"matches": []}.'
+    )
+
+
+def _ai_review_request_body(prompt: str, model: str) -> bytes:
+    schema = {
+        "type": "object",
+        "properties": {
+            "matches": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file_idx":   {"type": "integer"},
+                        "lib_id":     {"type": "integer"},
+                        "confidence": {"type": "string", "enum": ["high", "medium"]},
+                        "reason":     {"type": "string"},
+                    },
+                    "required": ["file_idx", "lib_id", "confidence", "reason"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["matches"],
+        "additionalProperties": False,
+    }
+    return json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "dedup_matches", "strict": True, "schema": schema},
+        },
+    }).encode()
+
+
+def _ai_review_call_provider(endpoint: str, req_body: bytes, api_key: str) -> Dict[str, Any]:
+    """The AI's reply message for one batch."""
+    req = _ur.Request(
+        endpoint,
+        data=req_body,
+        headers={"Authorization": f"Bearer {api_key}",
+                 "Content-Type": "application/json"},
+    )
+    with provider_boundary.opened("ai", req, timeout=45) as r:
+        resp_data = json.loads(r.read())
+    return (resp_data.get("choices") or [{}])[0].get("message") or {}
+
+
+def _ai_review_apply_match(m: Dict[str, Any], file_meta: List[Dict], lib_index: List[Dict], new_dupes: List[Dict],
+                           state: Dict[str, Any], update_state) -> None:
+    """Check one AI suggestion. The AI only suggests: the title guard and the
+    AcoustID fingerprint decide what is kept and how far it is trusted."""
+    fidx    = int(m.get("file_idx", 0)) - 1
+    lib_id  = int(m.get("lib_id", 0))
+    conf    = str(m.get("confidence", "medium")).lower()
+    reason  = str(m.get("reason", ""))
+    if fidx < 0 or fidx >= len(file_meta): return
+    if conf not in ("high", "medium"): return
+
+    # Look up the library item to get its real path
+    lib_item_obj = lib.get_item(lib_id)
+    if not lib_item_obj: return
+    lib_path = _s(getattr(lib_item_obj, "path", "") or "")
+    if lib_path and not lib_path.startswith("/"):
+        lib_path = str(MUSIC_ROOT / lib_path)
+    if not Path(lib_path).exists(): return
+
+    fm  = file_meta[fidx]
+    src = Path(fm["path"])
+    if str(src) == lib_path: return  # same file
+
+    # ── Hard title-similarity guard ────────────────────────
+    # Reject AI matches where titles don't actually align —
+    # this catches hallucinations like "Young Girls" → "24K Magic"
+    lib_meta = next((x for x in lib_index if x["id"] == lib_id), {})
+    file_title_chk = fm.get("_derived_title") or fm.get("title") or src.stem
+    lib_title_chk  = lib_meta.get("title", "")
+    sim = _ai_review_title_similarity(file_title_chk, lib_title_chk)
+    if sim < 0.50:
+        state["log"].append(
+            f"  REJECT hallucination: {src.name!r} → {lib_title_chk!r} "
+            f"(title sim={sim:.2f}, reason={reason!r})"
+        )
+        return
+
+    # ── AcoustID fingerprint verification ───────────────────
+    # GPT can hallucinate matches on title similarity alone; a
+    # confirmed fingerprint mismatch rejects the AI candidate
+    # outright, and a confirmed match upgrades confidence.
+    shared_id, src_fp_ids, lib_fp_ids = _acoustid_fingerprint_match(str(src), lib_path)
+    fingerprint_verified = bool(shared_id)
+    if src_fp_ids and lib_fp_ids and not shared_id:
+        state["log"].append(
+            f"  ✗ REJECTED AI match: {src.name!r} → {lib_title_chk!r} "
+            f"— AcoustID fingerprint disagrees (reason={reason!r})"
+        )
+        return
+    if fingerprint_verified:
+        conf = "high"
+
+    dup = {
+        "source_path":          str(src),
+        "source_filename":      src.name,
+        "source_artist":        fm.get("artist", ""),
+        "source_title":         file_title_chk,
+        "source_size":          src.stat().st_size if src.exists() else 0,
+        "lib_path":             lib_path,
+        "lib_title":            lib_meta.get("title", ""),
+        "lib_artist":           lib_meta.get("artist", ""),
+        "lib_album":            lib_meta.get("album", ""),
+        "lib_id":               lib_id,
+        "match_type":           f"AI duplicate{' + fingerprint-verified' if fingerprint_verified else ''}",
+        "confidence":           conf,
+        "reason":               f"AI: {reason}" + (
+            f" Confirmed by AcoustID audio fingerprint (recording {shared_id})."
+            if fingerprint_verified else ""
+        ),
+        "fingerprint_verified": fingerprint_verified,
+    }
+    new_dupes.append(dup)
+    state["found"] += 1
+    state["duplicate_type"] = "AI duplicate"
+    state["current_result"] = "AI duplicate candidate found"
+    if update_state:
+        update_state(_dedup_structured_state(state))
+    state["log"].append(
+        f"  🤖 [{conf}]{' [fingerprint-verified]' if fingerprint_verified else ''} {src.name}"
+        f"  →  {lib_meta.get('artist','')} – {lib_meta.get('title','')}"
+        f"  ({reason})"
+    )
+
+
+def _ai_review_batch(batch_start: int, unmatched: List[Path], lib_index: List[Dict], api_key: str,
+                     new_dupes: List[Dict], cancel, state: Dict[str, Any], update_state) -> None:
+    """One batch. A provider or reply failure costs only this batch."""
+    BATCH = _AI_REVIEW_BATCH
+    _dedup_raise_if_cancelled(cancel, state)
+    batch = unmatched[batch_start: batch_start + BATCH]
+    state["scanned"] = batch_start + len(batch)
+    state["current_task"] = "Reviewing unmatched files with AI"
+    state["current_item"] = (
+        f"Batch {batch_start // BATCH + 1} of "
+        f"{(len(unmatched) + BATCH - 1) // BATCH}"
+    )
+    state["current_path"] = str(batch[0]) if batch else ""
+    state["current_result"] = f"{state.get('found', 0)} duplicate file(s) found so far"
+    if update_state:
+        update_state(_dedup_structured_state(state))
+
+    file_meta = _ai_review_file_meta(batch)
+    prompt = _ai_review_prompt(file_meta, _ai_review_relevant_tracks(file_meta, lib_index))
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
+    req_body = _ai_review_request_body(prompt, _ai_model)
+
+    try:
+        msg = _ai_review_call_provider(_ai_endpoint, req_body, api_key)
+        if msg.get("refusal"):
+            state["log"].append(f"  AI refusal: {msg['refusal'][:100]}")
+            return
+        parsed = json.loads(msg["content"])
+        matches = parsed.get("matches", []) if isinstance(parsed, dict) else []
+        for m in matches:
+            _ai_review_apply_match(m, file_meta, lib_index, new_dupes, state, update_state)
+    except Exception as exc:
+        state["log"].append(
+            f"  ⚠ Batch {batch_start//BATCH + 1} error: {exc}")
+
+    state["log"].append(
+        f"  Batch {batch_start//BATCH + 1}/{(len(unmatched)+BATCH-1)//BATCH} done")
+    # Update incrementally so the client can show partial results
+    state["duplicates"] = list(new_dupes)
+    if update_state:
+        update_state(_dedup_structured_state(
+            state,
+            current_result=f"{len(new_dupes)} duplicate file(s) found so far",
+        ))
+
+
+def _ai_review_finish_nothing_to_do(all_files: List[Path], scan_jid: Any, state: Dict[str, Any], update_state) -> Dict[str, Any]:
+    state["log"].append("Nothing left to review — done.")
+    state["status"] = "done"
+    state["final_summary"] = _dedup_final_summary(state, source_files=all_files)
+    if update_state:
+        update_state(_dedup_structured_state(
+            state,
+            current_task="AI duplicate review complete",
+            current_item=None,
+            current_path=None,
+            current_result="No unmatched files needed AI review",
+            final_summary=state["final_summary"],
+        ))
+    return _ai_review_result(state, scan_jid)
+
+
+def _ai_review_finish(unmatched: List[Path], new_dupes: List[Dict], scan_jid: Any, state: Dict[str, Any], update_state) -> Dict[str, Any]:
+    # Same folder structure as the regular scan.
+    state["folders"] = _dedup_group_by_folder(new_dupes, _dedup_folder_totals(unmatched))
+    state["status"]  = "done"
+    state["final_summary"] = _dedup_final_summary(state, source_files=unmatched)
+    if update_state:
+        update_state(_dedup_structured_state(
+            state,
+            current_task="AI duplicate review complete",
+            current_item=None,
+            current_path=None,
+            current_result=f"{len(new_dupes)} additional duplicate file(s) found",
+            final_summary=state["final_summary"],
+        ))
+    state["log"].append(
+        f"🤖 AI review complete — {len(new_dupes)} additional "
+        f"duplicate{'s' if len(new_dupes)!=1 else ''} found"
+    )
+    return _ai_review_result(state, scan_jid)
+
+
+def _ai_review_job(state: Dict[str, Any], scan_path: Path, already_matched: set, scan_jid: Any, api_key: str,
+                   log, cancel, update_state=None):
+    """Body of the AI duplicate review job."""
+    state["log"] = log
+    if update_state:
+        update_state(_dedup_structured_state(
+            state,
+            current_task="Listing unmatched files for AI duplicate review",
+            current_result="Scanning source path",
+        ))
+    state["log"].append(f"🤖 AI Review: scanning {scan_path} for unmatched files…")
+    try:
+        all_files = sorted(
+            p for p in scan_path.rglob("*")
+            if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+        )
+    except Exception as exc:
+        _dedup_record_listing_failure(state, exc, "Listing unmatched files for AI duplicate review", update_state)
+        return
+
+    unmatched = [f for f in all_files if str(f) not in already_matched]
+    state["total"] = len(unmatched)
+    if update_state:
+        update_state(_dedup_structured_state(
+            state,
+            current_task="Preparing AI duplicate review batches",
+            current_result=f"{len(unmatched)} unmatched file(s) to review",
+        ))
+    state["log"].append(
+        f"{len(all_files)} total file(s) · "
+        f"{len(already_matched)} already matched · "
+        f"{len(unmatched)} to review with AI"
+    )
+    if not unmatched:
+        return _ai_review_finish_nothing_to_do(all_files, scan_jid, state, update_state)
+
+    lib_index = _ai_review_library_index(cancel, state, update_state)
+    new_dupes: List[Dict] = []
+    for batch_start in range(0, len(unmatched), _AI_REVIEW_BATCH):
+        _ai_review_batch(batch_start, unmatched, lib_index, api_key, new_dupes, cancel, state, update_state)
+    return _ai_review_finish(unmatched, new_dupes, scan_jid, state, update_state)
 
 
 @app.post("/api/dedup/cleanup")

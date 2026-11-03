@@ -1,9 +1,9 @@
 import unittest
 from pathlib import Path
 try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
-    from _app_ast_cache import app_family_source, app_unit_source  # noqa: E402
+    from _app_ast_cache import app_family_source, app_unit_source, dedup_scan_source  # noqa: E402
 except ImportError:  # pragma: no cover
-    from tests._app_ast_cache import app_family_source, app_unit_source  # noqa: E402
+    from tests._app_ast_cache import app_family_source, app_unit_source, dedup_scan_source  # noqa: E402
 
 
 class DedupAcoustidFingerprintTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
     def setUpClass(cls):
         root = Path(__file__).resolve().parents[1]
         cls.app_source = app_family_source()
-        cls.dedup_source = app_unit_source("start_dedup_scan")
+        cls.dedup_source = dedup_scan_source()
 
     def test_fingerprint_helpers_defined(self):
         self.assertIn("def _acoustid_fingerprint_ids(", self.app_source)
