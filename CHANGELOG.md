@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
-## Unreleased
+## v0.16.0 - 2026-11-03
 
 - Clean All's job body in `routes_maintenance.py` is split into named steps, pinned by golden traces recorded from the old code; no behavior change (#505).
 
@@ -36,6 +36,7 @@ The project uses Semantic Versioning.
 
 - **Deprecated variable names (still working).** `QBIT_URL`/`QB_URL`, `QBIT_USER`/`QB_USER`, `QBIT_PASS`/`QB_PASS`, `QBIT_CATEGORY`, `QBIT_FILTER`, `BEETS_WEB_TOKEN`, `DISCOGS_USER_TOKEN`, `ACOUSTID_KEY`, `PLEX_SECTION_KEY`, `BEETS_MUSIC_ROOT` and `YTDLP_COOKIES_BROWSER` keep working when the canonical name is blank, and now log a deprecation warning once (name only, never the value). Nothing needs changing today; `docs/CONFIGURATION.md` lists the canonical names.
 - **Outbound limits above a ceiling stop applying.** If `BEETS_OUTBOUND_TIMEOUT_SECONDS` (300), `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` (200 MiB), `BEETS_OUTBOUND_MAX_REDIRECTS` (20) or `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` (600) is above its ceiling, saved or in the Docker environment, the app now logs a warning and uses the default instead of your value. Lower the value to the ceiling or below to keep a non-default limit.
+- **AI keys go only to their own provider (#523).** An `OPENAI_API_KEY` used with a non-OpenAI `AI_BASE_URL` (as older first-run wizards saved it) still works and logs a one-time warning naming the variable to use instead. Move the key to that provider's own variable (`OPENROUTER_API_KEY` or `AI_API_KEY`) to silence it. See Fixed.
 - **Removed: the legacy single-file fallback UI and its serving fallback.** Root `index.html` (~366 KB of inline legacy UI, served only when the built frontend in `frontend/dist` was absent) is deleted, and `app.py` no longer tries anywhere else: the SPA comes from `frontend/dist` alone, which is also all the image ever shipped. While the build exists, `/`, deep-link refreshes, `/assets/…` and `/_next/static/…` behave exactly as before. **When the build is missing or empty, the UI routes now answer `503`** with a small inline `text/html` page ("The web frontend build is missing. Rebuild or reinstall the application." — no application chrome or external assets, `no-store`), and an unknown `/api/*` path that falls through to the SPA catch-all answers `503 {"ok": false, "error": "frontend_missing", "message": …}` (`application/json`) instead of a bare 404 — so a broken or absent frontend build is visible instead of silently serving an old UI. Real `/api/*` endpoints (liveness, health, setup, jobs, …) keep answering without the build; `/api/health`, `/health/live`, `/health/ready` and `/health` are unchanged, and with the build present unknown `/api/*` paths keep their ordinary 404. Tests: `tests/test_serving_frontend.py` (serving behavior with and without the build), and the surviving playlist-platform CodeQL coverage now tests the live `frontend/src/views/Playlists.tsx` (`tests/test_frontend_hostname_parsing.py`); the protections that existed only inside the deleted legacy file (folder-browse inline `onclick` containment, manual-MBID `href` validation) expire with it.
 
 ### Fixed
