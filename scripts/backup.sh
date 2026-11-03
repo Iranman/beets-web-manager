@@ -155,14 +155,22 @@ find "${BEETS_CONFIG_DIR}" -maxdepth 1 -name "*.json" -exec cp -p {} "${STAGE}/b
 # Job records are copied one by one instead: running jobs rewrite jobs/ every
 # few seconds, which makes tar fail ("file changed as we read it"). Web
 # Manager writes each record to a temp file and renames it over <id>.json, so
-# every <id>.json copied here is a complete record. A record pruned between
-# listing and copying is skipped; any other copy failure is fatal.
+# every <id>.json copied here is a complete record: cat reads the one file it
+# opened. (cp is not used: it refuses a file renamed over between its stat and
+# open.) A record pruned between listing and copying is skipped; any other
+# read failure is fatal.
 if [ -d "${WEB_MANAGER_DATA_DIR}/jobs" ]; then
   mkdir -p "${STAGE}/web-manager-data/jobs"
   for f in "${WEB_MANAGER_DATA_DIR}/jobs/"*.json; do
     [ -e "$f" ] || continue
-    cp -p "$f" "${STAGE}/web-manager-data/jobs/" 2>/dev/null || [ ! -e "$f" ] \
-      || fail "could not copy job record ${f}"
+    dst="${STAGE}/web-manager-data/jobs/${f##*/}"
+    if cat "$f" > "${dst}" 2>/dev/null; then
+      touch -r "$f" "${dst}" 2>/dev/null || :  # mtime only; the record may have been rewritten since
+    elif [ -e "$f" ]; then
+      fail "could not copy job record ${f}"
+    else
+      rm -f "${dst}"
+    fi
   done
 fi
 
