@@ -95,9 +95,18 @@ def _validate_import_source_audio(path_value: str, log: list, *, reject_download
     for row in report.get("accepted") or []:
         msg = row.get("message") or "Accepted: audio matches Music Format Preferences"
         log.append(f"  [audio] {msg}")
+    # Uninspected files are never moved, deleted or marked: keep them for a retry.
+    deferred = list(report.get("deferred") or [])
+    for row in deferred:
+        log.append(f"  [audio] {row.get('message')}: {Path(row.get('path') or '').name}")
     rejected = list(report.get("rejected") or [])
     handled_results: List[Dict[str, Any]] = []
     if not rejected:
+        if deferred:
+            raise RuntimeError(
+                f"Audio inspection did not complete for {len(deferred)} file(s) (ffprobe could not finish, "
+                "often because storage or the host was busy). Files were kept in place; retry the import later."
+            )
         return report
     for row in rejected:
         msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"

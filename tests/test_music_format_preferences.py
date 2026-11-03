@@ -108,7 +108,7 @@ class MusicFormatPreferencesTests(unittest.TestCase):
         self.assertEqual(result["format"], "mp3")
         self.assertEqual(result["layout"], "stereo")
         self.assertEqual(run.call_count, 2)
-        self.assertIn("-read_intervals", run.call_args_list[1].args[0])
+        self.assertIn("-probesize", run.call_args_list[1].args[0])
     def test_rejected_download_delete_or_quarantine(self):
         with tempfile.TemporaryDirectory() as tmp:
             doomed = Path(tmp) / "bad.flac"

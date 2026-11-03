@@ -8,6 +8,8 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
+- **An ffprobe timeout no longer counts as a rejected download.** When ffprobe could not finish (seen live on a busy host after a stack restart: both 20 s probes of a FLAC timed out), the import log said "Rejected download", and folder, MusicBrainz-ID and AI imports quarantined or deleted the file as if its audio had failed Music Format Preferences (library files were marked "Needs replacement"). Such files are now reported as "Audio inspection incomplete", left in place and unmarked, and the import stops asking for a retry; they are never imported unchecked. The fallback probe now bounds `-probesize`/`-analyzeduration` (the old `-read_intervals` did not limit probing). Damaged files that ffprobe can read are still rejected.
+
 - **The TrueNAS rollout script deploys single-container stacks (#487).** `scripts/deploy_truenas_web_manager.sh` refused the shipped embedded-Beets layout because it looked for a separate `beets` container. It now detects the layout from `docker compose config`. With no `beets` service, it finds the library through the `beets-web-manager` container's `/config` mount, reads the semantic snapshot (counts, item identity digest, `/api/health` `beets.ok`) through that container's own API, recreates only `beets-web-manager` (`--no-deps`) and restarts no separate Beets service. Image label checks, the `_backups/` backup, `--dry-run`, `--rollback` and the post-deploy checks are unchanged; two-container stacks behave as before. New reason codes: `beets_config_unmounted`, `embedded_beets_unhealthy`. `docs/TRUENAS_ROLLOUT.md` now documents the single-container flow first and drops the manual-deploy note.
 
 ## v0.16.0 - 2026-11-03

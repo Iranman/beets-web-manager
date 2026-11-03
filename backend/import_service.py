@@ -2308,24 +2308,8 @@ def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 12
 
 
 def _audio_validation_inspection_failed(row: Dict[str, Any]) -> bool:
-    props = row.get("properties") if isinstance(row.get("properties"), dict) else {}
-    text = " ".join(
-        _s(value) for value in (
-            row.get("message"),
-            " ".join(row.get("reasons") or []),
-            props.get("error"),
-        )
-    ).casefold()
-    return bool(
-        text
-        and not props.get("ok")
-        and (
-            "ffprobe failed" in text
-            or "ffprobe json failed" in text
-            or "timed out" in text
-            or "timeout" in text
-        )
-    )
+    """True when ffprobe could not run or finish (not a verdict on the audio)."""
+    return bool(not row.get("ok") and row.get("inspection_incomplete"))
 
 
 def _filter_import_review_selected_audio_files(audio_files: List[Path], log: list) -> List[Path]:
@@ -2348,7 +2332,7 @@ def _filter_import_review_selected_audio_files(audio_files: List[Path], log: lis
             continue
         msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"
         if _audio_validation_inspection_failed(row):
-            log.append(f"  [audio] Inspection deferred; source kept in review: {path.name} ({msg})")
+            log.append(f"  [audio] {msg}; source kept in review: {path.name}")
             deferred.append(path)
             continue
         log.append(f"  [audio] {msg}: {path.name}")
@@ -2362,8 +2346,9 @@ def _filter_import_review_selected_audio_files(audio_files: List[Path], log: lis
     if not accepted:
         if deferred and not rejected:
             raise RuntimeError(
-                "Audio inspection did not complete for selected files. "
-                "Files were kept for retry/review."
+                "Audio inspection did not complete for selected files (ffprobe could not finish, "
+                "often because storage or the host was busy). Files were kept for retry/review; "
+                "retry the import later."
             )
         raise RuntimeError(
             _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
