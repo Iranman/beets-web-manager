@@ -2814,7 +2814,7 @@
    ],
    [
     "log",
-    "  [import] Album repair complete (3 Beets track(s)), but 4 audio file(s) on disk are not in Beets (b.mp3, d.flac, a.flac...). Review in Album Track Cleanup."
+    "  [import] Album repair complete (3 Beets track(s)), but 4 audio file(s) on disk are not in Beets (a.flac, b.mp3, c.flac...). Review in Album Track Cleanup."
    ],
    [
     "call",
@@ -2830,7 +2830,7 @@
     [
      "<TMP>/downloads/Artist/Album (2001)",
      null,
-     "Album repair complete (3 Beets track(s)), but 4 audio file(s) on disk are not in Beets (b.mp3, d.flac, a.flac...). Review in Album Track Cleanup.",
+     "Album repair complete (3 Beets track(s)), but 4 audio file(s) on disk are not in Beets (a.flac, b.mp3, c.flac...). Review in Album Track Cleanup.",
      "<log>"
     ],
     {
@@ -11620,6 +11620,368 @@
    ]
   ]
  },
+ "reimport/library_partial_at_boundary": {
+  "http": [
+   {
+    "job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "label": "Tag+Import disk: Album (2001)",
+  "metadata": {
+   "aldir": "<TMP>/music/Artist/Album (2001)",
+   "existing_album_id": 5,
+   "mb_albumid": "11111111-1111-1111-1111-111111111111",
+   "missing_track_count": 0,
+   "skip_import_lock": true,
+   "type": "reimport-disk"
+  },
+  "result": null,
+  "trace": [
+   [
+    "call",
+    "cw.inspect_import_source",
+    [
+     "<TMP>/music/Artist/Album (2001)"
+    ],
+    {
+     "operation": "reimport"
+    }
+   ],
+   [
+    "log",
+    "[reimport] Running inside parent import slot…"
+   ],
+   [
+    "call",
+    "cw.get_album",
+    [
+     5
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_album_release_for_import",
+    [
+     "11111111-1111-1111-1111-111111111111",
+     "Artist",
+     "Album",
+     "",
+     0,
+     "<log>"
+    ],
+    {
+     "allow_oversized_partial": true,
+     "allow_provided_release_override": false,
+     "existing_album_id": 5,
+     "source_folder": "<TMP>/music/Artist/Album (2001)",
+     "wanted_tracks": []
+    }
+   ],
+   [
+    "call",
+    "_folder_release_preflight",
+    [
+     "<TMP>/music/Artist/Album (2001)",
+     "11111111-1111-1111-1111-111111111111"
+    ],
+    {
+     "existing_album_id": 5,
+     "log": "<log>"
+    }
+   ],
+   [
+    "log",
+    "  [preflight] Existing album_id 5: 80/100 track(s) match selected MusicBrainz release"
+   ],
+   [
+    "call",
+    "_source_audio_missing_track_scan",
+    [
+     "<TMP>/music/Artist/Album (2001)",
+     5,
+     "11111111-1111-1111-1111-111111111111",
+     "<log>"
+    ],
+    {}
+   ],
+   [
+    "log",
+    "  [import] Existing album source scan: 2 still-missing, 0 importable, 0 already-present, 0 unknown"
+   ],
+   [
+    "log",
+    "[import] Existing album is missing 2 MusicBrainz track(s), but no safe source file was found for the gap. Repairing the confidently matched existing tracks instead."
+   ],
+   [
+    "log",
+    "[1/3] Existing album is a high-confidence partial match; repairing matched tags in-place without re-importing."
+   ],
+   [
+    "call",
+    "_mb_release_track_count",
+    [
+     "11111111-1111-1111-1111-111111111111",
+     "<log>"
+    ],
+    {}
+   ],
+   [
+    "log",
+    "[2/3] Matching tracks in existing album..."
+   ],
+   [
+    "call",
+    "_match_tracks_from_mb",
+    [
+     "11111111-1111-1111-1111-111111111111",
+     5,
+     "<log>"
+    ],
+    {
+     "zero_unmatched": false
+    }
+   ],
+   [
+    "call",
+    "cw.plan_album_mb_track_repair",
+    [
+     {
+      "album_id": 5,
+      "allow_establish_release_group": true,
+      "mb_albumid": "11111111-1111-1111-1111-111111111111"
+     }
+    ],
+    {}
+   ],
+   [
+    "call",
+    "cw.apply_album_mb_track_repair",
+    [
+     "repair-1"
+    ],
+    {
+     "write_tags": true
+    }
+   ],
+   [
+    "log",
+    "[3/3] Writing tags and moving existing album..."
+   ],
+   [
+    "call",
+    "_strip_year_from_album_name",
+    [
+     5,
+     "<log>"
+    ],
+    {}
+   ],
+   [
+    "call",
+    "cw.update_album_metadata",
+    [
+     5,
+     {}
+    ],
+    {
+     "force_write_tags": true
+    }
+   ],
+   [
+    "call",
+    "cw.relocate_album",
+    [
+     5
+    ],
+    {
+     "mode": "rename"
+    }
+   ],
+   [
+    "call",
+    "_repair_album_mbid_sticking_once",
+    [
+     5,
+     "11111111-1111-1111-1111-111111111111",
+     "<log>"
+    ],
+    {
+     "cancel_event": "<cancel>",
+     "write_tags": true
+    }
+   ],
+   [
+    "call",
+    "_remove_pending_review_for_path",
+    [
+     "<TMP>/music/Artist/Album (2001)",
+     "<log>"
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_invalidate_lib_cache",
+    [],
+    {}
+   ],
+   [
+    "call",
+    "_trigger_plex_refresh",
+    [
+     "<log>"
+    ],
+    {}
+   ],
+   [
+    "log",
+    "✓ Done — existing album_id 5 repaired without re-import."
+   ],
+   [
+    "call",
+    "carrier.load_for_folder",
+    [
+     "<TMP>/music/Artist/Album (2001)"
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_queue_folder_for_manual_review",
+    [
+     "<TMP>/music/Artist/Album (2001)",
+     null,
+     "Repaired 8/10 track(s) in place. 2 track(s) still missing — no source files found. Download missing tracks to complete.",
+     "<log>"
+    ],
+    {
+     "allow_existing": true,
+     "carrier": null,
+     "evidence": null
+    }
+   ],
+   [
+    "call",
+    "_invalidate_lib_cache",
+    [],
+    {}
+   ]
+  ]
+ },
+ "reimport/library_partial_just_below_boundary": {
+  "http": [
+   {
+    "job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "label": "Tag+Import disk: Album (2001)",
+  "metadata": {
+   "aldir": "<TMP>/music/Artist/Album (2001)",
+   "existing_album_id": 5,
+   "mb_albumid": "11111111-1111-1111-1111-111111111111",
+   "missing_track_count": 0,
+   "skip_import_lock": true,
+   "type": "reimport-disk"
+  },
+  "result": {
+   "duplicate_count": 0,
+   "existing_album_id": 5,
+   "mb_albumid": "11111111-1111-1111-1111-111111111111",
+   "message": "Source contained no files that safely match the missing MusicBrainz tracks.",
+   "missing_count": 2,
+   "status": "no_useful_missing_tracks",
+   "unknown_count": 0
+  },
+  "trace": [
+   [
+    "call",
+    "cw.inspect_import_source",
+    [
+     "<TMP>/music/Artist/Album (2001)"
+    ],
+    {
+     "operation": "reimport"
+    }
+   ],
+   [
+    "log",
+    "[reimport] Running inside parent import slot…"
+   ],
+   [
+    "call",
+    "cw.get_album",
+    [
+     5
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_album_release_for_import",
+    [
+     "11111111-1111-1111-1111-111111111111",
+     "Artist",
+     "Album",
+     "",
+     0,
+     "<log>"
+    ],
+    {
+     "allow_oversized_partial": true,
+     "allow_provided_release_override": false,
+     "existing_album_id": 5,
+     "source_folder": "<TMP>/music/Artist/Album (2001)",
+     "wanted_tracks": []
+    }
+   ],
+   [
+    "call",
+    "_folder_release_preflight",
+    [
+     "<TMP>/music/Artist/Album (2001)",
+     "11111111-1111-1111-1111-111111111111"
+    ],
+    {
+     "existing_album_id": 5,
+     "log": "<log>"
+    }
+   ],
+   [
+    "log",
+    "  [preflight] Existing album_id 5: 79/100 track(s) match selected MusicBrainz release"
+   ],
+   [
+    "call",
+    "_source_audio_missing_track_scan",
+    [
+     "<TMP>/music/Artist/Album (2001)",
+     5,
+     "11111111-1111-1111-1111-111111111111",
+     "<log>"
+    ],
+    {}
+   ],
+   [
+    "log",
+    "  [import] Existing album source scan: 2 still-missing, 0 importable, 0 already-present, 0 unknown"
+   ],
+   [
+    "log",
+    "[import] No source files matched the still-missing MusicBrainz tracks. Existing album was left unchanged and still needs completion from another source."
+   ],
+   [
+    "call",
+    "_invalidate_lib_cache",
+    [],
+    {}
+   ]
+  ]
+ },
  "reimport/library_partial_repair": {
   "http": [
    {
@@ -13435,6 +13797,14 @@
    [
     "log",
     "[reimport] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -13487,6 +13857,10 @@
    [
     "log",
     "[reimport] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -13653,6 +14027,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -23488,6 +23866,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -23659,6 +24041,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -23737,6 +24123,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -23926,6 +24316,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -24004,6 +24398,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -24193,6 +24591,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -24271,6 +24673,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -24464,6 +24870,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -24542,6 +24952,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -24731,6 +25145,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -24809,6 +25227,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -24982,6 +25404,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -25063,6 +25489,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -25163,6 +25593,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -25244,6 +25678,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -25343,6 +25781,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -25421,6 +25863,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -25594,6 +26040,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -25675,6 +26125,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -25772,6 +26226,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -25855,6 +26313,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -25931,6 +26393,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -26014,6 +26480,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -26090,6 +26560,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -26171,6 +26645,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -26261,6 +26739,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -26339,6 +26821,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -26502,6 +26988,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -26580,6 +27070,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -26747,6 +27241,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -26830,6 +27328,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -26865,6 +27367,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -26943,6 +27449,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "call",
@@ -27139,6 +27649,10 @@
      "completed_at": "<time>",
      "status": "completed"
     }
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -27222,6 +27736,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "call",
     "_import_review_auto_update",
     [
@@ -27284,6 +27802,10 @@
     {
      "idempotency_key": "key-1"
     }
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -27367,6 +27889,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "call",
     "_import_review_auto_update",
     [
@@ -27445,6 +27971,10 @@
      "error": "n",
      "status": "format_policy_rejected"
     }
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -27523,6 +28053,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -27696,6 +28230,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -27779,6 +28317,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "call",
     "_is_music_format_policy_handled_error",
     [
@@ -27808,6 +28350,10 @@
     {
      "idempotency_key": "key-1"
     }
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -27889,6 +28435,14 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -27967,6 +28521,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -28140,6 +28698,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -28218,6 +28780,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -28391,6 +28957,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -28469,6 +29039,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -28623,6 +29197,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -28701,6 +29279,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -28866,6 +29448,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -28944,6 +29530,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -29109,6 +29699,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -29187,6 +29781,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -29360,6 +29958,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -29438,6 +30040,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -29576,6 +30182,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -29654,6 +30264,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -29762,7 +30376,7 @@
    ],
    [
     "log",
-    "  [cleanup] 6 unknown file(s) in source — not removing: b.nfo, d.y, f.q, a.txt, c.x"
+    "  [cleanup] 6 unknown file(s) in source — not removing: a.txt, b.nfo, c.x, d.y, e.z"
    ],
    [
     "call",
@@ -29808,6 +30422,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -29878,6 +30496,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -30059,6 +30681,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -30137,6 +30763,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -30310,6 +30940,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -30388,6 +31022,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -30569,6 +31207,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -30647,6 +31289,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -30801,6 +31447,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -30879,6 +31529,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -31033,6 +31687,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -31111,6 +31769,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -31249,6 +31911,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -31329,6 +31995,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -31399,6 +32069,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -31480,6 +32154,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -31608,6 +32286,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -31686,6 +32368,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -31882,6 +32568,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -31944,6 +32634,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -32066,6 +32760,214 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
+   ]
+  ]
+ },
+ "with_id/handoff_given_tracks_when_scan_has_none": {
+  "http": [
+   {
+    "job_id": "job-1",
+    "ok": true
+   },
+   200
+  ],
+  "label": "Import+Tag: Album (2001)",
+  "metadata": {
+   "auto_import": false,
+   "existing_album_id": 5,
+   "import_review_auto_idempotency_key": "",
+   "mb_albumid": "11111111-1111-1111-1111-111111111111",
+   "mb_releasegroupid": "22222222-2222-2222-2222-222222222222",
+   "missing_track_count": 2,
+   "partial_subset_import": false,
+   "path": "<TMP>/downloads/Artist/Album (2001)",
+   "review_item_id": "",
+   "selected_source_file_count": 0,
+   "selected_source_files": [],
+   "trigger_plex_refresh": false,
+   "type": "import-folder"
+  },
+  "result": null,
+  "trace": [
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": "dir",
+     "require_exists": false
+    }
+   ],
+   [
+    "call",
+    "_import_review_selected_source_files",
+    [
+     "<TMP>/downloads/Artist/Album (2001)",
+     [],
+     []
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_preserve_torrent_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {}
+   ],
+   [
+    "log",
+    "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
+    "log",
+    "[import] Import slot acquired — starting… selected_files=0"
+   ],
+   [
+    "held-enter",
+    "import-slot"
+   ],
+   [
+    "call",
+    "carrier.load_for_folder",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_source_audio_missing_track_scan",
+    [
+     "<TMP>/downloads/Artist/Album (2001)",
+     5,
+     "11111111-1111-1111-1111-111111111111",
+     "<log>"
+    ],
+    {}
+   ],
+   [
+    "log",
+    "  Existing album source scan: 1 still-missing, 0 already-present, 1 unknown"
+   ],
+   [
+    "call",
+    "_stage_selected_audio_files",
+    [
+     "<TMP>/downloads/Artist/Album (2001)",
+     [
+      "<TMP>/downloads/Artist/Album (2001)/02.flac"
+     ],
+     "Scan Artist",
+     "Scan Album",
+     "<log>"
+    ],
+    {
+     "force_stage": false,
+     "target_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      },
+      {
+       "disc": 1,
+       "mb_trackid": "rec-3",
+       "title": "Three",
+       "track": 3
+      }
+     ]
+    }
+   ],
+   [
+    "call",
+    "_recovery_rebind_restaged",
+    [
+     "<TMP>/downloads/Artist/Album (2001)",
+     "<TMP>/staged",
+     5,
+     "<log>"
+    ],
+    {}
+   ],
+   [
+    "log",
+    "[import] Existing album detected; importing 1 still-missing track(s) into album_id 5"
+   ],
+   [
+    "call",
+    "_start_reimport_disk_job_internal",
+    [
+     "<TMP>/staged",
+     "11111111-1111-1111-1111-111111111111"
+    ],
+    {
+     "albumartist": "Scan Artist",
+     "existing_album_id": 5,
+     "skip_import_lock": true,
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      },
+      {
+       "disc": 1,
+       "mb_trackid": "rec-3",
+       "title": "Three",
+       "track": 3
+      }
+     ]
+    }
+   ],
+   [
+    "log",
+    "[import] Missing-track import job child-1 started; waiting for completion…"
+   ],
+   [
+    "call",
+    "_wait_for_child_job",
+    [
+     "child-1",
+     "<log>",
+     "<cancel>"
+    ],
+    {
+     "prefix": "import",
+     "timeout": 1200
+    }
+   ],
+   [
+    "log",
+    "[import] Existing album merge complete."
+   ],
+   [
+    "call",
+    "_invalidate_lib_cache",
+    [],
+    {}
+   ],
+   [
+    "held-exit",
+    "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -32144,6 +33046,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -32282,6 +33188,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -32360,6 +33270,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -32498,6 +33412,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -32576,6 +33494,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -32714,6 +33636,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -32797,6 +33723,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -32870,6 +33800,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -32948,6 +33882,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -33097,6 +34035,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -33177,6 +34119,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -33247,6 +34193,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -33325,6 +34275,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -33466,6 +34420,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -33549,6 +34507,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=2"
    ],
@@ -33592,6 +34554,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -33670,6 +34636,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -33808,6 +34778,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -33886,6 +34860,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -34024,6 +35002,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -34125,6 +35107,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -34287,6 +35273,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -34365,6 +35355,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -34546,6 +35540,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -34629,6 +35627,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -34674,6 +35676,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -34752,6 +35758,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -34949,6 +35959,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -35032,6 +36046,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -35077,6 +36095,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -35160,6 +36182,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -35333,6 +36359,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -35419,6 +36449,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -35649,6 +36683,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -35765,6 +36803,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "call",
@@ -35967,6 +37009,10 @@
      "completed_at": "<time>",
      "status": "completed"
     }
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -36139,6 +37185,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -36204,6 +37254,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -36287,6 +37341,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -36352,6 +37410,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -36430,6 +37492,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -36609,6 +37675,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -36683,6 +37753,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -36864,6 +37938,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -36956,6 +38034,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -37147,6 +38229,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -37239,6 +38325,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -37430,6 +38520,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -37522,6 +38616,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -37713,6 +38811,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -37863,6 +38965,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -38055,6 +39161,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -38133,6 +39243,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -38329,6 +39443,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -38407,6 +39525,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -38580,6 +39702,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -38642,6 +39768,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -38823,6 +39953,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -38893,6 +40027,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -39074,6 +40212,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -39152,6 +40294,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -39274,6 +40420,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -39352,6 +40502,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -39525,6 +40679,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -39603,6 +40761,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -39776,6 +40938,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -39859,6 +41025,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -39897,6 +41067,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -39980,6 +41154,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -40018,6 +41196,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -40101,6 +41283,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -40120,6 +41306,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -40198,6 +41388,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -40371,6 +41565,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -40449,6 +41647,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -40642,6 +41844,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -40725,6 +41931,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -40771,6 +41981,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -40854,6 +42068,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -40884,6 +42102,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -40967,6 +42189,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=0"
    ],
@@ -41012,6 +42238,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -41090,6 +42320,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -41283,6 +42517,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -41364,6 +42602,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -41594,6 +42836,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -41680,6 +42926,10 @@
     "[import] Queued — waiting for import worker slot…"
    ],
    [
+    "held-enter",
+    "import-job-lock"
+   ],
+   [
     "log",
     "[import] Import slot acquired — starting… selected_files=2"
    ],
@@ -41715,6 +42965,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -41795,6 +43049,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -42019,6 +43277,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -42100,6 +43362,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "call",
@@ -42329,6 +43595,10 @@
      "completed_at": "<time>",
      "status": "completed"
     }
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -42410,6 +43680,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -42604,6 +43878,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -42685,6 +43963,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -42907,6 +44189,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -42988,6 +44274,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -43230,6 +44520,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  },
@@ -43308,6 +44602,10 @@
    [
     "log",
     "[import] Queued — waiting for import worker slot…"
+   ],
+   [
+    "held-enter",
+    "import-job-lock"
    ],
    [
     "log",
@@ -43485,6 +44783,10 @@
    [
     "held-exit",
     "import-slot"
+   ],
+   [
+    "held-exit",
+    "import-job-lock"
    ]
   ]
  }

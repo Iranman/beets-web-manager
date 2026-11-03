@@ -718,8 +718,8 @@
       "#505 M4: moved verbatim out of the import job. The only pattern hit is the literal \"confidence\": \"low\" in a Review suggestion; it decides nothing."
     ],
     "backend/import_service.py::_reimport_preflight_failed": [
-      "DISPLAY_ONLY",
-      "#505 M4: moved verbatim out of the import job. The only pattern hit is the literal \"confidence\": \"low\" in a Review suggestion; it decides nothing."
+      "COMPATIBILITY_WRAPPER",
+      "Gates a manual override into mutation: after a failed canonical preflight, only an explicit manual_mbid_override proceeds to in-place repair or import; anything else goes to Review and fails the job. It adds no threshold, and its pattern hit is the literal \"confidence\": \"low\" in the Review suggestion. (#505 M4: moved verbatim out of start_reimport_disk into this step.)"
     ],
     "backend/import_service.py::_reimport_refuse_failed_import": [
       "DISPLAY_ONLY",

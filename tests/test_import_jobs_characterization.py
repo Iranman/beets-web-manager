@@ -36,6 +36,11 @@ FULL = {"ok": True, "matches": 3, "expected": 3}
 BAD = {"ok": False, "matches": 1, "expected": 3}
 
 
+def _sorted_listing(original):
+    """The filesystem picks the listing order, and the jobs log names in that order."""
+    return lambda self, *args, **kwargs: iter(sorted(original(self, *args, **kwargs)))
+
+
 class Seq(list):
     """Successive return values of a spy; the last one repeats."""
 
@@ -208,6 +213,9 @@ class World:
                    for name, default in cw_defaults.items()]
         patches += [mock.patch.object(isvc, name, self.spy(name, default)) for name, default in svc_defaults.items()]
         patches += [
+            mock.patch.object(Path, "iterdir", _sorted_listing(Path.iterdir)),
+            mock.patch.object(Path, "rglob", _sorted_listing(Path.rglob)),
+            mock.patch.object(isvc, "_IMPORT_JOB_LOCK", self.held("import-job-lock")),
             mock.patch.object(isvc, "MUSIC_ROOT", self.music_root),
             mock.patch.object(isvc.jobs, "start_python", self.start_python),
             mock.patch.object(isvc.job_contract, "held", self.held),
@@ -428,6 +436,12 @@ REIMPORT_SCENARIOS = {
     "library_partial_repair_unknown": dict(source="music", payload=_existing(), overrides={
         "_folder_release_preflight": {"ok": True, "matches": 8, "expected": 10},
         "_source_audio_missing_track_scan": _SCAN_GAP_UNKNOWN}),
+    "library_partial_at_boundary": dict(source="music", payload=_existing(), overrides={
+        "_folder_release_preflight": {"ok": True, "matches": 80, "expected": 100},
+        "_source_audio_missing_track_scan": _SCAN_GAP}),
+    "library_partial_just_below_boundary": dict(source="music", payload=_existing(), overrides={
+        "_folder_release_preflight": {"ok": True, "matches": 79, "expected": 100},
+        "_source_audio_missing_track_scan": _SCAN_GAP}),
     "library_partial_repair_too_few": dict(source="music", payload=_existing(), overrides={
         "_folder_release_preflight": {"ok": True, "matches": 8, "expected": 10}, "_match_tracks_from_mb": 7,
         "_mb_release_track_count": 10, "_source_audio_missing_track_scan": _SCAN_GAP}),
@@ -575,6 +589,9 @@ WITH_ID_SCENARIOS = {
         "_wait_for_child_job": RuntimeError("child failed")}),
     "handoff_download_useful_unknown": dict(payload=_with_id(existing_album_id=5, wanted_tracks=WANTED), overrides={
         "carrier.load_for_folder": _CARRIER, "_source_audio_missing_track_scan": _SCAN_USEFUL}),
+    "handoff_given_tracks_when_scan_has_none": dict(payload=_with_id(existing_album_id=5, wanted_tracks=WANTED2), overrides={
+        "carrier.load_for_folder": dict(_CARRIER, wanted_tracks=WANTED2),
+        "_source_audio_missing_track_scan": dict(_SCAN_USEFUL, wanted_tracks=[])}),
     "handoff_missing_not_in_source": dict(source="music", overrides={
         **_HANDOFF_PRE, "_source_audio_missing_track_scan": {"ok": True, "useful_files": [], "unknown_files": [],
                                                              "audio_count": 3, "missing_count": 2}}),
@@ -692,6 +709,15 @@ class ImportJobGoldenTests(unittest.TestCase):
     def test_every_golden_entry_has_a_scenario(self):
         names = {f"reimport/{n}" for n in REIMPORT_SCENARIOS} | {f"with_id/{n}" for n in WITH_ID_SCENARIOS}
         self.assertEqual(set(self.golden), names)
+
+    def test_both_jobs_hold_the_process_lock_around_the_durable_slot(self):
+        order = [["held-enter", "import-job-lock"], ["held-enter", "import-slot"],
+                 ["held-exit", "import-slot"], ["held-exit", "import-job-lock"]]
+        for key in ("reimport/lock_default_path", "with_id/fresh_copy"):
+            with self.subTest(key=key):
+                held = [e for e in self.golden[key]["trace"] if e[0] in ("held-enter", "held-exit")]
+                self.assertEqual(held, order)
+        self.assertIsInstance(isvc._IMPORT_JOB_LOCK, type(threading.Lock()))
 
 
 class StepsRunAloneTests(unittest.TestCase):

@@ -3350,10 +3350,10 @@ def _folder_import_handoff_useful_files(ctx: _FolderImportContext, mb_albumid: s
 
 def _folder_import_handoff(ctx: _FolderImportContext, mb_albumid: str, selected_releasegroupid: str,
                            candidate_album_ids: List[int]) -> bool:
+    """Handle Beets album-duplicate skips as an existing-album missing-track import."""
     log, folder_path = ctx.log, ctx.folder_path
     existing_album_id, source_is_library = ctx.existing_album_id, ctx.source_is_library
     selected_subset_import = ctx.selected_subset_import
-    """Handle Beets album-duplicate skips as an existing-album missing-track import."""
     target_album_id = existing_album_id or (int(candidate_album_ids[0]) if candidate_album_ids else 0)
     if not target_album_id:
         return False
