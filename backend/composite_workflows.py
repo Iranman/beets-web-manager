@@ -3942,10 +3942,13 @@ def plan_item_metadata(
             "write_tags": write_tags,
             **kwargs,
         }
+    payload = dict(payload)
+    initiating_user = _s(payload.pop("initiating_user", "")) or None  # None: the store names the actor
     iid = payload.get("item_id")
     tx = st.create(
         operation_type="Metadata Update",
         status="Preview",
+        initiating_user=initiating_user,
         summary=f"Metadata update for item {iid}",
         metadata={**payload, "mutation_family": ITEM_METADATA_FAMILY},
     )

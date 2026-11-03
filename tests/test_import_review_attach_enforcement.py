@@ -96,7 +96,9 @@ ARBITRARY_UUID = "55555555-5555-5555-5555-555555555555"
 
 def _fake_item(**overrides):
     base = dict(
-        title="Test Title", artist="Test Artist", album="", albumartist="",
+        # An album track by default (the album repair path); singletons
+        # pass album_id=0 (the item metadata path).
+        album_id=1, title="Test Title", artist="Test Artist", album="", albumartist="",
         year="", genre="", track=0, label="",
         mb_trackid="", mb_albumid="", mb_releasegroupid="",
         path="/music/test.mp3", length=200.0,
