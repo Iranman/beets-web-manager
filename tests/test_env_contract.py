@@ -151,7 +151,6 @@ class SettingMetadataDefaultTests(unittest.TestCase):
         "BEETS_OUTBOUND_MAX_REDIRECTS": "backend/security.py",
         "BEETS_OUTBOUND_MAX_RESPONSE_BYTES": "backend/security.py",
         "BEETS_OUTBOUND_ALLOWLIST": "backend/security.py",
-        "AI_BASE_URL": "backend/matching_service.py",
         "BEETS_CONFIG": "backend/config_layers.py",
         "MUSIC_FORMAT_QUARANTINE_DIR": "backend/audio_preferences.py",
         "SPOTIFY_CLIENT_ID": "backend/playlist_service.py",
@@ -176,6 +175,7 @@ class SettingMetadataDefaultTests(unittest.TestCase):
         "BEETS_WEB_USERNAME": "auth_service returns the literal admin in a later statement, not in the read",
         "BEETS_WEB_AUTH_DISABLED": "the reader's blank means the same as 0: auth stays on",
         "AI_MODEL": "matching_service takes the fallback from each call site; the row matches the setup probe",
+        "AI_BASE_URL": "_BUILTIN_SETTINGS: matching_service._ai_provider picks OpenAI or OpenRouter by the key set (#523)",
     }
     _READ_CALLS = {"get", "getenv", "legacy_env_value", "container_path", "_env_limit"}
 

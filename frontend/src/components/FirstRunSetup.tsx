@@ -28,6 +28,21 @@ function BeetsLogo() {
   );
 }
 
+// The backend only sends a key to the provider it belongs to (#523), so save
+// it under that provider's variable.
+function aiKeyVariable(baseUrl: string): string {
+  let host = '';
+  try {
+    host = new URL(baseUrl || 'https://api.openai.com/v1').hostname.toLowerCase();
+  } catch {
+    // not a URL: a custom endpoint
+  }
+  const on = (domain: string) => host === domain || host.endsWith(`.${domain}`);
+  if (on('api.openai.com')) return 'OPENAI_API_KEY';
+  if (on('openrouter.ai')) return 'OPENROUTER_API_KEY';
+  return 'AI_API_KEY';
+}
+
 export default function FirstRunSetup() {
   const [currentStep, setCurrentStep] = useState<number>(1);
   const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(null);
@@ -220,7 +235,7 @@ export default function FirstRunSetup() {
       const envUpdates: Record<string, string> = {};
       if (acoustidKey && !acoustidSkipped) envUpdates['ACOUSTID_API_KEY'] = acoustidKey;
       if (aiApiKey && !aiSkipped) {
-        envUpdates['OPENAI_API_KEY'] = aiApiKey;
+        envUpdates[aiKeyVariable(aiBaseUrl)] = aiApiKey;
         if (aiBaseUrl) envUpdates['AI_BASE_URL'] = aiBaseUrl;
         if (aiModel) envUpdates['AI_MODEL'] = aiModel;
       }

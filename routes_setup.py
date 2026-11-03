@@ -952,6 +952,12 @@ def _builtin_setting_fallback(name: str, persisted: Dict[str, str]) -> Tuple[str
                 pass
         if runtime:
             return runtime, "runtime"
+    if name == "AI_BASE_URL":
+        # An OpenRouter-only setup calls OpenRouter, not this default (#523).
+        from backend.matching_service import _ai_provider
+        runtime = _ai_provider()[0]
+        if runtime != _BUILTIN_SETTINGS[name][0]:
+            return runtime, "runtime"
     return _BUILTIN_SETTINGS[name][0], "default"
 
 
@@ -2594,23 +2600,17 @@ def _build_setup_status_payload() -> Dict[str, Any]:
     fpcalc_path = str(diagnostics.get("fpcalc_path") or "") if fpcalc_available else ""
     ffmpeg_path = diagnostics.get("ffmpeg_path") if diagnostics.get("ffmpeg_available") else ""
 
+    from backend.matching_service import _ai_api_key
+    ai_configured = bool(_ai_api_key())  # a key that belongs to AI_BASE_URL (#523)
     integrations = {
         "ai": _integration_status(
-            configured=bool(
-                os.environ.get("OPENAI_API_KEY")
-                or os.environ.get("OPENROUTER_API_KEY")
-                or os.environ.get("AI_API_KEY")
-            ),
-            state="configured" if (
-                os.environ.get("OPENAI_API_KEY")
-                or os.environ.get("OPENROUTER_API_KEY")
-                or os.environ.get("AI_API_KEY")
-            ) else "not_configured",
-            note="Optional - not configured." if not (
-                os.environ.get("OPENAI_API_KEY")
-                or os.environ.get("OPENROUTER_API_KEY")
-                or os.environ.get("AI_API_KEY")
-            ) else "Optional provider configured.",
+            configured=ai_configured,
+            state="configured" if ai_configured else "not_configured",
+            note="Optional provider configured." if ai_configured else (
+                "Optional - not configured." if not any(
+                    os.environ.get(name, "").strip()
+                    for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_API_KEY"))
+                else "No AI key set belongs to AI_BASE_URL; set the key for that provider."),
         ),
         "musicbrainz": _musicbrainz_integration_status(diagnostics),
         "acoustid": _acoustid_integration_status(diagnostics, fpcalc_available),
@@ -3104,7 +3104,8 @@ def setup_test_ai():
 
     payload = request.get_json(silent=True) or {}
     from backend.auth_service import probe_may_use_stored_secret
-    configured_base_url = os.environ.get("AI_BASE_URL") or "https://api.openai.com/v1"
+    from backend.matching_service import _ai_provider
+    configured_base_url, stored_key = _ai_provider()
     supplied_base_url = str(payload.get("base_url") or "").strip()
     base_url = supplied_base_url or configured_base_url
     model = payload.get("model") or os.environ.get("AI_MODEL") or "gpt-4o-mini"
@@ -3112,8 +3113,9 @@ def setup_test_ai():
     if not api_key and probe_may_use_stored_secret(supplied_base_url, configured_base_url):
         # SEC-1: a stored key is only ever sent to the operator-configured
         # endpoint, and only for an authenticated caller -- never to a
-        # caller-supplied base_url, never during anonymous first-run setup.
-        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY") or ""
+        # caller-supplied base_url, never during anonymous first-run setup,
+        # and only the key that belongs to that endpoint (#523).
+        api_key = stored_key
     if not api_key:
         return jsonify({"ok": False, "status": "not_configured",
                          "error": "No AI API key to test. Enter the API key for this base URL, or set OPENAI_API_KEY (or your provider's key) and retry."}), 200
