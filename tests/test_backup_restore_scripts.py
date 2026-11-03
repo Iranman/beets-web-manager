@@ -157,19 +157,24 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
         for jid in ids:
             Path(jobs, f"{jid}.json").write_text(json.dumps({"id": jid, "n": 0, "pad": "x" * 4096}), encoding="utf-8")
         stop = threading.Event()
+        passes, errors = [0], []
 
         def churn():
-            n = 0
-            while not stop.is_set():
-                n += 1
-                for jid in ids:
-                    tmp = os.path.join(jobs, f".{jid}.1.tmp")
-                    Path(tmp).write_text(json.dumps({"id": jid, "n": n, "pad": "x" * 4096}), encoding="utf-8")
-                    os.replace(tmp, os.path.join(jobs, f"{jid}.json"))
+            try:
+                while not stop.is_set():
+                    for jid in ids:
+                        tmp = os.path.join(jobs, f".{jid}.1.tmp")
+                        Path(tmp).write_text(json.dumps({"id": jid, "n": passes[0], "pad": "x" * 4096}), encoding="utf-8")
+                        os.replace(tmp, os.path.join(jobs, f"{jid}.json"))
+                    passes[0] += 1
+            except BaseException as exc:  # surfaced in the main thread below
+                errors.append(exc)
 
         writer = threading.Thread(target=churn, daemon=True)
         writer.start()
         try:
+            while not passes[0] and not errors:  # the churn is running before the first backup
+                stop.wait(0.01)
             for _ in range(3):
                 archive = self.backup("python")
                 with tarfile.open(archive) as tf:
@@ -181,6 +186,23 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
         finally:
             stop.set()
             writer.join()
+        if errors:
+            raise errors[0]
+        self.assertGreater(passes[0], 1, "the writer must have rewritten the records during the backups")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root can read any folder")
+    def test_unreadable_jobs_folder_fails_the_backup(self):
+        jobs = os.path.join(self.wm, "jobs")
+        for mode in (0o300, 0o000):
+            os.chmod(jobs, mode)
+            try:
+                res = self.run_script(BACKUP, "--beets-config", self.beets, "--web-manager-data", self.wm,
+                                      "--out", self.out, method="python", check=False)
+            finally:
+                os.chmod(jobs, 0o700)
+            self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn("jobs", res.stderr)
+            self.assertFalse(any(n.endswith(".tar.gz") for n in os.listdir(self.out)), "no archive on failure")
 
     def test_without_sqlite_tools_refuses_while_beets_may_be_running(self):
         res = self.run_script(BACKUP, "--beets-config", self.beets, "--web-manager-data", self.wm,

@@ -158,20 +158,24 @@ find "${BEETS_CONFIG_DIR}" -maxdepth 1 -name "*.json" -exec cp -p {} "${STAGE}/b
 # every <id>.json copied here is a complete record: cat reads the one file it
 # opened. (cp is not used: it refuses a file renamed over between its stat and
 # open.) A record pruned between listing and copying is skipped; any other
-# read failure is fatal.
-if [ -d "${WEB_MANAGER_DATA_DIR}/jobs" ]; then
+# read failure is fatal. Only the top-level <id>.json records are copied.
+JOBS_DIR="${WEB_MANAGER_DATA_DIR}/jobs"
+if [ -d "${JOBS_DIR}" ]; then
+  # An unreadable folder would otherwise look empty to the glob below.
+  { [ -r "${JOBS_DIR}" ] && [ -x "${JOBS_DIR}" ]; } || fail "cannot read the job records folder ${JOBS_DIR}"
   mkdir -p "${STAGE}/web-manager-data/jobs"
-  for f in "${WEB_MANAGER_DATA_DIR}/jobs/"*.json; do
-    [ -e "$f" ] || continue
+  shopt -s nullglob
+  for f in "${JOBS_DIR}/"*.json; do
     dst="${STAGE}/web-manager-data/jobs/${f##*/}"
-    if cat "$f" > "${dst}" 2>/dev/null; then
+    if err="$(cat "$f" 2>&1 > "${dst}")"; then
       touch -r "$f" "${dst}" 2>/dev/null || :  # mtime only; the record may have been rewritten since
     elif [ -e "$f" ]; then
-      fail "could not copy job record ${f}"
+      fail "could not copy job record ${f}: ${err}"
     else
-      rm -f "${dst}"
+      rm -f "${dst}"  # pruned after listing
     fi
   done
+  shopt -u nullglob
 fi
 
 {
