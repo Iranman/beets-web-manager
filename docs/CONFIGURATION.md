@@ -159,7 +159,7 @@ Files in `/web-manager-data` that can hold secrets are created at mode 0600: `.e
 
 | Variable | Purpose |
 |---|---|
-| `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL` | Optional AI-assisted candidate ranking. Matching still uses MusicBrainz and AcoustID evidence without AI. |
+| `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL` | Optional AI-assisted candidate ranking. Matching still uses MusicBrainz and AcoustID evidence without AI. A key is only sent to its own provider. With `AI_BASE_URL` blank, `OPENAI_API_KEY` goes to OpenAI, else `OPENROUTER_API_KEY` to `https://openrouter.ai/api/v1`, else `AI_API_KEY` to OpenAI. With `AI_BASE_URL` on `api.openai.com`, `OPENAI_API_KEY` or `AI_API_KEY` is used; on `openrouter.ai`, `OPENROUTER_API_KEY` or `AI_API_KEY`; on any other host, `AI_API_KEY`. Legacy: a non-OpenAI `AI_BASE_URL` with only `OPENAI_API_KEY` set still uses it, and the log warns once which variable to move the key to. |
 | `ACOUSTID_API_KEY`, `ACOUSTID_KEY` | Your AcoustID **application** key (register one at https://acoustid.org/new-application); `ACOUSTID_KEY` is a legacy alias read only when `ACOUSTID_API_KEY` is empty. Required for fingerprint lookups: there is no built-in fallback key. Without it, lookups report `not_configured` (fingerprint evidence unavailable, never "no match", never cached) and the setup status says "AcoustID not configured". Fingerprinting also requires Chroma/fpcalc in the Beets engine. |
 | `ACOUSTID_USER_KEY` | Your AcoustID **user** key, used for fingerprint submissions. Submissions fall back to the application key when it is empty. |
 | `DISCOGS_TOKEN` | Optional Discogs metadata. |

@@ -228,7 +228,7 @@ def _valid_ai_reply(reply: Any) -> Dict[str, Any]:
 
 def _ask_ai(prompt: str, api_key: str) -> Dict[str, Any]:
     """The AI's validated reply. Raises on any provider or parse failure, or a reply of the wrong shape."""
-    model, endpoint = _ai_model_and_endpoint("gpt-4o")
+    model, endpoint = _ai_model_and_endpoint("gpt-4o", api_key)
     req = urllib.request.Request(
         endpoint,
         data=json.dumps({

@@ -1,4 +1,5 @@
 import { errorMessage } from '../lib/errors';
+import { DEFAULT_AI_BASE_URL, aiSetupEnv, effectiveAiBaseUrl } from '../lib/aiSetup';
 import { useEffect, useState } from 'react';
 import {
   completeSetup,
@@ -57,7 +58,7 @@ export default function FirstRunSetup() {
 
   // AI state
   const [aiApiKey, setAiApiKey] = useState('');
-  const [aiBaseUrl, setAiBaseUrl] = useState('https://api.openai.com/v1');
+  const [aiBaseUrl, setAiBaseUrl] = useState(DEFAULT_AI_BASE_URL);
   const [aiModel, setAiModel] = useState('gpt-4o-mini');
   const [aiStatus, setAiStatus] = useState<{ testing: boolean; ok?: boolean; message?: string; error?: string }>({ testing: false });
   const [aiSkipped, setAiSkipped] = useState(false);
@@ -142,7 +143,7 @@ export default function FirstRunSetup() {
   const handleTestAi = async () => {
     setAiStatus({ testing: true });
     try {
-      const res = await testSetupAi({ api_key: aiApiKey, base_url: aiBaseUrl, model: aiModel });
+      const res = await testSetupAi({ api_key: aiApiKey, base_url: effectiveAiBaseUrl(aiBaseUrl), model: aiModel });
       if (res.ok) {
         setAiStatus({ testing: false, ok: true, message: `Connected to AI Provider (${aiModel}).` });
       } else {
@@ -219,11 +220,7 @@ export default function FirstRunSetup() {
       // 2. Save configured environment variables
       const envUpdates: Record<string, string> = {};
       if (acoustidKey && !acoustidSkipped) envUpdates['ACOUSTID_API_KEY'] = acoustidKey;
-      if (aiApiKey && !aiSkipped) {
-        envUpdates['OPENAI_API_KEY'] = aiApiKey;
-        if (aiBaseUrl) envUpdates['AI_BASE_URL'] = aiBaseUrl;
-        if (aiModel) envUpdates['AI_MODEL'] = aiModel;
-      }
+      if (aiApiKey && !aiSkipped) Object.assign(envUpdates, aiSetupEnv(aiApiKey, aiBaseUrl, aiModel));
       if (plexUrl && plexToken && !plexSkipped) {
         envUpdates['PLEX_URL'] = plexUrl;
         envUpdates['PLEX_TOKEN'] = plexToken;

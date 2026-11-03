@@ -8,6 +8,7 @@ from __future__ import annotations
 import backend.provider_boundary as provider_boundary
 import copy, difflib, json, math, os, re, threading, time
 import urllib.error
+import urllib.parse
 from backend.matching import AcoustIDStatus, album_track_score as _canonical_album_track_score, best_album_track_match as _canonical_best_album_track_match, normalize_artist as _canonical_normalize_artist, similarity as _canonical_similarity, track_feature_variants as _canonical_track_feature_variants, track_parenthetical_alias_variants as _canonical_track_parenthetical_alias_variants
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -1500,23 +1501,68 @@ def _fast_album_mb_health_fields(tracks: List[Dict[str, Any]],
     }
 
 
+_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _ai_provider() -> Tuple[str, str]:
+    """(base URL, API key) for outbound AI requests. A key is only paired
+    with a URL it belongs to (#523):
+
+    - AI_BASE_URL unset: OPENAI_API_KEY -> OpenAI, else OPENROUTER_API_KEY ->
+      OpenRouter, else AI_API_KEY -> OpenAI (the documented default URL).
+    - AI_BASE_URL on api.openai.com: OPENAI_API_KEY, else AI_API_KEY.
+    - AI_BASE_URL on openrouter.ai: OPENROUTER_API_KEY, else AI_API_KEY.
+    - any other AI_BASE_URL: AI_API_KEY.
+    OPENROUTER_API_KEY never goes anywhere but openrouter.ai. The first-run
+    wizard used to save every provider's key as OPENAI_API_KEY next to the
+    AI_BASE_URL the operator typed, so on a non-OpenAI URL with none of its
+    own keys set OPENAI_API_KEY is still used, with a one-time warning.
+    """
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    generic_key = os.environ.get("AI_API_KEY", "").strip()
+    base_url = os.environ.get("AI_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        if openai_key:
+            return _OPENAI_BASE_URL, openai_key
+        if openrouter_key:
+            return _OPENROUTER_BASE_URL, openrouter_key
+        return _OPENAI_BASE_URL, generic_key
+    try:
+        host = "." + (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    except ValueError:
+        # Unparseable (e.g. NFKC-invalid netloc). Never send a key there, and
+        # never surface the error: its text quotes the netloc, password included.
+        return base_url, ""
+    if host.endswith(".api.openai.com"):
+        return base_url, openai_key or generic_key
+    own_name = "OPENROUTER_API_KEY" if host.endswith(".openrouter.ai") else "AI_API_KEY"
+    own_key = (openrouter_key or generic_key) if own_name == "OPENROUTER_API_KEY" else generic_key
+    if own_key or not openai_key:
+        return base_url, own_key
+    from backend.config_layers import _warn_once
+    _warn_once("OPENAI_API_KEY is used for a non-OpenAI AI_BASE_URL; set %s instead.", own_name)
+    return base_url, openai_key
+
+
+class _AiKey(str):
+    """An AI API key plus the base URL it was resolved for. Callers read the
+    key once and the endpoint later; carrying the URL with the key means an
+    AI_BASE_URL saved in between can't receive the old key (#523 F3)."""
+    base_url = ""
+
+
 def _ai_api_key() -> str:
-    """Resolve the outbound AI request API key from the same three
-    variables the setup wizard's own `/api/setup/status` integrations
-    readiness check (OPENAI_API_KEY or OPENROUTER_API_KEY or AI_API_KEY)
-    already treats as equivalent "AI is configured" signals -- every real
-    AI call site previously checked OPENAI_API_KEY only, so a user who set
-    just OPENROUTER_API_KEY/AI_API_KEY saw "AI configured" during setup but
-    every actual AI request silently failed. OPENAI_API_KEY still takes
-    priority when more than one is set."""
-    return (
-        os.environ.get("OPENAI_API_KEY", "").strip()
-        or os.environ.get("OPENROUTER_API_KEY", "").strip()
-        or os.environ.get("AI_API_KEY", "").strip()
-    )
+    """The API key for outbound AI requests; see _ai_provider(). Pass it to
+    _ai_model_and_endpoint() so the request goes to the URL it belongs to."""
+    base_url, key = _ai_provider()
+    bound = _AiKey(key)
+    bound.base_url = base_url
+    return bound
 
 
-def _ai_model_and_endpoint(default_model: str) -> Tuple[str, str]:
+def _ai_model_and_endpoint(default_model: str, api_key: Optional[str]) -> Tuple[str, str]:
     """Resolve (model, chat-completions URL) for an outbound AI request from
     the same AI_MODEL/AI_BASE_URL environment variables the System page's
     "AI & LLM Services" section displays as live, effective settings.
@@ -1525,16 +1571,16 @@ def _ai_model_and_endpoint(default_model: str) -> Tuple[str, str]:
     and "https://api.openai.com/v1/chat/completions" URL -- the System page
     could show AI_MODEL=some-other-model / AI_BASE_URL=https://openrouter.ai/...
     as "configured" while every real AI request silently ignored both and
-    always talked to OpenAI's gpt-4o/gpt-4o-mini. This closes that gap
-    without touching API-key resolution/gating (still OPENAI_API_KEY only,
-    exactly as before) or any prompt/schema/error-handling logic.
+    always talked to OpenAI's gpt-4o/gpt-4o-mini. The URL is the one
+    `api_key` (from _ai_api_key()) was resolved for; without a bound key it
+    is resolved now.
 
     `default_model` preserves each call site's own historical choice
     (gpt-4o for higher-stakes album/folder matching, gpt-4o-mini for
     cheaper lookups like genre) when AI_MODEL is not set.
     """
     model = os.environ.get("AI_MODEL", "").strip() or default_model
-    base_url = (os.environ.get("AI_BASE_URL", "").strip() or "https://api.openai.com/v1").rstrip("/")
+    base_url = getattr(api_key, "base_url", "") or _ai_provider()[0]
     return model, f"{base_url}/chat/completions"
 
 
@@ -2106,7 +2152,7 @@ def _ai_review_album_track_candidates(album_info: Dict[str, Any],
         "required": ["decisions"],
         "additionalProperties": False,
     }
-    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini", api_key)
     req_body = json.dumps({
         "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],

@@ -405,7 +405,7 @@ def _ai_review_batch(batch_start: int, unmatched: List[Path], lib_index: List[Di
 
     file_meta = _ai_review_file_meta(batch)
     prompt = _ai_review_prompt(file_meta, _ai_review_relevant_tracks(file_meta, lib_index))
-    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini", api_key)
     req_body = _ai_review_request_body(prompt, _ai_model)
 
     try:

@@ -77,7 +77,8 @@ class SettingItem(unittest.TestCase):
             os.environ.pop("OPENAI_API_KEY", None)
             os.environ.pop("AI_BASE_URL", None)
             item = self._item("AI_BASE_URL")
-        self.assertEqual(item["value"], "https://api.openai.com/v1")
+        # #523: an OpenRouter-only setup calls OpenRouter, and the row says so.
+        self.assertEqual(item["value"], "https://openrouter.ai/api/v1")
         self.assertEqual(item["default"], "https://api.openai.com/v1")
 
 
