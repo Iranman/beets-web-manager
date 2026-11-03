@@ -6,6 +6,8 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+- Clean All's job body in `routes_maintenance.py` is split into named steps, pinned by golden traces recorded from the old code; no behavior change (#505).
+
 ### Fixed
 
 - **Clean All no longer stalls for up to 600 seconds on artist folders that need an MBID stamp.** The apply call passed `acceptance_failpoint` and `timeout`, arguments left over from the removed HTTP engine, so every call raised `TypeError`. That error was logged as a lost response and a never-applied transaction was polled until the deadline. The call now matches the function, and an unexpected error fails at once as an internal error.

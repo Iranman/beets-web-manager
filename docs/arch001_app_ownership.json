@@ -349,12 +349,14 @@
     "_acq_locally_satisfies_wanted",
     "_acq_needs_acquisition",
     "_build_acquisition_queue_payload",
+    "_clean_all_library_health",
+    "_clean_all_missing_files",
+    "_clean_all_run_steps",
     "_maintenance_clean_all_counts",
     "_maintenance_final_verification",
-    "_maintenance_remove_missing_file_rows",
-    "start_maintenance_runner"
+    "_maintenance_remove_missing_file_rows"
    ],
-   "caller_count": 10,
+   "caller_count": 12,
    "dependencies": []
   },
   {
@@ -525,7 +527,7 @@
     "_ai_batch_find_audio_dirs",
     "_ai_batch_find_state"
    ],
-   "caller_count": 677,
+   "caller_count": 682,
    "dependencies": []
   },
   {
@@ -2950,14 +2952,15 @@
    "desired_owner": "backend/job_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_clean_all_artwork",
+    "_clean_all_genres",
     "_maintenance_full_duplicate_scan",
     "_music_format_replace_rows",
     "acquisition_download_all",
     "library_import_all",
-    "start_folder_import_with_id",
-    "start_maintenance_runner"
+    "start_folder_import_with_id"
    ],
-   "caller_count": 6,
+   "caller_count": 7,
    "dependencies": [
     "_s",
     "_yt_bot_check_message",
@@ -2979,13 +2982,15 @@
    "desired_owner": "backend/job_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_clean_all_artist_folder_merge",
+    "_clean_all_artwork",
+    "_clean_all_genres",
     "_maintenance_full_duplicate_scan",
     "_maintenance_release_group_merge",
     "dedup_maintenance_run",
-    "library_untracked_inventory_run",
-    "start_maintenance_runner"
+    "library_untracked_inventory_run"
    ],
-   "caller_count": 5,
+   "caller_count": 7,
    "dependencies": []
   },
   {
@@ -19852,8 +19857,8 @@
    "desired_owner": "backend/playlist_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "playlist_sync_status",
-    "start_maintenance_runner"
+    "_clean_all_playlist_refs",
+    "playlist_sync_status"
    ],
    "caller_count": 2,
    "dependencies": []
@@ -23072,8 +23077,8 @@
    "desired_owner": "backend/library_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "library_fix_genres",
-    "start_maintenance_runner"
+    "_clean_all_genres",
+    "library_fix_genres"
    ],
    "caller_count": 2,
    "dependencies": [
@@ -23144,8 +23149,8 @@
    "desired_owner": "backend/library_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "library_merge_artist_id",
-    "start_maintenance_runner"
+    "_clean_all_artist_alias",
+    "library_merge_artist_id"
    ],
    "caller_count": 2,
    "dependencies": [
@@ -23379,9 +23384,9 @@
    "desired_owner": "backend/library_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_clean_all_folder_scan",
     "_scan_folder_name_placeholders",
-    "scan_folder_placeholders_job",
-    "start_maintenance_runner"
+    "scan_folder_placeholders_job"
    ],
    "caller_count": 3,
    "dependencies": []
@@ -23402,10 +23407,10 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_apply_folder_name_placeholders",
+    "_clean_all_folder_scan",
     "_maintenance_final_verification",
     "apply_safe_folder_placeholder_renames_job",
-    "scan_folder_placeholders_job",
-    "start_maintenance_runner"
+    "scan_folder_placeholders_job"
    ],
    "caller_count": 5,
    "dependencies": [
@@ -24094,8 +24099,8 @@
    "desired_owner": "backend/artwork_service.py",
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
-    "fetch_missing_art",
-    "start_maintenance_runner"
+    "_clean_all_artwork",
+    "fetch_missing_art"
    ],
    "caller_count": 2,
    "dependencies": [
@@ -29155,12 +29160,13 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_clean_all_library_health",
+    "_clean_all_missing_files",
     "_maintenance_final_verification",
     "clean_library_health",
-    "clean_library_health_scan",
-    "start_maintenance_runner"
+    "clean_library_health_scan"
    ],
-   "caller_count": 4,
+   "caller_count": 5,
    "dependencies": [
     "_load_rgid_resolutions"
    ]
@@ -29180,8 +29186,8 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_maintenance_resume_from_report",
-    "start_maintenance_runner"
+    "_clean_all_run_context",
+    "_maintenance_resume_from_report"
    ],
    "caller_count": 2,
    "dependencies": []
@@ -29295,8 +29301,8 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "clean_artist_folders_stamp_mbid",
-    "start_maintenance_runner"
+    "_clean_all_artist_folder_merge",
+    "clean_artist_folders_stamp_mbid"
    ],
    "caller_count": 2,
    "dependencies": [
@@ -29345,10 +29351,11 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_maintenance_full_duplicate_scan",
-    "start_maintenance_runner"
+    "_clean_all_artwork",
+    "_clean_all_genres",
+    "_maintenance_full_duplicate_scan"
    ],
-   "caller_count": 2,
+   "caller_count": 3,
    "dependencies": [
     "_json_from_flask_response",
     "_s"
@@ -29369,7 +29376,7 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "start_maintenance_runner"
+    "_clean_all_run_context"
    ],
    "caller_count": 1,
    "dependencies": []
@@ -29389,9 +29396,12 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "start_maintenance_runner"
+    "_clean_all_complete_payload",
+    "_clean_all_failed_payload",
+    "_clean_all_progress_payload",
+    "_clean_all_run_context"
    ],
-   "caller_count": 1,
+   "caller_count": 4,
    "dependencies": [
     "_load_pending_reviews",
     "health"
@@ -29412,13 +29422,15 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
+    "_clean_all_artist_alias",
+    "_clean_all_record_artist_folder_merge",
+    "_clean_all_run_context",
     "_maintenance_final_verification",
     "_maintenance_full_duplicate_scan",
     "_maintenance_release_group_merge",
-    "_maintenance_root_folder_repair",
-    "start_maintenance_runner"
+    "_maintenance_root_folder_repair"
    ],
-   "caller_count": 5,
+   "caller_count": 7,
    "dependencies": [
     "_maintenance_load_last_report"
    ]
@@ -29458,7 +29470,7 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "start_maintenance_runner"
+    "_clean_all_missing_files"
    ],
    "caller_count": 1,
    "dependencies": [
@@ -29481,7 +29493,7 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "start_maintenance_runner"
+    "_clean_all_release_group_merge"
    ],
    "caller_count": 1,
    "dependencies": [
@@ -29506,7 +29518,7 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "start_maintenance_runner"
+    "_clean_all_root_folder_repair"
    ],
    "caller_count": 1,
    "dependencies": [
@@ -29591,7 +29603,7 @@
    "desired_owner": "backend/maintenance_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "start_maintenance_runner"
+    "_clean_all_final_verification"
    ],
    "caller_count": 1,
    "dependencies": [
@@ -31707,8 +31719,8 @@
    "desired_owner": "backend/dedup_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "dedup_maintenance_run",
-    "start_maintenance_runner"
+    "_clean_all_track_scan",
+    "dedup_maintenance_run"
    ],
    "caller_count": 2,
    "dependencies": [
@@ -38312,8 +38324,8 @@
    "name": "restart_app",
    "module": "routes_maintenance.py",
    "lines": [
-    31,
-    48
+    32,
+    49
    ],
    "size": 18,
    "body_lines": 16,
@@ -38333,8 +38345,8 @@
    "name": "maintenance_runner_report",
    "module": "routes_maintenance.py",
    "lines": [
-    89,
-    115
+    90,
+    116
    ],
    "size": 27,
    "body_lines": 26,
@@ -38359,8 +38371,8 @@
    "name": "_run_with_app_context",
    "module": "routes_maintenance.py",
    "lines": [
-    118,
-    123
+    119,
+    124
    ],
    "size": 6,
    "body_lines": 4,
@@ -38381,11 +38393,11 @@
    "name": "start_maintenance_runner",
    "module": "routes_maintenance.py",
    "lines": [
-    127,
-    681
+    128,
+    197
    ],
-   "size": 555,
-   "body_lines": 549,
+   "size": 70,
+   "body_lines": 64,
    "route": {
     "method": "POST",
     "path": "/api/jobs/maintenance-runner"
@@ -38397,41 +38409,711 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
-    "_artist_id_alias_groups",
-    "_folder_placeholder_summary",
-    "_library_health_payload",
-    "_maintenance_artist_folder_merge_step",
-    "_maintenance_clean_all_counts",
-    "_maintenance_extract_child_job_id",
-    "_maintenance_final_verification",
-    "_maintenance_full_duplicate_scan",
-    "_maintenance_initial_task_state",
+    "_clean_all_execute",
+    "_clean_all_run_context",
     "_maintenance_load_last_report",
-    "_maintenance_release_group_merge",
-    "_maintenance_remove_missing_file_rows",
     "_maintenance_resume_from_report",
     "_maintenance_resume_summary",
-    "_maintenance_root_folder_repair",
     "_maintenance_running_job",
+    "_run_with_app_context"
+   ]
+  },
+  {
+   "name": "_clean_all_finished_count",
+   "module": "routes_maintenance.py",
+   "lines": [
+    204,
+    205
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_failed_payload",
+    "_clean_all_progress_payload",
+    "_clean_all_run_context"
+   ],
+   "caller_count": 3,
+   "dependencies": []
+  },
+  {
+   "name": "_clean_all_next_resume_task",
+   "module": "routes_maintenance.py",
+   "lines": [
+    208,
+    209
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_checkpoint_record",
+    "_clean_all_run_context"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_clean_all_final_summary",
+   "module": "routes_maintenance.py",
+   "lines": [
+    212,
+    218
+   ],
+   "size": 7,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_complete_payload",
+    "_clean_all_partial_payload"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_clean_all_progress_payload",
+   "module": "routes_maintenance.py",
+   "lines": [
+    221,
+    242
+   ],
+   "size": 22,
+   "body_lines": 21,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_context"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_finished_count",
+    "_maintenance_clean_all_counts"
+   ]
+  },
+  {
+   "name": "_clean_all_checkpoint_record",
+   "module": "routes_maintenance.py",
+   "lines": [
+    245,
+    265
+   ],
+   "size": 21,
+   "body_lines": 20,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_context"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_next_resume_task"
+   ]
+  },
+  {
+   "name": "_clean_all_partial_payload",
+   "module": "routes_maintenance.py",
+   "lines": [
+    268,
+    284
+   ],
+   "size": 17,
+   "body_lines": 16,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_context"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_final_summary"
+   ]
+  },
+  {
+   "name": "_clean_all_complete_payload",
+   "module": "routes_maintenance.py",
+   "lines": [
+    287,
+    306
+   ],
+   "size": 20,
+   "body_lines": 19,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_finish"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_final_summary",
+    "_maintenance_clean_all_counts"
+   ]
+  },
+  {
+   "name": "_clean_all_failed_payload",
+   "module": "routes_maintenance.py",
+   "lines": [
+    309,
+    324
+   ],
+   "size": 16,
+   "body_lines": 15,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_handle_failure"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_finished_count",
+    "_maintenance_clean_all_counts"
+   ]
+  },
+  {
+   "name": "_clean_all_run_context",
+   "module": "routes_maintenance.py",
+   "lines": [
+    327,
+    403
+   ],
+   "size": 77,
+   "body_lines": 70,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "start_maintenance_runner"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_checkpoint_record",
+    "_clean_all_finished_count",
+    "_clean_all_next_resume_task",
+    "_clean_all_partial_payload",
+    "_clean_all_progress_payload",
+    "_maintenance_clean_all_counts",
+    "_maintenance_initial_task_state",
     "_maintenance_save_last_report",
-    "_maintenance_task_result_summary",
-    "_run_with_app_context",
-    "_running_job_of_type",
+    "_maintenance_task_result_summary"
+   ]
+  },
+  {
+   "name": "_clean_all_progress",
+   "module": "routes_maintenance.py",
+   "lines": [
+    406,
+    407
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_final_verification",
+    "_clean_all_folder_scan",
+    "_clean_all_library_health",
+    "_clean_all_missing_files",
+    "_clean_all_release_group_merge",
+    "_clean_all_root_folder_repair",
+    "_clean_all_track_scan"
+   ],
+   "caller_count": 7,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_clean_all_library_health",
+   "module": "routes_maintenance.py",
+   "lines": [
+    410,
+    425
+   ],
+   "size": 16,
+   "body_lines": 14,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_progress",
+    "_library_health_payload",
+    "health"
+   ]
+  },
+  {
+   "name": "_clean_all_missing_files",
+   "module": "routes_maintenance.py",
+   "lines": [
+    428,
+    446
+   ],
+   "size": 19,
+   "body_lines": 17,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_progress",
+    "_library_health_payload",
+    "_maintenance_remove_missing_file_rows",
     "_s",
-    "_scan_folder_name_placeholders",
+    "health"
+   ]
+  },
+  {
+   "name": "_clean_all_root_folder_repair",
+   "module": "routes_maintenance.py",
+   "lines": [
+    449,
+    481
+   ],
+   "size": 33,
+   "body_lines": 29,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_progress",
+    "_maintenance_root_folder_repair",
+    "_s"
+   ]
+  },
+  {
+   "name": "_clean_all_artist_alias",
+   "module": "routes_maintenance.py",
+   "lines": [
+    484,
+    505
+   ],
+   "size": 22,
+   "body_lines": 20,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_artist_id_alias_groups",
+    "_maintenance_save_last_report"
+   ]
+  },
+  {
+   "name": "_clean_all_artist_folder_merge",
+   "module": "routes_maintenance.py",
+   "lines": [
+    508,
+    539
+   ],
+   "size": 32,
+   "body_lines": 31,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_record_artist_folder_merge",
+    "_maintenance_artist_folder_merge_step",
+    "_running_job_of_type",
+    "_s"
+   ]
+  },
+  {
+   "name": "_clean_all_record_artist_folder_merge",
+   "module": "routes_maintenance.py",
+   "lines": [
+    542,
+    585
+   ],
+   "size": 44,
+   "body_lines": 43,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_artist_folder_merge"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_maintenance_save_last_report",
+    "_s"
+   ]
+  },
+  {
+   "name": "_clean_all_release_group_merge",
+   "module": "routes_maintenance.py",
+   "lines": [
+    588,
+    603
+   ],
+   "size": 16,
+   "body_lines": 14,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_progress",
+    "_maintenance_release_group_merge"
+   ]
+  },
+  {
+   "name": "_clean_all_track_scan",
+   "module": "routes_maintenance.py",
+   "lines": [
+    606,
+    617
+   ],
+   "size": 12,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_progress",
+    "_maintenance_full_duplicate_scan"
+   ]
+  },
+  {
+   "name": "_clean_all_folder_scan",
+   "module": "routes_maintenance.py",
+   "lines": [
+    620,
+    645
+   ],
+   "size": 26,
+   "body_lines": 23,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_progress",
+    "_folder_placeholder_summary",
+    "_scan_folder_name_placeholders"
+   ]
+  },
+  {
+   "name": "_clean_all_folder_safe_renames",
+   "module": "routes_maintenance.py",
+   "lines": [
+    648,
+    653
+   ],
+   "size": 6,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_clean_all_artwork",
+   "module": "routes_maintenance.py",
+   "lines": [
+    656,
+    667
+   ],
+   "size": 12,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_maintenance_extract_child_job_id",
+    "_running_job_of_type",
     "_wait_for_child_job",
-    "health",
-    "playlist_sync_status_payload",
-    "start_fetch_missing_art",
+    "start_fetch_missing_art"
+   ]
+  },
+  {
+   "name": "_clean_all_genres",
+   "module": "routes_maintenance.py",
+   "lines": [
+    670,
+    680
+   ],
+   "size": 11,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_maintenance_extract_child_job_id",
+    "_running_job_of_type",
+    "_wait_for_child_job",
     "start_library_fix_genres"
+   ]
+  },
+  {
+   "name": "_clean_all_final_verification",
+   "module": "routes_maintenance.py",
+   "lines": [
+    683,
+    694
+   ],
+   "size": 12,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_progress",
+    "_maintenance_final_verification"
+   ]
+  },
+  {
+   "name": "_clean_all_stale_jobs",
+   "module": "routes_maintenance.py",
+   "lines": [
+    697,
+    703
+   ],
+   "size": 7,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_clean_all_playlist_refs",
+   "module": "routes_maintenance.py",
+   "lines": [
+    706,
+    715
+   ],
+   "size": 10,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "playlist_sync_status_payload"
+   ]
+  },
+  {
+   "name": "_clean_all_finish",
+   "module": "routes_maintenance.py",
+   "lines": [
+    718,
+    727
+   ],
+   "size": 10,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_run_steps"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_complete_payload"
+   ]
+  },
+  {
+   "name": "_clean_all_run_steps",
+   "module": "routes_maintenance.py",
+   "lines": [
+    730,
+    761
+   ],
+   "size": 32,
+   "body_lines": 30,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_execute"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_artist_alias",
+    "_clean_all_artist_folder_merge",
+    "_clean_all_artwork",
+    "_clean_all_final_verification",
+    "_clean_all_finish",
+    "_clean_all_folder_safe_renames",
+    "_clean_all_folder_scan",
+    "_clean_all_genres",
+    "_clean_all_library_health",
+    "_clean_all_missing_files",
+    "_clean_all_playlist_refs",
+    "_clean_all_release_group_merge",
+    "_clean_all_root_folder_repair",
+    "_clean_all_stale_jobs",
+    "_clean_all_track_scan",
+    "health"
+   ]
+  },
+  {
+   "name": "_clean_all_handle_failure",
+   "module": "routes_maintenance.py",
+   "lines": [
+    764,
+    789
+   ],
+   "size": 26,
+   "body_lines": 24,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_clean_all_execute"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_failed_payload",
+    "_s"
+   ]
+  },
+  {
+   "name": "_clean_all_execute",
+   "module": "routes_maintenance.py",
+   "lines": [
+    792,
+    806
+   ],
+   "size": 15,
+   "body_lines": 14,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "MAINTENANCE",
+   "desired_owner": "backend/maintenance_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "start_maintenance_runner"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_clean_all_handle_failure",
+    "_clean_all_run_steps"
    ]
   },
   {
    "name": "api_transaction_settings",
    "module": "routes_maintenance.py",
    "lines": [
-    685,
-    686
+    810,
+    811
    ],
    "size": 2,
    "body_lines": 1,
@@ -38451,8 +39133,8 @@
    "name": "api_transaction_settings_save",
    "module": "routes_maintenance.py",
    "lines": [
-    690,
-    704
+    815,
+    829
    ],
    "size": 15,
    "body_lines": 14,
@@ -38472,8 +39154,8 @@
    "name": "api_transactions_list",
    "module": "routes_maintenance.py",
    "lines": [
-    708,
-    729
+    833,
+    854
    ],
    "size": 22,
    "body_lines": 12,
@@ -38497,8 +39179,8 @@
    "name": "api_transaction_detail",
    "module": "routes_maintenance.py",
    "lines": [
-    733,
-    751
+    858,
+    876
    ],
    "size": 19,
    "body_lines": 12,
@@ -38523,8 +39205,8 @@
    "name": "api_transaction_approve",
    "module": "routes_maintenance.py",
    "lines": [
-    755,
-    784
+    880,
+    909
    ],
    "size": 30,
    "body_lines": 21,
@@ -38544,8 +39226,8 @@
    "name": "api_transaction_cancel",
    "module": "routes_maintenance.py",
    "lines": [
-    788,
-    805
+    913,
+    930
    ],
    "size": 18,
    "body_lines": 15,
@@ -38568,8 +39250,8 @@
    "name": "_cancel_engine_mbsync",
    "module": "routes_maintenance.py",
    "lines": [
-    808,
-    822
+    933,
+    947
    ],
    "size": 15,
    "body_lines": 11,
@@ -38588,8 +39270,8 @@
    "name": "_item_file_replacement_response",
    "module": "routes_maintenance.py",
    "lines": [
-    825,
-    846
+    950,
+    971
    ],
    "size": 22,
    "body_lines": 16,
@@ -38612,8 +39294,8 @@
    "name": "_rollback_evidence_available",
    "module": "routes_maintenance.py",
    "lines": [
-    921,
-    946
+    1046,
+    1071
    ],
    "size": 26,
    "body_lines": 19,
@@ -38632,8 +39314,8 @@
    "name": "rollback_eligibility",
    "module": "routes_maintenance.py",
    "lines": [
-    968,
-    1064
+    1093,
+    1189
    ],
    "size": 97,
    "body_lines": 76,
@@ -38655,8 +39337,8 @@
    "name": "_rollback_fields",
    "module": "routes_maintenance.py",
    "lines": [
-    1067,
-    1071
+    1192,
+    1196
    ],
    "size": 5,
    "body_lines": 2,
@@ -38678,8 +39360,8 @@
    "name": "api_transaction_apply",
    "module": "routes_maintenance.py",
    "lines": [
-    1075,
-    1097
+    1200,
+    1222
    ],
    "size": 23,
    "body_lines": 22,
@@ -38703,8 +39385,8 @@
    "name": "_rollback_dispatch_body",
    "module": "routes_maintenance.py",
    "lines": [
-    1100,
-    1120
+    1225,
+    1245
    ],
    "size": 21,
    "body_lines": 17,
@@ -38723,8 +39405,8 @@
    "name": "api_transaction_rollback",
    "module": "routes_maintenance.py",
    "lines": [
-    1124,
-    1333
+    1249,
+    1458
    ],
    "size": 210,
    "body_lines": 209,
@@ -38751,8 +39433,8 @@
    "name": "api_transaction_export",
    "module": "routes_maintenance.py",
    "lines": [
-    1337,
-    1346
+    1462,
+    1471
    ],
    "size": 10,
    "body_lines": 9,
@@ -38772,8 +39454,8 @@
    "name": "_transaction_int_arg",
    "module": "routes_maintenance.py",
    "lines": [
-    1349,
-    1354
+    1474,
+    1479
    ],
    "size": 6,
    "body_lines": 5,
