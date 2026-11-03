@@ -9,6 +9,7 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - **The TrueNAS rollout script deploys single-container stacks (#487).** `scripts/deploy_truenas_web_manager.sh` refused the shipped embedded-Beets layout because it looked for a separate `beets` container. It now detects the layout from `docker compose config`. With no `beets` service, it finds the library through the `beets-web-manager` container's `/config` mount, reads the semantic snapshot (counts, item identity digest, `/api/health` `beets.ok`) through that container's own API, recreates only `beets-web-manager` (`--no-deps`) and restarts no separate Beets service. Image label checks, the `_backups/` backup, `--dry-run`, `--rollback` and the post-deploy checks are unchanged; two-container stacks behave as before. New reason codes: `beets_config_unmounted`, `embedded_beets_unhealthy`. `docs/TRUENAS_ROLLOUT.md` now documents the single-container flow first and drops the manual-deploy note.
+- **Frontend dev tooling no longer pulls a vulnerable `minimatch` (Dependabot #85, GHSA-g3hv-75wg-m249).** An npm override moves the ESLint and typescript-eslint dependency on `minimatch` from 10.2.6 to 11.x. The DoS fix is in 11.0.1, and no ESLint release accepts 11 yet.
 
 ## v0.16.0 - 2026-11-03
 
