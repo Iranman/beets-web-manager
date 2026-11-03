@@ -386,11 +386,13 @@ def cmd_exec(args, state):
     if state.get("exec_should_fail") or (cont.get("State") or {}).get("Status") != "running":
         print("fake_docker: exec failed", file=sys.stderr)
         return 1
+    # Which container served the snapshot (single-container tests assert it).
+    state.setdefault("exec_targets", []).append(target)
     snaps = state.get("semantic_snapshots") or [state.get("semantic_snapshot")]
     snap = snaps[0]
     if len(snaps) > 1:
         state["semantic_snapshots"] = snaps[1:]
-        _save(state)
+    _save(state)
     if snap is None:
         print("fake_docker: no semantic snapshot configured", file=sys.stderr)
         return 1

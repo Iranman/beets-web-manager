@@ -3113,3 +3113,174 @@ class SemanticSnapshotPathNormalizationTests(unittest.TestCase):
         legacy.update(b"|albums|")
         legacy.update(json.dumps([1, None, None, None, "WHAM"]).encode())
         self.assertEqual(self._digest([rel]), legacy.hexdigest())
+
+
+class SingleContainerStackFixture(LatestTagStackFixture):
+    """The shipped embedded-Beets layout (ADR 0006): the Compose file has
+    only beets-web-manager (plus unrelated services), Beets runs inside it,
+    and its /config mount holds config.yaml and musiclibrary.blb. Runs 0.1.2
+    under :latest; the registry's :latest is 0.1.3."""
+
+    def setUp(self):
+        super().setUp()
+        Path(self.compose_file).write_text(
+            f"services:\n  beets-web-manager:\n    image: {self.LATEST}\n"
+            "  lidarr:\n    image: lidarr:local\n",
+            encoding="utf-8",
+        )
+        self.compose_before = Path(self.compose_file).read_bytes()
+        Path(self.engine_dir, "config.yaml").write_text("directory: /music\n", encoding="utf-8")
+        del self.state["containers"]["cid-beets"]
+        del self.state["service_containers"]["beets"]
+        self.state["containers"]["cid-webmgr"]["Mounts"] = [
+            {"Destination": "/web-manager-data", "Source": self.webmgr_dir},
+            {"Destination": "/config", "Source": self.engine_dir},
+        ]
+        self.state["semantic_snapshot"]["plugin_version"] = "embedded"
+        self._save_state()
+
+    def set_snapshots(self, *snaps):
+        st = self.load_state()
+        st["semantic_snapshots"] = [{**st["semantic_snapshot"], **s} for s in snaps]
+        self.save_state(st)
+
+
+class SingleContainerDeployTests(SingleContainerStackFixture):
+    def test_dry_run_reads_the_library_through_the_web_manager_container(self):
+        res = self.run_script("--dry-run")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Stack layout: single-container", res.stderr)
+        engine_canon = os.path.realpath(self.engine_dir).replace("\\", "/")
+        self.assertIn(f"Beets /config source:               {engine_canon}", res.stderr)
+        self.assertIn(f"Authoritative DB path (expected):   {engine_canon}/musiclibrary.blb", res.stderr)
+        self.assertIn("there is no separate Beets service to restart", res.stderr)
+        st = self.load_state()
+        self.assertTrue(st["exec_targets"])
+        self.assertEqual(set(st["exec_targets"]), {"cid-webmgr"})
+        self.assertNotIn("up_args", st)
+        self.assertNotIn("restarted", st)
+        self.assertEqual(self.backup_dirs(), [])
+        self.assert_compose_and_env_untouched()
+
+    def test_deploy_recreates_only_web_manager_and_restarts_no_beets_service(self):
+        lidarr_cid = self.state["service_containers"]["lidarr"]
+        res = self.run_script()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("completed successfully", res.stderr)
+        st = self.load_state()
+        cont = self.webmgr()
+        self.assertEqual((cont["Config"]["Image"], cont["Image"]), (self.LATEST, "sha256:goodimageid"))
+        self.assertEqual(st["up_args"], [["-d", "--no-deps", "--pull", "never", "--force-recreate", "beets-web-manager"]])
+        # Only the token-persistence restart of the web manager itself.
+        self.assertEqual(st.get("restarted"), ["beets-web-manager"])
+        self.assertEqual(st["service_containers"]["lidarr"], lidarr_cid)
+        self.assertEqual(set(st["exec_targets"]), {"cid-webmgr"})
+        self.assertIn("no separate Beets restart", res.stderr)
+        self.assertIn("ONLINE SEMANTIC INTEGRITY confirmed post-deploy (items=3144 albums=200", res.stderr)
+        self.assertIn("live main-file sha256 before=", res.stderr)
+        self.assertIn("/health/live reports version 0.1.3", res.stderr)
+        (bdir,) = self.backup_dirs()
+        self.assertTrue(os.path.isfile(os.path.join(bdir, "beets-config", "config.yaml")))
+        self.assertFalse(os.path.exists(os.path.join(bdir, "beets-config", "musiclibrary.blb")))
+        self.assertIn("auth_item_count=3144", Path(bdir, "authoritative-db-metadata.txt").read_text(encoding="utf-8"))
+        self.assert_compose_and_env_untouched()
+
+    def test_unhealthy_embedded_beets_is_refused_before_any_change(self):
+        st = self.load_state()
+        st["semantic_snapshot"]["plugin_version"] = ""
+        self.save_state(st)
+        for args in (("--dry-run",), ()):
+            res = self.run_script(*args)
+            self.assertNotEqual(res.returncode, 0, args)
+            self.assertIn("Reason code:           embedded_beets_unhealthy", res.stderr)
+        cont = self.webmgr()
+        self.assertEqual((cont["Image"], cont["State"]["Status"]), ("sha256:oldimageid", "running"))
+        self.assertEqual(self.backup_dirs(), [])
+
+    def test_library_change_across_the_deploy_fails_with_a_rollback_command(self):
+        self.set_snapshots({}, {"digest": "b" * 64})
+        res = self.run_script()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("library identity digest changed during deploy", res.stderr)
+        self.assertIn("--rollback", res.stderr)
+
+    def test_missing_config_mount_is_refused(self):
+        st = self.load_state()
+        st["containers"]["cid-webmgr"]["Mounts"] = [{"Destination": "/web-manager-data", "Source": self.webmgr_dir}]
+        self.save_state(st)
+        res = self.run_script("--dry-run")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Reason code:           beets_config_unmounted", res.stderr)
+
+    def test_rollback_restores_the_previous_image_without_a_beets_restart(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        (bdir,) = self.backup_dirs()
+        res = self.run_script("--rollback", bdir)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.webmgr()["Image"], "sha256:oldimageid")
+        self.assertIn("rollback is durable", res.stderr)
+        self.assertIn("/health/live reports version 0.1.2", res.stderr)
+        self.assertIn("no separate Beets restart", res.stderr)
+        self.assertEqual(self.load_state().get("restarted"), ["beets-web-manager"], "the rollback restarts nothing")
+        self.assert_compose_and_env_untouched()
+
+
+class EmbeddedSnapshotTests(unittest.TestCase):
+    """EMBEDDED_SNAPSHOT_PY: the single-container snapshot, read through Web
+    Manager's own API inside its container."""
+
+    SNIPPET = re.search(r"^EMBEDDED_SNAPSHOT_PY='\n(.*?)\n'$", SCRIPT_SOURCE, re.S | re.M).group(1)
+
+    def _run(self, paths, beets_ok=True, env=None):
+        from contextlib import redirect_stdout
+        from io import BytesIO, StringIO
+        from unittest import mock
+
+        rows = [{"id": i, "album_id": 1, "mb_trackid": f"t{i}", "path": p} for i, p in enumerate(paths, 1)]
+        seen = []
+
+        def urlopen(req, timeout=None):
+            path = req.full_url.split(":8337", 1)[1]
+            seen.append((path, req.get_header("Authorization")))
+            if path == "/api/health":
+                body = {"ok": True, "beets": {"engine": "embedded", "ok": beets_ok, "codes": []}}
+            elif path == "/api/stats":
+                body = {"tracks": len(rows), "albums": 1, "artists": 1}
+            else:
+                offset = int(re.search(r"offset=(\d+)", path).group(1))
+                page = rows[offset:offset + 2]  # small pages: the loop must follow them
+                body = {"items": page, "pagination": {"returned": len(page), "total": len(rows)}}
+            return BytesIO(json.dumps(body).encode())
+
+        names = ("BEETS_WEB_AUTH_TOKEN", "BEETS_WEB_AUTH_TOKEN_FILE", "WEB_MANAGER_DATA_DIR", "WEBCONTROL_PORT")
+        clean = {k: v for k, v in os.environ.items() if k not in names}
+        clean.update(env if env is not None else {"BEETS_WEB_AUTH_TOKEN": "tok-abc"})
+        out = StringIO()
+        with mock.patch.dict(os.environ, clean, clear=True), \
+                mock.patch("urllib.request.urlopen", urlopen), redirect_stdout(out):
+            exec(self.SNIPPET, {})
+        return json.loads(out.getvalue()), seen
+
+    def test_counts_pages_and_health(self):
+        snap, seen = self._run(["/music/a.flac", "/music/b.flac", "/music/c.flac"])
+        self.assertEqual((snap["items"], snap["listed_items"], snap["albums"]), (3, 3, 1))
+        self.assertEqual(snap["plugin_version"], "embedded")
+        self.assertEqual([p for p, _ in seen if p.startswith("/api/library")],
+                         ["/api/library?limit=500&offset=0", "/api/library?limit=500&offset=2"])
+        self.assertIsNone(dict(seen)["/api/health"], "the public health check sends no token")
+        self.assertEqual(dict(seen)["/api/stats"], "Bearer tok-abc")
+
+    def test_unhealthy_beets_reports_no_plugin_version(self):
+        snap, _ = self._run(["/music/a.flac"], beets_ok=False)
+        self.assertEqual(snap["plugin_version"], "")
+
+    def test_digest_tracks_item_identity(self):
+        base = self._run(["/music/a.flac", "/music/b.flac"])[0]["digest"]
+        self.assertEqual(base, self._run(["/music/a.flac", "/music/b.flac"])[0]["digest"])
+        self.assertNotEqual(base, self._run(["/music/a.flac", "/music/x.flac"])[0]["digest"])
+
+    def test_token_file_in_the_data_dir_is_used_without_a_token_variable(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ".auth_token").write_text("tok-from-file\n", encoding="utf-8")
+            _, seen = self._run(["/music/a.flac"], env={"WEB_MANAGER_DATA_DIR": d})
+        self.assertEqual(dict(seen)["/api/stats"], "Bearer tok-from-file")

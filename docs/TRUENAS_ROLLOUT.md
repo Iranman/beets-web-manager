@@ -6,33 +6,31 @@ SQLite database left behind by pre-#64 installs. The tooling for this is
 `scripts/deploy_truenas_web_manager.sh` -- reusable across releases via its
 `VERSION` env var, not tied to one release in its filename.
 
-> **Single container now.** Beets runs inside Web Manager; the separate
-> `beets` service is gone (`docs/adr/0006-embedded-beets.md`). The script
-> below still describes the two-container stack: it resolves the library from
-> `docker inspect beets`, takes its semantic snapshot through `docker exec`
-> into that container and restarts it after a plugin change, so it refuses a
-> single-container stack. Until it is adapted, deploy this release by hand:
->
-> 1. Stop mutation jobs. Record the `musiclibrary.blb` sha256 and the album
->    and item counts, and take the documented backup (`./backup.sh`).
-> 2. Stop and remove the old Beets service:
->    `docker compose stop beets && docker compose rm -f beets`.
-> 3. Edit the stack's Compose file as in `docs/INSTALLATION.md`, "Upgrading
->    from two containers": delete the `beets` service and any
->    `depends_on: beets`, mount `/music` read-write in `beets-web-manager`,
->    keep the same `/config` folder, check `MUSIC_ROOT` equals `directory:`
->    and `plugins:` lists `musicbrainz`, remove `BEETS_ENGINE`,
->    `BEETS_WEB_URL`, `BEETS_WEBMANAGER_API_KEY[_FILE]`, and use the
->    `beets.ok` healthcheck.
-> 4. Pin the release's exact version in `image:` and
->    `docker compose up -d --remove-orphans`.
-> 5. Check `/api/health` (`"beets": {"ok": true}`, no `library_created`, no
->    `legacy_settings_ignored`, no `separate_beets_running`), then compare the
->    counts with step 1 and explain every difference.
->
-> Rollback is the previous image: stop Web Manager, restore the backup if
-> needed, put back the previous Compose file (with its `beets` service) and
-> the previous pinned release (`docs/INSTALLATION.md`, "Rolling back").
+## Stack layouts
+
+The script detects the layout from `docker compose config`; there is nothing
+to configure.
+
+- **Single container (the shipped layout, primary).** Beets runs inside
+  Web Manager (`docs/adr/0006-embedded-beets.md`); the Compose file has no
+  `beets` service. The library is located through the `beets-web-manager`
+  container's `/config` mount (`config.yaml`, `musiclibrary.blb`), the
+  online semantic snapshot is read through that same container (Web
+  Manager's own `/api/health`, `/api/stats` and `/api/library`, which answer
+  from embedded Beets), and only `beets-web-manager` is recreated
+  (`--no-deps`). There is no separate Beets restart: recreating
+  `beets-web-manager` restarts embedded Beets with it.
+- **Two containers (legacy).** A separate `beets` service (`ENGINE_SERVICE`)
+  owns the library. The library is resolved from that container's `/config`,
+  the snapshot is read through its web API with `docker exec`, and it is
+  restarted (never recreated) only when its loaded webmanager plugin is
+  stale. Moving a two-container stack to one container is a manual,
+  one-time change: follow `docs/INSTALLATION.md`, "Upgrading from two
+  containers" (back up first, then remove the `beets` service).
+
+Before any deploy that can touch the library, also take the database copy
+`scripts/backup.sh` makes (online SQLite backup of `musiclibrary.blb`): the
+rollout backup below deliberately never copies the library database.
 
 ## Which version to deploy
 
@@ -80,15 +78,17 @@ the script writes a version into `.env`. Switch the image line to `:latest`.
 
 ```text
 $STACK_DIR                                                  stack directory
-$STACK_DIR/beets/musiclibrary.blb                            authoritative DB
+$STACK_DIR/beets/musiclibrary.blb                            authoritative DB (mounted at /config)
 $STACK_DIR/beets-web-manager/                                web-manager state dir
 $STACK_DIR/beets-web-manager/musiclibrary.blb                 stale DB (if present)
 $STACK_DIR/beets-web-manager/.auth_token                      persistent web token
 ```
 
 **These paths are never trusted as given.** The script resolves the real
-bind-mount sources from `docker inspect beets` (destination `/config`) and
-`docker inspect beets-web-manager` (the destination named by the container's
+bind-mount sources from `docker inspect` of the container that has the Beets
+`/config` mount (`beets-web-manager` in the single-container layout, reason
+code `beets_config_unmounted` if it has none; `beets` in the two-container
+layout) and `docker inspect beets-web-manager` (the destination named by the container's
 `WEB_MANAGER_DATA_DIR`; only when that is unset, `/data` and then
 `/web-manager-data`, as the app itself falls back) before touching anything,
 and refuses to continue if either source can't be determined, if they're the same path, or if the authoritative/stale DB paths
@@ -115,8 +115,9 @@ file nor `.env` is touched. What it does do outside the stack:
 - Short-lived `mktemp` files for HTTP probe bodies and the planned backup
   path. They are removed or left in the system temp directory, never in
   `STACK_DIR`.
-- Read-only `docker exec` into the Beets container for the semantic
-  snapshot, and authenticated GETs against the web manager.
+- Read-only `docker exec` for the semantic snapshot (into
+  `beets-web-manager` in the single-container layout, into `beets` in the
+  two-container layout), and authenticated GETs against the web manager.
 
 `tests/test_deploy_truenas_rollout.py` exercises it.
 
@@ -180,7 +181,10 @@ the first half passes:
    - take the online semantic snapshot again and assert counts and the
      identity digest are unchanged (the live main-file hash is logged for
      reference only -- see below);
-   - **plugin refresh:** Web Manager has just copied its bundled webmanager
+   - single-container layout: the snapshot also requires `/api/health`
+     `beets.ok` to be true (reason `embedded_beets_unhealthy` otherwise), and
+     there is no plugin refresh or separate Beets restart;
+   - **plugin refresh (two-container layout only):** Web Manager has just copied its bundled webmanager
      plugin into the engine's `/config/beetsplug`, but the running Beets
      process still has the plugin it imported when it started. If
      `PLUGIN_VERSION` in the provisioned `beetsplug/webmanager/version.py`
@@ -253,7 +257,19 @@ checkpoint) and stay identical while the WAL holds new data. The rollout
 never calls a live main-file hash "unchanged database"; it logs it as
 informational only.
 
-**Online semantic integrity** (every dry run and deploy): inside the Beets
+**Online semantic integrity, single-container layout** (every dry run and
+deploy): inside the `beets-web-manager` container, through Web Manager's own
+API (answered by embedded Beets, never by opening SQLite), the script reads
+`/api/health` (`beets.ok` must be true), `/api/stats` (track and album
+counts) and every page of `/api/library?limit=500` (an identity digest over
+every item's id, album row, Recording ID and path; the item count must equal
+the listed rows). The token is read inside the container the way the app
+resolves it (`BEETS_WEB_AUTH_TOKEN`, `BEETS_WEB_AUTH_TOKEN_FILE`, else
+`.auth_token` in the data folder) and never printed. Deploy fails if counts
+or the digest change. The live `musiclibrary.blb` main-file sha256 is logged
+before and after (informational, see above).
+
+**Online semantic integrity, two-container layout**: inside the Beets
 container, through its own web API and never by opening SQLite, the script
 reads `/stats` (item/album counts), `/item/` and `/album/` (an identity
 digest over every item's id, album row, Recording/Release/Release Group
@@ -271,7 +287,8 @@ STACK_DIR=/path/to/docker-stack /bin/bash deploy_truenas_web_manager.sh --offlin
 # optionally BASELINE_DB_SHA256=<hex> to compare with an earlier run
 ```
 
-It takes a semantic snapshot, stops only the `beets` service gracefully so
+It takes a semantic snapshot, stops only the service that runs Beets
+(`beets-web-manager` in the single-container layout, `beets` otherwise) gracefully so
 SQLite closes and settles its WAL, records whether `-wal`/`-shm` exist and
 their sizes, and only when the WAL is absent or empty runs `PRAGMA
 quick_check` and hashes `musiclibrary.blb` -- that hash is the database's
@@ -378,9 +395,10 @@ STACK_DIR=/path/to/docker-stack /bin/bash /path/to/deploy_truenas_web_manager.sh
      the service to the previous reference, so a later plain
      `docker compose up -d` keeps it;
    - `/health/live` reports the previous image's version label.
-7. Runs the same plugin refresh as a deploy: if the engine still has the
-   newer plugin loaded, `beets` is restarted (same container) with semantic
-   snapshots before and after.
+7. Two-container layout only: runs the same plugin refresh as a deploy: if
+   the engine still has the newer plugin loaded, `beets` is restarted (same
+   container) with semantic snapshots before and after. In the
+   single-container layout nothing else is restarted.
 
 Stale database files are **left archived** by default -- current-architecture
 code never reads them. Pass `RESTORE_STALE_DB=1` to restore them anyway (e.g.
@@ -410,6 +428,8 @@ meaning gets a new code.
 | `backup_manifest_missing` | `backup-verification` | `--rollback`: the backup has no checksum manifest (older script) and `--allow-legacy-backup` was not given; nothing was stopped or changed |
 | `backup_manifest_mismatch` | `backup-verification` | `--rollback`: a backup file is missing, changed or not listed in `state-manifest.txt`, or a listed path is outside the backup; nothing was stopped or changed |
 | `recreated_image_unverified` | `image-deployment` / `rollback-recreate` | the recreated container runs another image than the verified (or recorded previous) one; it was stopped |
+| `beets_config_unmounted` | `mount-discovery` | single-container layout: `beets-web-manager` has no mount at `/config`, so the library cannot be located; checked before anything changes |
+| `embedded_beets_unhealthy` | any snapshot stage | single-container layout: `/api/health` does not report `beets.ok` true (before the deploy: nothing was changed) |
 
 ### Backup and restore safety
 
@@ -490,7 +510,7 @@ STACK_DIR              required (your deployment's stack directory), no default
 VERSION                required for --dry-run/rollout only, no default (e.g. 1.0.0)
 EXPECTED_REVISION       strongly recommended; when set, validates exact Git commit revision label
 SERVICE                default beets-web-manager
-ENGINE_SERVICE          default beets
+ENGINE_SERVICE          default beets; only used when the Compose file has that service (two-container layout)
 COMPOSE_FILE            auto-detected: tries a legacy `docker-compose.arrs.yml` name first (a combined-stack convention from one earlier deployment, not a Beets Web Manager requirement), then `docker-compose.yml`. Set this explicitly -- to whatever your own Compose file is actually named -- rather than relying on auto-detection.
 MIN_ITEM_COUNT          default 10 -- raise to your real library size
 STALE_DB_MAX_ITEMS      default 100000
@@ -514,4 +534,4 @@ python -m unittest tests.test_deploy_truenas_rollout -v
 `tests/test_deploy_truenas_rollout.py` covers safety checks directly
 (by sourcing the script's functions against real temp SQLite files) and
 end-to-end dry-run/deploy/rollback flows against a fake `docker`/`docker compose`/`curl`
-(`tests/deploy/fake_docker.py`, `tests/deploy/fake_curl.py`) driven by a JSON world-state file. No real Docker daemon or TrueNAS host is used. Passing these tests is necessary but not sufficient for production confidence -- validate against a disposable two-container Compose environment before touching the real stack.
+(`tests/deploy/fake_docker.py`, `tests/deploy/fake_curl.py`) driven by a JSON world-state file. No real Docker daemon or TrueNAS host is used. Passing these tests is necessary but not sufficient for production confidence -- validate against a disposable Compose environment of the same layout before touching the real stack.
