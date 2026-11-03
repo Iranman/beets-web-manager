@@ -3110,6 +3110,10 @@ def setup_test_ai():
     base_url = supplied_base_url or configured_base_url
     model = payload.get("model") or os.environ.get("AI_MODEL") or "gpt-4o-mini"
     api_key = str(payload.get("api_key") or "").strip()
+    if api_key and not supplied_base_url:
+        # A typed key with a blank URL means OpenAI, as the wizard saves it;
+        # never the provider inferred from other stored keys (#523).
+        base_url = os.environ.get("AI_BASE_URL", "").strip() or "https://api.openai.com/v1"
     if not api_key and probe_may_use_stored_secret(supplied_base_url, configured_base_url):
         # SEC-1: a stored key is only ever sent to the operator-configured
         # endpoint, and only for an authenticated caller -- never to a

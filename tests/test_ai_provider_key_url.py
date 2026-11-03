@@ -207,6 +207,18 @@ class SetupProbeKeyUrlTests(probe_tests._ProbeHarness):
         self._probe({**KEYS, "AI_BASE_URL": BASES["openrouter"]})
         self.assertEqual(self.sent[0][2]["authorization"], "Bearer k-openrouter")
 
+    def test_blank_url_body_key_is_probed_where_the_wizard_saves_it(self):
+        # The wizard saves a blank-URL key as OPENAI_API_KEY for OpenAI, so
+        # the probe must not pass against OpenRouter because OPENROUTER_API_KEY
+        # happens to be stored.
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "", "AI_API_KEY": "", "AI_BASE_URL": "",
+                                          "OPENROUTER_API_KEY": "k-openrouter"}):
+            for body in ({"api_key": "body-key"}, {"api_key": "body-key", "base_url": ""}):
+                self.sent.clear()
+                self.post("/api/setup/test/ai", body, auth=True)
+                self.assertTrue(self.sent[0][1].startswith("https://api.openai.com/v1/"), body)
+                self.assertEqual(self.sent[0][2]["authorization"], "Bearer body-key")
+
     def test_openrouter_key_is_not_probed_against_openai(self):
         out = self._probe({"OPENROUTER_API_KEY": "k-openrouter", "AI_BASE_URL": BASES["openai"]})
         self.assertEqual(out["status"], "not_configured")
