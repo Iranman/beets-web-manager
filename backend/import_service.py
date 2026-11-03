@@ -8,6 +8,7 @@ import copy, hashlib, json, math, os, re, sqlite3, threading, time
 import backend.job_contract as job_contract
 from backend.matching import verify_audio_against_request
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
 from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
@@ -923,6 +924,916 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
 _IMPORT_JOB_LOCK = threading.Lock()
 
 
+@dataclass(frozen=True)
+class _ReimportContext:
+    """What one reimport-disk job was asked to do. The values the job narrows
+    as it runs (aldir, mb_albumid, existing_album_id, wanted_tracks) stay in
+    its body and reach each step as arguments."""
+    log: list
+    cancel_event: Any
+    guess_artist: str
+    guess_album: str
+    queue_review_on_uncertain: bool
+    light_confirm: bool
+    manual_mbid_override: bool
+    replace_existing_item_ids: List[int]
+    forced_albumartist: str
+
+
+def _import_positive_item_ids(raw_ids: Any) -> List[int]:
+    replace_existing_item_ids = []
+    for raw_id in (raw_ids or []):
+        try:
+            item_id = int(raw_id or 0)
+            if item_id > 0:
+                replace_existing_item_ids.append(item_id)
+        except Exception:
+            pass
+    return replace_existing_item_ids
+
+
+def _reimport_inspect_source(aldir: str) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[Dict[str, Any], int]]]:
+    """(engine evidence, None), or (None, the HTTP refusal)."""
+    # SEC-002 Wave 8 ARCH-003: _resolve_import_review_source_path() validated
+    # existence/containment/symlink-safety against THIS process's own
+    # filesystem -- which has no view of MUSIC_ROOT/DOWNLOADS_ROOT in the
+    # shipped web-manager topology, so it could never succeed for a real
+    # path (confirmed by the mandatory two-service runtime test). The Beets
+    # engine owns those mounts, so it -- not the web manager -- must be the
+    # one to validate and inspect the source. inspect_import_source() is
+    # engine-authoritative: it reuses the engine's own resolve_safe_path()
+    # (full realpath resolution + root containment, closing symlink escapes
+    # the same way) and returns only the canonical path plus bounded audio
+    # evidence, never letting the caller pick its own trusted root.
+    try:
+        return composite_workflows.inspect_import_source(aldir, operation="reimport"), None
+    except BeetsAuthError:
+        return None, ({"ok": False, "error": "Beets engine authentication failed."}, 502)
+    except BeetsUnavailableError:
+        return None, ({"ok": False, "error": "Beets engine is unavailable."}, 502)
+    except BeetsError as exc:
+        # The engine's /imports/source/inspect only ever returns one of a
+        # fixed set of stable error_code strings (see inspect_import_source()
+        # in backend/beets_control_agent.py) -- BeetsClient._request() wraps
+        # that string as this exception's message. Still, never interpolate
+        # the exception text directly into a response: _request() falls back
+        # to embedding up to 200 raw response-body characters for any
+        # non-JSON error response it doesn't recognize (e.g. an unexpected
+        # proxy/framework error page), which could carry stack-trace-shaped
+        # text. Map only the known codes to a safe message; anything else
+        # collapses to one generic string.
+        _known_source_errors = {
+            "invalid_path": "Import source is outside the allowed roots or does not exist.",
+            "root_self_rejected": "Import source cannot be an entire trusted root.",
+            "invalid_operation": "Import source inspection request was malformed.",
+            "inspection_failed": "Could not inspect the import source.",
+        }
+        _error_text = next(
+            (msg for code, msg in _known_source_errors.items() if code in str(exc)),
+            "Import source rejected.",
+        )
+        return None, ({"ok": False, "error": _error_text}, 400)
+
+
+def _reimport_queue_review(ctx: _ReimportContext, folder_path: str, suggestion: Optional[dict],
+                           reason: str, *, allow_existing: bool = False,
+                           evidence: Optional[Dict[str, Any]] = None) -> bool:
+    log = ctx.log
+    if ctx.queue_review_on_uncertain or ctx.light_confirm:
+        # Phase-2 spine: if a recovery carrier was created for this
+        # staged folder at download time, the Review row keeps its
+        # structured album identity instead of the `allow_existing`
+        # boolean + free-text suggestion that Phase-1 proved lossy.
+        carrier = None
+        try:
+            carrier = recovery_carrier.load_for_folder(folder_path)
+        except Exception:
+            carrier = None
+        return _queue_folder_for_manual_review(
+            folder_path, suggestion, reason, log,
+            allow_existing=allow_existing, evidence=evidence,
+            carrier=carrier)
+    mode = "light-confirm" if ctx.light_confirm else "no-review"
+    log.append(
+        f"  Skipped Pending Review ({mode}): {reason} "
+        "No library files were changed."
+    )
+    return False
+
+
+def _reimport_repair_in_place(ctx: _ReimportContext, aldir: str, mb_albumid: str, aid: int, *,
+                              partial: bool = False, manual_override: bool = False) -> None:
+    log, cancel_event = ctx.log, ctx.cancel_event
+    repair_desc = (
+        "Manual MusicBrainz release override; syncing album metadata "
+        "in-place even though track titles did not pass automatic preflight."
+        if manual_override else
+        "Existing album is a high-confidence partial match; repairing "
+        "matched tags in-place without re-importing."
+        if partial else
+        "Existing album already matches the selected MusicBrainz "
+        "release; repairing tags in-place without re-importing."
+    )
+    log.append(f"[1/3] {repair_desc}")
+    expected_tracks = _mb_release_track_count(mb_albumid, log)
+    if not expected_tracks:
+        raise RuntimeError(
+            "MusicBrainz release lookup failed during existing album repair; "
+            "album mb_albumid was not changed."
+        )
+    log.append("[2/3] Matching tracks in existing album...")
+    matched = _match_tracks_from_mb(
+        mb_albumid,
+        aid,
+        log,
+        zero_unmatched=(not partial and not manual_override),
+    )
+    if matched < 0:
+        raise RuntimeError(
+            "MusicBrainz release lookup failed during existing album repair; "
+            "album mb_albumid was not changed."
+        )
+    min_ratio = 0.80 if partial else 0.60
+    if partial:
+        min_matched = max(
+            1,
+            min(expected_tracks, int((expected_tracks * min_ratio) + 0.999)),
+        )
+    else:
+        min_matched = max(1, min(expected_tracks, int(expected_tracks * min_ratio)))
+    if matched < min_matched:
+        if manual_override:
+            log.append(
+                "  Manual override: only "
+                f"{matched}/{expected_tracks} track(s) matched by title. "
+                "Continuing with album-level MusicBrainz sync; unmatched "
+                "track titles/numbers are left in place."
+            )
+        else:
+            raise RuntimeError(
+                f"Existing album repair did not match enough tracks: "
+                f"{matched}/{expected_tracks}"
+            )
+    p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
+    if not p_res.get("ok") or not p_res.get("operation_id"):
+        raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
+    app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+    if not app_res.get("ok"):
+        raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
+
+    log.append("[3/3] Writing tags and moving existing album...")
+    _strip_year_from_album_name(aid, log)
+    up_res = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
+    if not up_res.get("ok"):
+        raise RuntimeError(f"Engine update_album_metadata failed for album {aid}")
+    rel_res = composite_workflows.relocate_album(aid, mode="rename")
+    if not rel_res.get("ok"):
+        raise RuntimeError(f"Engine relocate_album failed for album {aid}")
+    _repair_album_mbid_sticking_once(
+        aid,
+        mb_albumid,
+        log,
+        write_tags=True,
+        cancel_event=cancel_event,
+    )
+    _remove_pending_review_for_path(aldir, log)
+    _invalidate_lib_cache()
+    _trigger_plex_refresh(log)
+    log.append(f"✓ Done — existing album_id {aid} repaired without re-import.")
+
+
+def _reimport_current_existing_album(log: list, existing_album_id: int, mb_albumid: str, _guess_album: str) -> int:
+    """The album to work on: the requested one, or its replacement if it is gone (0 = none)."""
+    try:
+        exists = composite_workflows.get_album(existing_album_id)
+        if not exists:
+            replacement_id = None
+            if mb_albumid:
+                mb_matches = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
+                if mb_matches:
+                    replacement_id = int(mb_matches[0]["id"])
+            if not replacement_id and _guess_album:
+                q_albums = composite_workflows.find_albums_by_query(f"album:{_guess_album}")
+                if q_albums:
+                    replacement_id = int(q_albums[0]["id"])
+            if replacement_id:
+                old_existing = existing_album_id
+                existing_album_id = replacement_id
+                log.append(
+                    f"  Existing album_id {old_existing} no longer exists; "
+                    f"using current album_id {existing_album_id}"
+                )
+            else:
+                log.append(
+                    f"  Existing album_id {existing_album_id} no longer exists; "
+                    "continuing as a new folder import"
+                )
+                existing_album_id = 0
+    except Exception as ex:
+        log.append(f"  Existing album lookup warning: {ex}")
+    return existing_album_id
+
+
+def _reimport_refuse_unresolved_release(ctx: _ReimportContext, aldir: str, mb_albumid: str,
+                                        existing_album_id: int, wanted_tracks: List[Dict[str, Any]]) -> None:
+    """No release matched the folder: queue for Review and fail the job."""
+    _guess_artist, _guess_album = ctx.guess_artist, ctx.guess_album
+    review_reason = (
+        "No MusicBrainz release candidate matched this folder's "
+        "tracklist. Verify the correct artist and release before retagging."
+    )
+    review_suggestion = {
+        "artist": _guess_artist,
+        "albumartist": _guess_artist,
+        "album": _guess_album,
+        "confidence": "low",
+        "reason": review_reason,
+    }
+    rejected_preflight = None
+    rejected_mbid = _s(mb_albumid).strip().lower()
+    if _MB_UUID_RE.match(rejected_mbid):
+        review_suggestion["mb_albumid"] = rejected_mbid
+        review_suggestion["mb_url"] = f"https://musicbrainz.org/release/{rejected_mbid}"
+        review_suggestion["mb_valid"] = True
+        try:
+            rejected_preflight = _folder_release_preflight(
+                aldir,
+                rejected_mbid,
+                existing_album_id=existing_album_id,
+                log=None,
+                wanted_tracks=wanted_tracks,
+            )
+        except Exception:
+            rejected_preflight = None
+        review_reason = _preflight_review_reason(
+            rejected_preflight,
+            review_reason,
+        )
+        review_suggestion["reason"] = review_reason
+    review_evidence = _ai_match_evidence_packet(
+        "missing_track" if wanted_tracks else "light_confirm",
+        folder_path=aldir,
+        suggestion=review_suggestion,
+        folder_evidence=_build_folder_evidence(aldir),
+        preflight=rejected_preflight,
+        wanted_tracks=wanted_tracks,
+        reason=review_reason,
+    )
+    # Stable code the acquisition layer reads (IMPORT_REFUSAL_REASONS).
+    refusal_code = (_s(((rejected_preflight or {}).get("missing_track_proof") or {}).get("reason_code"))
+                    or "release_unresolved")
+    review_evidence["refusal_reason_code"] = refusal_code
+    queued = _reimport_queue_review(
+        ctx,
+        aldir,
+        review_suggestion,
+        review_reason,
+        allow_existing=bool(existing_album_id),
+        evidence=review_evidence,
+    )
+    raise RuntimeError(
+        f"Could not resolve a MusicBrainz release ID for import [reason_code={refusal_code}]"
+        + ("; queued for Review without changing library files." if queued else "")
+    )
+
+
+def _reimport_log_preflight(log: list, preflight: Dict[str, Any], existing_album_id: int) -> None:
+    target_desc = (
+        f"Existing album_id {existing_album_id}"
+        if existing_album_id else "Library folder"
+    )
+    log.append(
+        f"  [preflight] {target_desc}: "
+        f"{preflight.get('matches', 0)}/{preflight.get('expected', 0)} "
+        f"track(s) match selected MusicBrainz release"
+        + (f" ({preflight.get('release_title')})" if preflight.get("release_title") else "")
+    )
+    if preflight.get("release_artist") or preflight.get("folder_artist"):
+        log.append(
+            "  [preflight] Artist check: "
+            f"folder={preflight.get('folder_artist')!r}, "
+            f"MusicBrainz={preflight.get('release_artist')!r}, "
+            f"score={preflight.get('artist_score', 0):.0%}"
+        )
+    if preflight.get("acoustid_top_release"):
+        status = "mismatch" if preflight.get("acoustid_mismatch") else "checked"
+        log.append(
+            f"  [preflight] AcoustID {status}: selected release "
+            f"{preflight.get('acoustid_target_hits', 0)} hit(s), "
+            f"top release {preflight.get('acoustid_top_release')} "
+            f"{preflight.get('acoustid_top_hits', 0)} hit(s)"
+        )
+    for line in preflight.get("examples") or []:
+        log.append(line)
+
+
+def _reimport_stage_missing_fill(ctx: _ReimportContext, aldir: str, mb_albumid: str, existing_album_id: int,
+                                 wanted_tracks: List[Dict[str, Any]],
+                                 source_is_music_library: bool) -> Tuple[str, List[Dict[str, Any]], bool, bool]:
+    """A staged fill: narrow to the still-missing tracks.
+    Returns (aldir, wanted_tracks, source_is_music_library, staged_missing_import_ok)."""
+    log, _guess_artist, _guess_album = ctx.log, ctx.guess_artist, ctx.guess_album
+    staged_missing_import_ok = False
+    scan = _source_audio_missing_track_scan(aldir, existing_album_id, mb_albumid, log)
+    if scan.get("ok"):
+        useful_files = [Path(p) for p in (scan.get("useful_files") or [])]
+        duplicate_count = len(scan.get("duplicate_files") or [])
+        unknown_count = len(scan.get("unknown_files") or [])
+        log.append(
+            "  [import] Staged missing-track scan: "
+            f"{scan.get('missing_count', 0)} still-missing, "
+            f"{len(useful_files)} importable, "
+            f"{duplicate_count} already-present, "
+            f"{unknown_count} unknown"
+        )
+        if useful_files:
+            wanted_tracks = _normalise_wanted_tracks(
+                scan.get("wanted_tracks") or wanted_tracks)
+            log.append(
+                "  [import] Targeting still-missing track(s): "
+                + ", ".join(_wanted_track_label(t) for t in wanted_tracks[:5])
+            )
+            if unknown_count:
+                log.append(
+                    "  [import] Ignoring "
+                    f"{unknown_count} downloaded file(s) that did not "
+                    "safely match requested missing MusicBrainz tracks."
+                )
+            staged_dir = _stage_selected_audio_files(
+                aldir,
+                useful_files,
+                scan.get("artist") or _guess_artist,
+                scan.get("album") or _guess_album,
+                log,
+                target_tracks=_normalise_wanted_tracks(
+                    scan.get("wanted_tracks") or wanted_tracks
+                ),
+            )
+            if staged_dir != aldir:
+                # F5/F6 auto path (QA F1): the recovery carrier was
+                # bound to this pre-restage folder at acquisition.
+                # The subset-narrowing restage creates a NEW staged
+                # path, and the merge/Plex-leg carrier lookups below
+                # are keyed on the reassigned aldir -- rebind the
+                # carrier to the new path FIRST (same album-equality
+                # gate the helper enforces) so the merge runs under
+                # carrier ownership/audit instead of degrading to a
+                # carrier-less merge that leaves the carrier orphaned
+                # at STAGED.
+                _recovery_rebind_restaged(aldir, staged_dir, existing_album_id, log)
+                aldir = staged_dir
+                source_is_music_library = False
+            staged_missing_import_ok = True
+            log.append(
+                "[import] Staged source matches still-missing "
+                "MusicBrainz track(s); continuing import."
+            )
+    return aldir, wanted_tracks, source_is_music_library, staged_missing_import_ok
+
+
+def _reimport_preflight_failed(ctx: _ReimportContext, aldir: str, mb_albumid: str, existing_album_id: int,
+                               wanted_tracks: List[Dict[str, Any]], preflight: Dict[str, Any]) -> bool:
+    """A failed preflight: a manual override proceeds, anything else goes to Review
+    and fails the job. True when the override's in-place repair finished the job."""
+    log, _guess_artist, _guess_album = ctx.log, ctx.guess_artist, ctx.guess_album
+    if ctx.manual_mbid_override:
+        log.append(
+            "  Manual MusicBrainz release override accepted. "
+            "Automatic tracklist preflight failed, but the user-provided "
+            "release ID will be used."
+        )
+        if existing_album_id:
+            _reimport_repair_in_place(
+                ctx, aldir, mb_albumid,
+                existing_album_id,
+                manual_override=True,
+            )
+            return True
+        log.append(
+            "  Continuing import for this library folder with the "
+            "provided release ID."
+        )
+        return False
+    reason = (
+        "Selected MusicBrainz release did not match this existing "
+        f"library folder ({preflight.get('matches', 0)}/"
+        f"{preflight.get('expected', 0)} track(s) matched"
+        + (
+            f", artist {preflight.get('release_artist')!r} did not match "
+            f"folder artist {preflight.get('folder_artist')!r}"
+            if not preflight.get("artist_ok", True) else ""
+        )
+        + "). "
+        "Verify the release before retagging."
+    )
+    _reimport_queue_review(ctx,
+        aldir,
+        {
+            "mb_albumid": mb_albumid,
+            "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+            "mb_valid": True,
+            "confidence": "low",
+            "albumartist": _guess_artist,
+            "album": _guess_album,
+            "reason": reason,
+        },
+        reason,
+        allow_existing=bool(existing_album_id),
+        evidence=_ai_match_evidence_packet(
+            "missing_track" if wanted_tracks else "light_confirm",
+            folder_path=aldir,
+            suggestion={
+                "mb_albumid": mb_albumid,
+                "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+                "mb_valid": True,
+                "confidence": "low",
+                "albumartist": _guess_artist,
+                "album": _guess_album,
+                "reason": reason,
+            },
+            folder_evidence=_build_folder_evidence(aldir),
+            preflight=preflight,
+            wanted_tracks=wanted_tracks,
+            reason=reason,
+        ),
+    )
+    raise RuntimeError(
+        "Selected MusicBrainz release does not match this library folder; "
+        "queued for Review without changing DB rows."
+    )
+
+
+def _reimport_queue_unimported_files(ctx: _ReimportContext, aldir: str, existing_album_id: int,
+                                     comp: Dict[str, Any]) -> None:
+    log = ctx.log
+    # After repair, check for audio files in the folder that
+    # are still not in Beets.  These won't be imported by the
+    # repair path (mbsync/write/move only touches existing DB
+    # items), so they'd cause the album to re-appear in Import
+    # All on every run.  Route them to Import Review instead.
+    try:
+        _audio_exts = {
+            '.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus',
+            '.wav', '.aiff', '.wv', '.ape', '.dsf', '.dsd',
+        }
+        _disk_audio = [
+            f for f in Path(aldir).iterdir()
+            if f.is_file() and f.suffix.lower() in _audio_exts
+        ]
+        if _disk_audio:
+            _db_abs: set = set()
+            try:
+                _existing_items = composite_workflows.find_all_items_by_album_id(existing_album_id)
+                for _it in _existing_items:
+                    _p = _s(_it.get("path"))
+                    _abs = (
+                        str(MUSIC_ROOT / _p.lstrip("/"))
+                        if _p and not _p.startswith("/")
+                        else _p
+                    )
+                    _db_abs.add(_abs)
+            except Exception:
+                pass
+            _unimported_files = [
+                f for f in _disk_audio if str(f) not in _db_abs
+            ]
+            if _unimported_files:
+                _reason = (
+                    f"Album repair complete "
+                    f"({comp.get('in_library', 0)} Beets track(s)), "
+                    f"but {len(_unimported_files)} audio file(s) on "
+                    f"disk are not in Beets"
+                    + (
+                        f" ({', '.join(f.name for f in _unimported_files[:3])}"
+                        + ("..." if len(_unimported_files) > 3 else "")
+                        + ")"
+                    )
+                    + ". Review in Album Track Cleanup."
+                )
+                log.append(f"  [import] {_reason}")
+                _reimport_queue_review(ctx,
+                    aldir, None, _reason, allow_existing=True,
+                )
+    except Exception as _scan_ex:
+        log.append(
+            f"  [import] Post-repair scan warning: {_scan_ex}"
+        )
+
+
+def _reimport_repair_if_complete(ctx: _ReimportContext, aldir: str, mb_albumid: str, existing_album_id: int,
+                                 preflight: Dict[str, Any]) -> bool:
+    """True when the existing album was already complete and was repaired in place.
+    A failure in here is a warning: the job continues to the source scan/import."""
+    log = ctx.log
+    try:
+        comp = _album_mb_completeness(existing_album_id, mb_albumid, log)
+        complete_existing = (
+            int(comp.get("missing_count") or 0) == 0
+            and int(comp.get("in_library") or 0) >= int(preflight.get("expected") or 0)
+        )
+        if complete_existing:
+            _reimport_repair_in_place(ctx, aldir, mb_albumid, existing_album_id)
+            _reimport_queue_unimported_files(ctx, aldir, existing_album_id, comp)
+            return True
+        log.append(
+            "  [import] Folder tracklist matches the selected release, "
+            f"but existing album_id {existing_album_id} is incomplete "
+            f"({comp.get('in_library', 0)}/{comp.get('expected_count', 0)} present). "
+            "Continuing source scan/import to complete it."
+        )
+    except Exception as ex:
+        log.append(
+            "  [import] Existing album completeness check warning: "
+            f"{ex}; continuing source scan/import."
+        )
+    return False
+
+
+def _reimport_fill_gap_without_source(ctx: _ReimportContext, aldir: str, mb_albumid: str, existing_album_id: int,
+                                      wanted_tracks: List[Dict[str, Any]], preflight: Dict[str, Any],
+                                      scan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The album is missing tracks and no source file fits. Always ends the job; returns its result."""
+    log, _guess_artist, _guess_album = ctx.log, ctx.guess_artist, ctx.guess_album
+    duplicate_count = len(scan.get("duplicate_files") or [])
+    unknown_count = len(scan.get("unknown_files") or [])
+    preflight_matches = int(preflight.get("matches") or 0)
+    preflight_expected = int(preflight.get("expected") or 0)
+    high_confidence_partial = (
+        preflight_expected > 0
+        and preflight_matches < preflight_expected
+        and (preflight_matches / max(1, preflight_expected)) >= 0.80
+    )
+    if high_confidence_partial:
+        log.append(
+            "[import] Existing album is missing "
+            f"{int(scan.get('missing_count') or 0)} MusicBrainz "
+            "track(s), but no safe source file was found for the "
+            "gap. Repairing the confidently matched existing "
+            "tracks instead."
+        )
+        if unknown_count:
+            log.append(
+                "  [import] Warning: "
+                f"{unknown_count} file(s) did not map cleanly; "
+                "leaving them in place for later review."
+        )
+        _reimport_repair_in_place(ctx, aldir, mb_albumid, existing_album_id, partial=True)
+        _partial_missing = int(scan.get("missing_count") or 0)
+        _partial_in_library = int(scan.get("in_library") or 0)
+        _partial_expected = int(
+            scan.get("expected_count") or preflight_expected or 0
+        )
+        _partial_reason = (
+            f"Repaired {_partial_in_library}/"
+            f"{_partial_expected} track(s) in place. "
+            f"{_partial_missing} track(s) still missing — "
+            "no source files found. Download missing tracks to complete."
+        )
+        _reimport_queue_review(ctx, aldir, None, _partial_reason, allow_existing=True)
+        _invalidate_lib_cache()
+        return None
+    if unknown_count:
+        reason_unknown = (
+            "Existing album is missing tracks, but this folder "
+            "contains audio that does not safely match the "
+            "missing MusicBrainz tracks."
+        )
+        unknown_suggestion = {
+            "mb_albumid": mb_albumid,
+            "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+            "mb_valid": True,
+            "confidence": "low",
+            "albumartist": _guess_artist,
+            "album": _guess_album,
+            "reason": reason_unknown,
+        }
+        _reimport_queue_review(ctx,
+            aldir,
+            unknown_suggestion,
+            reason_unknown,
+            allow_existing=True,
+            evidence=_ai_match_evidence_packet(
+                "missing_track",
+                folder_path=aldir,
+                suggestion=unknown_suggestion,
+                folder_evidence=_build_folder_evidence(aldir),
+                preflight=preflight,
+                wanted_tracks=scan.get("wanted_tracks") or wanted_tracks,
+                reason=reason_unknown,
+            ),
+        )
+    log.append(
+        "[import] No source files matched the still-missing "
+        "MusicBrainz tracks. Existing album was left unchanged "
+        "and still needs completion from another source."
+    )
+    _invalidate_lib_cache()
+    return {
+        "status": "no_useful_missing_tracks",
+        "existing_album_id": existing_album_id,
+        "mb_albumid": mb_albumid,
+        "missing_count": int(scan.get("missing_count") or 0),
+        "duplicate_count": duplicate_count,
+        "unknown_count": unknown_count,
+        "message": (
+            "Source contained no files that safely match the "
+            "missing MusicBrainz tracks."
+        ),
+    }
+
+
+def _reimport_scan_library_album(ctx: _ReimportContext, aldir: str, mb_albumid: str, existing_album_id: int,
+                                 wanted_tracks: List[Dict[str, Any]], preflight: Dict[str, Any],
+                                 source_is_music_library: bool) -> Tuple[bool, Optional[Dict[str, Any]], str,
+                                                                         List[Dict[str, Any]], bool]:
+    """An existing album's own library folder: only still-missing files may be imported.
+    Returns (job finished, its result, aldir, wanted_tracks, source_is_music_library)."""
+    log, _guess_artist, _guess_album = ctx.log, ctx.guess_artist, ctx.guess_album
+    scan = _source_audio_missing_track_scan(aldir, existing_album_id, mb_albumid, log)
+    if scan.get("ok"):
+        useful_files = [Path(p) for p in (scan.get("useful_files") or [])]
+        duplicate_count = len(scan.get("duplicate_files") or [])
+        unknown_count = len(scan.get("unknown_files") or [])
+        log.append(
+            "  [import] Existing album source scan: "
+            f"{scan.get('missing_count', 0)} still-missing, "
+            f"{len(useful_files)} importable, "
+            f"{duplicate_count} already-present, "
+            f"{unknown_count} unknown"
+        )
+        if useful_files:
+            wanted_tracks = _normalise_wanted_tracks(
+                scan.get("wanted_tracks") or wanted_tracks)
+            log.append(
+                "  [import] Targeting still-missing track(s): "
+                + ", ".join(_wanted_track_label(t) for t in wanted_tracks[:5])
+            )
+            staged_dir = _stage_selected_audio_files(
+                aldir,
+                useful_files,
+                scan.get("artist") or _guess_artist,
+                scan.get("album") or _guess_album,
+                log,
+                force_stage=True,
+                target_tracks=_normalise_wanted_tracks(
+                    scan.get("wanted_tracks") or wanted_tracks
+                ),
+            )
+            if staged_dir != aldir:
+                log.append(
+                    "[import] Existing album detected; importing only "
+                    f"{len(useful_files)} file(s) that match still-missing "
+                    "MusicBrainz tracks."
+                )
+                aldir = staged_dir
+                source_is_music_library = False
+            else:
+                raise RuntimeError(
+                    "Could not stage the still-missing track subset; "
+                    "refusing to re-import the existing library folder."
+                )
+        elif int(scan.get("missing_count") or 0) > 0:
+            return True, _reimport_fill_gap_without_source(
+                ctx, aldir, mb_albumid, existing_album_id, wanted_tracks, preflight, scan
+            ), aldir, wanted_tracks, source_is_music_library
+    else:
+        raise RuntimeError(
+            "Could not safely scan this existing album for missing tracks; "
+            "refusing full library folder re-import."
+        )
+    return False, None, aldir, wanted_tracks, source_is_music_library
+
+
+def _reimport_log_template_tokens(log: list, aldir: str) -> None:
+    # ── Step 0a: Template-token file names (report only) ──────────────────
+    # Files like "Artist - Album - %02i{$track} - Title.flac" are left over
+    # from a previous failed rename. This step used to rename them in place
+    # with a raw filesystem move; since S1 (LT-13) raw moves are refused
+    # inside the music library and no engine family renames files ahead of
+    # an import, so the rename is NOT performed. beet import matches by
+    # tags/fingerprint, not by file name, and the import's own move/rename
+    # gives the files their final template names.
+    try:
+        token_files = [
+            f.name for f in sorted(Path(aldir).iterdir())
+            if f.is_file() and f.suffix.lower() in AUDIO_EXT
+            and _UNRESOLVED_TEMPLATE_TOKEN_RE.search(f.stem)
+        ]
+    except Exception as ex:
+        token_files = []
+        log.append(f"  Template-token scan warning: {ex}")
+    if token_files:
+        log.append(
+            f"  Pre-rename skipped (not_supported): {len(token_files)} file(s) carry unresolved "
+            "template tokens; raw renames are disabled for library safety -- beet import will "
+            "rename them to the configured template.")
+
+
+def _reimport_prepare_existing_rows(log: list, existing_album_id: int, mb_albumid: str,
+                                    wanted_tracks: List[Dict[str, Any]]) -> None:
+    # ── Step 0b: Existing DB rows for this folder ─────────────────────────
+    # Existing albums are preserved until after the selected MB release has
+    # passed preflight; deleting the current rows first can lose a valid
+    # library album when the MBID is wrong.
+    if existing_album_id:
+        log.append(
+            f"  Existing album repair: preserving current DB rows for album_id {existing_album_id}"
+        )
+        if wanted_tracks:
+            _prune_stale_wanted_rows_before_import(
+                existing_album_id, mb_albumid, wanted_tracks, log)
+    else:
+        # S1: the former "clear every orphan row in this folder" block
+        # never worked (resolve_folder_to_albums returns a list of album
+        # ids, so it always raised and logged a warning) and its comment
+        # wrongly claimed it quarantined files. It is not performed;
+        # rows are only ever removed through an approved rows-only
+        # transaction.
+        log.append("  Orphan DB-row pre-cleanup for unowned folders: not performed (not_supported)")
+
+
+def _reimport_keep_for_review(ctx: _ReimportContext, aldir: str, mb_albumid: str, reason: str,
+                              kept_ids: List[int]) -> None:
+    log = ctx.log
+    # Never removes the rows Beets just imported: a removal goes
+    # through the transaction preview/approve flow, not this job.
+    ids = ", ".join(str(i) for i in kept_ids)
+    reason = f"{reason} Album_id {ids} was left in the library for review."
+    if not _queue_folder_for_manual_review(
+            aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
+                    "kept_album_ids": kept_ids, "reason": reason},
+            reason, log, allow_existing=True):
+        log.append(f"  No Review entry was written; album_id {ids} was left in the library.")
+    raise RuntimeError(reason)
+
+
+def _reimport_refuse_failed_import(ctx: _ReimportContext, atomic_res: Dict[str, Any], aldir: str, mb_albumid: str,
+                                   existing_album_id: int) -> None:
+    """The confirmed import did not succeed: queue for Review where that applies, and fail the job."""
+    _guess_artist, _guess_album = ctx.guess_artist, ctx.guess_album
+    if atomic_res.get("code") == "not_imported":
+        review_reason = ("Beets could not confidently match this source to the selected "
+                         "MusicBrainz release.")
+        _reimport_queue_review(ctx,
+            aldir,
+            {
+                "mb_albumid": mb_albumid,
+                "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+                "mb_valid": True,
+                "confidence": "low",
+                "albumartist": _guess_artist,
+                "album": _guess_album,
+                "reason": review_reason,
+            },
+            review_reason,
+            allow_existing=bool(existing_album_id),
+        )
+        raise RuntimeError(f"{review_reason} Queued for Review without changing library files.")
+    # A verification failure after Beets imported (release_group_mismatch,
+    # import_ambiguous) keeps the album rows and sends the folder to review.
+    if atomic_res.get("album_ids"):
+        _reimport_keep_for_review(ctx, aldir, mb_albumid,
+                                  atomic_res.get("error") or "Beets import failed verification.",
+                                  atomic_res["album_ids"])
+    raise RuntimeError(atomic_res.get("error") or "Beets import failed.")
+
+
+def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, mb_albumid: str, planned_rg: str,
+                                  existing_album_id: int, wanted_tracks: List[Dict[str, Any]],
+                                  requested_tracks: List[Dict[str, Any]],
+                                  replace_existing: bool) -> Tuple[int, List[Dict[str, Any]]]:
+    """Gate and merge the imported album onto the existing one, then read it back.
+    Returns (the album id the job now owns, requested tracks still undelivered)."""
+    log, _guess_artist = ctx.log, ctx.guess_artist
+    undelivered_tracks: List[Dict[str, Any]] = []
+    # Missing-track fill: Beets kept the new files as their own album
+    # (duplicate_action keep); merge them onto the existing album.
+    if wanted_tracks:
+        fp_validation = _validate_wanted_album_items_with_acoustid(
+            aid, mb_albumid, wanted_tracks, log, expected_artist=_guess_artist,
+            slot_authorized=_recovery_slot_authorized(aldir))
+        if not fp_validation.get("ok"):
+            _reimport_keep_for_review(
+                ctx, aldir, mb_albumid,
+                fp_validation.get("reason") or "AcoustID did not verify the downloaded "
+                "file(s) for the requested missing MusicBrainz track(s).", [aid])
+    imported_aid = aid
+
+    def _merge_failed(detail: str) -> None:
+        # Fail closed: the imported album row stays as it is, never
+        # removed here; cleanup goes through the controlled workflow.
+        log.append(f"  [merge] FAILED: imported album_id {imported_aid} remains a separate album "
+                   f"row next to existing album_id {existing_album_id}; clean it up through "
+                   "Review / Transactions.")
+        # The fixed message comes first: the acquisition layer reads the
+        # code only from it, never from the detail (engine/peer text).
+        _reimport_keep_for_review(ctx, aldir, mb_albumid,
+                                  f"{EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: existing album_id "
+                                  f"{existing_album_id}, {detail}.", [imported_aid])
+
+    # A missing-track fill must end with the delivered tracks on the
+    # existing album; a format replacement stays a separate row
+    # until its Preview is approved, so only fills are read back.
+    verify_fill = bool(wanted_tracks) and not replace_existing
+    fill_item_ids: List[int] = []
+    if verify_fill:
+        def _is_wanted(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
+            rid = _s(t.get("mb_trackid")).strip().lower()
+            return bool(
+                (int(t.get("track") or 0)
+                 and (int(row.get("disc") or 1), int(row.get("track") or 0))
+                 == (int(t.get("disc") or 1), int(t.get("track") or 0)))
+                or (rid and _s(row.get("mb_trackid")).strip().lower() == rid))
+        try:
+            imported_rows = composite_workflows.find_all_items_by_album_id(int(aid))
+        except Exception as ex:
+            _merge_failed(f"could not read the imported items ({ex})")
+        fill_item_ids = [int(r["id"]) for r in imported_rows
+                         if any(_is_wanted(r, t) for t in wanted_tracks)]
+    try:
+        aid = _merge_imported_album_into_existing(
+            aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
+            replace_existing_item_ids=ctx.replace_existing_item_ids)
+    except _ExistingAlbumMergeFailed as ex:
+        _merge_failed(str(ex))
+    if verify_fill:
+        try:
+            existing_rows = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
+        except Exception as ex:
+            _merge_failed(f"could not read back existing album_id {existing_album_id} ({ex})")
+        on_existing = {int(r.get("id") or 0) for r in existing_rows}
+        unmerged = [i for i in fill_item_ids if i not in on_existing]
+        if aid != existing_album_id or not fill_item_ids or unmerged:
+            _merge_failed("the requested track(s) are not on the existing album"
+                          + (f" (item_id(s) {', '.join(map(str, unmerged))})" if unmerged else ""))
+        log.append(f"  [merge] Verified {len(fill_item_ids)} requested track(s) on existing "
+                   f"album_id {existing_album_id}.")
+        # The read-back covers what the source delivered. Originally
+        # requested tracks still absent from the album are reported,
+        # not failed (QA N1); the source scan narrows wanted_tracks.
+        undelivered_tracks = [t for t in requested_tracks
+                              if not any(_is_wanted(r, t) for r in existing_rows)]
+        if undelivered_tracks:
+            log.append(f"  [merge] The source did not deliver {len(undelivered_tracks)} requested "
+                       f"track(s), still missing from album_id {existing_album_id}: "
+                       + ", ".join(_wanted_track_label(t) for t in undelivered_tracks[:8]))
+    merged = composite_workflows.get_album(aid) or {}
+    if (_s(merged.get("mb_albumid")).strip().lower() != mb_albumid
+            or _s(merged.get("mb_releasegroupid")).strip().lower() != planned_rg):
+        _reimport_keep_for_review(ctx, aldir, mb_albumid,
+                                  f"Album_id {aid} does not carry the selected release and "
+                                  "Release Group after the merge.", [aid])
+    return aid, undelivered_tracks
+
+
+def _reimport_pin_albumartist(ctx: _ReimportContext, aid: int) -> None:
+    log, forced_albumartist = ctx.log, ctx.forced_albumartist
+    cur = composite_workflows.get_album(aid) or {}
+    if _s(cur.get("albumartist")) != forced_albumartist:
+        up_aa = composite_workflows.update_album_metadata(
+            aid, {"albumartist": forced_albumartist}, force_write_tags=True)
+        if not up_aa.get("ok"):
+            raise RuntimeError(f"Engine update albumartist failed for album {aid}")
+        rel_res = composite_workflows.relocate_album(aid, mode="rename")
+        if not rel_res.get("ok"):
+            raise RuntimeError(f"Engine relocate_album failed for album {aid}")
+        log.append(f"  [albumartist] Set to the requested '{forced_albumartist}'.")
+
+
+def _reimport_embed_art(log: list, album_ids: List[int]) -> None:
+    # ── Fetch and embed album art ─────────────────────────────────────────
+    # Wave 25 round (independent review): BeetsClient had no
+    # repair_album_artwork method at all -- every call here raised
+    # AttributeError, silently swallowed by this try/except, so
+    # artwork was never actually fetched for any import. Best-effort
+    # by design (matches the pre-Wave-25 local `beet fetchart`/`beet
+    # embedart` behavior this replaces): missing cover art must not
+    # fail an otherwise-successful import, but the failure is now a
+    # real, checked result rather than a guaranteed no-op.
+    for _art_aid in album_ids:
+        try:
+            _art_res = composite_workflows.fetch_and_embed_album_art(int(_art_aid))
+            if not _art_res.get("ok"):
+                log.append(f"  [artwork] Warning: {_art_res.get('error')}")
+        except Exception as _ae:
+            log.append(f"  [artwork] Warning: {_ae}")
+
+
+def _reimport_plex_sync_leg(log: list, aldir: str) -> None:
+    # F9: the Plex-sync tail of a missing-track recovery. The merge above
+    # drove the carrier to imported+IMPORTED; trigger its best-effort Plex
+    # refresh and advance to PLEX_SYNCED. A carrier-less reimport is a no-op
+    # and still takes the generic (workflow-gated) refresh below. The carrier
+    # lookup is best-effort: an unavailable/unwritable carrier store must
+    # never fail a completed import (as the merge lookup already tolerates).
+    try:
+        _recovery_leg_carrier = recovery_carrier.load_for_folder(aldir)
+    except Exception as _rc_ex:
+        _recovery_leg_carrier = None
+        log.append(f"  [recovery] Plex-leg carrier lookup skipped ({type(_rc_ex).__name__}).")
+    _recovery_plex_sync_leg(_recovery_leg_carrier, log)
+
+
 # Service behind POST /api/albums/reimport-disk (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
 def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
@@ -973,14 +1884,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         existing_album_id = 0
     wanted_tracks = _normalise_wanted_tracks(
         payload.get("wanted_tracks") or payload.get("missing_tracks") or [])
-    replace_existing_item_ids = []
-    for raw_id in (payload.get("replace_existing_item_ids") or []):
-        try:
-            item_id = int(raw_id or 0)
-            if item_id > 0:
-                replace_existing_item_ids.append(item_id)
-        except Exception:
-            pass
+    replace_existing_item_ids = _import_positive_item_ids(payload.get("replace_existing_item_ids"))
     replace_existing = bool(payload.get("replace_existing") or replace_existing_item_ids)
     queue_review_on_uncertain = payload.get("queue_review", True) is not False
     light_confirm = bool(payload.get("light_confirm"))
@@ -992,45 +1896,9 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         return {"ok": False, "error": "aldir required"}, 400
     if not mb_albumid:
         return {"ok": False, "error": "mb_albumid required"}, 400
-    # SEC-002 Wave 8 ARCH-003: _resolve_import_review_source_path() validated
-    # existence/containment/symlink-safety against THIS process's own
-    # filesystem -- which has no view of MUSIC_ROOT/DOWNLOADS_ROOT in the
-    # shipped web-manager topology, so it could never succeed for a real
-    # path (confirmed by the mandatory two-service runtime test). The Beets
-    # engine owns those mounts, so it -- not the web manager -- must be the
-    # one to validate and inspect the source. inspect_import_source() is
-    # engine-authoritative: it reuses the engine's own resolve_safe_path()
-    # (full realpath resolution + root containment, closing symlink escapes
-    # the same way) and returns only the canonical path plus bounded audio
-    # evidence, never letting the caller pick its own trusted root.
-    try:
-        import_source_evidence = composite_workflows.inspect_import_source(aldir, operation="reimport")
-    except BeetsAuthError:
-        return {"ok": False, "error": "Beets engine authentication failed."}, 502
-    except BeetsUnavailableError:
-        return {"ok": False, "error": "Beets engine is unavailable."}, 502
-    except BeetsError as exc:
-        # The engine's /imports/source/inspect only ever returns one of a
-        # fixed set of stable error_code strings (see inspect_import_source()
-        # in backend/beets_control_agent.py) -- BeetsClient._request() wraps
-        # that string as this exception's message. Still, never interpolate
-        # the exception text directly into a response: _request() falls back
-        # to embedding up to 200 raw response-body characters for any
-        # non-JSON error response it doesn't recognize (e.g. an unexpected
-        # proxy/framework error page), which could carry stack-trace-shaped
-        # text. Map only the known codes to a safe message; anything else
-        # collapses to one generic string.
-        _known_source_errors = {
-            "invalid_path": "Import source is outside the allowed roots or does not exist.",
-            "root_self_rejected": "Import source cannot be an entire trusted root.",
-            "invalid_operation": "Import source inspection request was malformed.",
-            "inspection_failed": "Could not inspect the import source.",
-        }
-        _error_text = next(
-            (msg for code, msg in _known_source_errors.items() if code in str(exc)),
-            "Import source rejected.",
-        )
-        return {"ok": False, "error": _error_text}, 400
+    import_source_evidence, source_refusal = _reimport_inspect_source(aldir)
+    if source_refusal:
+        return source_refusal
     if not import_source_evidence.get("ok"):
         return {"ok": False, "error": "Import source rejected."}, 400
     # Only the engine's own canonical path is ever used from here on --
@@ -1056,6 +1924,11 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', Path(aldir).name).strip()
         )
         source_is_music_library = str(aldir).rstrip("/").startswith(str(MUSIC_ROOT).rstrip("/") + "/")
+        ctx = _ReimportContext(
+            log=log, cancel_event=cancel_event, guess_artist=_guess_artist, guess_album=_guess_album,
+            queue_review_on_uncertain=queue_review_on_uncertain, light_confirm=light_confirm,
+            manual_mbid_override=manual_mbid_override, replace_existing_item_ids=replace_existing_item_ids,
+            forced_albumartist=forced_albumartist)
         # SEC-002 Wave 8 final mutation binding: torrent-staged sources are no
         # longer preserved here as a separate up-front step. reimport_source_atomic()
         # (called at the actual import mutation below) detects a torrent-staged
@@ -1064,137 +1937,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         # the atomic endpoint preserve again would silently double-copy. aldir
         # stays the original canonical torrent source throughout preflight; only
         # the final mutation call operates on the engine's own preserved copy.
-        def _maybe_queue_review(folder_path: str, suggestion: Optional[dict],
-                                reason: str, *, allow_existing: bool = False,
-                                evidence: Optional[Dict[str, Any]] = None) -> bool:
-            if queue_review_on_uncertain or light_confirm:
-                # Phase-2 spine: if a recovery carrier was created for this
-                # staged folder at download time, the Review row keeps its
-                # structured album identity instead of the `allow_existing`
-                # boolean + free-text suggestion that Phase-1 proved lossy.
-                carrier = None
-                try:
-                    carrier = recovery_carrier.load_for_folder(folder_path)
-                except Exception:
-                    carrier = None
-                return _queue_folder_for_manual_review(
-                    folder_path, suggestion, reason, log,
-                    allow_existing=allow_existing, evidence=evidence,
-                    carrier=carrier)
-            mode = "light-confirm" if light_confirm else "no-review"
-            log.append(
-                f"  Skipped Pending Review ({mode}): {reason} "
-                "No library files were changed."
-            )
-            return False
-
-        def _repair_existing_album_in_place(aid: int, *, partial: bool = False,
-                                            manual_override: bool = False) -> None:
-            repair_desc = (
-                "Manual MusicBrainz release override; syncing album metadata "
-                "in-place even though track titles did not pass automatic preflight."
-                if manual_override else
-                "Existing album is a high-confidence partial match; repairing "
-                "matched tags in-place without re-importing."
-                if partial else
-                "Existing album already matches the selected MusicBrainz "
-                "release; repairing tags in-place without re-importing."
-            )
-            log.append(f"[1/3] {repair_desc}")
-            expected_tracks = _mb_release_track_count(mb_albumid, log)
-            if not expected_tracks:
-                raise RuntimeError(
-                    "MusicBrainz release lookup failed during existing album repair; "
-                    "album mb_albumid was not changed."
-                )
-            log.append("[2/3] Matching tracks in existing album...")
-            matched = _match_tracks_from_mb(
-                mb_albumid,
-                aid,
-                log,
-                zero_unmatched=(not partial and not manual_override),
-            )
-            if matched < 0:
-                raise RuntimeError(
-                    "MusicBrainz release lookup failed during existing album repair; "
-                    "album mb_albumid was not changed."
-                )
-            min_ratio = 0.80 if partial else 0.60
-            if partial:
-                min_matched = max(
-                    1,
-                    min(expected_tracks, int((expected_tracks * min_ratio) + 0.999)),
-                )
-            else:
-                min_matched = max(1, min(expected_tracks, int(expected_tracks * min_ratio)))
-            if matched < min_matched:
-                if manual_override:
-                    log.append(
-                        "  Manual override: only "
-                        f"{matched}/{expected_tracks} track(s) matched by title. "
-                        "Continuing with album-level MusicBrainz sync; unmatched "
-                        "track titles/numbers are left in place."
-                    )
-                else:
-                    raise RuntimeError(
-                        f"Existing album repair did not match enough tracks: "
-                        f"{matched}/{expected_tracks}"
-                    )
-            p_res = composite_workflows.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
-            if not p_res.get("ok") or not p_res.get("operation_id"):
-                raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
-            app_res = composite_workflows.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
-            if not app_res.get("ok"):
-                raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
-
-            log.append("[3/3] Writing tags and moving existing album...")
-            _strip_year_from_album_name(aid, log)
-            up_res = composite_workflows.update_album_metadata(aid, {}, force_write_tags=True)
-            if not up_res.get("ok"):
-                raise RuntimeError(f"Engine update_album_metadata failed for album {aid}")
-            rel_res = composite_workflows.relocate_album(aid, mode="rename")
-            if not rel_res.get("ok"):
-                raise RuntimeError(f"Engine relocate_album failed for album {aid}")
-            _repair_album_mbid_sticking_once(
-                aid,
-                mb_albumid,
-                log,
-                write_tags=True,
-                cancel_event=cancel_event,
-            )
-            _remove_pending_review_for_path(aldir, log)
-            _invalidate_lib_cache()
-            _trigger_plex_refresh(log)
-            log.append(f"✓ Done — existing album_id {aid} repaired without re-import.")
-
         if existing_album_id:
-            try:
-                exists = composite_workflows.get_album(existing_album_id)
-                if not exists:
-                    replacement_id = None
-                    if mb_albumid:
-                        mb_matches = composite_workflows.find_all_albums_by_mb_albumid(mb_albumid)
-                        if mb_matches:
-                            replacement_id = int(mb_matches[0]["id"])
-                    if not replacement_id and _guess_album:
-                        q_albums = composite_workflows.find_albums_by_query(f"album:{_guess_album}")
-                        if q_albums:
-                            replacement_id = int(q_albums[0]["id"])
-                    if replacement_id:
-                        old_existing = existing_album_id
-                        existing_album_id = replacement_id
-                        log.append(
-                            f"  Existing album_id {old_existing} no longer exists; "
-                            f"using current album_id {existing_album_id}"
-                        )
-                    else:
-                        log.append(
-                            f"  Existing album_id {existing_album_id} no longer exists; "
-                            "continuing as a new folder import"
-                        )
-                        existing_album_id = 0
-            except Exception as ex:
-                log.append(f"  Existing album lookup warning: {ex}")
+            existing_album_id = _reimport_current_existing_album(log, existing_album_id, mb_albumid, _guess_album)
         _resolved_mbid = _resolve_album_release_for_import(
             mb_albumid,
             _guess_artist,
@@ -1209,62 +1953,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             wanted_tracks=wanted_tracks,
         )
         if not _resolved_mbid:
-            review_reason = (
-                "No MusicBrainz release candidate matched this folder's "
-                "tracklist. Verify the correct artist and release before retagging."
-            )
-            review_suggestion = {
-                "artist": _guess_artist,
-                "albumartist": _guess_artist,
-                "album": _guess_album,
-                "confidence": "low",
-                "reason": review_reason,
-            }
-            rejected_preflight = None
-            rejected_mbid = _s(mb_albumid).strip().lower()
-            if _MB_UUID_RE.match(rejected_mbid):
-                review_suggestion["mb_albumid"] = rejected_mbid
-                review_suggestion["mb_url"] = f"https://musicbrainz.org/release/{rejected_mbid}"
-                review_suggestion["mb_valid"] = True
-                try:
-                    rejected_preflight = _folder_release_preflight(
-                        aldir,
-                        rejected_mbid,
-                        existing_album_id=existing_album_id,
-                        log=None,
-                        wanted_tracks=wanted_tracks,
-                    )
-                except Exception:
-                    rejected_preflight = None
-                review_reason = _preflight_review_reason(
-                    rejected_preflight,
-                    review_reason,
-                )
-                review_suggestion["reason"] = review_reason
-            review_evidence = _ai_match_evidence_packet(
-                "missing_track" if wanted_tracks else "light_confirm",
-                folder_path=aldir,
-                suggestion=review_suggestion,
-                folder_evidence=_build_folder_evidence(aldir),
-                preflight=rejected_preflight,
-                wanted_tracks=wanted_tracks,
-                reason=review_reason,
-            )
-            # Stable code the acquisition layer reads (IMPORT_REFUSAL_REASONS).
-            refusal_code = (_s(((rejected_preflight or {}).get("missing_track_proof") or {}).get("reason_code"))
-                            or "release_unresolved")
-            review_evidence["refusal_reason_code"] = refusal_code
-            queued = _maybe_queue_review(
-                aldir,
-                review_suggestion,
-                review_reason,
-                allow_existing=bool(existing_album_id),
-                evidence=review_evidence,
-            )
-            raise RuntimeError(
-                f"Could not resolve a MusicBrainz release ID for import [reason_code={refusal_code}]"
-                + ("; queued for Review without changing library files." if queued else "")
-            )
+            _reimport_refuse_unresolved_release(ctx, aldir, mb_albumid, existing_album_id, wanted_tracks)
         if _resolved_mbid != mb_albumid:
             log.append(f"  Using MusicBrainz release ID: {_resolved_mbid}")
             mb_albumid = _resolved_mbid
@@ -1272,33 +1961,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         if existing_album_id or source_is_music_library:
             preflight = _folder_release_preflight(
                 aldir, mb_albumid, existing_album_id=existing_album_id, log=log)
-            target_desc = (
-                f"Existing album_id {existing_album_id}"
-                if existing_album_id else "Library folder"
-            )
-            log.append(
-                f"  [preflight] {target_desc}: "
-                f"{preflight.get('matches', 0)}/{preflight.get('expected', 0)} "
-                f"track(s) match selected MusicBrainz release"
-                + (f" ({preflight.get('release_title')})" if preflight.get("release_title") else "")
-            )
-            if preflight.get("release_artist") or preflight.get("folder_artist"):
-                log.append(
-                    "  [preflight] Artist check: "
-                    f"folder={preflight.get('folder_artist')!r}, "
-                    f"MusicBrainz={preflight.get('release_artist')!r}, "
-                    f"score={preflight.get('artist_score', 0):.0%}"
-                )
-            if preflight.get("acoustid_top_release"):
-                status = "mismatch" if preflight.get("acoustid_mismatch") else "checked"
-                log.append(
-                    f"  [preflight] AcoustID {status}: selected release "
-                    f"{preflight.get('acoustid_target_hits', 0)} hit(s), "
-                    f"top release {preflight.get('acoustid_top_release')} "
-                    f"{preflight.get('acoustid_top_hits', 0)} hit(s)"
-                )
-            for line in preflight.get("examples") or []:
-                log.append(line)
+            _reimport_log_preflight(log, preflight, existing_album_id)
             staged_missing_import_ok = False
             if replace_existing and existing_album_id and wanted_tracks and not source_is_music_library:
                 log.append(
@@ -1306,376 +1969,22 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                     "instead of treating the requested track as already present."
                 )
             if existing_album_id and wanted_tracks and not source_is_music_library and not replace_existing:
-                scan = _source_audio_missing_track_scan(aldir, existing_album_id, mb_albumid, log)
-                if scan.get("ok"):
-                    useful_files = [Path(p) for p in (scan.get("useful_files") or [])]
-                    duplicate_count = len(scan.get("duplicate_files") or [])
-                    unknown_count = len(scan.get("unknown_files") or [])
-                    log.append(
-                        "  [import] Staged missing-track scan: "
-                        f"{scan.get('missing_count', 0)} still-missing, "
-                        f"{len(useful_files)} importable, "
-                        f"{duplicate_count} already-present, "
-                        f"{unknown_count} unknown"
-                    )
-                    if useful_files:
-                        wanted_tracks = _normalise_wanted_tracks(
-                            scan.get("wanted_tracks") or wanted_tracks)
-                        log.append(
-                            "  [import] Targeting still-missing track(s): "
-                            + ", ".join(_wanted_track_label(t) for t in wanted_tracks[:5])
-                        )
-                        if unknown_count:
-                            log.append(
-                                "  [import] Ignoring "
-                                f"{unknown_count} downloaded file(s) that did not "
-                                "safely match requested missing MusicBrainz tracks."
-                            )
-                        staged_dir = _stage_selected_audio_files(
-                            aldir,
-                            useful_files,
-                            scan.get("artist") or _guess_artist,
-                            scan.get("album") or _guess_album,
-                            log,
-                            target_tracks=_normalise_wanted_tracks(
-                                scan.get("wanted_tracks") or wanted_tracks
-                            ),
-                        )
-                        if staged_dir != aldir:
-                            # F5/F6 auto path (QA F1): the recovery carrier was
-                            # bound to this pre-restage folder at acquisition.
-                            # The subset-narrowing restage creates a NEW staged
-                            # path, and the merge/Plex-leg carrier lookups below
-                            # are keyed on the reassigned aldir -- rebind the
-                            # carrier to the new path FIRST (same album-equality
-                            # gate the helper enforces) so the merge runs under
-                            # carrier ownership/audit instead of degrading to a
-                            # carrier-less merge that leaves the carrier orphaned
-                            # at STAGED.
-                            _recovery_rebind_restaged(aldir, staged_dir, existing_album_id, log)
-                            aldir = staged_dir
-                            source_is_music_library = False
-                        staged_missing_import_ok = True
-                        log.append(
-                            "[import] Staged source matches still-missing "
-                            "MusicBrainz track(s); continuing import."
-                        )
+                aldir, wanted_tracks, source_is_music_library, staged_missing_import_ok = _reimport_stage_missing_fill(
+                    ctx, aldir, mb_albumid, existing_album_id, wanted_tracks, source_is_music_library)
             if not preflight.get("ok") and not staged_missing_import_ok:
-                if manual_mbid_override:
-                    log.append(
-                        "  Manual MusicBrainz release override accepted. "
-                        "Automatic tracklist preflight failed, but the user-provided "
-                        "release ID will be used."
-                    )
-                    if existing_album_id:
-                        _repair_existing_album_in_place(
-                            existing_album_id,
-                            manual_override=True,
-                        )
-                        return
-                    log.append(
-                        "  Continuing import for this library folder with the "
-                        "provided release ID."
-                    )
-                else:
-                    reason = (
-                        "Selected MusicBrainz release did not match this existing "
-                        f"library folder ({preflight.get('matches', 0)}/"
-                        f"{preflight.get('expected', 0)} track(s) matched"
-                        + (
-                            f", artist {preflight.get('release_artist')!r} did not match "
-                            f"folder artist {preflight.get('folder_artist')!r}"
-                            if not preflight.get("artist_ok", True) else ""
-                        )
-                        + "). "
-                        "Verify the release before retagging."
-                    )
-                    _maybe_queue_review(
-                        aldir,
-                        {
-                            "mb_albumid": mb_albumid,
-                            "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
-                            "mb_valid": True,
-                            "confidence": "low",
-                            "albumartist": _guess_artist,
-                            "album": _guess_album,
-                            "reason": reason,
-                        },
-                        reason,
-                        allow_existing=bool(existing_album_id),
-                        evidence=_ai_match_evidence_packet(
-                            "missing_track" if wanted_tracks else "light_confirm",
-                            folder_path=aldir,
-                            suggestion={
-                                "mb_albumid": mb_albumid,
-                                "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
-                                "mb_valid": True,
-                                "confidence": "low",
-                                "albumartist": _guess_artist,
-                                "album": _guess_album,
-                                "reason": reason,
-                            },
-                            folder_evidence=_build_folder_evidence(aldir),
-                            preflight=preflight,
-                            wanted_tracks=wanted_tracks,
-                            reason=reason,
-                        ),
-                    )
-                    raise RuntimeError(
-                        "Selected MusicBrainz release does not match this library folder; "
-                        "queued for Review without changing DB rows."
-                    )
+                if _reimport_preflight_failed(ctx, aldir, mb_albumid, existing_album_id, wanted_tracks, preflight):
+                    return
             if existing_album_id and not replace_existing and int(preflight.get("matches") or 0) >= int(preflight.get("expected") or 0):
-                try:
-                    comp = _album_mb_completeness(existing_album_id, mb_albumid, log)
-                    complete_existing = (
-                        int(comp.get("missing_count") or 0) == 0
-                        and int(comp.get("in_library") or 0) >= int(preflight.get("expected") or 0)
-                    )
-                    if complete_existing:
-                        _repair_existing_album_in_place(existing_album_id)
-                        # After repair, check for audio files in the folder that
-                        # are still not in Beets.  These won't be imported by the
-                        # repair path (mbsync/write/move only touches existing DB
-                        # items), so they'd cause the album to re-appear in Import
-                        # All on every run.  Route them to Import Review instead.
-                        try:
-                            _audio_exts = {
-                                '.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus',
-                                '.wav', '.aiff', '.wv', '.ape', '.dsf', '.dsd',
-                            }
-                            _disk_audio = [
-                                f for f in Path(aldir).iterdir()
-                                if f.is_file() and f.suffix.lower() in _audio_exts
-                            ]
-                            if _disk_audio:
-                                _db_abs: set = set()
-                                try:
-                                    _existing_items = composite_workflows.find_all_items_by_album_id(existing_album_id)
-                                    for _it in _existing_items:
-                                        _p = _s(_it.get("path"))
-                                        _abs = (
-                                            str(MUSIC_ROOT / _p.lstrip("/"))
-                                            if _p and not _p.startswith("/")
-                                            else _p
-                                        )
-                                        _db_abs.add(_abs)
-                                except Exception:
-                                    pass
-                                _unimported_files = [
-                                    f for f in _disk_audio if str(f) not in _db_abs
-                                ]
-                                if _unimported_files:
-                                    _reason = (
-                                        f"Album repair complete "
-                                        f"({comp.get('in_library', 0)} Beets track(s)), "
-                                        f"but {len(_unimported_files)} audio file(s) on "
-                                        f"disk are not in Beets"
-                                        + (
-                                            f" ({', '.join(f.name for f in _unimported_files[:3])}"
-                                            + ("..." if len(_unimported_files) > 3 else "")
-                                            + ")"
-                                        )
-                                        + ". Review in Album Track Cleanup."
-                                    )
-                                    log.append(f"  [import] {_reason}")
-                                    _maybe_queue_review(
-                                        aldir, None, _reason, allow_existing=True,
-                                    )
-                        except Exception as _scan_ex:
-                            log.append(
-                                f"  [import] Post-repair scan warning: {_scan_ex}"
-                            )
-                        return
-                    log.append(
-                        "  [import] Folder tracklist matches the selected release, "
-                        f"but existing album_id {existing_album_id} is incomplete "
-                        f"({comp.get('in_library', 0)}/{comp.get('expected_count', 0)} present). "
-                        "Continuing source scan/import to complete it."
-                    )
-                except Exception as ex:
-                    log.append(
-                        "  [import] Existing album completeness check warning: "
-                        f"{ex}; continuing source scan/import."
-                    )
+                if _reimport_repair_if_complete(ctx, aldir, mb_albumid, existing_album_id, preflight):
+                    return
             if existing_album_id and source_is_music_library:
-                scan = _source_audio_missing_track_scan(aldir, existing_album_id, mb_albumid, log)
-                if scan.get("ok"):
-                    useful_files = [Path(p) for p in (scan.get("useful_files") or [])]
-                    duplicate_count = len(scan.get("duplicate_files") or [])
-                    unknown_count = len(scan.get("unknown_files") or [])
-                    log.append(
-                        "  [import] Existing album source scan: "
-                        f"{scan.get('missing_count', 0)} still-missing, "
-                        f"{len(useful_files)} importable, "
-                        f"{duplicate_count} already-present, "
-                        f"{unknown_count} unknown"
-                    )
-                    if useful_files:
-                        wanted_tracks = _normalise_wanted_tracks(
-                            scan.get("wanted_tracks") or wanted_tracks)
-                        log.append(
-                            "  [import] Targeting still-missing track(s): "
-                            + ", ".join(_wanted_track_label(t) for t in wanted_tracks[:5])
-                        )
-                        staged_dir = _stage_selected_audio_files(
-                            aldir,
-                            useful_files,
-                            scan.get("artist") or _guess_artist,
-                            scan.get("album") or _guess_album,
-                            log,
-                            force_stage=True,
-                            target_tracks=_normalise_wanted_tracks(
-                                scan.get("wanted_tracks") or wanted_tracks
-                            ),
-                        )
-                        if staged_dir != aldir:
-                            log.append(
-                                "[import] Existing album detected; importing only "
-                                f"{len(useful_files)} file(s) that match still-missing "
-                                "MusicBrainz tracks."
-                            )
-                            aldir = staged_dir
-                            source_is_music_library = False
-                        else:
-                            raise RuntimeError(
-                                "Could not stage the still-missing track subset; "
-                                "refusing to re-import the existing library folder."
-                            )
-                    elif int(scan.get("missing_count") or 0) > 0:
-                        preflight_matches = int(preflight.get("matches") or 0)
-                        preflight_expected = int(preflight.get("expected") or 0)
-                        high_confidence_partial = (
-                            preflight_expected > 0
-                            and preflight_matches < preflight_expected
-                            and (preflight_matches / max(1, preflight_expected)) >= 0.80
-                        )
-                        if high_confidence_partial:
-                            log.append(
-                                "[import] Existing album is missing "
-                                f"{int(scan.get('missing_count') or 0)} MusicBrainz "
-                                "track(s), but no safe source file was found for the "
-                                "gap. Repairing the confidently matched existing "
-                                "tracks instead."
-                            )
-                            if unknown_count:
-                                log.append(
-                                    "  [import] Warning: "
-                                    f"{unknown_count} file(s) did not map cleanly; "
-                                    "leaving them in place for later review."
-                            )
-                            _repair_existing_album_in_place(existing_album_id, partial=True)
-                            _partial_missing = int(scan.get("missing_count") or 0)
-                            _partial_in_library = int(scan.get("in_library") or 0)
-                            _partial_expected = int(
-                                scan.get("expected_count") or preflight_expected or 0
-                            )
-                            _partial_reason = (
-                                f"Repaired {_partial_in_library}/"
-                                f"{_partial_expected} track(s) in place. "
-                                f"{_partial_missing} track(s) still missing — "
-                                "no source files found. Download missing tracks to complete."
-                            )
-                            _maybe_queue_review(aldir, None, _partial_reason,
-                                                allow_existing=True)
-                            _invalidate_lib_cache()
-                            return
-                        if unknown_count:
-                            reason_unknown = (
-                                "Existing album is missing tracks, but this folder "
-                                "contains audio that does not safely match the "
-                                "missing MusicBrainz tracks."
-                            )
-                            unknown_suggestion = {
-                                "mb_albumid": mb_albumid,
-                                "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
-                                "mb_valid": True,
-                                "confidence": "low",
-                                "albumartist": _guess_artist,
-                                "album": _guess_album,
-                                "reason": reason_unknown,
-                            }
-                            _maybe_queue_review(
-                                aldir,
-                                unknown_suggestion,
-                                reason_unknown,
-                                allow_existing=True,
-                                evidence=_ai_match_evidence_packet(
-                                    "missing_track",
-                                    folder_path=aldir,
-                                    suggestion=unknown_suggestion,
-                                    folder_evidence=_build_folder_evidence(aldir),
-                                    preflight=preflight,
-                                    wanted_tracks=scan.get("wanted_tracks") or wanted_tracks,
-                                    reason=reason_unknown,
-                                ),
-                            )
-                        log.append(
-                            "[import] No source files matched the still-missing "
-                            "MusicBrainz tracks. Existing album was left unchanged "
-                            "and still needs completion from another source."
-                        )
-                        _invalidate_lib_cache()
-                        return {
-                            "status": "no_useful_missing_tracks",
-                            "existing_album_id": existing_album_id,
-                            "mb_albumid": mb_albumid,
-                            "missing_count": int(scan.get("missing_count") or 0),
-                            "duplicate_count": duplicate_count,
-                            "unknown_count": unknown_count,
-                            "message": (
-                                "Source contained no files that safely match the "
-                                "missing MusicBrainz tracks."
-                            ),
-                        }
-                else:
-                    raise RuntimeError(
-                        "Could not safely scan this existing album for missing tracks; "
-                        "refusing full library folder re-import."
-                    )
+                finished, result, aldir, wanted_tracks, source_is_music_library = _reimport_scan_library_album(
+                    ctx, aldir, mb_albumid, existing_album_id, wanted_tracks, preflight, source_is_music_library)
+                if finished:
+                    return result
 
-        # ── Step 0a: Template-token file names (report only) ──────────────────
-        # Files like "Artist - Album - %02i{$track} - Title.flac" are left over
-        # from a previous failed rename. This step used to rename them in place
-        # with a raw filesystem move; since S1 (LT-13) raw moves are refused
-        # inside the music library and no engine family renames files ahead of
-        # an import, so the rename is NOT performed. beet import matches by
-        # tags/fingerprint, not by file name, and the import's own move/rename
-        # gives the files their final template names.
-        try:
-            token_files = [
-                f.name for f in sorted(Path(aldir).iterdir())
-                if f.is_file() and f.suffix.lower() in AUDIO_EXT
-                and _UNRESOLVED_TEMPLATE_TOKEN_RE.search(f.stem)
-            ]
-        except Exception as ex:
-            token_files = []
-            log.append(f"  Template-token scan warning: {ex}")
-        if token_files:
-            log.append(
-                f"  Pre-rename skipped (not_supported): {len(token_files)} file(s) carry unresolved "
-                "template tokens; raw renames are disabled for library safety -- beet import will "
-                "rename them to the configured template.")
-
-        # ── Step 0b: Existing DB rows for this folder ─────────────────────────
-        # Existing albums are preserved until after the selected MB release has
-        # passed preflight; deleting the current rows first can lose a valid
-        # library album when the MBID is wrong.
-        if existing_album_id:
-            log.append(
-                f"  Existing album repair: preserving current DB rows for album_id {existing_album_id}"
-            )
-            if wanted_tracks:
-                _prune_stale_wanted_rows_before_import(
-                    existing_album_id, mb_albumid, wanted_tracks, log)
-        else:
-            # S1: the former "clear every orphan row in this folder" block
-            # never worked (resolve_folder_to_albums returns a list of album
-            # ids, so it always raised and logged a warning) and its comment
-            # wrongly claimed it quarantined files. It is not performed;
-            # rows are only ever removed through an approved rows-only
-            # transaction.
-            log.append("  Orphan DB-row pre-cleanup for unowned folders: not performed (not_supported)")
+        _reimport_log_template_tokens(log, aldir)
+        _reimport_prepare_existing_rows(log, existing_album_id, mb_albumid, wanted_tracks)
 
         # Web Manager mounts the downloads root and (read-only) the library
         # in the documented compose, so the audio policy reads the files here.
@@ -1697,18 +2006,6 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             raise RuntimeError(
                 "Could not look up the Release Group of the selected MusicBrainz release; "
                 "nothing was imported.")
-        def _keep_for_review(reason: str, kept_ids: List[int]) -> None:
-            # Never removes the rows Beets just imported: a removal goes
-            # through the transaction preview/approve flow, not this job.
-            ids = ", ".join(str(i) for i in kept_ids)
-            reason = f"{reason} Album_id {ids} was left in the library for review."
-            if not _queue_folder_for_manual_review(
-                    aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
-                            "kept_album_ids": kept_ids, "reason": reason},
-                    reason, log, allow_existing=True):
-                log.append(f"  No Review entry was written; album_id {ids} was left in the library.")
-            raise RuntimeError(reason)
-
         plan_res = composite_workflows.plan_confirmed_import({
             "source_folder": aldir,
             "existing_album_id": existing_album_id,
@@ -1724,30 +2021,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         atomic_res = composite_workflows.apply_confirmed_import(
             plan_res["operation_id"], timeout=import_timeout + 15.0)
         if not atomic_res.get("ok"):
-            if atomic_res.get("code") == "not_imported":
-                review_reason = ("Beets could not confidently match this source to the selected "
-                                 "MusicBrainz release.")
-                _maybe_queue_review(
-                    aldir,
-                    {
-                        "mb_albumid": mb_albumid,
-                        "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
-                        "mb_valid": True,
-                        "confidence": "low",
-                        "albumartist": _guess_artist,
-                        "album": _guess_album,
-                        "reason": review_reason,
-                    },
-                    review_reason,
-                    allow_existing=bool(existing_album_id),
-                )
-                raise RuntimeError(f"{review_reason} Queued for Review without changing library files.")
-            # A verification failure after Beets imported (release_group_mismatch,
-            # import_ambiguous) keeps the album rows and sends the folder to review.
-            if atomic_res.get("album_ids"):
-                _keep_for_review(atomic_res.get("error") or "Beets import failed verification.",
-                                 atomic_res["album_ids"])
-            raise RuntimeError(atomic_res.get("error") or "Beets import failed.")
+            _reimport_refuse_failed_import(ctx, atomic_res, aldir, mb_albumid, existing_album_id)
 
         # Beets applied the confirmed Release (tags, file placement, write) and
         # apply_confirmed_import verified exactly one new album with that
@@ -1757,133 +2031,25 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         log.append(f"[2/3] Beets imported album_id {aid} as release {mb_albumid} "
                    f"(Release Group {planned_rg}, verified).")
 
-        def _needs_review(reason: str) -> None:
-            _keep_for_review(reason, [aid])
-
         undelivered_tracks: List[Dict[str, Any]] = []
         if existing_album_id:
-            # Missing-track fill: Beets kept the new files as their own album
-            # (duplicate_action keep); merge them onto the existing album.
-            if wanted_tracks:
-                fp_validation = _validate_wanted_album_items_with_acoustid(
-                    aid, mb_albumid, wanted_tracks, log, expected_artist=_guess_artist,
-                    slot_authorized=_recovery_slot_authorized(aldir))
-                if not fp_validation.get("ok"):
-                    _needs_review(fp_validation.get("reason") or "AcoustID did not verify the downloaded "
-                                  "file(s) for the requested missing MusicBrainz track(s).")
-            imported_aid = aid
-
-            def _merge_failed(detail: str) -> None:
-                # Fail closed: the imported album row stays as it is, never
-                # removed here; cleanup goes through the controlled workflow.
-                log.append(f"  [merge] FAILED: imported album_id {imported_aid} remains a separate album "
-                           f"row next to existing album_id {existing_album_id}; clean it up through "
-                           "Review / Transactions.")
-                # The fixed message comes first: the acquisition layer reads the
-                # code only from it, never from the detail (engine/peer text).
-                _keep_for_review(f"{EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: existing album_id "
-                                 f"{existing_album_id}, {detail}.", [imported_aid])
-
-            # A missing-track fill must end with the delivered tracks on the
-            # existing album; a format replacement stays a separate row
-            # until its Preview is approved, so only fills are read back.
-            verify_fill = bool(wanted_tracks) and not replace_existing
-            fill_item_ids: List[int] = []
-            if verify_fill:
-                def _is_wanted(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
-                    rid = _s(t.get("mb_trackid")).strip().lower()
-                    return bool(
-                        (int(t.get("track") or 0)
-                         and (int(row.get("disc") or 1), int(row.get("track") or 0))
-                         == (int(t.get("disc") or 1), int(t.get("track") or 0)))
-                        or (rid and _s(row.get("mb_trackid")).strip().lower() == rid))
-                try:
-                    imported_rows = composite_workflows.find_all_items_by_album_id(int(aid))
-                except Exception as ex:
-                    _merge_failed(f"could not read the imported items ({ex})")
-                fill_item_ids = [int(r["id"]) for r in imported_rows
-                                 if any(_is_wanted(r, t) for t in wanted_tracks)]
-            try:
-                aid = _merge_imported_album_into_existing(
-                    aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
-                    replace_existing_item_ids=replace_existing_item_ids)
-            except _ExistingAlbumMergeFailed as ex:
-                _merge_failed(str(ex))
-            if verify_fill:
-                try:
-                    existing_rows = composite_workflows.find_all_items_by_album_id(int(existing_album_id))
-                except Exception as ex:
-                    _merge_failed(f"could not read back existing album_id {existing_album_id} ({ex})")
-                on_existing = {int(r.get("id") or 0) for r in existing_rows}
-                unmerged = [i for i in fill_item_ids if i not in on_existing]
-                if aid != existing_album_id or not fill_item_ids or unmerged:
-                    _merge_failed("the requested track(s) are not on the existing album"
-                                  + (f" (item_id(s) {', '.join(map(str, unmerged))})" if unmerged else ""))
-                log.append(f"  [merge] Verified {len(fill_item_ids)} requested track(s) on existing "
-                           f"album_id {existing_album_id}.")
-                # The read-back covers what the source delivered. Originally
-                # requested tracks still absent from the album are reported,
-                # not failed (QA N1); the source scan narrows wanted_tracks.
-                undelivered_tracks = [t for t in requested_tracks
-                                      if not any(_is_wanted(r, t) for r in existing_rows)]
-                if undelivered_tracks:
-                    log.append(f"  [merge] The source did not deliver {len(undelivered_tracks)} requested "
-                               f"track(s), still missing from album_id {existing_album_id}: "
-                               + ", ".join(_wanted_track_label(t) for t in undelivered_tracks[:8]))
-            merged = composite_workflows.get_album(aid) or {}
-            if (_s(merged.get("mb_albumid")).strip().lower() != mb_albumid
-                    or _s(merged.get("mb_releasegroupid")).strip().lower() != planned_rg):
-                _needs_review(f"Album_id {aid} does not carry the selected release and "
-                              "Release Group after the merge.")
+            aid, undelivered_tracks = _reimport_merge_into_existing(
+                ctx, aid, aldir, mb_albumid, planned_rg, existing_album_id, wanted_tracks, requested_tracks,
+                replace_existing)
 
         if forced_albumartist:
-            cur = composite_workflows.get_album(aid) or {}
-            if _s(cur.get("albumartist")) != forced_albumartist:
-                up_aa = composite_workflows.update_album_metadata(
-                    aid, {"albumartist": forced_albumartist}, force_write_tags=True)
-                if not up_aa.get("ok"):
-                    raise RuntimeError(f"Engine update albumartist failed for album {aid}")
-                rel_res = composite_workflows.relocate_album(aid, mode="rename")
-                if not rel_res.get("ok"):
-                    raise RuntimeError(f"Engine relocate_album failed for album {aid}")
-                log.append(f"  [albumartist] Set to the requested '{forced_albumartist}'.")
+            _reimport_pin_albumartist(ctx, aid)
         log.append("[3/3] Tags and file placement were done by Beets' importer.")
         album_ids = [aid]
 
-        # ── Fetch and embed album art ─────────────────────────────────────────
-        # Wave 25 round (independent review): BeetsClient had no
-        # repair_album_artwork method at all -- every call here raised
-        # AttributeError, silently swallowed by this try/except, so
-        # artwork was never actually fetched for any import. Best-effort
-        # by design (matches the pre-Wave-25 local `beet fetchart`/`beet
-        # embedart` behavior this replaces): missing cover art must not
-        # fail an otherwise-successful import, but the failure is now a
-        # real, checked result rather than a guaranteed no-op.
-        for _art_aid in album_ids:
-            try:
-                _art_res = composite_workflows.fetch_and_embed_album_art(int(_art_aid))
-                if not _art_res.get("ok"):
-                    log.append(f"  [artwork] Warning: {_art_res.get('error')}")
-            except Exception as _ae:
-                log.append(f"  [artwork] Warning: {_ae}")
+        _reimport_embed_art(log, album_ids)
 
         _record_recent_import_for_album(album_ids[0] if album_ids else None, log,
                                         mb_albumid=mb_albumid, aldir=aldir)
 
         _remove_pending_review_for_path(aldir, log)
         _invalidate_lib_cache()
-        # F9: the Plex-sync tail of a missing-track recovery. The merge above
-        # drove the carrier to imported+IMPORTED; trigger its best-effort Plex
-        # refresh and advance to PLEX_SYNCED. A carrier-less reimport is a no-op
-        # and still takes the generic (workflow-gated) refresh below. The carrier
-        # lookup is best-effort: an unavailable/unwritable carrier store must
-        # never fail a completed import (as the merge lookup already tolerates).
-        try:
-            _recovery_leg_carrier = recovery_carrier.load_for_folder(aldir)
-        except Exception as _rc_ex:
-            _recovery_leg_carrier = None
-            log.append(f"  [recovery] Plex-leg carrier lookup skipped ({type(_rc_ex).__name__}).")
-        _recovery_plex_sync_leg(_recovery_leg_carrier, log)
+        _reimport_plex_sync_leg(log, aldir)
         _trigger_plex_refresh(log)
         log.append(f"✓ Done — '{Path(aldir).name}' imported by Beets"
                    + (" in place." if source_is_music_library else " into the library structure."))
@@ -2977,6 +3143,549 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class _FolderImportContext:
+    """What one import-with-id job was asked to do. The identity it settles as
+    it runs (mb_albumid, selected_releasegroupid) stays in its body and reaches
+    each step as arguments."""
+    log: list
+    cancel_event: Any
+    folder_path: str
+    ai_suggestion: Dict[str, Any]
+    raw_mb_input: str
+    input_looks_like_release_group: bool
+    queue_review_on_uncertain: bool
+    light_confirm: bool
+    existing_album_id: int
+    wanted_tracks: List[Dict[str, Any]]
+    source_is_library: bool
+    selected_subset_import: bool
+
+
+def _folder_import_parse_ids(raw_mb_albumid: str, raw_mb_releasegroupid: str) -> Tuple[str, str, str, bool]:
+    """(raw_mb_input, mb_albumid, selected_releasegroupid, input_looks_like_release_group)."""
+    raw_mb_input = raw_mb_albumid or raw_mb_releasegroupid
+    mb_albumid = _extract_mb_uuid(raw_mb_input)
+    selected_releasegroupid = _extract_mb_uuid(raw_mb_releasegroupid)
+    if not selected_releasegroupid and "release-group" in raw_mb_input.casefold():
+        selected_releasegroupid = mb_albumid
+    # Wave 25 Docker acceptance round: mb_albumid currently holds a
+    # release-group UUID rather than a genuine, directly-importable release
+    # UUID exactly when selected_releasegroupid ended up equal to it -- either
+    # because the caller supplied mb_releasegroupid explicitly with no
+    # separate release id (mb_albumid fell back to the release-group value
+    # above), or because a release-group URL/ID was pasted into the generic
+    # release-id field and detected by the check just above. In both cases
+    # the value must be resolved to a representative release before beet
+    # import can use it. This flag was referenced below but never assigned,
+    # so every real fresh-import call raised NameError -- only surfaced once
+    # the real two-service Docker acceptance run exercised this production
+    # route end to end.
+    input_looks_like_release_group = (
+        bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid
+    )
+    return raw_mb_input, mb_albumid, selected_releasegroupid, input_looks_like_release_group
+
+
+def _folder_import_carrier_identity(_auth_carrier: Dict[str, Any], raw_mb_releasegroupid: str,
+                                    wanted_tracks: List[Dict[str, Any]]) -> Tuple[Any, ...]:
+    """(raw_mb_releasegroupid, raw_mb_input, mb_albumid, selected_releasegroupid,
+    input_looks_like_release_group, existing_album_id, wanted_tracks) from the carrier alone."""
+    # C3: an UNATTENDED auto-insert is bound to the carrier's OWN identity.
+    # The client payload only had to pass the divergence check above; the
+    # actual target (release group / representative release / existing album
+    # / wanted subset) is re-derived here from the carrier record, so a
+    # crafted payload can never redirect the authorized insert (e.g. via a
+    # bare release UUID in a different release group).
+    raw_mb_releasegroupid = _s(_auth_carrier.get("mb_releasegroupid")).strip() or raw_mb_releasegroupid
+    raw_mb_albumid = _s(_auth_carrier.get("release_id")).strip() or raw_mb_releasegroupid
+    raw_mb_input, mb_albumid, selected_releasegroupid, input_looks_like_release_group = _folder_import_parse_ids(
+        raw_mb_albumid, raw_mb_releasegroupid)
+    existing_album_id = int(_auth_carrier.get("existing_album_id") or 0)
+    wanted_tracks = _normalise_wanted_tracks(
+        _auth_carrier.get("expected_tracks")
+        or _auth_carrier.get("wanted_tracks") or wanted_tracks)
+    return (raw_mb_releasegroupid, raw_mb_input, mb_albumid, selected_releasegroupid,
+            input_looks_like_release_group, existing_album_id, wanted_tracks)
+
+
+def _folder_import_reentry_identity(folder_path: str, existing_album_id: int,
+                                    wanted_tracks: List[Dict[str, Any]]) -> Tuple[int, List[Dict[str, Any]]]:
+    # F4: a recovery re-entering from Review recovers its STRUCTURED identity
+    # from the carrier bound to this folder (never re-derived from the folder
+    # name): the existing album and the still-missing tracks, so the single
+    # verified track routes through the existing-album missing-track merge
+    # instead of importing a second album row. A staged downloads folder lives
+    # outside MUSIC_ROOT, so _library_album_ids_for_folder cannot recover this.
+    if not existing_album_id or not wanted_tracks:
+        try:
+            _reentry_carrier = recovery_carrier.load_for_folder(folder_path)
+        except Exception:
+            _reentry_carrier = None
+        if _reentry_carrier and int(_reentry_carrier.get("existing_album_id") or 0):
+            if not existing_album_id:
+                existing_album_id = int(_reentry_carrier.get("existing_album_id") or 0)
+            if not wanted_tracks:
+                wanted_tracks = _normalise_wanted_tracks(_reentry_carrier.get("wanted_tracks") or [])
+    return existing_album_id, wanted_tracks
+
+
+def _folder_import_review_and_raise(ctx: _FolderImportContext, mb_albumid: str, selected_releasegroupid: str,
+                                    reason: str) -> None:
+    log, folder_path, ai_suggestion = ctx.log, ctx.folder_path, ctx.ai_suggestion
+    # A provided ID that cannot be imported inside its own Release
+    # Group goes to review (D1); it never falls back to a free search.
+    if ctx.queue_review_on_uncertain or ctx.light_confirm:
+        _queue_folder_for_manual_review(
+            folder_path,
+            {**(ai_suggestion or {}),
+             "mb_albumid": "" if ctx.input_looks_like_release_group else mb_albumid,
+             "mb_releasegroupid": selected_releasegroupid,
+             "provided_mb_id": ctx.raw_mb_input,
+             "album": Path(folder_path).name, "reason": reason},
+            reason, log, allow_existing=bool(ctx.existing_album_id or ctx.source_is_library))
+    else:
+        log.append(f"  Skipped Pending Review (no-review): {reason}")
+    raise RuntimeError(f"{reason} No library files were changed.")
+
+
+def _folder_import_review_payload(ctx: _FolderImportContext, mb_albumid: str, selected_releasegroupid: str,
+                                  target_album_id: int, reason: str,
+                                  scan_result: Optional[Dict[str, Any]] = None) -> tuple:
+    folder_path, ai_suggestion, wanted_tracks = ctx.folder_path, ctx.ai_suggestion, ctx.wanted_tracks
+    sug = dict(ai_suggestion or {})
+    sug.update({
+        "mb_albumid": mb_albumid,
+        "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+        "mb_releasegroupid": selected_releasegroupid,
+        "mb_releasegroup_url": (
+            f"https://musicbrainz.org/release-group/{selected_releasegroupid}"
+            if selected_releasegroupid else ""
+        ),
+        "mb_valid": bool(_MB_UUID_RE.match(_s(mb_albumid).strip().lower())),
+        "confidence": "low",
+        "albumartist": sug.get("albumartist") or Path(folder_path).parent.name,
+        "album": sug.get("album") or Path(folder_path).name,
+        "reason": reason,
+    })
+    pre = None
+    try:
+        pre = _folder_release_preflight(
+            folder_path,
+            mb_albumid,
+            existing_album_id=target_album_id,
+            log=None,
+        )
+    except Exception:
+        pass
+    evidence = _ai_match_evidence_packet(
+        "missing_track" if (scan_result or {}).get("wanted_tracks") or wanted_tracks else "light_confirm",
+        folder_path=folder_path,
+        suggestion=sug,
+        folder_evidence=_build_folder_evidence(folder_path),
+        preflight=pre,
+        wanted_tracks=(scan_result or {}).get("wanted_tracks") or wanted_tracks,
+        reason=reason,
+    )
+    return sug, evidence
+
+
+def _folder_import_queue_library_review(ctx: _FolderImportContext, mb_albumid: str, selected_releasegroupid: str,
+                                        target_album_id: int, reason: str, scan: Dict[str, Any]) -> None:
+    log, folder_path = ctx.log, ctx.folder_path
+    review_sug, review_evidence = _folder_import_review_payload(
+        ctx, mb_albumid, selected_releasegroupid, target_album_id, reason, scan)
+    if _queue_folder_for_manual_review(
+            folder_path, review_sug, reason, log,
+            allow_existing=True, evidence=review_evidence):
+        log.append("[import] Library folder needs manual release review; no files were changed.")
+    else:
+        log.append("[import] Existing library album skipped; no pending item was added.")
+
+
+def _folder_import_handoff_useful_files(ctx: _FolderImportContext, mb_albumid: str, selected_releasegroupid: str,
+                                        target_album_id: int, scan: Dict[str, Any], useful_files: List[Path]) -> None:
+    log, folder_path, wanted_tracks = ctx.log, ctx.folder_path, ctx.wanted_tracks
+    source_is_library, cancel_event = ctx.source_is_library, ctx.cancel_event
+    staged_dir = _stage_selected_audio_files(
+        folder_path,
+        useful_files,
+        scan.get("artist") or Path(folder_path).parent.name,
+        scan.get("album") or Path(folder_path).name,
+        log,
+        force_stage=source_is_library,
+        target_tracks=_normalise_wanted_tracks(
+            scan.get("wanted_tracks") or wanted_tracks
+        ),
+    )
+    if source_is_library and staged_dir == folder_path:
+        raise RuntimeError(
+            "Could not stage the still-missing track subset; "
+            "refusing to import the existing library folder."
+        )
+    handoff_tracks = _normalise_wanted_tracks(scan.get("wanted_tracks") or wanted_tracks)
+    # F5/F6: the still-missing subset was restaged to a new path; a
+    # recovery carrier bound to the original review folder is rebound
+    # to it so the merge below (load_for_folder on staged_dir) runs
+    # under carrier ownership/audit and reaches IMPORTED/PLEX_SYNCED.
+    _recovery_rebind_restaged(folder_path, staged_dir, target_album_id, log)
+    log.append(
+        f"[import] Existing album detected; importing {len(useful_files)} "
+        f"still-missing track(s) into album_id {target_album_id}"
+    )
+    child_job_id = _start_reimport_disk_job_internal(
+        staged_dir,
+        mb_albumid,
+        albumartist=scan.get("artist") or "",
+        existing_album_id=target_album_id,
+        wanted_tracks=handoff_tracks,
+        skip_import_lock=True,
+    )
+    log.append(f"[import] Missing-track import job {child_job_id} started; waiting for completion…")
+    _wait_for_child_job(child_job_id, log, cancel_event, prefix="import", timeout=1200)
+    if not scan.get("unknown_files"):
+        _delete_source_if_proven_in_library(folder_path, target_album_id, selected_releasegroupid, log)
+    log.append("[import] Existing album merge complete.")
+
+
+def _folder_import_handoff(ctx: _FolderImportContext, mb_albumid: str, selected_releasegroupid: str,
+                           candidate_album_ids: List[int]) -> bool:
+    """Handle Beets album-duplicate skips as an existing-album missing-track import."""
+    log, folder_path = ctx.log, ctx.folder_path
+    existing_album_id, source_is_library = ctx.existing_album_id, ctx.source_is_library
+    selected_subset_import = ctx.selected_subset_import
+    target_album_id = existing_album_id or (int(candidate_album_ids[0]) if candidate_album_ids else 0)
+    if not target_album_id:
+        return False
+
+    scan = _source_audio_missing_track_scan(folder_path, target_album_id, mb_albumid, log)
+    if not scan.get("ok"):
+        return False
+    log.append(
+        "  Existing album source scan: "
+        f"{len(scan.get('useful_files') or [])} still-missing, "
+        f"{len(scan.get('duplicate_files') or [])} already-present, "
+        f"{len(scan.get('unknown_files') or [])} unknown"
+    )
+    if source_is_library and scan.get("unknown_files"):
+        reason = (
+            f"Selected MusicBrainz release did not match this library folder "
+            f"({len(scan.get('unknown_files') or [])} file(s) did not map cleanly). "
+            "Choose the correct edition/release before tagging."
+        )
+        _folder_import_queue_library_review(ctx, mb_albumid, selected_releasegroupid, target_album_id, reason, scan)
+        return True
+    useful_files = [Path(p) for p in (scan.get("useful_files") or [])]
+    if useful_files:
+        _folder_import_handoff_useful_files(ctx, mb_albumid, selected_releasegroupid, target_album_id, scan,
+                                            useful_files)
+        return True
+
+    if scan.get("audio_count") and not scan.get("unknown_files"):
+        if int(scan.get("missing_count") or 0):
+            log.append(
+                "[import] Source folder did not contain any tracks that are still "
+                "missing from this MusicBrainz release."
+            )
+        else:
+            log.append("[import] Existing album is already complete for this MusicBrainz release.")
+        _delete_source_if_proven_in_library(folder_path, target_album_id, selected_releasegroupid, log)
+        return True
+
+    if selected_subset_import and not useful_files and scan.get("duplicate_files"):
+        # unknown_files counts ANY file in the source folder that
+        # wasn't selected for this job — completely unrelated to what
+        # was actually requested. Don't let unrelated files block
+        # recognizing that the selected file(s) are already present
+        # (they showed up as duplicate_files, not useful_files).
+        # Unlike the "fully complete" branch above, do not delete the
+        # folder here: the unrelated files may still need review.
+        log.append(
+            "[import] Selected file(s) are already present in the library; "
+            "unrelated files remain in the source folder for review."
+        )
+        return True
+
+    if source_is_library:
+        reason = (
+            "Selected MusicBrainz release did not match the current library track list. "
+            "Choose the correct edition/release before tagging."
+        )
+        _folder_import_queue_library_review(ctx, mb_albumid, selected_releasegroupid, target_album_id, reason, scan)
+        return True
+
+    return False
+
+
+def _folder_import_library_handoff(ctx: _FolderImportContext, mb_albumid: str, selected_releasegroupid: str) -> bool:
+    """A library folder that fails preflight goes through the handoff or is refused.
+    True when the handoff finished the job."""
+    log, folder_path = ctx.log, ctx.folder_path
+    candidate_album_ids = _library_album_ids_for_folder(folder_path)
+    if candidate_album_ids:
+        try:
+            pre = _folder_release_preflight(
+                folder_path,
+                mb_albumid,
+                existing_album_id=int(candidate_album_ids[0]),
+                log=log,
+            )
+        except Exception as ex:
+            pre = {"ok": False, "error": str(ex), "matches": 0, "expected": 0}
+        log.append(
+            "[import] Library source preflight before Beets import: "
+            f"{pre.get('matches', 0)}/{pre.get('expected', 0)} "
+            "track(s) matched selected MusicBrainz release"
+        )
+        if not pre.get("ok"):
+            if _folder_import_handoff(ctx, mb_albumid, selected_releasegroupid,
+                                      [int(aid) for aid in candidate_album_ids]):
+                return True
+            raise RuntimeError(
+                "Selected MusicBrainz release does not match this library folder; "
+                "refusing to run beet import against existing library files."
+            )
+    return False
+
+
+def _folder_import_recovery_handoff(ctx: _FolderImportContext, mb_albumid: str, selected_releasegroupid: str) -> bool:
+    # F4/F5: a recovery re-entering from Review is a staged downloads folder
+    # (not a library folder, so the source_is_library handoff above does not
+    # fire) that carries a carrier naming the existing album. Route it through
+    # the existing-album missing-track merge so the verified track is MERGED
+    # onto that album under carrier ownership/audit, instead of importing a
+    # second album row via the generic confirmed-import path below.
+    folder_path, existing_album_id = ctx.folder_path, ctx.existing_album_id
+    try:
+        _reentry = recovery_carrier.load_for_folder(folder_path)
+    except Exception:
+        _reentry = None
+    if _reentry and int(_reentry.get("existing_album_id") or 0) == int(existing_album_id):
+        return _folder_import_handoff(ctx, mb_albumid, selected_releasegroupid, [int(existing_album_id)])
+    return False
+
+
+def _folder_import_selected_sources(folder_path: str, payload: Dict[str, Any]) -> Tuple[Any, Any]:
+    """(selected source files, None), or (None, the HTTP refusal)."""
+    raw_track_mapping = payload.get("track_mapping") if isinstance(payload.get("track_mapping"), list) else []
+    selected_source_files = _import_review_selected_source_files(
+        folder_path,
+        payload.get("selected_source_files") if isinstance(payload.get("selected_source_files"), list) else [],
+        raw_track_mapping,
+    )
+    if raw_track_mapping and any(
+        _s((row if isinstance(row, dict) else {}).get("status")).strip().lower()
+        in _IMPORT_REVIEW_IMPORTABLE_STATUSES
+        for row in raw_track_mapping
+    ) and not selected_source_files:
+        return None, ({"ok": False, "error": "No verified selected source files were found for import."}, 400)
+    return selected_source_files, None
+
+
+def _folder_import_settle_release_group(ctx: _FolderImportContext, mb_albumid: str,
+                                        selected_releasegroupid: str) -> Tuple[Dict[str, Any], str, str]:
+    """(MusicBrainz identity, its Release Group, the selected Release Group); a mismatch goes to review."""
+    log = ctx.log
+    mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
+    if not mb_identity.get("ok"):
+        raise RuntimeError(
+            "The selected MusicBrainz release could not be loaded. "
+            "Import was not started."
+        )
+    resolved_releasegroupid = _s(mb_identity.get("release_group") or "").strip().lower()
+    if selected_releasegroupid and resolved_releasegroupid and selected_releasegroupid != resolved_releasegroupid:
+        _folder_import_review_and_raise(
+            ctx, mb_albumid, selected_releasegroupid,
+            f"MusicBrainz release {mb_albumid} is in release group {resolved_releasegroupid}, "
+            f"not the selected release group {selected_releasegroupid}; it was not imported.")
+    if resolved_releasegroupid and not selected_releasegroupid:
+        selected_releasegroupid = resolved_releasegroupid
+    if not selected_releasegroupid:
+        _folder_import_review_and_raise(
+            ctx, mb_albumid, selected_releasegroupid,
+            f"The Release Group of MusicBrainz release {mb_albumid} is unknown, so the "
+            "import could not be verified; it was not imported.")
+    return mb_identity, resolved_releasegroupid, selected_releasegroupid
+
+
+def _folder_import_log_native_diagnostics(log: list, ex: Exception) -> None:
+    # Round 4 (found while adding this very diagnostics feature):
+    # BeetsClient._request() raises BeetsError/BeetsUnavailableError
+    # for every non-2xx response (standard urllib behavior) -- it
+    # never returns a plain {"ok": False, ...} dict for those, so a
+    # `if not apply_res.get("ok")` check here would be dead code for
+    # every real rejection this route can produce (Plan/Apply both
+    # respond 400/409 on failure, never 200 with ok:false). The
+    # exception itself is the only thing that ever reaches this line,
+    # and its own .diagnostics attribute (populated by _request() from
+    # the agent's error JSON) is what carries the real native Beets
+    # stdout/stderr -- surfaced into this job's own log here so it is
+    # visible to whoever is debugging a real failure, including the
+    # Docker acceptance script's own [FAIL] report.
+    diag = getattr(ex, "diagnostics", None) or {}
+    if diag.get("returncode") is not None:
+        log.append(f"[import] Native Beets exit code: {diag['returncode']}")
+    if diag.get("stdout_excerpt"):
+        log.append(f"[import] Native Beets stdout: {diag['stdout_excerpt']}")
+    if diag.get("stderr_excerpt"):
+        log.append(f"[import] Native Beets stderr: {diag['stderr_excerpt']}")
+
+
+def _folder_import_refuse_failed_apply(ctx: _FolderImportContext, apply_res: Dict[str, Any], mb_albumid: str,
+                                       selected_releasegroupid: str) -> None:
+    log, folder_path = ctx.log, ctx.folder_path
+    reason = apply_res.get("error") or "Beets import failed."
+    kept_ids = apply_res.get("album_ids") or []
+    if kept_ids:
+        # Verification failed after Beets imported: keep the rows (a
+        # removal goes through preview/approve) and send the folder to review.
+        reason = (f"{reason} Album_id {', '.join(str(i) for i in kept_ids)} "
+                  "was left in the library for review.")
+        _queue_folder_for_manual_review(
+            folder_path, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
+                          "kept_album_ids": kept_ids, "reason": reason},
+            reason, log, allow_existing=True)
+    elif apply_res.get("code") == "not_imported":
+        _folder_import_review_and_raise(
+            ctx, mb_albumid, selected_releasegroupid,
+            f"Beets could not confidently match this source to MusicBrainz release "
+            f"{mb_albumid} (release group {selected_releasegroupid}): {reason}")
+    raise RuntimeError(reason)
+
+
+def _folder_import_clean_source(log: list, source_folder_path: str, album_ids: List[int], selected_subset_import: bool,
+                                partial_remaining_audio: List[Path]) -> None:
+    # ── Move orphaned artwork to canonical album folder, then remove source ──
+    # After beet move, audio files are at the library path.  Any image files
+    # (cover.jpg, folder.jpg, Artwork/ …) left in the source folder are moved
+    # to the same canonical folder.  The source is then removed only when it
+    # contains no unknown (non-image) files.
+    src_dir = Path(source_folder_path)
+    try:
+        if src_dir.is_dir():
+            if selected_subset_import and partial_remaining_audio:
+                log.append(
+                    f"  [cleanup] Source folder kept: {len(partial_remaining_audio)} unmatched audio file(s) awaiting review."
+                )
+            else:
+                # Move artwork to the canonical album folder before cleanup
+                _move_artwork_to_target(src_dir, list(album_ids), log)
+                # Walk remaining files; skip directories (already handled above)
+                remaining_files = [f for f in src_dir.rglob("*") if f.is_file()]
+                unknown = [f for f in remaining_files if f.suffix.lower() not in _ART_EXTS]
+                if unknown:
+                    log.append(
+                        f"  [cleanup] {len(unknown)} unknown file(s) in source — not removing: "
+                        + ", ".join(f.name for f in unknown[:5])
+                    )
+                else:
+                    # Only residual art files (already moved) or empty — safe to remove.
+                    # Wave 25 round (independent review): folder_cleanup_v1's Plan
+                    # reads payload["source"]/["source_folder"] and
+                    # action in {"remove_empty_source","remove_empty",
+                    # "safe_rename","rename_folder","merge_source_files","merge"}
+                    # -- the previous {"path": ..., "action": "delete"}
+                    # payload matched none of that, so Plan always
+                    # returned {"ok": False, "error": "source folder
+                    # required"} and this source folder was never
+                    # actually removed (silently caught by the outer
+                    # except below, logged as "cleanup skipped").
+                    # remove_empty is the correct action: Apply only
+                    # rmdir()s if the directory is verified truly empty,
+                    # failing closed (not raising) otherwise.
+                    p_cl = composite_workflows.plan_folder_cleanup({"source": str(src_dir), "action": "remove_empty"})
+                    if not p_cl.get("ok") or not p_cl.get("operation_id"):
+                        raise RuntimeError(p_cl.get("error") or f"Engine plan_folder_cleanup failed for {src_dir}")
+                    app_cl = composite_workflows.apply_folder_cleanup(p_cl["operation_id"])
+                    if not app_cl.get("ok"):
+                        raise RuntimeError(app_cl.get("error") or f"Engine apply_folder_cleanup failed for {src_dir}")
+                    log.append(f"  [cleanup] Source folder removed: {src_dir.name}")
+    except Exception as ex:
+        log.append(f"  (source folder cleanup skipped: {ex})")
+
+
+def _folder_import_dedupe_artist_folders(log: list, music_root: str, album_ids: List[int]) -> None:
+    try:
+        for aid in album_ids:
+            album_obj = lib.get_album(int(aid))
+            if album_obj:
+                _auto_merge_case_duplicate_artist_folder(
+                    music_root, _s(getattr(album_obj, "albumartist", "") or ""), log,
+                )
+    except Exception as ex:
+        log.append(f"  [auto-dedup] artist-folder check skipped: {ex}")
+
+
+def _folder_import_record_ai_history(log: list, folder_path: str, ai_suggestion: Dict[str, Any],
+                                     ai_confidence_label: str, mb_albumid: str, selected_releasegroupid: str) -> None:
+    # History records a suggestion only when it named what Beets imported
+    # (verified above): an operator's override or a bare origin is not a match.
+    if _ai_suggestion_names_import(ai_suggestion, mb_albumid, selected_releasegroupid):
+        try:
+            _record_ai_match(folder_path, {
+                **ai_suggestion,
+                "mb_albumid": mb_albumid,
+                "mb_releasegroupid": selected_releasegroupid,
+                "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+                "confidence": ai_confidence_label,
+            })
+        except Exception as ex:
+            log.append(f"  [history] AI match history was not updated ({type(ex).__name__}).")
+
+
+def _folder_import_in_slot(do: Callable[..., Any], log: list, cancel_event: Any, *, folder_path: str,
+                           selected_source_files: List[Path], auto_import_idempotency_key: str,
+                           review_item_id: str) -> Any:
+    """Run the job body in the import slot, keeping the auto-import state current."""
+    log.append("[import] Queued — waiting for import worker slot…")
+    with _IMPORT_JOB_LOCK:
+        try:
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("cancelled")
+            if auto_import_idempotency_key:
+                _import_review_auto_update(
+                    auto_import_idempotency_key,
+                    status="running",
+                    review_item_id=review_item_id,
+                    path=folder_path,
+                )
+            log.append(f"[import] Import slot acquired — starting… selected_files={len(selected_source_files)}")
+            # The slot, held durably: one import at a time across processes.
+            with job_contract.held("import-slot", log=log, cancel_event=cancel_event):
+                result = do(log, cancel_event)
+            if auto_import_idempotency_key:
+                _import_review_auto_update(
+                    auto_import_idempotency_key,
+                    status="completed",
+                    completed_at=time.time(),
+                )
+            return result
+        except Exception as ex:
+            reason = str(ex)
+            if auto_import_idempotency_key:
+                if _is_music_format_policy_handled_error(reason):
+                    outcome = _finalize_pending_review_format_policy_rejection(
+                        folder_path,
+                        reason,
+                        idempotency_key=auto_import_idempotency_key,
+                        log=log,
+                    )
+                    _import_review_auto_update(
+                        auto_import_idempotency_key,
+                        status=outcome.get("status"),
+                        error=outcome.get("note"),
+                    )
+                else:
+                    _import_review_auto_update(auto_import_idempotency_key, status="failed", error=reason)
+                    _mark_pending_review_status(
+                        folder_path,
+                        "auto_enqueue_failed",
+                        reason,
+                        idempotency_key=auto_import_idempotency_key,
+                    )
+            raise
+
+
 # Service behind POST /api/folders/import-with-id (ARCH-001): request-free,
 # returns (json_body, http_status); the route and in-process callers share it.
 def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
@@ -2998,26 +3707,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         or payload.get("release_group")
         or payload.get("release_group_id")
     ).strip()
-    raw_mb_input = raw_mb_albumid or raw_mb_releasegroupid
-    mb_albumid = _extract_mb_uuid(raw_mb_input)
-    selected_releasegroupid = _extract_mb_uuid(raw_mb_releasegroupid)
-    if not selected_releasegroupid and "release-group" in raw_mb_input.casefold():
-        selected_releasegroupid = mb_albumid
-    # Wave 25 Docker acceptance round: mb_albumid currently holds a
-    # release-group UUID rather than a genuine, directly-importable release
-    # UUID exactly when selected_releasegroupid ended up equal to it -- either
-    # because the caller supplied mb_releasegroupid explicitly with no
-    # separate release id (mb_albumid fell back to the release-group value
-    # above), or because a release-group URL/ID was pasted into the generic
-    # release-id field and detected by the check just above. In both cases
-    # the value must be resolved to a representative release before beet
-    # import can use it. This flag was referenced below but never assigned,
-    # so every real fresh-import call raised NameError -- only surfaced once
-    # the real two-service Docker acceptance run exercised this production
-    # route end to end.
-    input_looks_like_release_group = (
-        bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid
-    )
+    raw_mb_input, mb_albumid, selected_releasegroupid, input_looks_like_release_group = _folder_import_parse_ids(
+        raw_mb_albumid, raw_mb_releasegroupid)
     raw_ai_suggestion = payload.get("ai_suggestion")   # optional: a proposed identity and its origin
     use_move      = bool(payload.get("move", False))
     # Wave 25 Round 4: test-only pass-through for the dedicated Docker
@@ -3040,14 +3731,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     trigger_plex_context = _s(payload.get("trigger_plex_context") or payload.get("plex_context") or payload.get("workflow") or "").strip().casefold()
     wanted_tracks = _normalise_wanted_tracks(
         payload.get("wanted_tracks") or payload.get("missing_tracks") or [])
-    replace_existing_item_ids = []
-    for raw_id in (payload.get("replace_existing_item_ids") or []):
-        try:
-            item_id = int(raw_id or 0)
-            if item_id > 0:
-                replace_existing_item_ids.append(item_id)
-        except Exception:
-            pass
+    replace_existing_item_ids = _import_positive_item_ids(payload.get("replace_existing_item_ids"))
     if not folder_path:
         return {"ok": False, "error": "path required"}, 400
     # Wave 25 Docker acceptance round (found only by actually exercising
@@ -3096,26 +3780,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             return {"ok": False,
                     "error": _gate.get("reason") or "recovery auto-insert not authorized",
                     "code": _gate.get("code") or "recovery_action_not_allowed"}, 409
-        # C3: an UNATTENDED auto-insert is bound to the carrier's OWN identity.
-        # The client payload only had to pass the divergence check above; the
-        # actual target (release group / representative release / existing album
-        # / wanted subset) is re-derived here from the carrier record, so a
-        # crafted payload can never redirect the authorized insert (e.g. via a
-        # bare release UUID in a different release group).
-        _auth_carrier = _gate.get("carrier") or {}
-        raw_mb_releasegroupid = _s(_auth_carrier.get("mb_releasegroupid")).strip() or raw_mb_releasegroupid
-        raw_mb_albumid = _s(_auth_carrier.get("release_id")).strip() or raw_mb_releasegroupid
-        raw_mb_input = raw_mb_albumid or raw_mb_releasegroupid
-        mb_albumid = _extract_mb_uuid(raw_mb_input)
-        selected_releasegroupid = _extract_mb_uuid(raw_mb_releasegroupid)
-        if not selected_releasegroupid and "release-group" in raw_mb_input.casefold():
-            selected_releasegroupid = mb_albumid
-        input_looks_like_release_group = (
-            bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid)
-        existing_album_id = int(_auth_carrier.get("existing_album_id") or 0)
-        wanted_tracks = _normalise_wanted_tracks(
-            _auth_carrier.get("expected_tracks")
-            or _auth_carrier.get("wanted_tracks") or wanted_tracks)
+        (raw_mb_releasegroupid, raw_mb_input, mb_albumid, selected_releasegroupid,
+         input_looks_like_release_group, existing_album_id, wanted_tracks) = _folder_import_carrier_identity(
+            _gate.get("carrier") or {}, raw_mb_releasegroupid, wanted_tracks)
     # F16: the caller (the Review page, or the auto-import replaying a stored
     # suggestion) proposes an identity; its evidence is never kept. The review
     # paths below queue only this, and revalidation recomputes the evidence.
@@ -3135,18 +3802,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "error": "Enter a valid MusicBrainz release-group ID or release ID.",
         }, 400
 
-    raw_track_mapping = payload.get("track_mapping") if isinstance(payload.get("track_mapping"), list) else []
-    selected_source_files = _import_review_selected_source_files(
-        folder_path,
-        payload.get("selected_source_files") if isinstance(payload.get("selected_source_files"), list) else [],
-        raw_track_mapping,
-    )
-    if raw_track_mapping and any(
-        _s((row if isinstance(row, dict) else {}).get("status")).strip().lower()
-        in _IMPORT_REVIEW_IMPORTABLE_STATUSES
-        for row in raw_track_mapping
-    ) and not selected_source_files:
-        return {"ok": False, "error": "No verified selected source files were found for import."}, 400
+    selected_source_files, selection_refusal = _folder_import_selected_sources(folder_path, payload)
+    if selection_refusal:
+        return selection_refusal
     selected_subset_import = bool(selected_source_files)
     preserve_torrent_source = _preserve_torrent_source_path(folder_path)
     if not existing_album_id:
@@ -3156,22 +3814,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 existing_album_id = int(existing_ids[0])
         except Exception:
             existing_album_id = 0
-    # F4: a recovery re-entering from Review recovers its STRUCTURED identity
-    # from the carrier bound to this folder (never re-derived from the folder
-    # name): the existing album and the still-missing tracks, so the single
-    # verified track routes through the existing-album missing-track merge
-    # instead of importing a second album row. A staged downloads folder lives
-    # outside MUSIC_ROOT, so _library_album_ids_for_folder cannot recover this.
-    if not existing_album_id or not wanted_tracks:
-        try:
-            _reentry_carrier = recovery_carrier.load_for_folder(folder_path)
-        except Exception:
-            _reentry_carrier = None
-        if _reentry_carrier and int(_reentry_carrier.get("existing_album_id") or 0):
-            if not existing_album_id:
-                existing_album_id = int(_reentry_carrier.get("existing_album_id") or 0)
-            if not wanted_tracks:
-                wanted_tracks = _normalise_wanted_tracks(_reentry_carrier.get("wanted_tracks") or [])
+    existing_album_id, wanted_tracks = _folder_import_reentry_identity(folder_path, existing_album_id, wanted_tracks)
 
     def _do(log, cancel_event=None):
         nonlocal mb_albumid, selected_releasegroupid
@@ -3186,22 +3829,15 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         # re-tagging/re-validating a folder that is already inside the music
         # library, as opposed to importing from staging/downloads.
         source_is_library = _path_is_under(Path(folder_path), Path(music_root))
+        ctx = _FolderImportContext(
+            log=log, cancel_event=cancel_event, folder_path=folder_path, ai_suggestion=ai_suggestion,
+            raw_mb_input=raw_mb_input, input_looks_like_release_group=input_looks_like_release_group,
+            queue_review_on_uncertain=queue_review_on_uncertain, light_confirm=light_confirm,
+            existing_album_id=existing_album_id, wanted_tracks=wanted_tracks,
+            source_is_library=source_is_library, selected_subset_import=selected_subset_import)
 
         def _review_and_raise(reason: str) -> None:
-            # A provided ID that cannot be imported inside its own Release
-            # Group goes to review (D1); it never falls back to a free search.
-            if queue_review_on_uncertain or light_confirm:
-                _queue_folder_for_manual_review(
-                    folder_path,
-                    {**(ai_suggestion or {}),
-                     "mb_albumid": "" if input_looks_like_release_group else mb_albumid,
-                     "mb_releasegroupid": selected_releasegroupid,
-                     "provided_mb_id": raw_mb_input,
-                     "album": Path(folder_path).name, "reason": reason},
-                    reason, log, allow_existing=bool(existing_album_id or source_is_library))
-            else:
-                log.append(f"  Skipped Pending Review (no-review): {reason}")
-            raise RuntimeError(f"{reason} No library files were changed.")
+            _folder_import_review_and_raise(ctx, mb_albumid, selected_releasegroupid, reason)
 
         if input_looks_like_release_group:
             log_start = len(log)
@@ -3230,197 +3866,15 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
             mb_albumid = resolved_release
 
-        def _handoff_existing_album_import(candidate_album_ids: List[int]) -> bool:
-            """Handle Beets album-duplicate skips as an existing-album missing-track import."""
-            target_album_id = existing_album_id or (int(candidate_album_ids[0]) if candidate_album_ids else 0)
-            if not target_album_id:
-                return False
-
-            def _review_payload(reason: str, scan_result: Optional[Dict[str, Any]] = None) -> tuple:
-                sug = dict(ai_suggestion or {})
-                sug.update({
-                    "mb_albumid": mb_albumid,
-                    "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
-                    "mb_releasegroupid": selected_releasegroupid,
-                    "mb_releasegroup_url": (
-                        f"https://musicbrainz.org/release-group/{selected_releasegroupid}"
-                        if selected_releasegroupid else ""
-                    ),
-                    "mb_valid": bool(_MB_UUID_RE.match(_s(mb_albumid).strip().lower())),
-                    "confidence": "low",
-                    "albumartist": sug.get("albumartist") or Path(folder_path).parent.name,
-                    "album": sug.get("album") or Path(folder_path).name,
-                    "reason": reason,
-                })
-                pre = None
-                try:
-                    pre = _folder_release_preflight(
-                        folder_path,
-                        mb_albumid,
-                        existing_album_id=target_album_id,
-                        log=None,
-                    )
-                except Exception:
-                    pass
-                evidence = _ai_match_evidence_packet(
-                    "missing_track" if (scan_result or {}).get("wanted_tracks") or wanted_tracks else "light_confirm",
-                    folder_path=folder_path,
-                    suggestion=sug,
-                    folder_evidence=_build_folder_evidence(folder_path),
-                    preflight=pre,
-                    wanted_tracks=(scan_result or {}).get("wanted_tracks") or wanted_tracks,
-                    reason=reason,
-                )
-                return sug, evidence
-
-            scan = _source_audio_missing_track_scan(folder_path, target_album_id, mb_albumid, log)
-            if not scan.get("ok"):
-                return False
-            log.append(
-                "  Existing album source scan: "
-                f"{len(scan.get('useful_files') or [])} still-missing, "
-                f"{len(scan.get('duplicate_files') or [])} already-present, "
-                f"{len(scan.get('unknown_files') or [])} unknown"
-            )
-            if source_is_library and scan.get("unknown_files"):
-                reason = (
-                    f"Selected MusicBrainz release did not match this library folder "
-                    f"({len(scan.get('unknown_files') or [])} file(s) did not map cleanly). "
-                    "Choose the correct edition/release before tagging."
-                )
-                review_sug, review_evidence = _review_payload(reason, scan)
-                if _queue_folder_for_manual_review(
-                        folder_path, review_sug, reason, log,
-                        allow_existing=True, evidence=review_evidence):
-                    log.append("[import] Library folder needs manual release review; no files were changed.")
-                else:
-                    log.append("[import] Existing library album skipped; no pending item was added.")
-                return True
-            useful_files = [Path(p) for p in (scan.get("useful_files") or [])]
-            if useful_files:
-                staged_dir = _stage_selected_audio_files(
-                    folder_path,
-                    useful_files,
-                    scan.get("artist") or Path(folder_path).parent.name,
-                    scan.get("album") or Path(folder_path).name,
-                    log,
-                    force_stage=source_is_library,
-                    target_tracks=_normalise_wanted_tracks(
-                        scan.get("wanted_tracks") or wanted_tracks
-                    ),
-                )
-                if source_is_library and staged_dir == folder_path:
-                    raise RuntimeError(
-                        "Could not stage the still-missing track subset; "
-                        "refusing to import the existing library folder."
-                    )
-                handoff_tracks = _normalise_wanted_tracks(scan.get("wanted_tracks") or wanted_tracks)
-                # F5/F6: the still-missing subset was restaged to a new path; a
-                # recovery carrier bound to the original review folder is rebound
-                # to it so the merge below (load_for_folder on staged_dir) runs
-                # under carrier ownership/audit and reaches IMPORTED/PLEX_SYNCED.
-                _recovery_rebind_restaged(folder_path, staged_dir, target_album_id, log)
-                log.append(
-                    f"[import] Existing album detected; importing {len(useful_files)} "
-                    f"still-missing track(s) into album_id {target_album_id}"
-                )
-                child_job_id = _start_reimport_disk_job_internal(
-                    staged_dir,
-                    mb_albumid,
-                    albumartist=scan.get("artist") or "",
-                    existing_album_id=target_album_id,
-                    wanted_tracks=handoff_tracks,
-                    skip_import_lock=True,
-                )
-                log.append(f"[import] Missing-track import job {child_job_id} started; waiting for completion…")
-                _wait_for_child_job(child_job_id, log, cancel_event, prefix="import", timeout=1200)
-                if not scan.get("unknown_files"):
-                    _delete_source_if_proven_in_library(folder_path, target_album_id, selected_releasegroupid, log)
-                log.append("[import] Existing album merge complete.")
-                return True
-
-            if scan.get("audio_count") and not scan.get("unknown_files"):
-                if int(scan.get("missing_count") or 0):
-                    log.append(
-                        "[import] Source folder did not contain any tracks that are still "
-                        "missing from this MusicBrainz release."
-                    )
-                else:
-                    log.append("[import] Existing album is already complete for this MusicBrainz release.")
-                _delete_source_if_proven_in_library(folder_path, target_album_id, selected_releasegroupid, log)
-                return True
-
-            if selected_subset_import and not useful_files and scan.get("duplicate_files"):
-                # unknown_files counts ANY file in the source folder that
-                # wasn't selected for this job — completely unrelated to what
-                # was actually requested. Don't let unrelated files block
-                # recognizing that the selected file(s) are already present
-                # (they showed up as duplicate_files, not useful_files).
-                # Unlike the "fully complete" branch above, do not delete the
-                # folder here: the unrelated files may still need review.
-                log.append(
-                    "[import] Selected file(s) are already present in the library; "
-                    "unrelated files remain in the source folder for review."
-                )
-                return True
-
-            if source_is_library:
-                reason = (
-                    "Selected MusicBrainz release did not match the current library track list. "
-                    "Choose the correct edition/release before tagging."
-                )
-                review_sug, review_evidence = _review_payload(reason, scan)
-                if _queue_folder_for_manual_review(
-                        folder_path, review_sug, reason, log,
-                        allow_existing=True, evidence=review_evidence):
-                    log.append("[import] Library folder needs manual release review; no files were changed.")
-                else:
-                    log.append("[import] Existing library album skipped; no pending item was added.")
-                return True
-
-            return False
-
         if source_is_library:
-            candidate_album_ids = _library_album_ids_for_folder(folder_path)
-            if candidate_album_ids:
-                try:
-                    pre = _folder_release_preflight(
-                        folder_path,
-                        mb_albumid,
-                        existing_album_id=int(candidate_album_ids[0]),
-                        log=log,
-                    )
-                except Exception as ex:
-                    pre = {"ok": False, "error": str(ex), "matches": 0, "expected": 0}
-                log.append(
-                    "[import] Library source preflight before Beets import: "
-                    f"{pre.get('matches', 0)}/{pre.get('expected', 0)} "
-                    "track(s) matched selected MusicBrainz release"
-                )
-                if not pre.get("ok"):
-                    if _handoff_existing_album_import([int(aid) for aid in candidate_album_ids]):
-                        _invalidate_lib_cache()
-                        return
-                    raise RuntimeError(
-                        "Selected MusicBrainz release does not match this library folder; "
-                        "refusing to run beet import against existing library files."
-                    )
+            if _folder_import_library_handoff(ctx, mb_albumid, selected_releasegroupid):
+                _invalidate_lib_cache()
+                return
 
-        # F4/F5: a recovery re-entering from Review is a staged downloads folder
-        # (not a library folder, so the source_is_library handoff above does not
-        # fire) that carries a carrier naming the existing album. Route it through
-        # the existing-album missing-track merge so the verified track is MERGED
-        # onto that album under carrier ownership/audit, instead of importing a
-        # second album row via the generic confirmed-import path below.
         if existing_album_id and not source_is_library:
-            try:
-                _reentry = recovery_carrier.load_for_folder(folder_path)
-            except Exception:
-                _reentry = None
-            if _reentry and int(_reentry.get("existing_album_id") or 0) == int(existing_album_id):
-                if _handoff_existing_album_import([int(existing_album_id)]):
-                    _invalidate_lib_cache()
-                    return
+            if _folder_import_recovery_handoff(ctx, mb_albumid, selected_releasegroupid):
+                _invalidate_lib_cache()
+                return
 
         # ── Step 1: import with specific MB release ID + permissive threshold ──────────
 
@@ -3432,23 +3886,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         import_mode = "--move" if selected_subset_import else ("--copy" if preserve_torrent_source or not use_move else "--move")
         # The confirmed Release is imported as confirmed: never swapped for
         # another Release (or Release Group) here.
-        mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
-        if not mb_identity.get("ok"):
-            raise RuntimeError(
-                "The selected MusicBrainz release could not be loaded. "
-                "Import was not started."
-            )
-        resolved_releasegroupid = _s(mb_identity.get("release_group") or "").strip().lower()
-        if selected_releasegroupid and resolved_releasegroupid and selected_releasegroupid != resolved_releasegroupid:
-            _review_and_raise(
-                f"MusicBrainz release {mb_albumid} is in release group {resolved_releasegroupid}, "
-                f"not the selected release group {selected_releasegroupid}; it was not imported.")
-        if resolved_releasegroupid and not selected_releasegroupid:
-            selected_releasegroupid = resolved_releasegroupid
-        if not selected_releasegroupid:
-            _review_and_raise(
-                f"The Release Group of MusicBrainz release {mb_albumid} is unknown, so the "
-                "import could not be verified; it was not imported.")
+        mb_identity, resolved_releasegroupid, selected_releasegroupid = _folder_import_settle_release_group(
+            ctx, mb_albumid, selected_releasegroupid)
         log.append(f"[import] Canonical MusicBrainz release-group ID: {selected_releasegroupid}")
         if selected_subset_import:
             active_selected_source_files = _filter_import_review_selected_audio_files(selected_source_files, log)
@@ -3495,50 +3934,16 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         })
         if not plan_res.get("ok"):
             raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
-        # Round 4 (found while adding this very diagnostics feature):
-        # BeetsClient._request() raises BeetsError/BeetsUnavailableError
-        # for every non-2xx response (standard urllib behavior) -- it
-        # never returns a plain {"ok": False, ...} dict for those, so a
-        # `if not apply_res.get("ok")` check here would be dead code for
-        # every real rejection this route can produce (Plan/Apply both
-        # respond 400/409 on failure, never 200 with ok:false). The
-        # exception itself is the only thing that ever reaches this line,
-        # and its own .diagnostics attribute (populated by _request() from
-        # the agent's error JSON) is what carries the real native Beets
-        # stdout/stderr -- surfaced into this job's own log here so it is
-        # visible to whoever is debugging a real failure, including the
-        # Docker acceptance script's own [FAIL] report.
         try:
             apply_res = composite_workflows.apply_confirmed_import(
                 plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
                 timeout=import_timeout + 15.0,
             )
         except (BeetsError, BeetsUnavailableError) as ex:
-            diag = getattr(ex, "diagnostics", None) or {}
-            if diag.get("returncode") is not None:
-                log.append(f"[import] Native Beets exit code: {diag['returncode']}")
-            if diag.get("stdout_excerpt"):
-                log.append(f"[import] Native Beets stdout: {diag['stdout_excerpt']}")
-            if diag.get("stderr_excerpt"):
-                log.append(f"[import] Native Beets stderr: {diag['stderr_excerpt']}")
+            _folder_import_log_native_diagnostics(log, ex)
             raise
         if not apply_res.get("ok"):
-            reason = apply_res.get("error") or "Beets import failed."
-            kept_ids = apply_res.get("album_ids") or []
-            if kept_ids:
-                # Verification failed after Beets imported: keep the rows (a
-                # removal goes through preview/approve) and send the folder to review.
-                reason = (f"{reason} Album_id {', '.join(str(i) for i in kept_ids)} "
-                          "was left in the library for review.")
-                _queue_folder_for_manual_review(
-                    folder_path, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
-                                  "kept_album_ids": kept_ids, "reason": reason},
-                    reason, log, allow_existing=True)
-            elif apply_res.get("code") == "not_imported":
-                _review_and_raise(
-                    f"Beets could not confidently match this source to MusicBrainz release "
-                    f"{mb_albumid} (release group {selected_releasegroupid}): {reason}")
-            raise RuntimeError(reason)
+            _folder_import_refuse_failed_apply(ctx, apply_res, mb_albumid, selected_releasegroupid)
         log.append(f"[import] Beets import completed: {import_folder_path}")
         # Beets applied the confirmed Release (tags, placement, write) and
         # apply_confirmed_import verified exactly one new album with that
@@ -3575,53 +3980,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 )
             else:
                 log.append(f"Partial import complete. Removed {removed_selected} imported source file(s).")
-        # ── Move orphaned artwork to canonical album folder, then remove source ──
-        # After beet move, audio files are at the library path.  Any image files
-        # (cover.jpg, folder.jpg, Artwork/ …) left in the source folder are moved
-        # to the same canonical folder.  The source is then removed only when it
-        # contains no unknown (non-image) files.
-        src_dir = Path(source_folder_path)
-        try:
-            if src_dir.is_dir():
-                if selected_subset_import and partial_remaining_audio:
-                    log.append(
-                        f"  [cleanup] Source folder kept: {len(partial_remaining_audio)} unmatched audio file(s) awaiting review."
-                    )
-                else:
-                    # Move artwork to the canonical album folder before cleanup
-                    _move_artwork_to_target(src_dir, list(album_ids), log)
-                    # Walk remaining files; skip directories (already handled above)
-                    remaining_files = [f for f in src_dir.rglob("*") if f.is_file()]
-                    unknown = [f for f in remaining_files if f.suffix.lower() not in _ART_EXTS]
-                    if unknown:
-                        log.append(
-                            f"  [cleanup] {len(unknown)} unknown file(s) in source — not removing: "
-                            + ", ".join(f.name for f in unknown[:5])
-                        )
-                    else:
-                        # Only residual art files (already moved) or empty — safe to remove.
-                        # Wave 25 round (independent review): folder_cleanup_v1's Plan
-                        # reads payload["source"]/["source_folder"] and
-                        # action in {"remove_empty_source","remove_empty",
-                        # "safe_rename","rename_folder","merge_source_files","merge"}
-                        # -- the previous {"path": ..., "action": "delete"}
-                        # payload matched none of that, so Plan always
-                        # returned {"ok": False, "error": "source folder
-                        # required"} and this source folder was never
-                        # actually removed (silently caught by the outer
-                        # except below, logged as "cleanup skipped").
-                        # remove_empty is the correct action: Apply only
-                        # rmdir()s if the directory is verified truly empty,
-                        # failing closed (not raising) otherwise.
-                        p_cl = composite_workflows.plan_folder_cleanup({"source": str(src_dir), "action": "remove_empty"})
-                        if not p_cl.get("ok") or not p_cl.get("operation_id"):
-                            raise RuntimeError(p_cl.get("error") or f"Engine plan_folder_cleanup failed for {src_dir}")
-                        app_cl = composite_workflows.apply_folder_cleanup(p_cl["operation_id"])
-                        if not app_cl.get("ok"):
-                            raise RuntimeError(app_cl.get("error") or f"Engine apply_folder_cleanup failed for {src_dir}")
-                        log.append(f"  [cleanup] Source folder removed: {src_dir.name}")
-        except Exception as ex:
-            log.append(f"  (source folder cleanup skipped: {ex})")
+        _folder_import_clean_source(log, source_folder_path, album_ids, selected_subset_import, partial_remaining_audio)
 
         if selected_subset_import and import_folder_path != source_folder_path:
             try:
@@ -3639,83 +3998,20 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 )
         else:
             _remove_pending_review_for_path(folder_path, log)
-        try:
-            for aid in album_ids:
-                album_obj = lib.get_album(int(aid))
-                if album_obj:
-                    _auto_merge_case_duplicate_artist_folder(
-                        music_root, _s(getattr(album_obj, "albumartist", "") or ""), log,
-                    )
-        except Exception as ex:
-            log.append(f"  [auto-dedup] artist-folder check skipped: {ex}")
+        _folder_import_dedupe_artist_folders(log, music_root, album_ids)
         _invalidate_lib_cache()
         if trigger_plex_refresh_after:
             _trigger_plex_refresh(log, workflow=trigger_plex_context)
         else:
             log.append("  [plex] Refresh skipped for Import Review; playlist/batch jobs trigger Plex separately.")
         log.append(f"Done — '{Path(folder_path).name}' imported and tagged.")
-        # History records a suggestion only when it named what Beets imported
-        # (verified above): an operator's override or a bare origin is not a match.
-        if _ai_suggestion_names_import(ai_suggestion, mb_albumid, selected_releasegroupid):
-            try:
-                _record_ai_match(folder_path, {
-                    **ai_suggestion,
-                    "mb_albumid": mb_albumid,
-                    "mb_releasegroupid": selected_releasegroupid,
-                    "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
-                    "confidence": ai_confidence_label,
-                })
-            except Exception as ex:
-                log.append(f"  [history] AI match history was not updated ({type(ex).__name__}).")
+        _folder_import_record_ai_history(log, folder_path, ai_suggestion, ai_confidence_label, mb_albumid,
+                                         selected_releasegroupid)
 
     def _do_locked(log, cancel_event=None):
-        log.append("[import] Queued — waiting for import worker slot…")
-        with _IMPORT_JOB_LOCK:
-            try:
-                if cancel_event and cancel_event.is_set():
-                    raise RuntimeError("cancelled")
-                if auto_import_idempotency_key:
-                    _import_review_auto_update(
-                        auto_import_idempotency_key,
-                        status="running",
-                        review_item_id=review_item_id,
-                        path=folder_path,
-                    )
-                log.append(f"[import] Import slot acquired — starting… selected_files={len(selected_source_files)}")
-                # The slot, held durably: one import at a time across processes.
-                with job_contract.held("import-slot", log=log, cancel_event=cancel_event):
-                    result = _do(log, cancel_event)
-                if auto_import_idempotency_key:
-                    _import_review_auto_update(
-                        auto_import_idempotency_key,
-                        status="completed",
-                        completed_at=time.time(),
-                    )
-                return result
-            except Exception as ex:
-                reason = str(ex)
-                if auto_import_idempotency_key:
-                    if _is_music_format_policy_handled_error(reason):
-                        outcome = _finalize_pending_review_format_policy_rejection(
-                            folder_path,
-                            reason,
-                            idempotency_key=auto_import_idempotency_key,
-                            log=log,
-                        )
-                        _import_review_auto_update(
-                            auto_import_idempotency_key,
-                            status=outcome.get("status"),
-                            error=outcome.get("note"),
-                        )
-                    else:
-                        _import_review_auto_update(auto_import_idempotency_key, status="failed", error=reason)
-                        _mark_pending_review_status(
-                            folder_path,
-                            "auto_enqueue_failed",
-                            reason,
-                            idempotency_key=auto_import_idempotency_key,
-                        )
-                raise
+        return _folder_import_in_slot(
+            _do, log, cancel_event, folder_path=folder_path, selected_source_files=selected_source_files,
+            auto_import_idempotency_key=auto_import_idempotency_key, review_item_id=review_item_id)
 
     job = jobs.start_python(_do_locked, label=f"Import+Tag: {Path(folder_path).name}",
                             metadata={"path": folder_path, "mb_albumid": mb_albumid,
