@@ -8369,9 +8369,9 @@
     "job_start",
     "job-1",
     {
-     "label": "Duplicate AI review: <TMP>/downloads",
+     "label": "Duplicate AI review: <TMP>/music",
      "metadata": {
-      "path": "<TMP>/downloads",
+      "path": "<TMP>/music",
       "source_scan_jid": "scan-1",
       "type": "dedup-ai-review"
      }
@@ -8385,54 +8385,201 @@
      "current_task": "Listing unmatched files for AI duplicate review",
      "found_count": 0,
      "progress_percent": 0,
-     "scan_path": "<TMP>/downloads",
+     "scan_path": "<TMP>/music",
      "scan_scope": null,
      "scanned_count": 0
     }
    ],
    [
     "log",
-    "🤖 AI Review: scanning <TMP>/downloads for unmatched files…"
+    "🤖 AI Review: scanning <TMP>/music for unmatched files…"
    ],
    [
     "update_state",
     {
      "category": "Duplicates",
-     "current_result": "0 unmatched file(s) to review",
+     "current_result": "1 unmatched file(s) to review",
      "current_task": "Preparing AI duplicate review batches",
      "found_count": 0,
      "progress_percent": 0,
-     "scan_path": "<TMP>/downloads",
+     "remaining_count": 1,
+     "scan_path": "<TMP>/music",
      "scan_scope": null,
-     "scanned_count": 0
+     "scanned_count": 0,
+     "total_count": 1
     }
    ],
    [
     "log",
-    "0 total file(s) · 0 already matched · 0 to review with AI"
+    "1 total file(s) · 0 already matched · 1 to review with AI"
    ],
    [
-    "log",
-    "Nothing left to review — done."
+    "cancel?"
    ],
    [
     "update_state",
     {
      "category": "Duplicates",
-     "current_result": "No unmatched files needed AI review",
+     "current_result": "Reading library tracks",
+     "current_task": "Building library comparison index",
+     "found_count": 0,
+     "progress_percent": 0,
+     "remaining_count": 1,
+     "scan_path": "<TMP>/music",
+     "scan_scope": null,
+     "scanned_count": 0,
+     "total_count": 1
+    }
+   ],
+   [
+    "lib.items",
+    []
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "log",
+    "Library has 1 track(s) to compare against"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "01 Song One.flac",
+     "current_item": "Batch 1 of 1",
+     "current_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+     "current_result": "0 duplicate file(s) found so far",
+     "current_task": "Reviewing unmatched files with AI",
+     "found_count": 0,
+     "progress_percent": 100,
+     "remaining_count": 0,
+     "scan_path": "<TMP>/music",
+     "scan_scope": null,
+     "scanned_count": 1,
+     "total_count": 1
+    }
+   ],
+   [
+    "ai_request",
+    "ai",
+    "https://ai.invalid/v1",
+    45,
+    [
+     "Authorization",
+     "Content-type"
+    ],
+    {
+     "messages": [
+      {
+       "content": "You are a music duplicate-detection expert.\n\nThe files below are in a DOWNLOADS folder and may already exist in the library.\nDecide which download files are the SAME SONG as a library track.\n\nDOWNLOAD FILES:\n1. filename='01 Song One.flac'  artist=''  title='01 Song One'  album=''\n\nLIBRARY TRACKS:\n  id=1  artist='Artist'  title='Song One'  album='Alb'\n\nRules (READ CAREFULLY):\n• TITLE must match — 'Young Girls' cannot match 'That's What I Like'. Different song titles = different songs. Never match on artist alone.\n• Allow minor title variations: punctuation, 'feat.' tags, 'Remaster' suffixes.\n• Do NOT match remixes, live versions, or acoustic versions to studio originals.\n• Only include matches you are CERTAIN about (title genuinely the same song).\n• Return JSON: {\"matches\": [{\"file_idx\": <1-based int>, \"lib_id\": <int>, \"confidence\": \"high\"|\"medium\", \"reason\": \"one sentence\"}]}\n• If no file has a genuine title match, return {\"matches\": []}.",
+       "role": "user"
+      }
+     ],
+     "model": "model:gpt-4o-mini",
+     "response_format": {
+      "json_schema": {
+       "name": "dedup_matches",
+       "schema": {
+        "additionalProperties": false,
+        "properties": {
+         "matches": {
+          "items": {
+           "additionalProperties": false,
+           "properties": {
+            "confidence": {
+             "enum": [
+              "high",
+              "medium"
+             ],
+             "type": "string"
+            },
+            "file_idx": {
+             "type": "integer"
+            },
+            "lib_id": {
+             "type": "integer"
+            },
+            "reason": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "file_idx",
+            "lib_id",
+            "confidence",
+            "reason"
+           ],
+           "type": "object"
+          },
+          "type": "array"
+         }
+        },
+        "required": [
+         "matches"
+        ],
+        "type": "object"
+       },
+       "strict": true
+      },
+      "type": "json_schema"
+     },
+     "temperature": 0.0
+    }
+   ],
+   [
+    "lib.get_item",
+    1
+   ],
+   [
+    "log",
+    "  Batch 1/1 done"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "01 Song One.flac",
+     "current_item": "Batch 1 of 1",
+     "current_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+     "current_result": "0 duplicate file(s) found so far",
+     "current_task": "Reviewing unmatched files with AI",
+     "found_count": 0,
+     "progress_percent": 100,
+     "remaining_count": 0,
+     "scan_path": "<TMP>/music",
+     "scan_scope": null,
+     "scanned_count": 1,
+     "total_count": 1
+    }
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "0 additional duplicate file(s) found",
      "current_task": "AI duplicate review complete",
      "final_summary": {
       "duplicate_folders_found": 0,
       "duplicate_tracks_found": 0,
-      "scanned_files": 0,
-      "scanned_folders": 0
+      "scanned_files": 1,
+      "scanned_folders": 1
      },
      "found_count": 0,
-     "progress_percent": 0,
-     "scan_path": "<TMP>/downloads",
+     "progress_percent": 100,
+     "remaining_count": 0,
+     "scan_path": "<TMP>/music",
      "scan_scope": null,
-     "scanned_count": 0
+     "scanned_count": 1,
+     "total_count": 1
     }
+   ],
+   [
+    "log",
+    "🤖 AI review complete — 0 additional duplicates found"
    ]
   ],
   "http": [
@@ -8451,29 +8598,29 @@
     "created_at": 1700000000.0,
     "current_item": null,
     "current_path": null,
-    "current_result": "No unmatched files needed AI review",
+    "current_result": "0 additional duplicate file(s) found",
     "current_task": "AI duplicate review complete",
     "duplicates": [],
     "final_summary": {
      "duplicate_folders_found": 0,
      "duplicate_tracks_found": 0,
-     "scanned_files": 0,
-     "scanned_folders": 0
+     "scanned_files": 1,
+     "scanned_folders": 1
     },
     "folders": [],
     "found": 0,
     "kind": "ai_review",
-    "scan_path": "<TMP>/downloads",
-    "scanned": 0,
+    "scan_path": "<TMP>/music",
+    "scanned": 1,
     "source_scan_jid": "scan-1",
     "status": "done",
-    "total": 0
+    "total": 1
    },
    "scan-1": {
     "created_at": 1.0,
     "duplicates": [],
     "kind": "scan",
-    "scan_path": "<TMP>/downloads",
+    "scan_path": "<TMP>/music",
     "status": "done"
    }
   },
@@ -8484,16 +8631,16 @@
      "final_summary": {
       "duplicate_folders_found": 0,
       "duplicate_tracks_found": 0,
-      "scanned_files": 0,
-      "scanned_folders": 0
+      "scanned_files": 1,
+      "scanned_folders": 1
      },
      "folders": [],
      "found": 0,
      "kind": "ai_review",
-     "scan_path": "<TMP>/downloads",
-     "scanned": 0,
+     "scan_path": "<TMP>/music",
+     "scanned": 1,
      "source_scan_jid": "scan-1",
-     "total": 0
+     "total": 1
     },
     "safety": {
      "reviewed_pairs": {
@@ -8508,7 +8655,9 @@
     }
    }
   ],
-  "tag_reads": []
+  "tag_reads": [
+   "<TMP>/music/Art/Alb/01 Song One.flac"
+  ]
  },
  "ai_match_unknown_library_item": {
   "events": [
@@ -22154,6 +22303,325 @@
    "<TMP>/downloads/New/one.flac"
   ]
  },
+ "cancel_ai_at_second_batch": {
+  "events": [
+   [
+    "job_start",
+    "job-1",
+    {
+     "label": "Duplicate AI review: <TMP>/downloads",
+     "metadata": {
+      "path": "<TMP>/downloads",
+      "source_scan_jid": "scan-1",
+      "type": "dedup-ai-review"
+     }
+    }
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "Scanning source path",
+     "current_task": "Listing unmatched files for AI duplicate review",
+     "found_count": 0,
+     "progress_percent": 0,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": null,
+     "scanned_count": 0
+    }
+   ],
+   [
+    "log",
+    "🤖 AI Review: scanning <TMP>/downloads for unmatched files…"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "21 unmatched file(s) to review",
+     "current_task": "Preparing AI duplicate review batches",
+     "found_count": 0,
+     "progress_percent": 0,
+     "remaining_count": 21,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": null,
+     "scanned_count": 0,
+     "total_count": 21
+    }
+   ],
+   [
+    "log",
+    "21 total file(s) · 0 already matched · 21 to review with AI"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "Reading library tracks",
+     "current_task": "Building library comparison index",
+     "found_count": 0,
+     "progress_percent": 0,
+     "remaining_count": 21,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": null,
+     "scanned_count": 0,
+     "total_count": 21
+    }
+   ],
+   [
+    "lib.items",
+    []
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "log",
+    "Library has 1 track(s) to compare against"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "000 Song.flac",
+     "current_item": "Batch 1 of 2",
+     "current_path": "<TMP>/downloads/Bulk/000 Song.flac",
+     "current_result": "0 duplicate file(s) found so far",
+     "current_task": "Reviewing unmatched files with AI",
+     "found_count": 0,
+     "progress_percent": 95,
+     "remaining_count": 1,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": null,
+     "scanned_count": 20,
+     "total_count": 21
+    }
+   ],
+   [
+    "ai_request",
+    "ai",
+    "https://ai.invalid/v1",
+    45,
+    [
+     "Authorization",
+     "Content-type"
+    ],
+    {
+     "messages": [
+      {
+       "content": "You are a music duplicate-detection expert.\n\nThe files below are in a DOWNLOADS folder and may already exist in the library.\nDecide which download files are the SAME SONG as a library track.\n\nDOWNLOAD FILES:\n1. filename='000 Song.flac'  artist='Artist'  title='Song 0'  album=''\n2. filename='001 Song.flac'  artist='Artist'  title='Song 1'  album=''\n3. filename='002 Song.flac'  artist='Artist'  title='Song 2'  album=''\n4. filename='003 Song.flac'  artist='Artist'  title='Song 3'  album=''\n5. filename='004 Song.flac'  artist='Artist'  title='Song 4'  album=''\n6. filename='005 Song.flac'  artist='Artist'  title='Song 5'  album=''\n7. filename='006 Song.flac'  artist='Artist'  title='Song 6'  album=''\n8. filename='007 Song.flac'  artist='Artist'  title='Song 7'  album=''\n9. filename='008 Song.flac'  artist='Artist'  title='Song 8'  album=''\n10. filename='009 Song.flac'  artist='Artist'  title='Song 9'  album=''\n11. filename='010 Song.flac'  artist='Artist'  title='Song 10'  album=''\n12. filename='011 Song.flac'  artist='Artist'  title='Song 11'  album=''\n13. filename='012 Song.flac'  artist='Artist'  title='Song 12'  album=''\n14. filename='013 Song.flac'  artist='Artist'  title='Song 13'  album=''\n15. filename='014 Song.flac'  artist='Artist'  title='Song 14'  album=''\n16. filename='015 Song.flac'  artist='Artist'  title='Song 15'  album=''\n17. filename='016 Song.flac'  artist='Artist'  title='Song 16'  album=''\n18. filename='017 Song.flac'  artist='Artist'  title='Song 17'  album=''\n19. filename='018 Song.flac'  artist='Artist'  title='Song 18'  album=''\n20. filename='019 Song.flac'  artist='Artist'  title='Song 19'  album=''\n\nLIBRARY TRACKS:\n  id=1  artist='Artist'  title='Song One'  album='Alb'\n\nRules (READ CAREFULLY):\n• TITLE must match — 'Young Girls' cannot match 'That's What I Like'. Different song titles = different songs. Never match on artist alone.\n• Allow minor title variations: punctuation, 'feat.' tags, 'Remaster' suffixes.\n• Do NOT match remixes, live versions, or acoustic versions to studio originals.\n• Only include matches you are CERTAIN about (title genuinely the same song).\n• Return JSON: {\"matches\": [{\"file_idx\": <1-based int>, \"lib_id\": <int>, \"confidence\": \"high\"|\"medium\", \"reason\": \"one sentence\"}]}\n• If no file has a genuine title match, return {\"matches\": []}.",
+       "role": "user"
+      }
+     ],
+     "model": "model:gpt-4o-mini",
+     "response_format": {
+      "json_schema": {
+       "name": "dedup_matches",
+       "schema": {
+        "additionalProperties": false,
+        "properties": {
+         "matches": {
+          "items": {
+           "additionalProperties": false,
+           "properties": {
+            "confidence": {
+             "enum": [
+              "high",
+              "medium"
+             ],
+             "type": "string"
+            },
+            "file_idx": {
+             "type": "integer"
+            },
+            "lib_id": {
+             "type": "integer"
+            },
+            "reason": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "file_idx",
+            "lib_id",
+            "confidence",
+            "reason"
+           ],
+           "type": "object"
+          },
+          "type": "array"
+         }
+        },
+        "required": [
+         "matches"
+        ],
+        "type": "object"
+       },
+       "strict": true
+      },
+      "type": "json_schema"
+     },
+     "temperature": 0.0
+    }
+   ],
+   [
+    "lib.get_item",
+    1
+   ],
+   [
+    "fp_match",
+    "<TMP>/downloads/Bulk/019 Song.flac",
+    "<TMP>/music/Art/Alb/01 Song One.flac"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "000 Song.flac",
+     "current_item": "Batch 1 of 2",
+     "current_path": "<TMP>/downloads/Bulk/000 Song.flac",
+     "current_result": "AI duplicate candidate found",
+     "current_task": "Reviewing unmatched files with AI",
+     "duplicate_type": "AI duplicate",
+     "found_count": 1,
+     "progress_percent": 95,
+     "remaining_count": 1,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": null,
+     "scanned_count": 20,
+     "total_count": 21
+    }
+   ],
+   [
+    "log",
+    "  🤖 [high] 019 Song.flac  →  Artist – Song One  (same song)"
+   ],
+   [
+    "log",
+    "  Batch 1/2 done"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "000 Song.flac",
+     "current_item": "Batch 1 of 2",
+     "current_path": "<TMP>/downloads/Bulk/000 Song.flac",
+     "current_result": "1 duplicate file(s) found so far",
+     "current_task": "Reviewing unmatched files with AI",
+     "duplicate_type": "AI duplicate",
+     "found_count": 1,
+     "progress_percent": 95,
+     "remaining_count": 1,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": null,
+     "scanned_count": 20,
+     "total_count": 21
+    }
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "log",
+    "Cancelled by user from Jobs."
+   ]
+  ],
+  "http": [
+   {
+    "result": [
+     {
+      "job_id": "job-1",
+      "ok": true
+     },
+     200
+    ]
+   }
+  ],
+  "jobs_state": {
+   "job-1": {
+    "created_at": 1700000000.0,
+    "current_item": "Batch 1 of 2",
+    "current_path": "<TMP>/downloads/Bulk/000 Song.flac",
+    "current_result": "1 duplicate file(s) found so far",
+    "current_task": "Reviewing unmatched files with AI",
+    "duplicate_type": "AI duplicate",
+    "duplicates": [
+     {
+      "confidence": "high",
+      "fingerprint_verified": false,
+      "lib_album": "Alb",
+      "lib_artist": "Artist",
+      "lib_id": 1,
+      "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+      "lib_title": "Song One",
+      "match_type": "AI duplicate",
+      "reason": "AI: same song",
+      "source_artist": "Artist",
+      "source_filename": "019 Song.flac",
+      "source_path": "<TMP>/downloads/Bulk/019 Song.flac",
+      "source_size": 5019,
+      "source_title": "Song 19"
+     }
+    ],
+    "folders": [],
+    "found": 1,
+    "kind": "ai_review",
+    "scan_path": "<TMP>/downloads",
+    "scanned": 20,
+    "source_scan_jid": "scan-1",
+    "status": "cancelled",
+    "total": 21
+   },
+   "scan-1": {
+    "created_at": 1.0,
+    "duplicates": [],
+    "kind": "scan",
+    "scan_path": "<TMP>/downloads",
+    "status": "done"
+   }
+  },
+  "outcomes": [
+   {
+    "error": [
+     [
+      "RuntimeError",
+      "cancelled",
+      "end"
+     ]
+    ],
+    "safety": {}
+   }
+  ],
+  "tag_reads": [
+   "<TMP>/downloads/Bulk/000 Song.flac",
+   "<TMP>/downloads/Bulk/001 Song.flac",
+   "<TMP>/downloads/Bulk/002 Song.flac",
+   "<TMP>/downloads/Bulk/003 Song.flac",
+   "<TMP>/downloads/Bulk/004 Song.flac",
+   "<TMP>/downloads/Bulk/005 Song.flac",
+   "<TMP>/downloads/Bulk/006 Song.flac",
+   "<TMP>/downloads/Bulk/007 Song.flac",
+   "<TMP>/downloads/Bulk/008 Song.flac",
+   "<TMP>/downloads/Bulk/009 Song.flac",
+   "<TMP>/downloads/Bulk/010 Song.flac",
+   "<TMP>/downloads/Bulk/011 Song.flac",
+   "<TMP>/downloads/Bulk/012 Song.flac",
+   "<TMP>/downloads/Bulk/013 Song.flac",
+   "<TMP>/downloads/Bulk/014 Song.flac",
+   "<TMP>/downloads/Bulk/015 Song.flac",
+   "<TMP>/downloads/Bulk/016 Song.flac",
+   "<TMP>/downloads/Bulk/017 Song.flac",
+   "<TMP>/downloads/Bulk/018 Song.flac",
+   "<TMP>/downloads/Bulk/019 Song.flac"
+  ]
+ },
  "cancel_scan_at_check_0": {
   "events": [
    [
@@ -23129,6 +23597,2133 @@
   ],
   "tag_reads": [
    "<TMP>/downloads/New/x.flac"
+  ]
+ },
+ "cancel_scan_at_second_batch": {
+  "events": [
+   [
+    "job_start",
+    "job-1",
+    {
+     "label": "Duplicate scan: <TMP>/downloads",
+     "metadata": {
+      "path": "<TMP>/downloads",
+      "type": "dedup-scan"
+     }
+    }
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "Scanning source path",
+     "current_task": "Listing source audio files",
+     "found_count": 0,
+     "progress_percent": 0,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 0
+    }
+   ],
+   [
+    "log",
+    "Scanning downloads folder: <TMP>/downloads"
+   ],
+   [
+    "log",
+    "Comparing against library items in beets database …"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "lib.items",
+    []
+   ],
+   [
+    "log",
+    "Found 65 audio files to check"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "Found 65 source audio file(s)",
+     "current_task": "Building library comparison index",
+     "found_count": 0,
+     "progress_percent": 0,
+     "remaining_count": 65,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 0,
+     "total_count": 65
+    }
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "000.flac",
+     "current_path": "<TMP>/downloads/Bulk/000.flac",
+     "current_result": "Scanning 1/65 (2%) · 0 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "found_count": 0,
+     "progress_percent": 2,
+     "remaining_count": 64,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 1,
+     "total_count": 65
+    }
+   ],
+   [
+    "log",
+    "  [1/65] 000.flac"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "000.flac",
+     "current_path": "<TMP>/downloads/Bulk/000.flac",
+     "current_result": "Scanning 1/65 (2%) · 1 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "duplicate_type": "identical file size",
+     "found_count": 1,
+     "progress_percent": 2,
+     "remaining_count": 64,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 1,
+     "total_count": 65
+    }
+   ],
+   [
+    "log",
+    "  [BYTE VERIFIED] [identical file size] 000.flac  →  Library Artist – Library Song 1"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "001",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "001",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/001.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "002",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "002",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/002.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "003",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "003",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/003.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "004",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "004",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/004.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "005",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "005",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/005.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "006",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "006",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/006.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "007",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "007",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/007.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "008",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "008",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/008.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "009",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "009",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/009.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "010.flac",
+     "current_path": "<TMP>/downloads/Bulk/010.flac",
+     "current_result": "Scanning 11/65 (17%) · 1 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "duplicate_type": "identical file size",
+     "found_count": 1,
+     "progress_percent": 17,
+     "remaining_count": 54,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 11,
+     "total_count": 65
+    }
+   ],
+   [
+    "log",
+    "  [11/65] 010.flac"
+   ],
+   [
+    "fuzzy",
+    "",
+    "010",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "010",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/010.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "011",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "011",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/011.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "012",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "012",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/012.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "013",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "013",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/013.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "014",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "014",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/014.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "015",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "015",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/015.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "016",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "016",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/016.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "017",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "017",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/017.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "018",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "018",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/018.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "019",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "019",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/019.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "020.flac",
+     "current_path": "<TMP>/downloads/Bulk/020.flac",
+     "current_result": "Scanning 21/65 (32%) · 1 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "duplicate_type": "identical file size",
+     "found_count": 1,
+     "progress_percent": 32,
+     "remaining_count": 44,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 21,
+     "total_count": 65
+    }
+   ],
+   [
+    "log",
+    "  [21/65] 020.flac"
+   ],
+   [
+    "fuzzy",
+    "",
+    "020",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "020",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/020.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "021",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "021",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/021.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "022",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "022",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/022.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "023",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "023",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/023.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "024",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "024",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/024.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "025",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "025",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/025.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "026",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "026",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/026.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "027",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "027",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/027.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "028",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "028",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/028.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "029",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "029",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/029.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "030.flac",
+     "current_path": "<TMP>/downloads/Bulk/030.flac",
+     "current_result": "Scanning 31/65 (48%) · 1 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "duplicate_type": "identical file size",
+     "found_count": 1,
+     "progress_percent": 48,
+     "remaining_count": 34,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 31,
+     "total_count": 65
+    }
+   ],
+   [
+    "log",
+    "  [31/65] 030.flac"
+   ],
+   [
+    "fuzzy",
+    "",
+    "030",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "030",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/030.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "031",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "031",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/031.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "032",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "032",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/032.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "033",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "033",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/033.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "034",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "034",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/034.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "035",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "035",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/035.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "036",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "036",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/036.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "037",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "037",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/037.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "038",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "038",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/038.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "039",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "039",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/039.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "040.flac",
+     "current_path": "<TMP>/downloads/Bulk/040.flac",
+     "current_result": "Scanning 41/65 (63%) · 1 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "duplicate_type": "identical file size",
+     "found_count": 1,
+     "progress_percent": 63,
+     "remaining_count": 24,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 41,
+     "total_count": 65
+    }
+   ],
+   [
+    "log",
+    "  [41/65] 040.flac"
+   ],
+   [
+    "fuzzy",
+    "",
+    "040",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "040",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/040.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "041",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "041",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/041.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "042",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "042",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/042.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "043",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "043",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/043.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "044",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "044",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/044.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "045",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "045",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/045.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "046",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "046",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/046.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "047",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "047",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/047.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "048",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "048",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/048.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "049",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "049",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/049.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "050.flac",
+     "current_path": "<TMP>/downloads/Bulk/050.flac",
+     "current_result": "Scanning 51/65 (78%) · 1 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "duplicate_type": "identical file size",
+     "found_count": 1,
+     "progress_percent": 78,
+     "remaining_count": 14,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 51,
+     "total_count": 65
+    }
+   ],
+   [
+    "log",
+    "  [51/65] 050.flac"
+   ],
+   [
+    "fuzzy",
+    "",
+    "050",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "050",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/050.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "051",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "051",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/051.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "052",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "052",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/052.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "053",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "053",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/053.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "054",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "054",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/054.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "055",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "055",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/055.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "056",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "056",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/056.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "057",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "057",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/057.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "058",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "058",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/058.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "059",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "059",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/059.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "060.flac",
+     "current_path": "<TMP>/downloads/Bulk/060.flac",
+     "current_result": "Scanning 61/65 (94%) · 1 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "duplicate_type": "identical file size",
+     "found_count": 1,
+     "progress_percent": 94,
+     "remaining_count": 4,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 61,
+     "total_count": 65
+    }
+   ],
+   [
+    "log",
+    "  [61/65] 060.flac"
+   ],
+   [
+    "fuzzy",
+    "",
+    "060",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "060",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/060.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "061",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "061",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/061.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "062",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "062",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/062.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "fuzzy",
+    "",
+    "063",
+    {
+     "count": 2,
+     "titles": [
+      "library song 1",
+      "one"
+     ]
+    }
+   ],
+   [
+    "album_title",
+    "Bulk",
+    "063",
+    [
+     "album_index",
+     "logger_instance"
+    ]
+   ],
+   [
+    "fp_ids",
+    "<TMP>/downloads/Bulk/063.flac"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "log",
+    "Cancelled by user from Jobs."
+   ]
+  ],
+  "http": [
+   {
+    "result": [
+     {
+      "job_id": "job-1",
+      "ok": true
+     },
+     200
+    ]
+   }
+  ],
+  "jobs_state": {
+   "job-1": {
+    "created_at": 1700000000.0,
+    "current_path": "<TMP>/downloads/Bulk/063.flac",
+    "current_result": "Scanning 64/65 (98%) · 1 duplicate candidate(s) found",
+    "current_task": "Scanning",
+    "duplicate_type": "identical file size",
+    "duplicates": [],
+    "folders": [],
+    "found": 1,
+    "kind": "scan",
+    "scan_path": "<TMP>/downloads",
+    "scan_scope": "scope",
+    "scanned": 64,
+    "status": "cancelled",
+    "total": 65
+   }
+  },
+  "outcomes": [
+   {
+    "error": [
+     [
+      "RuntimeError",
+      "cancelled",
+      "end"
+     ]
+    ],
+    "safety": {}
+   }
+  ],
+  "tag_reads": [
+   "<TMP>/downloads/Bulk/000.flac",
+   "<TMP>/downloads/Bulk/001.flac",
+   "<TMP>/downloads/Bulk/002.flac",
+   "<TMP>/downloads/Bulk/003.flac",
+   "<TMP>/downloads/Bulk/004.flac",
+   "<TMP>/downloads/Bulk/005.flac",
+   "<TMP>/downloads/Bulk/006.flac",
+   "<TMP>/downloads/Bulk/007.flac",
+   "<TMP>/downloads/Bulk/008.flac",
+   "<TMP>/downloads/Bulk/009.flac",
+   "<TMP>/downloads/Bulk/010.flac",
+   "<TMP>/downloads/Bulk/011.flac",
+   "<TMP>/downloads/Bulk/012.flac",
+   "<TMP>/downloads/Bulk/013.flac",
+   "<TMP>/downloads/Bulk/014.flac",
+   "<TMP>/downloads/Bulk/015.flac",
+   "<TMP>/downloads/Bulk/016.flac",
+   "<TMP>/downloads/Bulk/017.flac",
+   "<TMP>/downloads/Bulk/018.flac",
+   "<TMP>/downloads/Bulk/019.flac",
+   "<TMP>/downloads/Bulk/020.flac",
+   "<TMP>/downloads/Bulk/021.flac",
+   "<TMP>/downloads/Bulk/022.flac",
+   "<TMP>/downloads/Bulk/023.flac",
+   "<TMP>/downloads/Bulk/024.flac",
+   "<TMP>/downloads/Bulk/025.flac",
+   "<TMP>/downloads/Bulk/026.flac",
+   "<TMP>/downloads/Bulk/027.flac",
+   "<TMP>/downloads/Bulk/028.flac",
+   "<TMP>/downloads/Bulk/029.flac",
+   "<TMP>/downloads/Bulk/030.flac",
+   "<TMP>/downloads/Bulk/031.flac",
+   "<TMP>/downloads/Bulk/032.flac",
+   "<TMP>/downloads/Bulk/033.flac",
+   "<TMP>/downloads/Bulk/034.flac",
+   "<TMP>/downloads/Bulk/035.flac",
+   "<TMP>/downloads/Bulk/036.flac",
+   "<TMP>/downloads/Bulk/037.flac",
+   "<TMP>/downloads/Bulk/038.flac",
+   "<TMP>/downloads/Bulk/039.flac",
+   "<TMP>/downloads/Bulk/040.flac",
+   "<TMP>/downloads/Bulk/041.flac",
+   "<TMP>/downloads/Bulk/042.flac",
+   "<TMP>/downloads/Bulk/043.flac",
+   "<TMP>/downloads/Bulk/044.flac",
+   "<TMP>/downloads/Bulk/045.flac",
+   "<TMP>/downloads/Bulk/046.flac",
+   "<TMP>/downloads/Bulk/047.flac",
+   "<TMP>/downloads/Bulk/048.flac",
+   "<TMP>/downloads/Bulk/049.flac",
+   "<TMP>/downloads/Bulk/050.flac",
+   "<TMP>/downloads/Bulk/051.flac",
+   "<TMP>/downloads/Bulk/052.flac",
+   "<TMP>/downloads/Bulk/053.flac",
+   "<TMP>/downloads/Bulk/054.flac",
+   "<TMP>/downloads/Bulk/055.flac",
+   "<TMP>/downloads/Bulk/056.flac",
+   "<TMP>/downloads/Bulk/057.flac",
+   "<TMP>/downloads/Bulk/058.flac",
+   "<TMP>/downloads/Bulk/059.flac",
+   "<TMP>/downloads/Bulk/060.flac",
+   "<TMP>/downloads/Bulk/061.flac",
+   "<TMP>/downloads/Bulk/062.flac",
+   "<TMP>/downloads/Bulk/063.flac"
   ]
  },
  "check_continues_after_rejection": {
@@ -57055,10 +59650,8 @@
          "id": 1,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/01 Song One.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song One"
         },
@@ -57067,10 +59660,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "Song One"
@@ -57086,10 +59677,8 @@
          "id": 1,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/01 Song One.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song One"
         },
@@ -57098,10 +59687,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "01 Song One"
@@ -57117,10 +59704,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57129,10 +59714,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "Song Two (feat. Guest)"
@@ -57148,10 +59731,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57160,10 +59741,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "Song Two (feat. Guest)"
@@ -57179,10 +59758,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57191,10 +59768,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "Song Two (feat. Guest)"
@@ -57210,10 +59785,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57222,10 +59795,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "02 feat"
@@ -57241,10 +59812,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57253,10 +59822,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "02 feat"
@@ -57272,10 +59839,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57284,10 +59849,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "02 feat"
@@ -57303,10 +59866,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57315,10 +59876,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "feat"
@@ -57334,10 +59893,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57346,10 +59903,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "feat"
@@ -57365,10 +59920,8 @@
          "id": 2,
          "length": 180.0,
          "path": "<TMP>/music/Art/Alb/02 feat.flac",
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library",
          "title": "Song Two (feat. Guest)"
         },
@@ -57377,10 +59930,8 @@
          "bitrate": 1000,
          "format": "FLAC",
          "length": 180.0,
-         "quality": "bad",
-         "quality_flags": [
-          "missing_file"
-         ],
+         "quality": "ok",
+         "quality_flags": [],
          "source": "Library"
         },
         "title": "feat"
@@ -57399,10 +59950,8 @@
           "id": 1,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/01 Song One.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song One"
          },
@@ -57411,10 +59960,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "01 Song One"
@@ -57432,10 +59979,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57444,10 +59989,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "02 feat"
@@ -57463,10 +60006,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57475,10 +60016,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "02 feat"
@@ -57494,10 +60033,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57506,10 +60043,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "02 feat"
@@ -57527,10 +60062,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57539,10 +60072,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "feat"
@@ -57558,10 +60089,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57570,10 +60099,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "feat"
@@ -57589,10 +60116,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57601,10 +60126,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "feat"
@@ -57622,10 +60145,8 @@
           "id": 1,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/01 Song One.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song One"
          },
@@ -57634,10 +60155,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "Song One"
@@ -57655,10 +60174,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57667,10 +60184,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "Song Two (feat. Guest)"
@@ -57686,10 +60201,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57698,10 +60211,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "Song Two (feat. Guest)"
@@ -57717,10 +60228,8 @@
           "id": 2,
           "length": 180.0,
           "path": "<TMP>/music/Art/Alb/02 feat.flac",
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library",
           "title": "Song Two (feat. Guest)"
          },
@@ -57729,10 +60238,8 @@
           "bitrate": 1000,
           "format": "FLAC",
           "length": 180.0,
-          "quality": "bad",
-          "quality_flags": [
-           "missing_file"
-          ],
+          "quality": "ok",
+          "quality_flags": [],
           "source": "Library"
          },
          "title": "Song Two (feat. Guest)"
@@ -63774,9 +66281,463 @@
     }
    ],
    [
+    "fuzzy_real",
+    {
+     "album": "Alb",
+     "albumartist": "Artist",
+     "artist": "Artist",
+     "bitrate": 1000,
+     "format": "FLAC",
+     "id": 1,
+     "length": 180.0,
+     "path": "<TMP>/music/Art/Alb/01 Song One.flac",
+     "quality": "ok",
+     "quality_flags": [],
+     "query_artist": "Artist",
+     "query_title": "Song One",
+     "score": 1.015,
+     "source": "Library",
+     "title": "Song One"
+    }
+   ],
+   [
+    "fp_match",
+    "<TMP>/downloads/New/one.flac",
+    "<TMP>/music/Art/Alb/01 Song One.flac"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "one.flac",
+     "current_path": "<TMP>/downloads/New/one.flac",
+     "current_result": "Scanning 1/1 (100%) · 1 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "duplicate_type": "fuzzy match 100%",
+     "found_count": 1,
+     "progress_percent": 100,
+     "remaining_count": 0,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 1,
+     "total_count": 1
+    }
+   ],
+   [
+    "log",
+    "  [CANDIDATE] [fuzzy match 100%] one.flac  →  Artist – Song One"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "1 duplicate file(s) found across 1 folder(s)",
+     "current_task": "Duplicate scan complete",
+     "duplicate_type": "fuzzy match 100%",
+     "final_summary": {
+      "duplicate_folders_found": 1,
+      "duplicate_tracks_found": 1,
+      "duplicate_type_counts": {
+       "fuzzy match 100%": 1
+      },
+      "scanned_files": 1,
+      "scanned_folders": 1
+     },
+     "found_count": 1,
+     "progress_percent": 100,
+     "remaining_count": 0,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 1,
+     "total_count": 1
+    }
+   ],
+   [
+    "log",
+    "Done — 1 file scanned, 1 duplicate found across 1 folder"
+   ]
+  ],
+  "http": [
+   {
+    "result": [
+     {
+      "job_id": "job-1",
+      "ok": true
+     },
+     200
+    ]
+   }
+  ],
+  "jobs_state": {
+   "job-1": {
+    "created_at": 1700000000.0,
+    "current_item": null,
+    "current_path": null,
+    "current_result": "1 duplicate file(s) found across 1 folder(s)",
+    "current_task": "Duplicate scan complete",
+    "duplicate_type": "fuzzy match 100%",
+    "duplicates": [
+     {
+      "confidence": "medium",
+      "fingerprint_mbid": "",
+      "fingerprint_verified": false,
+      "lib_album": "Alb",
+      "lib_album_id": null,
+      "lib_artist": "Artist",
+      "lib_disc": 1,
+      "lib_fingerprint_ids": [],
+      "lib_id": 1,
+      "lib_meta": {
+       "album_id": null,
+       "bitdepth": null,
+       "bitrate": 1000,
+       "disc": 1,
+       "format": "FLAC",
+       "recording_id": "",
+       "release_id": "",
+       "releasegroup_id": "",
+       "samplerate": null,
+       "track": 0
+      },
+      "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+      "lib_recording_id": "",
+      "lib_title": "Song One",
+      "lib_track": 0,
+      "match_type": "fuzzy match 100%",
+      "reason": "Matched by fuzzy match 100%.",
+      "release_relation": "not_library_item",
+      "source_album_id": null,
+      "source_artist": "Artist",
+      "source_disc": null,
+      "source_filename": "one.flac",
+      "source_fingerprint_ids": [],
+      "source_item_id": null,
+      "source_meta": {},
+      "source_path": "<TMP>/downloads/New/one.flac",
+      "source_recording_id": "",
+      "source_size": 5000,
+      "source_title": "Song One",
+      "source_track": null
+     }
+    ],
+    "final_summary": {
+     "duplicate_folders_found": 1,
+     "duplicate_tracks_found": 1,
+     "duplicate_type_counts": {
+      "fuzzy match 100%": 1
+     },
+     "scanned_files": 1,
+     "scanned_folders": 1
+    },
+    "folders": [
+     {
+      "all_dupes": true,
+      "dup_count": 1,
+      "files": [
+       {
+        "confidence": "medium",
+        "fingerprint_mbid": "",
+        "fingerprint_verified": false,
+        "lib_album": "Alb",
+        "lib_album_id": null,
+        "lib_artist": "Artist",
+        "lib_disc": 1,
+        "lib_fingerprint_ids": [],
+        "lib_id": 1,
+        "lib_meta": {
+         "album_id": null,
+         "bitdepth": null,
+         "bitrate": 1000,
+         "disc": 1,
+         "format": "FLAC",
+         "recording_id": "",
+         "release_id": "",
+         "releasegroup_id": "",
+         "samplerate": null,
+         "track": 0
+        },
+        "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+        "lib_recording_id": "",
+        "lib_title": "Song One",
+        "lib_track": 0,
+        "match_type": "fuzzy match 100%",
+        "reason": "Matched by fuzzy match 100%.",
+        "release_relation": "not_library_item",
+        "source_album_id": null,
+        "source_artist": "Artist",
+        "source_disc": null,
+        "source_filename": "one.flac",
+        "source_fingerprint_ids": [],
+        "source_item_id": null,
+        "source_meta": {},
+        "source_path": "<TMP>/downloads/New/one.flac",
+        "source_recording_id": "",
+        "source_size": 5000,
+        "source_title": "Song One",
+        "source_track": null
+       }
+      ],
+      "name": "New",
+      "path": "<TMP>/downloads/New",
+      "total_files": 1
+     }
+    ],
+    "found": 1,
+    "kind": "scan",
+    "scan_path": "<TMP>/downloads",
+    "scan_scope": "scope",
+    "scanned": 1,
+    "status": "done",
+    "total": 1
+   }
+  },
+  "outcomes": [
+   {
+    "result": {
+     "duplicates": [
+      {
+       "confidence": "medium",
+       "fingerprint_mbid": "",
+       "fingerprint_verified": false,
+       "lib_album": "Alb",
+       "lib_album_id": null,
+       "lib_artist": "Artist",
+       "lib_disc": 1,
+       "lib_fingerprint_ids": [],
+       "lib_id": 1,
+       "lib_meta": {
+        "album_id": null,
+        "bitdepth": null,
+        "bitrate": 1000,
+        "disc": 1,
+        "format": "FLAC",
+        "recording_id": "",
+        "release_id": "",
+        "releasegroup_id": "",
+        "samplerate": null,
+        "track": 0
+       },
+       "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+       "lib_recording_id": "",
+       "lib_title": "Song One",
+       "lib_track": 0,
+       "match_type": "fuzzy match 100%",
+       "reason": "Matched by fuzzy match 100%.",
+       "release_relation": "not_library_item",
+       "source_album_id": null,
+       "source_artist": "Artist",
+       "source_disc": null,
+       "source_filename": "one.flac",
+       "source_fingerprint_ids": [],
+       "source_item_id": null,
+       "source_meta": {},
+       "source_path": "<TMP>/downloads/New/one.flac",
+       "source_recording_id": "",
+       "source_size": 5000,
+       "source_title": "Song One",
+       "source_track": null
+      }
+     ],
+     "final_summary": {
+      "duplicate_folders_found": 1,
+      "duplicate_tracks_found": 1,
+      "duplicate_type_counts": {
+       "fuzzy match 100%": 1
+      },
+      "scanned_files": 1,
+      "scanned_folders": 1
+     },
+     "folders": [
+      {
+       "all_dupes": true,
+       "dup_count": 1,
+       "files": [
+        {
+         "confidence": "medium",
+         "fingerprint_mbid": "",
+         "fingerprint_verified": false,
+         "lib_album": "Alb",
+         "lib_album_id": null,
+         "lib_artist": "Artist",
+         "lib_disc": 1,
+         "lib_fingerprint_ids": [],
+         "lib_id": 1,
+         "lib_meta": {
+          "album_id": null,
+          "bitdepth": null,
+          "bitrate": 1000,
+          "disc": 1,
+          "format": "FLAC",
+          "recording_id": "",
+          "release_id": "",
+          "releasegroup_id": "",
+          "samplerate": null,
+          "track": 0
+         },
+         "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+         "lib_recording_id": "",
+         "lib_title": "Song One",
+         "lib_track": 0,
+         "match_type": "fuzzy match 100%",
+         "reason": "Matched by fuzzy match 100%.",
+         "release_relation": "not_library_item",
+         "source_album_id": null,
+         "source_artist": "Artist",
+         "source_disc": null,
+         "source_filename": "one.flac",
+         "source_fingerprint_ids": [],
+         "source_item_id": null,
+         "source_meta": {},
+         "source_path": "<TMP>/downloads/New/one.flac",
+         "source_recording_id": "",
+         "source_size": 5000,
+         "source_title": "Song One",
+         "source_track": null
+        }
+       ],
+       "name": "New",
+       "path": "<TMP>/downloads/New",
+       "total_files": 1
+      }
+     ],
+     "found": 1,
+     "kind": "scan",
+     "scan_path": "<TMP>/downloads",
+     "scanned": 1,
+     "total": 1
+    },
+    "safety": {
+     "reviewed_pairs": {
+      "result": [
+       [],
+       [
+        "<TMP>/downloads/New/one.flac"
+       ]
+      ]
+     },
+     "unattended_plan": {
+      "result": []
+     }
+    }
+   }
+  ],
+  "tag_reads": [
+   "<TMP>/downloads/New/one.flac"
+  ]
+ },
+ "scan_real_fuzzy_no_match": {
+  "events": [
+   [
+    "job_start",
+    "job-1",
+    {
+     "label": "Duplicate scan: <TMP>/downloads",
+     "metadata": {
+      "path": "<TMP>/downloads",
+      "type": "dedup-scan"
+     }
+    }
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "Scanning source path",
+     "current_task": "Listing source audio files",
+     "found_count": 0,
+     "progress_percent": 0,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 0
+    }
+   ],
+   [
+    "log",
+    "Scanning downloads folder: <TMP>/downloads"
+   ],
+   [
+    "log",
+    "Comparing against library items in beets database …"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "lib.items",
+    []
+   ],
+   [
+    "log",
+    "Found 1 audio file to check"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_result": "Found 1 source audio file(s)",
+     "current_task": "Building library comparison index",
+     "found_count": 0,
+     "progress_percent": 0,
+     "remaining_count": 1,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 0,
+     "total_count": 1
+    }
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "cancel?"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "x.flac",
+     "current_path": "<TMP>/downloads/New/x.flac",
+     "current_result": "Scanning 1/1 (100%) · 0 duplicate candidate(s) found",
+     "current_task": "Scanning",
+     "found_count": 0,
+     "progress_percent": 100,
+     "remaining_count": 0,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": "scope",
+     "scanned_count": 1,
+     "total_count": 1
+    }
+   ],
+   [
+    "log",
+    "  [1/1] x.flac"
+   ],
+   [
+    "fuzzy",
+    "Nobody",
+    "Nothing Alike",
+    {
+     "count": 2,
+     "titles": [
+      "01 song one",
+      "song one"
+     ]
+    }
+   ],
+   [
+    "fuzzy_real",
+    null
+   ],
+   [
     "album_title",
     "New",
-    "Song One",
+    "Nothing Alike",
     [
      "album_index",
      "logger_instance"
@@ -63784,7 +66745,7 @@
    ],
    [
     "fp_ids",
-    "<TMP>/downloads/New/one.flac"
+    "<TMP>/downloads/New/x.flac"
    ],
    [
     "update_state",
@@ -63878,7 +66839,7 @@
    }
   ],
   "tag_reads": [
-   "<TMP>/downloads/New/one.flac"
+   "<TMP>/downloads/New/x.flac"
   ]
  },
  "scan_refuse_blank": {

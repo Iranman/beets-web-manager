@@ -30,6 +30,7 @@ import routes_cleanup
 import backend.dedup_authorization as dedup_authorization
 import backend.dedup_service as dedup_service
 import backend.maintenance_service as maintenance_service
+import backend.plex_service as plex_service
 
 GOLDEN = Path(__file__).parent / "fixtures" / "dedup_jobs_golden.json"
 
@@ -136,6 +137,8 @@ SCENARIOS = {
                                   "sources": [SRC1], "dump_candidates": True},
     "scan_real_fuzzy_lookup": {"items": [LIB1, item(2, "Art/Alb/02.flac", title="Other Tune", artist="Someone")],
                                "sources": [SRC1], "real_fuzzy": True},
+    "scan_real_fuzzy_no_match": {"items": [LIB1], "sources": [src("New/x.flac", tags={"artist": "Nobody", "title": "Nothing Alike"})],
+                                 "real_fuzzy": True},
     # ── reading a source file ──
     "scan_source_vanished_keeps_going": {"items": [item(1, "Art/Alb/01.flac", size=4444)],
                                          "sources": [src("New/a.flac", size=1), src("New/b.flac", size=4444)], "vanish": ["a.flac"]},
@@ -326,7 +329,7 @@ SCENARIOS = {
     "ai_match_unknown_library_item": ai_case(ai(m(1, 99), m(1))),
     "ai_match_library_file_gone": ai_case(ai(m(1, 2), m(1)), items=[LIB1, item(2, "Art/Alb/gone.flac", no_file=True, title="Song One")]),
     "ai_match_relative_library_path": ai_case(ai(m()), items=[item(1, "Art/Alb/rel.flac", relative=True, title="Song One", artist="Artist")]),
-    "ai_match_same_file": ai_case(ai(m()), source_is_library=True),
+    "ai_match_same_file": ai_case(ai(m()), sources=[], source={"scan_path": "<TMP>/music"}),
     # title guard at its boundary: "abcd"/"abzz" is exactly 0.50, 0.4776 is just under.
     "ai_title_guard_exactly_half_kept": ai_case(ai(m()), items=[item(1, "A/1.flac", title="abzz", artist="Artist")],
                                                 sources=[src("New/one.flac", tags={"artist": "Artist", "title": "abcd"})]),
@@ -343,7 +346,7 @@ SCENARIOS = {
     "ai_fingerprint_unavailable_stays_unverified": ai_case(ai(m())),
     "ai_fingerprint_only_source_heard": ai_case(ai(m()), fp_match={"one.flac": [None, [REC], []]}),
     "ai_fingerprint_error_ends_the_batch": ai_case(ai(m()), fp_match={"one.flac": "boom"}),
-    "ai_high_confidence_is_not_a_cleanup_pair": ai_case(ai(m(confidence="high")), cleanup_after=True, source_is_tracked=True),
+    "ai_high_confidence_is_not_a_cleanup_pair": ai_case(ai(m(confidence="high")), cleanup_after=True),
     "ai_fingerprinted_without_source_id_not_a_pair": ai_case(ai(m()), fp_match={"one.flac": [REC, [REC], [REC]]}, cleanup_after=True),
     "ai_source_gone_after_tags": ai_case(ai(m()), vanish_on_fingerprint=["one.flac"]),
     # ── folder grouping ──
@@ -375,6 +378,9 @@ for _n in range(6):
                                                "sources": [src("New/x.flac", size=4444)], "cancel_after": _n}
 for _n in range(4):
     SCENARIOS[f"cancel_ai_at_check_{_n}"] = ai_case(ai(m()), cancel_after=_n)
+# Between batches, with the first batch's findings already on the job.
+SCENARIOS["cancel_scan_at_second_batch"] = {"items": [item(1, "Art/Alb/one.flac", size=9000)], "sources": many(65), "cancel_after": 68}
+SCENARIOS["cancel_ai_at_second_batch"] = ai_case(ai(m(20)), sources=ai_files(21), cancel_after=3)
 
 
 class Item:
@@ -481,10 +487,7 @@ class World:
 
     def make_source(self, row):
         path = self.downloads / row["rel"]
-        if self.cfg.get("source_is_library"):
-            path = Path(self.items[0].path)
-        else:
-            self.write(path, row.get("size", 5000 + len(self.tags)), row.get("fill", "s"))
+        self.write(path, row.get("size", 5000 + len(self.tags)), row.get("fill", "s"))
         self.tags[path.name] = row.get("tags", {})
 
     # ── spies ──
@@ -531,7 +534,9 @@ class World:
                 detail["rows"] = self.clean(candidates)
             self.events.append(["fuzzy", artist, title, detail])
             if self.cfg.get("real_fuzzy"):
-                return real(artist, title, candidates)
+                found = real(artist, title, candidates)
+                self.events.append(["fuzzy_real", self.clean(found)])
+                return found
             found = self.cfg.get("fuzzy", {}).get(title)
             if not found:
                 return None
@@ -616,6 +621,8 @@ class World:
         started += [mock.patch.object(routes_cleanup, key, value) for key, value in shared.items()]
         started += [
             mock.patch.object(dedup_service, "_BROWSE_ALLOWED_ROOTS", (self.music, self.downloads)),
+            # The candidate quality check resolves library paths against this root.
+            mock.patch.object(plex_service, "MUSIC_ROOT", self.music),
             mock.patch.object(dedup_service, "_scan_scope_label", lambda path: "scope"),
             mock.patch.object(dedup_service, "_acoustid_fingerprint_ids", self.fp_ids),
             mock.patch.object(dedup_service, "_playlist_match_payload_from_candidates",
@@ -692,9 +699,7 @@ def _start_ai(world, cfg, tmp, trace):
     if not cfg.get("no_source"):
         duplicates = [{"source_path": str(world.downloads / rel)} for rel in cfg.get("matched", [])]
         source = dict({"kind": "scan", "created_at": 1.0, "status": "done", "scan_path": str(world.downloads),
-                       "duplicates": duplicates}, **cfg.get("source", {}))
-        if cfg.get("source_is_tracked"):
-            source["duplicates"] = []
+                       "duplicates": duplicates}, **_fill(cfg.get("source", {}), tmp))
         dedup_service._dedup_scans["scan-1"] = source
     body = _fill(cfg.get("body", {"scan_jid": "scan-1"}), tmp)
 
