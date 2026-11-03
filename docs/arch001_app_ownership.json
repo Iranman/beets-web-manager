@@ -32697,8 +32697,8 @@
    "name": "_word",
    "module": "backend/transaction_service.py",
    "lines": [
-    32,
-    34
+    33,
+    35
    ],
    "size": 3,
    "body_lines": 1,
@@ -32717,8 +32717,8 @@
    "name": "_transaction_operation_from_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    37,
-    76
+    38,
+    77
    ],
    "size": 40,
    "body_lines": 39,
@@ -32739,11 +32739,11 @@
    "name": "_transaction_create_for_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    79,
-    118
+    84,
+    124
    ],
-   "size": 40,
-   "body_lines": 39,
+   "size": 41,
+   "body_lines": 40,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -32761,8 +32761,8 @@
    "name": "_jobs_by_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    125,
-    132
+    131,
+    138
    ],
    "size": 8,
    "body_lines": 6,
@@ -32782,8 +32782,8 @@
    "name": "_speaking_job",
    "module": "backend/transaction_service.py",
    "lines": [
-    135,
-    137
+    141,
+    143
    ],
    "size": 3,
    "body_lines": 1,
@@ -32803,8 +32803,8 @@
    "name": "overlay_running_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    140,
-    152
+    146,
+    158
    ],
    "size": 13,
    "body_lines": 9,
@@ -32824,14 +32824,54 @@
    ]
   },
   {
+   "name": "_is_job_wrapper",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    161,
+    169
+   ],
+   "size": 9,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "JOBS",
+   "desired_owner": "backend/job_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_reconcile_running_transactions"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_orphaned_job_wrapper",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    172,
+    186
+   ],
+   "size": 15,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "JOBS",
+   "desired_owner": "backend/job_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_reconcile_running_transactions"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_reconcile_running_transactions",
    "module": "backend/transaction_service.py",
    "lines": [
-    155,
-    195
+    189,
+    238
    ],
-   "size": 41,
-   "body_lines": 34,
+   "size": 50,
+   "body_lines": 41,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT_RECONCILIATION",
@@ -32842,7 +32882,9 @@
    ],
    "caller_count": 1,
    "dependencies": [
+    "_is_job_wrapper",
     "_jobs_by_transaction",
+    "_orphaned_job_wrapper",
     "_speaking_job"
    ]
   },
@@ -32850,11 +32892,11 @@
    "name": "_install_transaction_job_hooks",
    "module": "backend/transaction_service.py",
    "lines": [
-    198,
-    348
+    241,
+    393
    ],
-   "size": 151,
-   "body_lines": 150,
+   "size": 153,
+   "body_lines": 152,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -32872,8 +32914,8 @@
    "name": "transaction_cancel_eligibility",
    "module": "backend/transaction_service.py",
    "lines": [
-    355,
-    372
+    400,
+    417
    ],
    "size": 18,
    "body_lines": 12,
@@ -32893,8 +32935,8 @@
    "name": "_sync_transactions_from_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    375,
-    384
+    420,
+    429
    ],
    "size": 10,
    "body_lines": 9,
@@ -32913,8 +32955,8 @@
    "name": "_item_transaction_fields",
    "module": "backend/transaction_service.py",
    "lines": [
-    389,
-    400
+    434,
+    445
    ],
    "size": 12,
    "body_lines": 11,
@@ -32935,8 +32977,8 @@
    "name": "_item_metadata_transaction_payload",
    "module": "backend/transaction_service.py",
    "lines": [
-    403,
-    433
+    448,
+    478
    ],
    "size": 31,
    "body_lines": 30,
@@ -32958,8 +33000,8 @@
    "name": "_start_metadata_apply_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    436,
-    490
+    481,
+    535
    ],
    "size": 55,
    "body_lines": 54,
