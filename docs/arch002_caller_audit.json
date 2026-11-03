@@ -325,6 +325,38 @@
       "CANDIDATE_GENERATION_ONLY",
       "Provisional duplicate candidates with fingerprint veto; FIXED this pass: release_relation recorded, cross-release matches downgraded. (ARCH-001: body moved from the route into this request-free service.)"
     ],
+    "backend/dedup_service.py::_dedup_match_fuzzy": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Provisional fuzzy duplicate candidate; verified by the fingerprint step. (Moved out of start_dedup_scan.)"
+    ],
+    "backend/dedup_service.py::_dedup_confidence_and_reason": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Candidate confidence and reason text; cross-release matches downgraded. Deletes nothing. (Moved out of start_dedup_scan.)"
+    ],
+    "backend/dedup_service.py::_dedup_duplicate_record": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Builds the candidate record from evidence already decided. (Moved out of start_dedup_scan.)"
+    ],
+    "routes_cleanup.py::_ai_review_request_body": [
+      "CANDIDATE_GENERATION_ONLY",
+      "AI reply schema with its confidence labels. (Moved out of dedup_ai_review.)"
+    ],
+    "routes_cleanup.py::_ai_review_title_similarity": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Title score for the guard that rejects AI suggestions. (Moved out of dedup_ai_review.)"
+    ],
+    "routes_cleanup.py::_ai_review_relevant_tracks": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Picks the library tracks shown to the AI. (Moved out of dedup_ai_review.)"
+    ],
+    "routes_cleanup.py::_ai_review_prompt": [
+      "CANDIDATE_GENERATION_ONLY",
+      "AI prompt text and its confidence labels. (Moved out of dedup_ai_review.)"
+    ],
+    "routes_cleanup.py::_ai_review_apply_match": [
+      "CANDIDATE_GENERATION_ONLY",
+      "AI-proposed duplicates; title guard and fingerprint mismatch reject; deletion needs explicit paths or the maintenance deterministic same-album rule. (Moved out of dedup_ai_review.)"
+    ],
     "app.py::start_folder_import_with_id": [
       "COMPATIBILITY_WRAPPER",
       "Human-supplied release; library-source preflight canonical; fresh path goes to the engine confirmed-import plan (see transaction_engine entries). (ARCH-001: body moved from the route into this request-free service.)"

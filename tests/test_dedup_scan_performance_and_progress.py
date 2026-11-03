@@ -13,6 +13,10 @@ import backend.playlist_service as playlist_service
 import backend.dedup_service as dedup_service
 from backend.app_runtime import jobs
 from job_engine import JobStore, PythonJob
+try:  # ARCH-001: app.py module family (works under discovery and tests.<module> runs)
+    from _app_ast_cache import dedup_scan_source  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests._app_ast_cache import dedup_scan_source  # noqa: E402
 
 
 class MockBeetsItem:
@@ -260,12 +264,12 @@ class DedupScanPerformanceAndProgressTests(unittest.TestCase):
 
     def test_fuzzy_match_score_display_never_exceeds_100_percent(self):
         """Even if internal score composition adds bonuses (> 1.0), display output must never exceed 100%."""
-        src = inspect.getsource(dedup_service.start_dedup_scan)
+        src = dedup_scan_source()
         self.assertIn("min(1.0, score)", src, "Fuzzy match display score must be clamped with min(1.0, score)")
 
     def test_log_evidence_terminology(self):
         """Scan log must use clear evidence tags ([CANDIDATE], [FINGERPRINT VERIFIED], etc.) and not '✓ DUPLICATE'."""
-        src = inspect.getsource(dedup_service.start_dedup_scan)
+        src = dedup_scan_source()
         self.assertIn('"CANDIDATE"', src)
         self.assertIn('"FINGERPRINT VERIFIED"', src)
         self.assertIn('"BYTE VERIFIED"', src)
@@ -303,9 +307,7 @@ class FuzzyMatchKeepsRealLibraryItemTests(unittest.TestCase):
     def test_fuzzy_candidate_resolves_to_the_real_beets_item(self):
         """Release-slot evidence (album, disc, track, IDs) needs the real item,
         not a synthetic object built from the playlist match payload."""
-        import inspect
-        from backend import dedup_service
-        src = inspect.getsource(dedup_service.start_dedup_scan)
+        src = dedup_scan_source()
         self.assertIn("items_by_id.get(int(cand_payload.get(\"id\") or 0))", src)
 
 

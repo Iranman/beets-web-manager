@@ -24,9 +24,9 @@ try:  # ARCH-001: patch app.py and the modules extracted from it
 except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
 try:  # ARCH-001: app.py module family
-    from _app_ast_cache import app_unit_source  # noqa: E402
+    from _app_ast_cache import app_unit_source, dedup_scan_source  # noqa: E402
 except ImportError:  # pragma: no cover
-    from tests._app_ast_cache import app_unit_source  # noqa: E402
+    from tests._app_ast_cache import app_unit_source, dedup_scan_source  # noqa: E402
 try:  # ARCH-001: app.py module family
     from _app_ast_cache import app_family_source  # noqa: E402
 except ImportError:  # pragma: no cover
@@ -169,7 +169,7 @@ class ScanSourceContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         src = app_family_source()
-        cls.scan = app_unit_source("start_dedup_scan")
+        cls.scan = dedup_scan_source()
 
     def test_fuzzy_match_plus_acoustid_disagreement_is_rejected(self):
         self.assertIn('match_type.startswith("fuzzy match")', self.scan)
