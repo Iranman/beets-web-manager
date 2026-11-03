@@ -151,7 +151,20 @@ find "${BEETS_CONFIG_DIR}" -maxdepth 1 -name "*.json" -exec cp -p {} "${STAGE}/b
 # local database a very old version created (never used now).
 ( cd "${WEB_MANAGER_DATA_DIR}" && tar -cf - \
     --exclude='./musiclibrary.blb' --exclude='./musiclibrary.blb-wal' --exclude='./musiclibrary.blb-shm' \
-    --exclude='*.lock' . ) | ( cd "${STAGE}/web-manager-data" && tar -xf - )
+    --exclude='*.lock' --exclude='./jobs' . ) | ( cd "${STAGE}/web-manager-data" && tar -xf - )
+# Job records are copied one by one instead: running jobs rewrite jobs/ every
+# few seconds, which makes tar fail ("file changed as we read it"). Web
+# Manager writes each record to a temp file and renames it over <id>.json, so
+# every <id>.json copied here is a complete record. A record pruned between
+# listing and copying is skipped; any other copy failure is fatal.
+if [ -d "${WEB_MANAGER_DATA_DIR}/jobs" ]; then
+  mkdir -p "${STAGE}/web-manager-data/jobs"
+  for f in "${WEB_MANAGER_DATA_DIR}/jobs/"*.json; do
+    [ -e "$f" ] || continue
+    cp -p "$f" "${STAGE}/web-manager-data/jobs/" 2>/dev/null || [ ! -e "$f" ] \
+      || fail "could not copy job record ${f}"
+  done
+fi
 
 {
   echo "created=${STAMP} (UTC)"

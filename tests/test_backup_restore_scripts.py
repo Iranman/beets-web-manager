@@ -11,6 +11,7 @@ Linux/macOS only (POSIX bash, tar); skipped on Windows.
 """
 import datetime
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -18,6 +19,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -52,13 +54,15 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
         self.out = os.path.join(self.tmp, "backups")
         os.makedirs(os.path.join(self.beets, "beetsplug", "webmanager"))
         os.makedirs(os.path.join(self.wm, "transactions"))
+        os.makedirs(os.path.join(self.wm, "jobs"))
         Path(self.beets, "config.yaml").write_text("directory: /music\nlibrary: /config/musiclibrary.blb\n", encoding="utf-8")
         Path(self.beets, ".webmanager_api_key").write_text("plugin-key-for-test", encoding="utf-8")
         Path(self.beets, "beetsplug", "webmanager", "version.py").write_text('PLUGIN_VERSION = "1.5.0"\n', encoding="utf-8")
         for name, body in ((".auth_token", "token-for-test"), (".env", "AI_MODEL=x\n"),
                            (".browser_username", "admin"), (".browser_password", "pbkdf2:hash"),
                            (".flask_secret_key", "flask-key"), (".setup_complete", "1"),
-                           ("transactions/txn_1.json", '{"id": 1}')):
+                           ("transactions/txn_1.json", '{"id": 1}'),
+                           ("jobs/job_1.json", '{"id": "job_1", "status": "recovery_required"}')):
             Path(self.wm, name).write_text(body, encoding="utf-8")
         Path(self.wm, ".web_manager_config_store.lock").write_text("", encoding="utf-8")
 
@@ -109,7 +113,8 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
                          "beets/beetsplug/webmanager/version.py", "web-manager-data/.auth_token",
                          "web-manager-data/.env", "web-manager-data/.browser_password",
                          "web-manager-data/.flask_secret_key", "web-manager-data/.setup_complete",
-                         "web-manager-data/transactions/txn_1.json", "MANIFEST.txt"):
+                         "web-manager-data/transactions/txn_1.json", "web-manager-data/jobs/job_1.json",
+                         "MANIFEST.txt"):
             self.assertTrue(any(n.endswith(expected) for n in names), f"{expected} missing from {names}")
         self.assertFalse(any(n.endswith(".lock") for n in names))
 
@@ -143,6 +148,39 @@ class BackupRestoreRoundTripTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("sqlite3"), "sqlite3 command not installed")
     def test_round_trip_with_sqlite3_command(self):
         self._round_trip("sqlite3")
+
+    def test_backup_succeeds_while_jobs_are_rewritten(self):
+        """Running jobs rewrite jobs/ constantly (temp file + rename, like
+        job_engine). tar used to fail with "file changed as we read it"."""
+        jobs = os.path.join(self.wm, "jobs")
+        ids = [f"job_{i}" for i in range(200)]
+        for jid in ids:
+            Path(jobs, f"{jid}.json").write_text(json.dumps({"id": jid, "n": 0, "pad": "x" * 4096}), encoding="utf-8")
+        stop = threading.Event()
+
+        def churn():
+            n = 0
+            while not stop.is_set():
+                n += 1
+                for jid in ids:
+                    tmp = os.path.join(jobs, f".{jid}.1.tmp")
+                    Path(tmp).write_text(json.dumps({"id": jid, "n": n, "pad": "x" * 4096}), encoding="utf-8")
+                    os.replace(tmp, os.path.join(jobs, f"{jid}.json"))
+
+        writer = threading.Thread(target=churn, daemon=True)
+        writer.start()
+        try:
+            for _ in range(3):
+                archive = self.backup("python")
+                with tarfile.open(archive) as tf:
+                    records = {os.path.basename(m.name): json.load(tf.extractfile(m))
+                               for m in tf.getmembers() if "/jobs/" in m.name and m.isfile()}
+                    self.assertFalse(any(n.endswith(".tmp") for n in tf.getnames()))
+                self.assertEqual(set(records), {f"{j}.json" for j in ids} | {"job_1.json"})
+                os.remove(archive)
+        finally:
+            stop.set()
+            writer.join()
 
     def test_without_sqlite_tools_refuses_while_beets_may_be_running(self):
         res = self.run_script(BACKUP, "--beets-config", self.beets, "--web-manager-data", self.wm,
