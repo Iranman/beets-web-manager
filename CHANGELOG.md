@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **The TrueNAS rollout script deploys single-container stacks (#487).** `scripts/deploy_truenas_web_manager.sh` refused the shipped embedded-Beets layout because it looked for a separate `beets` container. It now detects the layout from `docker compose config`. With no `beets` service, it finds the library through the `beets-web-manager` container's `/config` mount, reads the semantic snapshot (counts, item identity digest, `/api/health` `beets.ok`) through that container's own API, recreates only `beets-web-manager` (`--no-deps`) and restarts no separate Beets service. Image label checks, the `_backups/` backup, `--dry-run`, `--rollback` and the post-deploy checks are unchanged; two-container stacks behave as before. New reason codes: `beets_config_unmounted`, `embedded_beets_unhealthy`. `docs/TRUENAS_ROLLOUT.md` now documents the single-container flow first and drops the manual-deploy note.
+
 ## v0.16.0 - 2026-11-03
 
 - Clean All's job body in `routes_maintenance.py` is split into named steps, pinned by golden traces recorded from the old code; no behavior change (#505).

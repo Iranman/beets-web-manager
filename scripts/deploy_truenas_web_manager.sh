@@ -5,9 +5,20 @@
 #
 # See docs/TRUENAS_ROLLOUT.md for the full writeup.
 #
+# Stack layouts (detected from `docker compose config`, never configured):
+#   - single-container (the shipped layout, ADR 0006): Beets runs embedded
+#     inside `beets-web-manager`; there is no ENGINE_SERVICE in the Compose
+#     file. The library is found through that container's /config mount, the
+#     online semantic snapshot is read through that same container (its own
+#     /api/health, /api/stats and /api/library), and no separate Beets
+#     container is ever restarted: recreating `beets-web-manager` restarts
+#     embedded Beets with it.
+#   - two-container (legacy): a separate ENGINE_SERVICE (`beets`) container
+#     owns the library; everything below that names "the engine" applies.
+#
 # Design goals:
 #   - Never touch the authoritative Beets database (/config/musiclibrary.blb
-#     under the `beets` engine's own mount). While Beets runs, integrity is
+#     under the Beets /config mount). While Beets runs, integrity is
 #     ONLINE SEMANTIC INTEGRITY: counts, an identity digest over every item
 #     and album, and plugin health, all read through the running engine's
 #     own web API -- never by opening its SQLite file, and never by hashing
@@ -22,7 +33,8 @@
 #   - Archive (never delete) the stale, pre-#64 web-manager-created database
 #     using exact filenames -- no wildcards, no `rm`.
 #   - Recreate only the `beets-web-manager` service. Plex, Lidarr and every
-#     other service are left untouched. The Beets engine is never recreated;
+#     other service are left untouched. In the two-container layout the
+#     separate Beets engine is never recreated;
 #     it is RESTARTED (same container) only when the webmanager plugin files
 #     Web Manager provisioned differ from the plugin version the running
 #     engine reports, with an online semantic snapshot before and after.
@@ -37,8 +49,9 @@
 #       (a backup without a checksum manifest -- made by an older version
 #        of this script -- is refused unless --allow-legacy-backup is given)
 #   /bin/bash scripts/deploy_truenas_web_manager.sh --offline-db-identity
-#       (stops the Beets engine briefly, hashes the settled database file,
-#        restarts it and re-verifies; BASELINE_DB_SHA256=<hex> to compare)
+#       (stops the Beets engine briefly -- in the single-container layout
+#        that is beets-web-manager itself -- hashes the settled database
+#        file, restarts it and re-verifies; BASELINE_DB_SHA256=<hex> to compare)
 #   /bin/bash scripts/deploy_truenas_web_manager.sh --prune-backups-older-than DAYS [--dry-run]
 #       (opt-in retention: deletes this script's own rollout backup
 #        directories older than DAYS, always keeping the newest one; with
@@ -66,7 +79,12 @@ set -Eeuo pipefail
 # we know the requested mode isn't --help.
 STACK_DIR="${STACK_DIR:-}"
 SERVICE="${SERVICE:-beets-web-manager}"
+# The separate Beets service of the legacy two-container layout. When the
+# Compose file has no such service, the stack is single-container and this
+# is set to SERVICE (see detect_beets_layout).
 ENGINE_SERVICE="${ENGINE_SERVICE:-beets}"
+# "single-container" or "two-container"; set by detect_beets_layout.
+BEETS_LAYOUT=""
 # No release default -- pinning one here would make the script silently
 # redeploy a stale version forever. Left unset at global init (same reason
 # as STACK_DIR: --help must work without it); required and validated only
@@ -526,8 +544,62 @@ print(json.dumps({"items": stats.get("items"), "albums": stats.get("albums"),
                   "plugin_version": status.get("plugin_version") or ""}))
 '
 
+# Single-container layout: the same ONLINE SEMANTIC INTEGRITY, read inside
+# the beets-web-manager container through Web Manager's own API, which
+# answers from embedded Beets (never by opening SQLite). Counts come from
+# /api/stats, the digest covers every item's identity (id, album row,
+# Recording ID, path) from the paginated /api/library rows, and Beets health
+# is /api/health beets.ok. The token is read inside the container the way
+# the app resolves it (BEETS_WEB_AUTH_TOKEN, else BEETS_WEB_AUTH_TOKEN_FILE,
+# else <WEB_MANAGER_DATA_DIR>/.auth_token) and never printed. The output has
+# the same fields as SEMANTIC_SNAPSHOT_PY; "plugin_version" is "embedded"
+# while beets.ok is true and empty otherwise.
+EMBEDDED_SNAPSHOT_PY='
+import hashlib, json, os, urllib.request
+BASE = "http://127.0.0.1:" + (os.environ.get("WEBCONTROL_PORT") or "8337")
+token = (os.environ.get("BEETS_WEB_AUTH_TOKEN") or "").strip()
+if not token:
+    path = os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE") or os.path.join(
+        os.environ.get("WEB_MANAGER_DATA_DIR") or "/web-manager-data", ".auth_token")
+    try:
+        with open(path, encoding="utf-8") as f:
+            token = f.read().strip()
+    except Exception:
+        token = ""
+def get(path, auth=True):
+    headers = {"Authorization": "Bearer " + token} if auth and token else {}
+    req = urllib.request.Request(BASE + path, headers=headers)
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+health = get("/api/health", auth=False)
+beets = health.get("beets") if isinstance(health, dict) else None
+beets_ok = isinstance(beets, dict) and beets.get("ok") is True
+stats = get("/api/stats")
+items, offset = [], 0
+while True:
+    page = get("/api/library?limit=500&offset=%d" % offset)
+    rows = page.get("items") or []
+    total = (page.get("pagination") or {}).get("total")
+    items.extend(rows)
+    offset += len(rows)
+    if not rows or not isinstance(total, int) or offset >= total:
+        break
+digest = hashlib.sha256()
+for it in sorted(items, key=lambda r: r.get("id") or 0):
+    digest.update(json.dumps([it.get(k) for k in ("id", "album_id", "mb_trackid", "path")]).encode())
+print(json.dumps({"items": stats.get("tracks"), "albums": stats.get("albums"),
+                  "listed_items": len(items), "listed_albums": stats.get("albums"),
+                  "digest": digest.hexdigest(),
+                  "plugin_version": "embedded" if beets_ok else ""}))
+'
+
 beets_semantic_snapshot() {
-  docker exec "$ENGINE_CID" python3 -c "$SEMANTIC_SNAPSHOT_PY" | tr -d '\r'
+  if [[ "$BEETS_LAYOUT" == "single-container" ]]; then
+    # WEBMGR_CID, not ENGINE_CID: a recreate gives the service a new container.
+    docker exec "$WEBMGR_CID" python3 -c "$EMBEDDED_SNAPSHOT_PY" | tr -d '\r'
+  else
+    docker exec "$ENGINE_CID" python3 -c "$SEMANTIC_SNAPSHOT_PY" | tr -d '\r'
+  fi
 }
 
 snapshot_field() {
@@ -543,7 +615,10 @@ checked_semantic_snapshot() {
   plugin="$(snapshot_field "$snap" plugin_version)"
   [[ "$items" =~ ^[0-9]+$ ]] || die "${label}: engine /stats returned no valid item count"
   [[ "$items" == "$listed" ]] || die "${label}: engine /stats reports ${items} items but /item/ listed ${listed}"
-  [[ -n "$plugin" ]] || die "${label}: webmanager plugin is not healthy (no /webmanager/status)"
+  if [[ -z "$plugin" ]]; then
+    [[ "$BEETS_LAYOUT" != "single-container" ]] || { REASON_CODE="embedded_beets_unhealthy"; die "${label}: embedded Beets is not healthy (${SERVICE} /api/health reports beets.ok other than true)"; }
+    die "${label}: webmanager plugin is not healthy (no /webmanager/status)"
+  fi
   printf '%s\n' "$snap"
 }
 
@@ -627,14 +702,43 @@ ENGINE_CONFIG_SRC=""
 WEBMGR_DATA_SRC=""
 WEBMGR_LEGACY_CONFIG_SRC=""
 
+# Single-container when the Compose file has no separate ENGINE_SERVICE
+# (ADR 0006: Beets is embedded in SERVICE); two-container otherwise.
+detect_beets_layout() {
+  local services
+  services="$(compose_config_json | _py -c 'import json, sys; print("\n".join((json.load(sys.stdin).get("services") or {}).keys()))')" \
+    || die "could not list the services of ${COMPOSE_FILE} with 'docker compose config'"
+  grep -qxF -- "$SERVICE" <<< "$services" || die "compose service '${SERVICE}' is not defined in ${COMPOSE_FILE}"
+  if [[ "$ENGINE_SERVICE" != "$SERVICE" ]] && grep -qxF -- "$ENGINE_SERVICE" <<< "$services"; then
+    BEETS_LAYOUT="two-container"
+    log "Stack layout: two-container (separate Beets service '${ENGINE_SERVICE}')."
+  else
+    BEETS_LAYOUT="single-container"
+    ENGINE_SERVICE="$SERVICE"
+    log "Stack layout: single-container (Beets embedded in '${SERVICE}'; no separate Beets service)."
+  fi
+}
+
 discover_and_verify_mounts() {
   STAGE="mount-discovery"
-  log "Resolving containers for services '${ENGINE_SERVICE}' and '${SERVICE}'..."
-  ENGINE_CID="$(resolve_container_id "$ENGINE_SERVICE")"
-  WEBMGR_CID="$(resolve_container_id "$SERVICE")"
+  detect_beets_layout
+  if [[ "$BEETS_LAYOUT" == "single-container" ]]; then
+    log "Resolving the container for service '${SERVICE}'..."
+    WEBMGR_CID="$(resolve_container_id "$SERVICE")"
+    ENGINE_CID="$WEBMGR_CID"
+    ENGINE_CONFIG_SRC="$(mount_source_for_dest "$WEBMGR_CID" /config)"
+    if [[ -z "$ENGINE_CONFIG_SRC" ]]; then
+      REASON_CODE="beets_config_unmounted"
+      die "${SERVICE} has no mount at /config, so the embedded Beets library (config.yaml, ${DB_FILENAME}) cannot be located -- refusing to guess"
+    fi
+  else
+    log "Resolving containers for services '${ENGINE_SERVICE}' and '${SERVICE}'..."
+    ENGINE_CID="$(resolve_container_id "$ENGINE_SERVICE")"
+    WEBMGR_CID="$(resolve_container_id "$SERVICE")"
 
-  ENGINE_CONFIG_SRC="$(mount_source_for_dest "$ENGINE_CID" /config)"
-  [[ -n "$ENGINE_CONFIG_SRC" ]] || die "could not determine the Beets engine's /config host source from 'docker inspect ${ENGINE_SERVICE}'"
+    ENGINE_CONFIG_SRC="$(mount_source_for_dest "$ENGINE_CID" /config)"
+    [[ -n "$ENGINE_CONFIG_SRC" ]] || die "could not determine the Beets engine's /config host source from 'docker inspect ${ENGINE_SERVICE}'"
+  fi
 
   # Where the running app keeps its state. When the container sets
   # WEB_MANAGER_DATA_DIR (every shipped Compose file sets /web-manager-data),
@@ -683,7 +787,10 @@ print("" if found is None else "=" + found)')"
   fi
   [[ -n "$WEBMGR_DATA_SRC" ]] || die "could not determine web-manager's data host source from 'docker inspect ${SERVICE}' -- is /data or /web-manager-data mounted at all?"
 
-  WEBMGR_LEGACY_CONFIG_SRC="$(mount_source_for_dest "$WEBMGR_CID" /config || true)"
+  # Single-container: /config is Beets' own folder, never a legacy
+  # web-manager config, so no token is ever migrated from it.
+  WEBMGR_LEGACY_CONFIG_SRC=""
+  [[ "$BEETS_LAYOUT" == "single-container" ]] || WEBMGR_LEGACY_CONFIG_SRC="$(mount_source_for_dest "$WEBMGR_CID" /config || true)"
 
   local engine_canon webmgr_canon
   engine_canon="$(canon_path "$ENGINE_CONFIG_SRC")"
@@ -704,7 +811,7 @@ print("" if found is None else "=" + found)')"
     "$engine_canon"/*) die "stale database path (${STALE_DB_PATH}) resolves INSIDE the authoritative Beets /config source -- refusing to continue" ;;
   esac
 
-  log "Beets engine /config source:        ${engine_canon}"
+  log "Beets /config source:               ${engine_canon}"
   log "web-manager data source: ${webmgr_canon}"
   [[ -n "$WEBMGR_LEGACY_CONFIG_SRC" ]] && log "web-manager legacy /config source:  $(canon_path "$WEBMGR_LEGACY_CONFIG_SRC")"
   log "Authoritative DB path (expected):   ${AUTH_DB_PATH}"
@@ -1184,6 +1291,10 @@ PYEOF
 
 refresh_engine_plugin_if_stale() {
   STAGE="engine-plugin-refresh"
+  if [[ "$BEETS_LAYOUT" == "single-container" ]]; then
+    log "Single-container layout: Beets runs inside ${SERVICE}, so recreating it restarted Beets too -- no separate Beets restart."
+    return 0
+  fi
   local provisioned before running after
   provisioned="$(provisioned_plugin_version)"
   before="$(checked_semantic_snapshot "before plugin check")"
@@ -1781,7 +1892,11 @@ run_dry_run() {
   else
     log "Service '${SERVICE}' is not currently running -- skipping live endpoint checks."
   fi
-  log "Running engine plugin: $(snapshot_field "$AUTH_SEMANTIC" plugin_version). The real run compares it with the plugin the new image provisions and restarts ${ENGINE_SERVICE} only if they differ."
+  if [[ "$BEETS_LAYOUT" == "single-container" ]]; then
+    log "Embedded Beets is healthy (/api/health beets.ok). The real run recreates only ${SERVICE} (--no-deps); there is no separate Beets service to restart."
+  else
+    log "Running engine plugin: $(snapshot_field "$AUTH_SEMANTIC" plugin_version). The real run compares it with the plugin the new image provisions and restarts ${ENGINE_SERVICE} only if they differ."
+  fi
   log "=== DRY RUN COMPLETE: all checks passed. Nothing in the stack was changed (the image may have been pulled into the local image store; probe bodies went to temp files). ==="
 }
 
@@ -2081,9 +2196,11 @@ verify_post_deploy() {
   refresh_engine_plugin_if_stale
   STAGE="post-deploy-verification"
 
-  local engine_status
-  engine_status="$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}(no healthcheck){{end}}' "$ENGINE_CID")"
-  log "Beets engine container (same container ID) reports: ${engine_status}"
+  if [[ "$BEETS_LAYOUT" == "two-container" ]]; then
+    local engine_status
+    engine_status="$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}(no healthcheck){{end}}' "$ENGINE_CID")"
+    log "Beets engine container (same container ID) reports: ${engine_status}"
+  fi
 
   local first_sha
   first_sha="$(sha256_file "$TOKEN_PATH")"
