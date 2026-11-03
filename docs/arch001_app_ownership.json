@@ -32828,10 +32828,10 @@
    "module": "backend/transaction_service.py",
    "lines": [
     161,
-    169
+    170
    ],
-   "size": 9,
-   "body_lines": 5,
+   "size": 10,
+   "body_lines": 6,
    "route": null,
    "mutation_capable": false,
    "domain": "JOBS",
@@ -32847,11 +32847,11 @@
    "name": "_orphaned_job_wrapper",
    "module": "backend/transaction_service.py",
    "lines": [
-    172,
-    186
+    173,
+    190
    ],
-   "size": 15,
-   "body_lines": 9,
+   "size": 18,
+   "body_lines": 12,
    "route": null,
    "mutation_capable": false,
    "domain": "JOBS",
@@ -32867,11 +32867,11 @@
    "name": "_reconcile_running_transactions",
    "module": "backend/transaction_service.py",
    "lines": [
-    189,
-    238
+    193,
+    247
    ],
-   "size": 50,
-   "body_lines": 41,
+   "size": 55,
+   "body_lines": 44,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT_RECONCILIATION",
@@ -32892,11 +32892,11 @@
    "name": "_install_transaction_job_hooks",
    "module": "backend/transaction_service.py",
    "lines": [
-    241,
-    393
+    250,
+    408
    ],
-   "size": 153,
-   "body_lines": 152,
+   "size": 159,
+   "body_lines": 158,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -32914,8 +32914,8 @@
    "name": "transaction_cancel_eligibility",
    "module": "backend/transaction_service.py",
    "lines": [
-    400,
-    417
+    415,
+    432
    ],
    "size": 18,
    "body_lines": 12,
@@ -32935,8 +32935,8 @@
    "name": "_sync_transactions_from_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    420,
-    429
+    435,
+    444
    ],
    "size": 10,
    "body_lines": 9,
@@ -32955,8 +32955,8 @@
    "name": "_item_transaction_fields",
    "module": "backend/transaction_service.py",
    "lines": [
-    434,
-    445
+    449,
+    460
    ],
    "size": 12,
    "body_lines": 11,
@@ -32977,8 +32977,8 @@
    "name": "_item_metadata_transaction_payload",
    "module": "backend/transaction_service.py",
    "lines": [
-    448,
-    478
+    463,
+    493
    ],
    "size": 31,
    "body_lines": 30,
@@ -33000,8 +33000,8 @@
    "name": "_start_metadata_apply_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    481,
-    535
+    496,
+    550
    ],
    "size": 55,
    "body_lines": 54,

@@ -577,7 +577,9 @@ class ReconcileTests(_Sync):
     def test_orphan_with_engine_evidence_is_left_to_the_recovery_sweep(self):
         txs = [self._orphaned_wrapper(**{ts._JOB_WRAPPER_MARK: True, key: value}) for key, value in (
             ("mutation_family", "album_relocation_v1"), ("engine_request", {"operation_id": "x"}),
-            ("engine_operation_id", "op1"), ("rollback_request", {"requested_at": 1}))]
+            ("engine_operation_id", "op1"), ("rollback_request", {"requested_at": 1}),
+            ("engine_result", {"mutation_started": True}), ("mutation_started", True),
+            ("filesystem_mutated", True))]
         jobs = self.jobstore()
         self.assertTrue(ts._reconcile_running_transactions(jobs, self.store, before=time.time() + 1))
         self.assertEqual({self.store.get(t["id"])["status"] for t in txs}, {"Running"})

@@ -164,17 +164,18 @@ def _is_job_wrapper(row: Dict[str, Any]) -> bool:
     marker are recognised by the hook's default reason."""
     meta = row.get("metadata") or {}
     if (meta.get("mutation_family") or meta.get("engine_request") or meta.get("engine_operation_id")
-            or meta.get("rollback_request")):
-        return False
+            or meta.get("rollback_request") or (meta.get("engine_result") or {}).get("mutation_started")
+            or meta.get("mutation_started") or meta.get("filesystem_mutated")):
+        return False  # transaction_recovery.sweep owns these
     return bool(meta.get(_JOB_WRAPPER_MARK)) or row.get("reason") == _JOB_WRAPPER_REASON
 
 
-def _orphaned_job_wrapper(store, row: Dict[str, Any]) -> None:
-    """A job-wrapper transaction an earlier process left Running whose job
-    record is gone (died before the job was attached or persisted, or the
-    record is no longer on disk). Settled as job_engine settles the job it
-    lost: Failed when that job type is read-only, else Recovery Required.
-    Never Completed and never replayed."""
+def _orphaned_job_wrapper(store, row: Dict[str, Any], before: float) -> None:
+    """A job-wrapper transaction an earlier process left Running for which no
+    job record exists, in memory or on disk (the process died before the job
+    was persisted, or the record was deleted). Settled as job_engine settles
+    the job it lost: Failed when that job type is read-only, else Recovery
+    Required. Never Completed and never replayed."""
     meta = row.get("metadata") or {}
     if is_read_only_job(meta):
         status, note = "Failed", ("Recovered after restart: the read-only job for this transaction was "
@@ -183,7 +184,10 @@ def _orphaned_job_wrapper(store, row: Dict[str, Any]) -> None:
         status, note = "Recovery Required", (
             "Recovered after restart: the process stopped while this job was running and its job record "
             "is gone, so whether it changed the library cannot be proven; check the library before retrying.")
-    store.transition(str(row["id"]), "Running", status, append_logs=[note])
+    with store._lock:  # re-checked under the lock: a write since the list means it is live
+        if (store.get(str(row["id"])).get("updated_at") or 0) >= before:
+            return
+        store.transition(str(row["id"]), "Running", status, append_logs=[note])
 
 
 def _reconcile_running_transactions(job_store, store, before: Optional[float] = None) -> bool:
@@ -194,8 +198,13 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
     live job keeps it Running. A Running transaction with no such job is left
     alone: engine operations run without one, so its absence proves nothing.
     The exception is a job-wrapper transaction last written before ``before``
-    (this process's start): no job of this process can still settle it."""
+    (this process's start) with no job record in memory, by id, or among the
+    tail sweep's on-disk records (``tail_transaction_jobs``): no job exists to
+    settle it. Pass ``before`` only once the tail sweep has finished."""
     grouped = _jobs_by_transaction(job_store)
+    for tx_id, snapshots in list((getattr(job_store, "tail_transaction_jobs", None) or {}).items()):
+        known = {j.job_id for j in grouped.get(tx_id, [])}
+        grouped.setdefault(tx_id, []).extend(j for j in snapshots if j.job_id not in known)
     rows, total = store.list(status="Running", limit=500)
     while len(rows) < total:
         page, _total = store.list(status="Running", offset=len(rows), limit=500)
@@ -210,13 +219,13 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
         # Beyond the startup window a job is on disk only; get() loads it by id.
         for job_id in (meta.get("rollback_job_id"), row.get("originating_job"), meta.get("job_id")):
             job = job_store.get(job_id) if job_id else None
-            if (job is not None and job not in candidates
+            if (job is not None and job.job_id not in {c.job_id for c in candidates}
                     and str((getattr(job, "metadata", None) or {}).get("transaction_id")) == tx_id):
                 candidates.append(job)
         if not candidates:
             if before is not None and (row.get("updated_at") or 0) < before and _is_job_wrapper(row):
                 try:
-                    _orphaned_job_wrapper(store, row)
+                    _orphaned_job_wrapper(store, row, before)
                 except Exception as ex:
                     ok = False
                     _app_logger.warning("transaction sync failed for %s, will retry: %s", tx_id, type(ex).__name__)
@@ -246,6 +255,7 @@ def _install_transaction_job_hooks() -> None:
     reconcile_due = threading.Event()
     reconcile_due.set()
     started = time.time()  # a job-wrapper transaction last written before this has no live job here
+    orphans = {"judged": False}  # orphans are judged in one successful pass, not every tick
 
     def reconcile_tick():
         """Off the startup path (startup stays O(job window), ARCH-004). Due
@@ -257,8 +267,13 @@ def _install_transaction_job_hooks() -> None:
         tail = job_store._recover_thread
         settled = tail is None or not tail.is_alive()  # read first: the pass must see all of the tail
         try:
-            # Orphans are judged only once the tail has loaded every job record.
-            settled = _reconcile_running_transactions(job_store, tx_store, started if settled else None) and settled
+            # The tail sweep has finished: every on-disk record naming a
+            # transaction is in memory or in tail_transaction_jobs.
+            judge = settled and not orphans["judged"]
+            settled = _reconcile_running_transactions(job_store, tx_store, started if judge else None) and settled
+            if judge and settled:
+                orphans["judged"] = True
+                (getattr(job_store, "tail_transaction_jobs", None) or {}).clear()  # consumed; do not hold them
         except Exception:
             settled = False
             raise
