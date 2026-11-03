@@ -7,6 +7,7 @@ import backend.provider_boundary as provider_boundary
 from backend import config_layers
 import copy, difflib, json, math, os, re, threading, time, uuid
 import urllib.error
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import backend.job_contract as job_contract
@@ -97,12 +98,47 @@ def _download_dest_under(root: Path, *segments: str) -> Path:
     return dest
 
 
-# Service behind POST /api/download/album (ARCH-001): request-free,
-# returns (json_body, http_status); the route and in-process callers share it.
-def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
-    """Start a background job to download an album via slskd (primary)
-    or yt-dlp (fallback), then import/tag/move it unless auto_import=false."""
-    data        = payload_in
+_RG_UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_RG_PATH_RE = re.compile(r"/release-group/(" + _RG_UUID_RE + r")", re.I)
+_SLSKD_MAX_ATTEMPTS = 12
+
+
+@dataclass
+class _AlbumDownloadRequest:
+    """A POST /api/download/album request, parsed. Shared by every run of its
+    job; only ``job_id`` changes after the job starts."""
+    artist: str
+    album: str
+    year: str
+    track_count: int
+    mb_albumid: str
+    method: str
+    auto_import: bool
+    forced_albumartist: str
+    try_source_fallback: bool
+    source_fallback_methods: List[str]
+    wanted_tracks: List[Dict[str, Any]]
+    replace_existing_item_ids: List[int]
+    replace_existing: bool
+    existing_album_id: int
+    # Set by _album_download_refusal.
+    downloads_root: Optional[Path] = None
+    safe_artist: str = ""
+    safe_album: str = ""
+    yr_sfx: str = ""
+    dest_dir: str = ""
+    # Set by _acq_bind_recovery_identity.
+    is_recovery: bool = False
+    requested_rgid: str = ""
+    resume_carrier_id: str = ""
+    recovery_carrier_id: str = ""
+    recovery_identity_key: str = ""
+    recovery_stage_prefix: Optional[str] = None
+    # Set once the job has started.
+    job_id: str = ""
+
+
+def _album_download_request(data: Dict[str, Any]) -> _AlbumDownloadRequest:
     artist      = (data.get("artist")      or "").strip()
     album       = (data.get("album")       or "").strip()
     year        = str(data.get("year")     or "").strip()
@@ -140,37 +176,181 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         existing_album_id = 0
     # method: "slskd" | "soundcloud" | "spotiflac";
     # slskd can optionally fall back through non-YouTube direct sources.
+    return _AlbumDownloadRequest(
+        artist=artist, album=album, year=year, track_count=track_count,
+        mb_albumid=mb_albumid, method=method, auto_import=auto_import,
+        forced_albumartist=forced_albumartist, try_source_fallback=try_source_fallback,
+        source_fallback_methods=source_fallback_methods, wanted_tracks=wanted_tracks,
+        replace_existing_item_ids=replace_existing_item_ids, replace_existing=replace_existing,
+        existing_album_id=existing_album_id,
+    )
 
-    if not artist or not album:
+
+def _album_download_refusal(req: _AlbumDownloadRequest) -> Optional[Tuple[Any, int]]:
+    """The (body, status) refusing this request, or None after recording its
+    download folder on ``req``."""
+    if not req.artist or not req.album:
         return {"ok": False, "error": "artist and album required"}, 200
-    if method not in _DOWNLOAD_METHODS:
+    if req.method not in _DOWNLOAD_METHODS:
         return {
             "ok": False,
             "error": (
-                f"Unknown method {method!r}; use 'slskd', 'spotiflac', "
+                f"Unknown method {req.method!r}; use 'slskd', 'spotiflac', "
                 "'ytdlp', or 'soundcloud'"
             ),
         }, 200
     try:
-        downloads_root = validated_downloads_root()
+        req.downloads_root = validated_downloads_root()
     except RuntimeError as exc:
         return {"ok": False, "error": str(exc)}, 200
     # Refused here, before any job or folder exists: "."/".." names would
     # otherwise climb out of DOWNLOADS_ROOT (#268 S-1).
-    safe_artist = _download_folder_segment(artist)
-    safe_album = _download_folder_segment(album)
-    yr_sfx = f" ({_download_folder_segment(year)})" if year else ""
+    req.safe_artist = _download_folder_segment(req.artist)
+    req.safe_album = _download_folder_segment(req.album)
+    req.yr_sfx = f" ({_download_folder_segment(req.year)})" if req.year else ""
     try:
-        dest_dir = str(_download_dest_under(
-            downloads_root, safe_artist, safe_album and safe_album + yr_sfx))
+        req.dest_dir = str(_download_dest_under(
+            req.downloads_root, req.safe_artist, req.safe_album and req.safe_album + req.yr_sfx))
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}, 200
     # ACQ-1: without an API key slskd cannot run. With a direct-source
     # fallback the job skips straight to it (and logs why); without one
     # there is nothing to start.
-    if method == "slskd" and not slskd_configured() and not try_source_fallback:
+    if req.method == "slskd" and not slskd_configured() and not req.try_source_fallback:
         return {"ok": False, "error": SLSKD_NOT_CONFIGURED}, 200
+    return None
 
+
+# F7: the canonical Release Group may arrive either as mb_releasegroupid or
+# folded into mb_albumid as a release-GROUP reference (the handler builds
+# mb_albumid from mb_releasegroupid, and callers may pass a release-group
+# URL directly as mb_albumid). Resolve the requested RG from the same
+# field(s) the rest of the handler already accepts so the identity
+# cross-check is never silently downgraded to album-only. Only a
+# release-GROUP reference contributes -- never a release id (ADR-0002).
+# NF-4: resolve the canonical RG from a bare mb_releasegroupid UUID, or from
+# a release-group reference folded into mb_albumid -- but ONLY from an
+# anchored ``/release-group/<uuid>`` path segment, never a loose substring
+# and never a ``/release/<uuid>`` (edition) reference. A crafted mb_albumid
+# (e.g. ``/release/<uuid>#release-group``) must not yield a release id as the
+# canonical Release Group (ADR-0002). Worst case on no match is a lost resume
+# optimisation (the consumer is fail-closed); this hardens the producer.
+def _acq_canonical_rgid(value: Any) -> str:
+    v = _s(value).strip()
+    if re.fullmatch(_RG_UUID_RE, v, re.I):      # a bare canonical RG UUID
+        return v.lower()
+    m = _RG_PATH_RE.search(v)                    # a /release-group/<uuid> path
+    return m.group(1).lower() if m else ""
+
+
+def _acq_resolve_release_rgid(value: Any) -> str:
+    """C9: resolve the canonical Release Group for the dedup/resume key.
+    A bare ``mb_albumid`` is usually a RELEASE id, but a release UUID and a
+    release-group UUID are indistinguishable by shape, so ``_acq_canonical_rgid``
+    returns the release id as-if it were the RG. create_carrier instead keys
+    on the RESOLVED rgid (read from the release's release-group), so the two
+    diverge: get_by_identity misses the carrier created under the real RG and
+    a retry mints a DUPLICATE carrier/folder. Resolve the release's canonical
+    RG up front so the dedup key, the identity-match guard and create_carrier
+    all agree. Fail-open to the bare id when MusicBrainz cannot answer (worst
+    case: a lost resume optimisation -- never block the download)."""
+    raw = _acq_canonical_rgid(value)
+    if not raw:
+        return ""
+    try:
+        from helpers_mb import _fetch_mb_release_group_strict
+        resolved = _s(_fetch_mb_release_group_strict(raw)).strip().lower()
+    except Exception:
+        return raw
+    return resolved or raw
+
+
+def _acq_carrier_identity_matches(req: _AlbumDownloadRequest, carrier: Optional[Dict[str, Any]]) -> bool:
+    """Finding A / QA-2: a client-supplied recovery_carrier_id may only be
+    honored when the STORED carrier is the SAME recovery as THIS request --
+    same existing album, and same canonical Release Group when the request
+    names one (ADR-0002). Used by BOTH the create-path reuse guard and the
+    IMPORTED/PLEX_SYNCED resume short-circuit, so a stolen/stale id can
+    neither clobber another recovery's row nor have its completed state
+    returned as a false success for a different requested recovery."""
+    if not carrier:
+        return False
+    if int(carrier.get("existing_album_id") or 0) != int(req.existing_album_id or 0):
+        return False
+    if req.requested_rgid and _s(carrier.get("mb_releasegroupid")).strip().lower() != req.requested_rgid:
+        return False
+    return True
+
+
+def _acq_carrier_track_identity(t: Any) -> Tuple[str, Optional[Tuple[int, int]]]:
+    """(rid, (disc,track)|None) for a track dict; rid '' when absent,
+    position None when unknown (F5: unknown position is not a signature)."""
+    if not isinstance(t, dict):
+        return "", None
+    rid = _s(t.get("mb_trackid") or t.get("recording_id")).strip().lower()
+    try:
+        trk = int(t.get("track") or 0)
+        disc = int(t.get("disc") or 1)
+    except Exception:
+        trk, disc = 0, 1
+    return rid, ((disc, trk) if trk > 0 else None)
+
+
+def _acq_requested_tracks_covered(req: _AlbumDownloadRequest, carrier: Optional[Dict[str, Any]]) -> bool:
+    """QA-2: only treat a carrier as covering THIS request's track(s) when
+    every requested track is provably present in the carrier's track scope
+    -- otherwise a recovery of track 6 would falsely report a requested
+    track 3 as covered and strand it. Used by the IMPORTED/PLEX short-circuit
+    and (F1) the sibling-carrier reuse decision.
+
+    A track matches by MB recording id OR by (disc, track position), so a
+    request identified by rid still matches a carrier identified only by
+    position and vice versa. NF-1: when the carrier has an IDENTIFIED
+    recording at a (disc,track) slot, a request for a DIFFERENT recording at
+    that same slot must NOT read as covered -- a bare position fallback may
+    not override a known-conflicting recording id. Position is a fallback
+    only when the carrier carries no conflicting identified recording at the
+    slot. F5: a track with neither a recording id nor a KNOWN position
+    (title-only / unknown position) is UNPROVEN -- it must never compare as
+    COVERED, so a request containing one is never reported already-done.
+    Tolerant only for a genuinely empty/opaque request (identity gated)."""
+    carrier = carrier or {}
+    wanted = req.wanted_tracks or []
+    if not wanted:
+        return True
+    cov_rids: set = set()                 # every recording id the carrier carries
+    cov_pos: set = set()                  # every KNOWN (disc,track) slot it carries
+    pos_rids: Dict[tuple, set] = {}        # identified recording ids per slot
+    for t in (list(carrier.get("expected_tracks") or [])
+              + list(carrier.get("wanted_tracks") or [])):
+        rid, pos = _acq_carrier_track_identity(t)
+        if rid:
+            cov_rids.add(rid)
+        if pos is not None:
+            cov_pos.add(pos)
+            if rid:
+                pos_rids.setdefault(pos, set()).add(rid)
+    for t in wanted:
+        w_rid, w_pos = _acq_carrier_track_identity(t)
+        if not w_rid and w_pos is None:    # F5: no rid, no known position -> UNPROVEN
+            return False
+        if w_rid:
+            if w_rid in cov_rids:          # rid match anywhere -> covered
+                continue
+            # NF-1: no rid match. A (disc,track) fallback is allowed only when
+            # the carrier has NO different identified recording at that slot.
+            if w_pos is not None and w_pos in cov_pos and not pos_rids.get(w_pos):
+                continue
+            return False
+        else:                              # request carries no rid -> position only
+            if w_pos is not None and w_pos in cov_pos:
+                continue
+            return False
+    return True
+
+
+def _acq_bind_recovery_identity(req: _AlbumDownloadRequest, data: Dict[str, Any]) -> None:
+    """Decide whether this request is a recovery and which carrier it uses."""
     # ── Phase-2 missing-track recovery carrier (identity SPINE) ──
     # A download that targets a known existing album for specific missing
     # track(s) IS a recovery. We mint a durable carrier id up front so the
@@ -183,146 +363,18 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # it would mint a carrier whose fail-closed precheck sees the slot already
     # filled and mis-routes the replacement to Review. The replacement path
     # (Preview-until-approved) owns it instead.
-    _is_recovery = bool(existing_album_id and wanted_tracks and not replace_existing)
+    req.is_recovery = bool(req.existing_album_id and req.wanted_tracks and not req.replace_existing)
     # F7: a resume re-triggers the download with the SAME carrier id (so the one
     # guarded workflow and its durable checkpoints are reused, not split); a
     # fresh recovery mints a new id. A non-recovery never carries one.
-    _resume_carrier_id = ""
     _incoming = _s(data.get("recovery_carrier_id")).strip().lower()
     if re.fullmatch(r"[0-9a-f]{32}", _incoming or ""):
-        _resume_carrier_id = _incoming
-    _recovery_box: Dict[str, str] = {"job_id": ""}
-    # F7: the canonical Release Group may arrive either as mb_releasegroupid or
-    # folded into mb_albumid as a release-GROUP reference (the handler builds
-    # mb_albumid from mb_releasegroupid, and callers may pass a release-group
-    # URL directly as mb_albumid). Resolve the requested RG from the same
-    # field(s) the rest of the handler already accepts so the identity
-    # cross-check is never silently downgraded to album-only. Only a
-    # release-GROUP reference contributes -- never a release id (ADR-0002).
-    # NF-4: resolve the canonical RG from a bare mb_releasegroupid UUID, or from
-    # a release-group reference folded into mb_albumid -- but ONLY from an
-    # anchored ``/release-group/<uuid>`` path segment, never a loose substring
-    # and never a ``/release/<uuid>`` (edition) reference. A crafted mb_albumid
-    # (e.g. ``/release/<uuid>#release-group``) must not yield a release id as the
-    # canonical Release Group (ADR-0002). Worst case on no match is a lost resume
-    # optimisation (the consumer is fail-closed); this hardens the producer.
-    _rg_uuid_re = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    _rg_path_re = re.compile(r"/release-group/(" + _rg_uuid_re + r")", re.I)
-
-    def _canonical_rgid(value: Any) -> str:
-        v = _s(value).strip()
-        if re.fullmatch(_rg_uuid_re, v, re.I):      # a bare canonical RG UUID
-            return v.lower()
-        m = _rg_path_re.search(v)                    # a /release-group/<uuid> path
-        return m.group(1).lower() if m else ""
-
-    def _resolve_release_rgid(value: Any) -> str:
-        """C9: resolve the canonical Release Group for the dedup/resume key.
-        A bare ``mb_albumid`` is usually a RELEASE id, but a release UUID and a
-        release-group UUID are indistinguishable by shape, so ``_canonical_rgid``
-        returns the release id as-if it were the RG. create_carrier instead keys
-        on the RESOLVED rgid (read from the release's release-group), so the two
-        diverge: get_by_identity misses the carrier created under the real RG and
-        a retry mints a DUPLICATE carrier/folder. Resolve the release's canonical
-        RG up front so the dedup key, the identity-match guard and create_carrier
-        all agree. Fail-open to the bare id when MusicBrainz cannot answer (worst
-        case: a lost resume optimisation -- never block the download)."""
-        raw = _canonical_rgid(value)
-        if not raw:
-            return ""
-        try:
-            from helpers_mb import _fetch_mb_release_group_strict
-            resolved = _s(_fetch_mb_release_group_strict(raw)).strip().lower()
-        except Exception:
-            return raw
-        return resolved or raw
-
+        req.resume_carrier_id = _incoming
     # An explicit mb_releasegroupid is trusted as an RG (never resolved). Only a
     # bare mb_albumid is ambiguous, and only a recovery keys on it, so resolve
     # there (and nowhere else -- a non-recovery keeps the fast, network-free path).
-    _requested_rgid = _canonical_rgid(data.get("mb_releasegroupid")) or (
-        _resolve_release_rgid(mb_albumid) if _is_recovery else _canonical_rgid(mb_albumid))
-
-    def _carrier_identity_matches(carrier: Optional[Dict[str, Any]]) -> bool:
-        """Finding A / QA-2: a client-supplied recovery_carrier_id may only be
-        honored when the STORED carrier is the SAME recovery as THIS request --
-        same existing album, and same canonical Release Group when the request
-        names one (ADR-0002). Used by BOTH the create-path reuse guard and the
-        IMPORTED/PLEX_SYNCED resume short-circuit, so a stolen/stale id can
-        neither clobber another recovery's row nor have its completed state
-        returned as a false success for a different requested recovery."""
-        if not carrier:
-            return False
-        if int(carrier.get("existing_album_id") or 0) != int(existing_album_id or 0):
-            return False
-        if _requested_rgid and _s(carrier.get("mb_releasegroupid")).strip().lower() != _requested_rgid:
-            return False
-        return True
-
-    def _requested_tracks_covered(carrier: Optional[Dict[str, Any]]) -> bool:
-        """QA-2: only treat a carrier as covering THIS request's track(s) when
-        every requested track is provably present in the carrier's track scope
-        -- otherwise a recovery of track 6 would falsely report a requested
-        track 3 as covered and strand it. Used by the IMPORTED/PLEX short-circuit
-        and (F1) the sibling-carrier reuse decision.
-
-        A track matches by MB recording id OR by (disc, track position), so a
-        request identified by rid still matches a carrier identified only by
-        position and vice versa. NF-1: when the carrier has an IDENTIFIED
-        recording at a (disc,track) slot, a request for a DIFFERENT recording at
-        that same slot must NOT read as covered -- a bare position fallback may
-        not override a known-conflicting recording id. Position is a fallback
-        only when the carrier carries no conflicting identified recording at the
-        slot. F5: a track with neither a recording id nor a KNOWN position
-        (title-only / unknown position) is UNPROVEN -- it must never compare as
-        COVERED, so a request containing one is never reported already-done.
-        Tolerant only for a genuinely empty/opaque request (identity gated)."""
-        def _ident(t):
-            """(rid, (disc,track)|None) for a track dict; rid '' when absent,
-            position None when unknown (F5: unknown position is not a signature)."""
-            if not isinstance(t, dict):
-                return "", None
-            rid = _s(t.get("mb_trackid") or t.get("recording_id")).strip().lower()
-            try:
-                trk = int(t.get("track") or 0)
-                disc = int(t.get("disc") or 1)
-            except Exception:
-                trk, disc = 0, 1
-            return rid, ((disc, trk) if trk > 0 else None)
-
-        carrier = carrier or {}
-        wanted = wanted_tracks or []
-        if not wanted:
-            return True
-        cov_rids: set = set()                 # every recording id the carrier carries
-        cov_pos: set = set()                  # every KNOWN (disc,track) slot it carries
-        pos_rids: Dict[tuple, set] = {}        # identified recording ids per slot
-        for t in (list(carrier.get("expected_tracks") or [])
-                  + list(carrier.get("wanted_tracks") or [])):
-            rid, pos = _ident(t)
-            if rid:
-                cov_rids.add(rid)
-            if pos is not None:
-                cov_pos.add(pos)
-                if rid:
-                    pos_rids.setdefault(pos, set()).add(rid)
-        for t in wanted:
-            w_rid, w_pos = _ident(t)
-            if not w_rid and w_pos is None:    # F5: no rid, no known position -> UNPROVEN
-                return False
-            if w_rid:
-                if w_rid in cov_rids:          # rid match anywhere -> covered
-                    continue
-                # NF-1: no rid match. A (disc,track) fallback is allowed only when
-                # the carrier has NO different identified recording at that slot.
-                if w_pos is not None and w_pos in cov_pos and not pos_rids.get(w_pos):
-                    continue
-                return False
-            else:                              # request carries no rid -> position only
-                if w_pos is not None and w_pos in cov_pos:
-                    continue
-                return False
-        return True
+    req.requested_rgid = _acq_canonical_rgid(data.get("mb_releasegroupid")) or (
+        _acq_resolve_release_rgid(req.mb_albumid) if req.is_recovery else _acq_canonical_rgid(req.mb_albumid))
 
     # Finding A (security / integrity): recovery_carrier_id is client-supplied.
     # Only honor an incoming id as a resume of an EXISTING carrier that is the
@@ -333,9 +385,9 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # another recovery's row, and the stolen id cannot drive the resume
     # short-circuit or the victim's guarded workflow slug. A fresh recovery
     # never supplies an id.
-    if _resume_carrier_id and _is_recovery:
+    if req.resume_carrier_id and req.is_recovery:
         try:
-            _existing = recovery_carrier.get_carrier(_resume_carrier_id)
+            _existing = recovery_carrier.get_carrier(req.resume_carrier_id)
         except Exception:
             _existing = None
         # F1: identity (album + canonical RG) is necessary but not sufficient.
@@ -344,9 +396,9 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         # stale expected_tracks. Apply the same track-scope check the resume
         # short-circuit uses -- when the requested tracks are not covered by the
         # stored carrier, mint a FRESH uuid instead of reusing the sibling.
-        if not (_carrier_identity_matches(_existing)
-                and _requested_tracks_covered(_existing)):
-            _resume_carrier_id = ""
+        if not (_acq_carrier_identity_matches(req, _existing)
+                and _acq_requested_tracks_covered(req, _existing)):
+            req.resume_carrier_id = ""
     # Step-2 dedup/resume: the SERVER-derived stable recovery identity
     # (existing album | canonical RG | sorted wanted-track signatures). Two
     # identical "download missing" requests resolve to the SAME key, so the
@@ -355,9 +407,9 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # same cross-request + sequential dedup the full-album content-hash path has.
     # Never client-trusted: derived only from the already-validated structured
     # request fields, never from the client carrier id or a folder name.
-    _recovery_identity_key = (
-        recovery_carrier.compute_identity_key(existing_album_id, _requested_rgid, wanted_tracks)
-        if _is_recovery else "")
+    req.recovery_identity_key = (
+        recovery_carrier.compute_identity_key(req.existing_album_id, req.requested_rgid, req.wanted_tracks)
+        if req.is_recovery else "")
     # C10 (residual race): this get_by_identity runs BEFORE the job's identity
     # workflow lock, so two concurrent duplicate requests can both read "no
     # carrier" and both mint a fresh uuid here. That is benign and NOT fixed in
@@ -369,19 +421,19 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # job_engine's guard acquisition (backend-architecture's) -- not a small,
     # safe change, and unnecessary given the lock already serialises creation.
     # ponytail: advisory pre-lock read; job workflow lock enforces uniqueness.
-    if _is_recovery and not _resume_carrier_id and _recovery_identity_key:
+    if req.is_recovery and not req.resume_carrier_id and req.recovery_identity_key:
         try:
-            _by_identity = recovery_carrier.get_by_identity(identity_key=_recovery_identity_key)
+            _by_identity = recovery_carrier.get_by_identity(identity_key=req.recovery_identity_key)
         except Exception:
             _by_identity = None
         # A non-terminal carrier for this exact identity is this recovery:
         # resume it (and its one guarded workflow + staged folder set) rather
         # than start a parallel one. The identity match + track-coverage checks
         # are the same ones the client-id resume path uses (defense in depth).
-        if (_by_identity and _carrier_identity_matches(_by_identity)
-                and _requested_tracks_covered(_by_identity)):
-            _resume_carrier_id = _s(_by_identity.get("carrier_id")).strip()
-    _recovery_carrier_id = (_resume_carrier_id or uuid.uuid4().hex) if _is_recovery else ""
+        if (_by_identity and _acq_carrier_identity_matches(req, _by_identity)
+                and _acq_requested_tracks_covered(req, _by_identity)):
+            req.resume_carrier_id = _s(_by_identity.get("carrier_id")).strip()
+    req.recovery_carrier_id = (req.resume_carrier_id or uuid.uuid4().hex) if req.is_recovery else ""
     # Step-3: a DETERMINISTIC staging-folder prefix derived from the stable
     # recovery identity, so every retry of the SAME recovery REUSES one staged
     # folder instead of minting a fresh uuid/timestamp family each attempt (the
@@ -390,1008 +442,28 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # never raw identity text -- the staging layer still re-sanitises it and
     # re-checks containment (SEC-007/#325). None for a non-recovery (keeps the
     # random-token behaviour).
-    _recovery_stage_prefix = (
-        ("rec-" + _recovery_identity_key[:16])
-        if (_is_recovery and _recovery_identity_key) else None)
+    req.recovery_stage_prefix = (
+        ("rec-" + req.recovery_identity_key[:16])
+        if (req.is_recovery and req.recovery_identity_key) else None)
+
+
+# Service behind POST /api/download/album (ARCH-001): request-free,
+# returns (json_body, http_status); the route and in-process callers share it.
+def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
+    """Start a background job to download an album via slskd (primary)
+    or yt-dlp (fallback), then import/tag/move it unless auto_import=false."""
+    req = _album_download_request(payload_in)
+    refusal = _album_download_refusal(req)
+    if refusal is not None:
+        return refusal
+    _acq_bind_recovery_identity(req, payload_in)
 
     def _do(log, cancel_event=None):
-        def _recovery_resume_short_circuit():
-            """F7: resume the one guarded recovery workflow from its last durable
-            checkpoint instead of restarting from scratch or splitting jobs. When
-            the carrier already reached IMPORTED (the verified track is on the
-            album) a resume must NOT re-download or re-import -- the carrier CAS
-            claim + merge precheck would already refuse that, but here we skip it
-            entirely and only run the best-effort Plex tail (idempotent if it
-            already ran). Returns a terminal result dict to short-circuit ``_do``,
-            or None to run the normal download/import flow."""
-            if not (_is_recovery and _recovery_carrier_id):
-                return None
-            try:
-                resumed = (recovery_carrier.get_carrier(_recovery_carrier_id)
-                           or recovery_carrier.load_for_job(_recovery_box.get("job_id", "")))
-            except Exception as ex:
-                # QA-3: a resume whose carrier read FAILED must not silently fall
-                # through to a full re-download/re-import of a recovery that may
-                # already be complete. Surface it as a retryable error instead of
-                # redoing/resetting -- but only for an actual resume (an honored
-                # incoming id); a fresh recovery has no prior state to protect.
-                if _resume_carrier_id:
-                    log.append("[recovery] Could not read carrier to resume "
-                               f"({type(ex).__name__}); not re-running -- retry later.")
-                    return {"ok": False, "error": "recovery_carrier_unreadable",
-                            "retryable": True,
-                            "existing_album_id": existing_album_id,
-                            "recovery_carrier_id": _recovery_carrier_id}
-                return None
-            # QA-2: only short-circuit as already-done when the stored carrier is
-            # THIS request's recovery (same album + Release Group) AND covers the
-            # requested track(s). A stale/mismatched completed carrier must not
-            # return a false "imported" success for a different recovery.
-            if not (_carrier_identity_matches(resumed) and _requested_tracks_covered(resumed)):
-                return None
-            cp = _s((resumed or {}).get("checkpoint"))
-            if not resumed or cp not in ("IMPORTED", "PLEX_SYNCED"):
-                return None
-            log.append(f"[recovery] Resuming workflow at checkpoint {cp}; the verified "
-                       "track is already imported -- not re-downloading or re-importing.")
-            if cp == "IMPORTED":
-                _recovery_plex_sync_leg(resumed, log)
-            return {
-                "imported": True,
-                "resumed": True,
-                "existing_album_id": existing_album_id,
-                "recovery_carrier_id": _recovery_carrier_id,
-                "checkpoint": _s((recovery_carrier.get_carrier(_recovery_carrier_id) or {}).get("checkpoint")) or cp,
-            }
+        # Fresh state per run: a re-run starts from the request, not the last run.
+        return _AlbumDownloadRun(req, log, cancel_event).execute()
 
-        _resume_result = _recovery_resume_short_circuit()
-        if _resume_result is not None:
-            return _resume_result
-
-        def _recovery_provenance_payload(folder_path: str) -> Optional[Dict[str, Any]]:
-            """Additive durable provenance (requirement 2) for the carrier
-            ``source`` dict, computed from the landed download ``folder_path``.
-            The discovery query/provider was recorded at create; this adds the
-            CHOSEN-result reference (resolved MB release + method + staged folder)
-            and the per-file source of what was actually delivered. Returned as a
-            ``payload_extra`` fragment so it merges onto an EXISTING carrier
-            advance (no extra lifecycle transition / checkpoint). Records no
-            secret or token. Returns None off the recovery path or when the
-            carrier cannot be read."""
-            if not _recovery_carrier_id or not _s(folder_path).strip():
-                return None
-            try:
-                carrier = recovery_carrier.get_carrier(_recovery_carrier_id)
-            except Exception:
-                carrier = None
-            if not carrier:
-                return None
-            src = dict(carrier.get("source") or {})
-            src["result"] = {
-                "provider": method,
-                "mb_release": _s(resolved_mbid),
-                "mb_releasegroupid": _s(carrier.get("mb_releasegroupid")),
-                "staged_folder": _s(folder_path),
-            }
-            try:
-                files = sorted(
-                    p.name for p in Path(folder_path).rglob("*")
-                    if p.is_file() and p.suffix.lower() in AUDIO_EXT)
-            except OSError:
-                files = []
-            if files:
-                src["per_file"] = [{"name": n, "source": method} for n in files]
-            return {"source": src}
-
-        def _recovery_bind_folder(folder_path: str) -> None:
-            """Bind the staged download folder to the recovery carrier so
-            load_for_folder() resolves the album identity (AI-batch scan,
-            pending-review, preflight). Best-effort: a store failure never
-            breaks the download/import."""
-            if not _recovery_carrier_id or not _s(folder_path).strip():
-                return
-            try:
-                recovery_carrier.bind_staged_folder(_recovery_carrier_id, folder_path)
-            except Exception as ex:
-                log.append(f"  [recovery] WARN could not bind staged folder: {type(ex).__name__}")
-
-        def _recovery_advance(state: str, checkpoint: str, *,
-                              source_folder: str = "") -> None:
-            """Advance the recovery carrier as the download progresses
-            (CREATED->DOWNLOADED->STAGED) so the single guarded recovery
-            workflow can resume from the last checkpoint. When ``source_folder``
-            is given, the additive result/per-file provenance is merged onto the
-            SAME transition (no separate write). Best-effort: a store failure
-            never breaks the download/import."""
-            if not _recovery_carrier_id:
-                return
-            payload_extra = (_recovery_provenance_payload(source_folder)
-                             if source_folder else None)
-            try:
-                recovery_carrier.advance_state(
-                    _recovery_carrier_id, state, checkpoint=checkpoint,
-                    payload_extra=payload_extra)
-            except Exception as ex:
-                log.append(
-                    f"  [recovery] WARN could not advance carrier to {checkpoint}: "
-                    f"{type(ex).__name__}")
-
-        def _recovery_create_carrier() -> None:
-            """Create the carrier once identity is resolved (stage 5). Canonical
-            mb_releasegroupid required; the Release is supporting. Best-effort.
-
-            Finding A: create_carrier is an unconditional upsert that RESETS an
-            existing row's checkpoint->CREATED and verification_evidence->{}. A
-            legitimately-resumed carrier already holds those durable values, so
-            never create OVER an existing carrier -- only mint a brand-new one.
-            A mismatching incoming id was already rejected upstream, so the id
-            here is either this recovery's own existing carrier (skip, resume via
-            the non-resetting advance_state CAS) or a fresh uuid (create)."""
-            if not _recovery_carrier_id:
-                return
-            rgid = _s(resolved_release_group_id or _requested_rgid).strip()
-            if not rgid or not job_wanted_tracks:
-                return
-            try:
-                if recovery_carrier.get_carrier(_recovery_carrier_id) is not None:
-                    return
-            except Exception as ex:
-                # F3: fail CLOSED. A transient carrier-read error must NOT fall
-                # through to create_carrier's unconditional upsert, which RESETS
-                # an existing row's checkpoint->CREATED and verification_evidence
-                # ->{} -- re-opening the Finding-A clobber under a read error.
-                # Skip creation this pass; advance_state (non-resetting CAS)
-                # resumes the row on a later leg.
-                log.append("  [recovery] WARN carrier read failed; not creating "
-                           f"over a possibly-existing row: {type(ex).__name__}")
-                return
-            try:
-                recovery_carrier.create_carrier(
-                    carrier_id=_recovery_carrier_id,
-                    existing_album_id=existing_album_id,
-                    mb_releasegroupid=rgid,
-                    release_id=_s(resolved_mbid),
-                    destination_album_path=_s(_album_folder_for_album_id(existing_album_id) or ""),
-                    wanted_tracks=job_wanted_tracks,
-                    # Recording-level evidence the verifier (music-identity) needs
-                    # to prove a downloaded file IS the expected track. Sourced
-                    # from the missing-track queue (already reconciled against MB
-                    # completeness by _wanted_tracks_not_in_album). mb_trackid is
-                    # the MB recording id; duration is the MB length in ms.
-                    expected_tracks=[
-                        {
-                            "recording_id": t.get("mb_trackid"),
-                            "track": t.get("track"),
-                            "disc": t.get("disc"),
-                            "duration": t.get("duration_ms"),
-                            "title": t.get("title"),
-                        }
-                        for t in job_wanted_tracks
-                    ],
-                    # Durable discovery + search provenance (requirement 2): the
-                    # provider/method and the discovery QUERY the recovery was
-                    # launched from. The chosen-result reference and per-file
-                    # source are added after the download lands (see
-                    # ``_recovery_record_provenance``). Additive to the carrier
-                    # ``source`` dict; no secret/token is recorded here.
-                    source={
-                        "method": method,
-                        "provider": method,
-                        "provenance": "download-import",
-                        "discovery_query": {
-                            "artist": artist,
-                            "album": album,
-                            "year": year,
-                            "mb_releasegroupid": rgid,
-                            "release_id": _s(resolved_mbid),
-                            "tracks": [
-                                {"title": _s(t.get("title")),
-                                 "track": t.get("track"),
-                                 "disc": t.get("disc")}
-                                for t in job_wanted_tracks
-                            ],
-                        },
-                    },
-                    origin_job_id=_recovery_box.get("job_id", ""),
-                    state="downloading",
-                )
-            except Exception as ex:
-                log.append(f"  [recovery] WARN could not create recovery carrier: {type(ex).__name__}")
-
-        download_result: Dict[str, Any]
-        resolved_mbid = mb_albumid
-        effective_track_count = track_count
-        job_wanted_tracks = list(wanted_tracks)
-        supplied_mbid_match = re.search(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-            mb_albumid,
-            re.I,
-        )
-        supplied_mbid = supplied_mbid_match.group(0).lower() if supplied_mbid_match else ""
-        release_group_requested = "release-group" in _s(mb_albumid).casefold()
-        resolved_release_group_id = ""
-        if auto_import or mb_albumid:
-            log.append("[import] Resolving MusicBrainz release before download…")
-            resolved_mbid = _resolve_album_release_for_import(
-                mb_albumid, artist, album, year, track_count, log)
-            if resolved_mbid:
-                if supplied_mbid and supplied_mbid != _s(resolved_mbid).strip().lower():
-                    # Resolution stayed inside the supplied ID's Release Group;
-                    # that group is read from the resolved Release below.
-                    release_group_requested = True
-                mb_release = _fetch_mb_release_tracklist(resolved_mbid, log)
-                mb_tracks = len(mb_release.get("tracks") or []) if mb_release.get("ok") else 0
-                if mb_release.get("release_group"):
-                    resolved_release_group_id = _s(mb_release.get("release_group")).strip().lower()
-                if mb_tracks and (not effective_track_count or effective_track_count != mb_tracks):
-                    log.append(f"  MusicBrainz track count: {mb_tracks}")
-                    effective_track_count = mb_tracks
-            elif auto_import:
-                raise RuntimeError("Could not resolve a MusicBrainz release ID before download")
-
-        if existing_album_id and resolved_mbid:
-            if replace_existing and job_wanted_tracks:
-                log.append(
-                    f"[import] Replacement mode: {len(job_wanted_tracks)} track(s) "
-                    f"will be downloaded for existing album_id {existing_album_id}"
-                )
-            else:
-                job_wanted_tracks = _wanted_tracks_not_in_album(
-                    existing_album_id, resolved_mbid, job_wanted_tracks, log)
-            if job_wanted_tracks:
-                log.append(
-                    f"[import] Missing-track mode: {len(job_wanted_tracks)} track(s) "
-                    f"will be downloaded for existing album_id {existing_album_id}"
-                )
-                _recovery_create_carrier()
-            elif existing_album_id:
-                review_reason = (
-                    "Requested missing track(s) are not missing for the selected "
-                    "MusicBrainz release. Verify the release edition before downloading."
-                )
-                log.append(
-                    "[import] No requested tracks are still missing for this selected "
-                    "MusicBrainz release; skipping download"
-                )
-                album_folder = _album_folder_for_album_id(existing_album_id)
-                if album_folder:
-                    try:
-                        comp = _album_mb_completeness(existing_album_id, resolved_mbid, log)
-                    except Exception:
-                        comp = {}
-                    requested = _normalise_wanted_tracks(wanted_tracks)
-                    currently_missing = _normalise_wanted_tracks((comp or {}).get("missing") or [])
-                    suggestion = {
-                        "albumartist": artist,
-                        "album": album,
-                        "year": year,
-                        "mb_albumid": resolved_mbid,
-                        "mb_url": f"https://musicbrainz.org/release/{resolved_mbid}",
-                        "mb_valid": bool(_MB_UUID_RE.match(_s(resolved_mbid).strip().lower())),
-                        "confidence": "low",
-                        "reason": review_reason,
-                    }
-                    evidence = _ai_match_evidence_packet(
-                        "missing_track",
-                        folder_path=album_folder,
-                        suggestion=suggestion,
-                        folder_evidence=_build_folder_evidence(album_folder),
-                        preflight=_folder_release_preflight(
-                            album_folder,
-                            resolved_mbid,
-                            existing_album_id=existing_album_id,
-                            log=None,
-                        ),
-                        wanted_tracks=requested,
-                        reason=review_reason,
-                    )
-                    evidence["requested_tracks"] = requested
-                    evidence["currently_missing_tracks"] = currently_missing
-                    if _queue_folder_for_manual_review(
-                        album_folder,
-                        suggestion,
-                        review_reason,
-                        log,
-                        allow_existing=True,
-                        evidence=evidence,
-                    ):
-                        log.append(
-                            "[import] Queued existing album for Review with requested-track evidence."
-                        )
-                return {
-                    "aldir": "",
-                    "method": method,
-                    "files": 0,
-                    "mb_albumid": resolved_mbid,
-                    "imported": True,
-                    "already_complete": True,
-                    "existing_album_id": existing_album_id,
-                }
-
-        expected_download_count = len(job_wanted_tracks) if job_wanted_tracks else effective_track_count
-
-        def _maybe_switch_release_for_slskd_candidate(candidate_dir: str,
-                                                      candidate_count: int) -> int:
-            nonlocal resolved_mbid, effective_track_count, expected_download_count
-            if (
-                job_wanted_tracks
-                or not release_group_requested
-                or not resolved_release_group_id
-                or not candidate_count
-                or candidate_count == effective_track_count
-            ):
-                return 0
-            if effective_track_count:
-                min_viable = max(1, min(effective_track_count, int(effective_track_count * 0.70)))
-                if candidate_count < min_viable:
-                    return 0
-            replacement = _resolve_release_group_to_release(
-                resolved_release_group_id,
-                log,
-                year=year,
-                track_count=candidate_count,
-            )
-            replacement = _s(replacement).strip().lower()
-            if not replacement or replacement == _s(resolved_mbid).strip().lower():
-                return 0
-            replacement_mb = _fetch_mb_release_tracklist(replacement, log)
-            replacement_count = len(replacement_mb.get("tracks") or []) if replacement_mb.get("ok") else 0
-            if replacement_count != candidate_count:
-                log.append(
-                    "  [slskd] Same-release-group candidate did not match downloaded "
-                    f"file count: MB has {replacement_count or '?'} track(s), "
-                    f"download has {candidate_count}."
-                )
-                return 0
-            preflight = _folder_release_preflight(
-                candidate_dir,
-                replacement,
-                existing_album_id=existing_album_id,
-                log=None,
-            )
-            if not preflight.get("ok"):
-                log.append(
-                    "  [slskd] Same-release-group candidate rejected by downloaded "
-                    f"folder tracklist: {preflight.get('matches', 0)}/"
-                    f"{preflight.get('expected', 0)} track(s) matched."
-                )
-                return 0
-            old_mbid = _s(resolved_mbid).strip().lower()
-            old_count = int(effective_track_count or 0)
-            resolved_mbid = replacement
-            effective_track_count = replacement_count
-            expected_download_count = replacement_count
-            log.append(
-                "  [slskd] Downloaded folder has "
-                f"{candidate_count} file(s); switched MusicBrainz release within "
-                f"release-group {resolved_release_group_id}: "
-                f"{old_mbid or '?'} ({old_count or '?'} tracks) -> "
-                f"{replacement} ({replacement_count} tracks)."
-            )
-            return replacement_count
-
-        def _import_downloaded_album(
-            import_dir: str,
-            import_wanted_tracks: Optional[List[Dict[str, Any]]] = None,
-        ) -> Dict[str, Any]:
-            if not resolved_mbid:
-                raise RuntimeError("Could not resolve a MusicBrainz release ID for import")
-            # Spine: bind the staged folder so a Review hand-off from the
-            # reimport-disk child job carries the recovery identity, and record
-            # that the files landed in it (DOWNLOADED = folder bound).
-            _recovery_bind_folder(import_dir)
-            _recovery_advance("downloaded", "DOWNLOADED", source_folder=import_dir)
-            active_wanted_tracks = (
-                _normalise_wanted_tracks(import_wanted_tracks)
-                if import_wanted_tracks is not None
-                else job_wanted_tracks
-            )
-            undelivered: List[Dict[str, Any]] = []
-            deferred_slot_paths: List[str] = []
-            had_wanted_tracks = bool(active_wanted_tracks)
-            if active_wanted_tracks:
-                # Only fingerprint-accepted tracks import inline; the rest stay
-                # missing. A genuine AcoustID NO_RESULT / UNAVAILABLE file is kept
-                # staged (not deleted) for the slot-gate advancer (ARCH-030 C1).
-                active_wanted_tracks, undelivered, deferred_slot_paths = (
-                    _validate_wanted_download_identity_before_import(
-                        import_dir,
-                        active_wanted_tracks,
-                        log,
-                        fallback_artist=forced_albumartist or artist,
-                    ))
-            if active_wanted_tracks and deferred_slot_paths:
-                # ARCH-030 B2: a MIXED batch (>=1 verified + >=1 deferred). The
-                # deferred NO_RESULT/UNAVAILABLE files are still physically in
-                # import_dir; the inline Beets import below runs on the WHOLE
-                # folder, so they would ride into autotag and bypass the slot gate
-                # ("no track bypasses identity verification", req-5). Separate them
-                # out to a carrier-bound slot-gate folder so only verified audio
-                # imports inline; the deferred files reach the slot gate only.
-                slot_dir, separation_complete = _separate_deferred_slot_files(
-                    import_dir, deferred_slot_paths, log)
-                if not separation_complete:
-                    # ARCH-030 F8: fail CLOSED. At least one deferred
-                    # NO_RESULT/UNAVAILABLE file could not be moved out of
-                    # import_dir (collision / symlink refusal / I/O). Running the
-                    # inline Beets import now would let that leftover UNVERIFIED
-                    # file ride into autotag and bypass the slot gate (req-5:
-                    # "no track bypasses identity verification"); a later
-                    # import-validation raise would then delete the whole folder
-                    # and destroy the RETAINED acquisition (B3: retain, never
-                    # delete). So do NOT inline-import and do NOT delete -- keep
-                    # the carrier bound to import_dir and leave it STAGED for the
-                    # metadata-slot recovery gate to verify downstream.
-                    _recovery_advance("downloaded", "STAGED")
-                    log.append(
-                        "[import] ARCH-030 F8: deferred-file separation incomplete; "
-                        f"leaving the whole carrier staged in {import_dir} for the "
-                        "metadata-slot recovery gate (no inline import, retained "
-                        "audio not deleted).")
-                    return {
-                        "imported": False,
-                        "staged_for_slot_gate": True,
-                        "existing_album_id": existing_album_id,
-                        "missing_track_count": len(undelivered),
-                        "undelivered_tracks": undelivered,
-                    }
-                if slot_dir:
-                    _recovery_bind_folder(slot_dir)
-            _validate_import_source_audio(import_dir, log, reject_downloads=True)
-            # Verified audio is staged and ready for Beets (STAGED). Later
-            # checkpoints (VERIFIED/IMPORTED/PLEX_SYNCED) are advanced by the
-            # downstream import/verify/Plex owners.
-            _recovery_advance("downloaded", "STAGED")
-            if had_wanted_tracks and not active_wanted_tracks:
-                # ARCH-030 C1: every requested-track file returned a genuine
-                # AcoustID NO_RESULT / UNAVAILABLE and was LEFT staged (not
-                # deleted). Do NOT run the inline Beets import on unverified
-                # audio -- leave the carrier STAGED (an advancer state) so the
-                # DETERMINISTIC_METADATA_SLOT advancer gate, the sole auto-insert
-                # authority, decides accept-vs-review on the staged folder
-                # downstream. (An empty active_wanted_tracks only reaches here
-                # when files were deferred: the validator fails closed and raises
-                # when nothing verified AND nothing was deferred.)
-                log.append(
-                    f"[import] No downloaded file fingerprint-accepted; "
-                    f"{len(undelivered)} requested track(s) left staged in "
-                    f"{import_dir} for the metadata-slot recovery gate to verify."
-                )
-                return {
-                    "imported": False,
-                    "staged_for_slot_gate": True,
-                    "existing_album_id": existing_album_id,
-                    "missing_track_count": len(undelivered),
-                    "undelivered_tracks": undelivered,
-                }
-            log.append(f"[import] Starting Beets import/tag/move for {import_dir}")
-            import_job_id = _start_reimport_disk_job_internal(
-                import_dir, resolved_mbid, albumartist=forced_albumartist,
-                existing_album_id=existing_album_id,
-                wanted_tracks=active_wanted_tracks,
-                replace_existing_item_ids=replace_existing_item_ids)
-            log.append(f"[import] Job {import_job_id} started; waiting for completion...")
-            import_result = _wait_for_child_job(import_job_id, log, cancel_event,
-                                                prefix="import", timeout=1200)
-            log.append("[import] Complete — files imported, tagged, and moved into the music folder")
-            if undelivered:
-                log.append(
-                    f"[import] {len(undelivered)} requested track(s) did not fingerprint-verify "
-                    "and are still missing: "
-                    + ", ".join(_wanted_track_label(t) for t in undelivered[:8])
-                )
-            return {
-                "imported": True,
-                "import_job_id": import_job_id,
-                "import_result": import_result,
-                "existing_album_id": existing_album_id,
-                "missing_track_count": len(active_wanted_tracks),
-                "undelivered_tracks": undelivered,
-            }
-
-        def _direct_dest_dir(selection_tracks: Optional[List[Dict[str, Any]]] = None,
-                             direct_method: Optional[str] = None) -> str:
-            source_method = _normalise_download_method(direct_method or method, "ytdlp")
-            active_tracks = (
-                _normalise_wanted_tracks(selection_tracks)
-                if selection_tracks is not None
-                else job_wanted_tracks
-            )
-            if active_tracks:
-                # Step-3: a recovery reuses ONE download folder across retries
-                # (the deterministic recovery-identity prefix) instead of a fresh
-                # per-attempt timestamp family; a non-recovery keeps the unique
-                # timestamp. ``_download_dest_under`` still enforces root
-                # containment (#268 S-1) on the resulting predictable name.
-                suffix = _recovery_stage_prefix or str(int(time.time() * 1000))
-                source_slug = re.sub(r"[^a-z0-9]+", "", source_method) or "download"
-                return str(_download_dest_under(
-                    downloads_root, safe_artist,
-                    f"{safe_album}{yr_sfx} - {source_slug} missing {suffix}",
-                ))
-            return dest_dir
-
-        def _download_ytdlp_selection(
-            selection_tracks: Optional[List[Dict[str, Any]]] = None,
-            direct_method: Optional[str] = None,
-        ) -> Dict[str, Any]:
-            source_method = _normalise_download_method(direct_method or method, "ytdlp")
-            active_tracks = (
-                _normalise_wanted_tracks(selection_tracks)
-                if selection_tracks is not None
-                else job_wanted_tracks
-            )
-            yt_dir = _direct_dest_dir(active_tracks, source_method)
-            log.append(f"  Downloading via {_download_method_label(source_method)} → {yt_dir}")
-            if active_tracks:
-                if source_method == "spotiflac":
-                    n = _spotiflac_missing_tracks_download(
-                        artist, album, year, yt_dir, log, active_tracks)
-                else:
-                    n = _ytdlp_missing_tracks_download(
-                        artist, album, year, yt_dir, log, active_tracks,
-                        source=source_method)
-            else:
-                if source_method == "spotiflac":
-                    n = _spotiflac_album_download(
-                        artist, album, year, yt_dir, log,
-                        track_count=effective_track_count,
-                        mb_albumid=resolved_mbid)
-                else:
-                    n = _ytdlp_album_download(
-                        artist, album, year, yt_dir, log,
-                        track_count=effective_track_count,
-                        source=source_method)
-            return {
-                "aldir": yt_dir,
-                "method": source_method,
-                "files": n,
-                "mb_albumid": resolved_mbid,
-            }
-
-        def _try_direct_sources_after_slskd(slskd_error: Exception,
-                                            selection_tracks: Optional[List[Dict[str, Any]]] = None,
-                                            fallback_from: str = "slskd") -> Dict[str, Any]:
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("cancelled")
-            active_tracks = (
-                _normalise_wanted_tracks(selection_tracks)
-                if selection_tracks is not None
-                else job_wanted_tracks
-            )
-            if not try_source_fallback:
-                raise slskd_error
-            # ACQ-2: the real slskd reason, in the log and first in the final error.
-            slskd_reason = _redact_security_text(slskd_error)
-            log.append(f"[slskd] Failed: {slskd_reason}")
-            fallback_tracks = active_tracks or None
-            fallback_scope = (
-                f"{len(active_tracks)} missing track(s)"
-                if active_tracks
-                else "the full album"
-            )
-            methods = _available_fallbacks()
-            if not methods:
-                raise RuntimeError(
-                    f"SLSKD failed: {slskd_reason}; no direct-source fallback is available"
-                ) from slskd_error
-            failures: List[str] = []
-            log.append(
-                f"[fallback] SLSKD could not provide a valid candidate for "
-                f"{fallback_scope}; trying direct sources: "
-                + ", ".join(_download_method_label(method) for method in methods)
-            )
-            for fallback_source in methods:
-                fallback_result = None
-                try:
-                    log.append(
-                        f"[fallback] Trying {_download_method_label(fallback_source)} "
-                        f"for {fallback_scope}."
-                    )
-                    fallback_result = _download_ytdlp_selection(
-                        fallback_tracks, direct_method=fallback_source)
-                    fallback_result["fallback_from"] = fallback_from
-                    fallback_result["slskd_error"] = str(slskd_error)
-                    if auto_import:
-                        fallback_result.update(
-                            _import_downloaded_album(
-                                fallback_result["aldir"], fallback_tracks))
-                    return fallback_result
-                except Exception as direct_ex:
-                    failures.append(
-                        f"{_download_method_label(fallback_source)}: {direct_ex}"
-                    )
-                    log.append(
-                        f"[fallback] {_download_method_label(fallback_source)} failed: "
-                        f"{direct_ex}"
-                    )
-                    if fallback_result:
-                        _delete_staged_import_folder(
-                            fallback_result.get("aldir", ""), log
-                        )
-                    if import_refusal_reason_code(direct_ex) == EXISTING_ALBUM_MERGE_FAILED:
-                        # #432 B2: imported but not merged; another source
-                        # would leave another partial album row.
-                        raise RuntimeError(
-                            f"Direct-source import stopped: {direct_ex}") from direct_ex
-            raise RuntimeError(
-                f"SLSKD failed: {slskd_reason}; direct-source fallback also failed: "
-                + "; ".join(failures)
-            ) from slskd_error
-
-        available_fallbacks: List[str] = []
-        fallbacks_checked = False
-
-        def _available_fallbacks() -> List[str]:
-            # ACQ-5: cheap availability checks, once per job.
-            nonlocal fallbacks_checked
-            if not fallbacks_checked:
-                fallbacks_checked = True
-                for candidate in source_fallback_methods:
-                    reason = _direct_source_unavailable_reason(candidate)
-                    if reason:
-                        log.append(
-                            f"[fallback] Skipped {_download_method_label(candidate)}: {reason}")
-                    else:
-                        available_fallbacks.append(candidate)
-            return available_fallbacks
-
-        if method == "slskd" and not slskd_configured():
-            log.append(f"[slskd] Skipped: {SLSKD_NOT_CONFIGURED}; going straight to direct sources.")
-            return _try_direct_sources_after_slskd(RuntimeError(SLSKD_NOT_CONFIGURED))
-
-        if method == "slskd":
-            # ── Soulseek via slskd ───────────────────────────────────────────
-            max_slskd_attempts = 12
-
-            def _skip_key(username: str, remote_dir: str) -> tuple:
-                return (
-                    _s(username).strip().lower(),
-                    _s(remote_dir).replace("\\", "/").strip().lower(),
-                )
-
-            def _download_slskd_selection(
-                selection_tracks: List[Dict[str, Any]],
-                expected_count: int,
-                skip_candidates: Optional[set] = None,
-            ) -> Dict[str, Any]:
-                slskd_skip_candidates = skip_candidates if skip_candidates is not None else set()
-                last_slskd_error: Optional[Exception] = None
-                for attempt in range(1, max_slskd_attempts + 1):
-                    username = ""
-                    remote_dir = ""
-                    queued: List[str] = []
-                    try:
-                        if attempt > 1:
-                            log.append(
-                                f"  [slskd] Trying another Soulseek candidate "
-                                f"({attempt}/{max_slskd_attempts})..."
-                            )
-                        username, queued, expected, remote_dir = _slskd_search_and_queue(
-                            artist, album, year, log, track_count=effective_track_count,
-                            wanted_tracks=selection_tracks,
-                            skip_candidates=slskd_skip_candidates, cancel_event=cancel_event)
-                        matched_tracks = _wanted_tracks_satisfied_by_names(
-                            queued, selection_tracks)
-                        download_target_tracks = (
-                            matched_tracks if selection_tracks and matched_tracks
-                            else _normalise_wanted_tracks(selection_tracks)
-                        )
-                        download_expected_count = (
-                            len(download_target_tracks)
-                            if selection_tracks and download_target_tracks
-                            else expected_count
-                        )
-                        aldir, transfer_hints = _slskd_wait_downloads(
-                            username, queued, log, timeout=600, cancel_event=cancel_event)
-                        if cancel_event is None:
-                            time.sleep(3)
-                        elif cancel_event.wait(3):
-                            raise RuntimeError("cancelled")
-                        aldir, afiles = _find_slskd_downloaded_files(
-                            username, queued, expected or aldir, log,
-                            artist=artist, album=album, track_count=download_expected_count,
-                            transfer_hints=transfer_hints,
-                            wanted_tracks=download_target_tracks,
-                            cancel_event=cancel_event)
-                        if not afiles:
-                            raise RuntimeError(
-                                f"No queued Soulseek files found at {aldir} after download; "
-                                "refusing unrelated fallback folders"
-                            )
-                        if (
-                            not selection_tracks
-                            and download_expected_count
-                            and len(afiles) != download_expected_count
-                        ):
-                            switched_count = _maybe_switch_release_for_slskd_candidate(
-                                aldir,
-                                len(afiles),
-                            )
-                            if switched_count:
-                                download_expected_count = switched_count
-                        if download_expected_count:
-                            required_files = max(1, download_expected_count)
-                            if len(afiles) < required_files:
-                                raise RuntimeError(
-                                    f"Downloaded candidate has only {len(afiles)}/{download_expected_count} "
-                                    "expected files; refusing incomplete import"
-                                )
-                        log.append(f"  [slskd] OK {len(afiles)} file(s) in {aldir}")
-                        log.append(
-                            "  [slskd] Download phase complete for this candidate; "
-                            "no additional Soulseek sources will be queued unless "
-                            "import validation fails."
-                        )
-                        return {
-                            "aldir": aldir,
-                            "files": afiles,
-                            "queued": queued,
-                            "username": username,
-                            "remote_dir": remote_dir,
-                            "wanted_tracks": download_target_tracks,
-                        }
-                    except Exception as ex:
-                        last_slskd_error = ex
-                        # #251: a cancel cleans up the queued candidate, then ends the job.
-                        cancelled = cancel_event is not None and cancel_event.is_set()
-                        if username or remote_dir:
-                            if queued:
-                                log.append("  [slskd] Candidate failed after queueing; cancelling it before retrying.")
-                                _slskd_cancel_queued_downloads(username, queued, log)
-                                _slskd_cleanup_failed_candidate_files(username, queued, log)
-                            slskd_skip_candidates.add(_skip_key(username, remote_dir))
-                            if attempt < max_slskd_attempts and not cancelled:
-                                log.append(f"  [slskd] Candidate failed: {ex}")
-                                log.append(
-                                    "  [slskd] Skipping that peer/folder and continuing automatically."
-                                )
-                                continue
-                        if cancelled:
-                            raise
-                        if slskd_skip_candidates:
-                            raise RuntimeError(
-                                f"SLSKD could not find a usable candidate after "
-                                f"{len(slskd_skip_candidates)} failed candidate(s): {ex}"
-                            ) from ex
-                        raise
-                raise RuntimeError(
-                    f"SLSKD could not find a usable candidate after {max_slskd_attempts} attempts"
-                    + (f": {last_slskd_error}" if last_slskd_error else "")
-                )
-
-            if job_wanted_tracks:
-                log.append(
-                    f"[import] SLSKD batch mode: {len(job_wanted_tracks)} "
-                    "requested missing track(s) will be queued together"
-                )
-            else:
-                log.append("[import] SLSKD batch mode: album tracks will be queued together")
-            slskd_skip_candidates: set = set()
-            if auto_import:
-                last_import_error: Optional[Exception] = None
-                for import_attempt in range(1, max_slskd_attempts + 1):
-                    try:
-                        dl = _download_slskd_selection(
-                            job_wanted_tracks,
-                            expected_download_count,
-                            skip_candidates=slskd_skip_candidates,
-                        )
-                    except Exception as ex:
-                        return _try_direct_sources_after_slskd(ex)
-                    aldir = dl["aldir"]
-                    afiles = dl["files"]
-                    dl_wanted_tracks = _normalise_wanted_tracks(
-                        dl.get("wanted_tracks") or job_wanted_tracks)
-                    import_dir = _stage_selected_audio_files(
-                        aldir, afiles, artist, album, log,
-                        target_tracks=dl_wanted_tracks or None,
-                        stage_prefix=_recovery_stage_prefix,
-                    )
-                    try:
-                        download_result = {
-                            "aldir": import_dir,
-                            "method": "slskd",
-                            "files": len(afiles),
-                            "mb_albumid": resolved_mbid,
-                            "username": dl.get("username", ""),
-                            "remote_dir": dl.get("remote_dir", ""),
-                        }
-                        download_result.update(
-                            _import_downloaded_album(import_dir, dl_wanted_tracks))
-                    except Exception as ex:
-                        last_import_error = ex
-                        username = _s(dl.get("username", ""))
-                        queued = list(dl.get("queued") or [])
-                        remote_dir = _s(dl.get("remote_dir", ""))
-                        log.append(
-                            "  [slskd] Downloaded candidate failed import validation: "
-                            f"{ex}"
-                        )
-                        if queued:
-                            log.append(
-                                "  [slskd] Cleaning failed candidate before trying another source."
-                            )
-                            _slskd_cancel_queued_downloads(username, queued, log)
-                            _slskd_cleanup_failed_candidate_files(username, queued, log)
-                        _delete_staged_import_folder(import_dir, log)
-                        if username or remote_dir:
-                            slskd_skip_candidates.add(_skip_key(username, remote_dir))
-                        # #406: a refusal that is not about this copy (False in
-                        # IMPORT_REFUSAL_REASONS) fails every peer the same way.
-                        reason_code = import_refusal_reason_code(ex)
-                        if reason_code == EXISTING_ALBUM_MERGE_FAILED:
-                            # #432 B2 (see #428): the files were imported but not
-                            # merged; another peer or a direct source would import
-                            # again and leave another partial album row.
-                            log.append(
-                                "  [slskd] Not trying other Soulseek peers or direct sources: "
-                                "the import into the existing album did not complete "
-                                f"({reason_code}); see the import log for its Review status.")
-                            raise RuntimeError(
-                                f"SLSKD import stopped after one candidate: {ex}") from ex
-                        # An unknown code is not proven candidate-specific: stop.
-                        if reason_code and not IMPORT_REFUSAL_REASONS.get(reason_code, False):
-                            log.append(
-                                f"  [slskd] Not trying other Soulseek peers: import refused "
-                                f"for a reason that is not specific to this copy "
-                                f"({reason_code}); every peer's copy would be refused the same way."
-                            )
-                            break
-                        if import_attempt < max_slskd_attempts:
-                            log.append(
-                                "  [slskd] Trying the next peer/folder because the "
-                                "downloaded files did not validate."
-                            )
-                            continue
-                        break
-                    if job_wanted_tracks and dl_wanted_tracks and (
-                            len(dl_wanted_tracks) < len(job_wanted_tracks)
-                            or download_result.get("undelivered_tracks")):
-                        remaining_after_slskd = _wanted_tracks_not_in_album(
-                            existing_album_id, resolved_mbid, job_wanted_tracks, log)
-                        slskd_imported_n = len(dl_wanted_tracks) - len(
-                            download_result.get("undelivered_tracks") or [])
-                        if remaining_after_slskd:
-                            remaining_desc = ", ".join(
-                                _wanted_track_label(t) for t in remaining_after_slskd[:8]
-                            )
-                            if not try_source_fallback:
-                                raise RuntimeError(
-                                    "SLSKD imported "
-                                    f"{slskd_imported_n}/{len(job_wanted_tracks)} "
-                                    "requested missing track(s), but these remain: "
-                                    f"{remaining_desc}"
-                                )
-                            log.append(
-                                "[fallback] SLSKD satisfied "
-                                f"{slskd_imported_n}/{len(job_wanted_tracks)} "
-                                "requested missing track(s); trying direct sources for remaining: "
-                                f"{remaining_desc}"
-                            )
-                            try:
-                                fallback_result = _try_direct_sources_after_slskd(
-                                    RuntimeError(
-                                        "partial SLSKD candidate left unresolved track(s): "
-                                        f"{remaining_desc}"
-                                    ),
-                                    remaining_after_slskd,
-                                    fallback_from="partial_slskd",
-                                )
-                            except Exception as direct_ex:
-                                raise RuntimeError(
-                                    "SLSKD imported "
-                                    f"{slskd_imported_n}/{len(job_wanted_tracks)} "
-                                    "requested missing track(s), but direct-source fallback for the "
-                                    f"remaining track(s) failed: {direct_ex}"
-                                ) from direct_ex
-                            combined = dict(download_result)
-                            combined["method"] = f"slskd+{fallback_result.get('method') or 'fallback'}"
-                            combined["files"] = int(download_result.get("files") or 0) + int(fallback_result.get("files") or 0)
-                            combined["fallback_result"] = fallback_result
-                            combined["undelivered_tracks"] = list(fallback_result.get("undelivered_tracks") or [])
-                            return combined
-                    return download_result
-                slskd_error = RuntimeError(
-                    f"SLSKD could not import a valid candidate after "
-                    f"{len(slskd_skip_candidates)} failed candidate(s)"
-                    + (f": {last_import_error}" if last_import_error else "")
-                )
-                return _try_direct_sources_after_slskd(slskd_error)
-
-            try:
-                dl = _download_slskd_selection(
-                    job_wanted_tracks,
-                    expected_download_count,
-                    skip_candidates=slskd_skip_candidates,
-                )
-            except Exception as ex:
-                return _try_direct_sources_after_slskd(ex)
-            aldir = dl["aldir"]
-            afiles = dl["files"]
-            download_result = {"aldir": aldir, "method": "slskd",
-                               "files": len(afiles), "mb_albumid": resolved_mbid}
-
-        else:
-            # ── Direct non-SLSKD source ──────────────────────────────────────
-            download_result = _download_ytdlp_selection(direct_method=method)
-
-        if not auto_import:
-            # Spine: bind the folder left in /downloads so the AI-batch scan
-            # and pending-review resolve the album identity instead of
-            # re-deriving it from the folder name (Phase-1 root cause).
-            aldir_na = _s(download_result.get("aldir"))
-            _recovery_bind_folder(aldir_na)
-            # F3: a carrier-bound recovery folder is deliberately EXCLUDED from
-            # the generic new-album AI batch (ai_service._ai_batch_find_audio_dirs).
-            # With auto_import=false nothing else would ever import it, so it
-            # would be stranded in /downloads. Hand it to Review WITH its
-            # structured carrier identity (existing album + canonical Release
-            # Group + wanted/expected tracks) so the operator can complete the
-            # recovery, and record the carrier as review_required.
-            if _recovery_carrier_id and aldir_na:
-                carrier = None
-                try:
-                    carrier = recovery_carrier.get_carrier(_recovery_carrier_id)
-                except Exception:
-                    carrier = None
-                _queued = False
-                if carrier:
-                    reason = ("Downloaded for an existing album with auto-import off; "
-                              "confirm the missing-track recovery in Review.")
-                    try:
-                        _queued = bool(_queue_folder_for_manual_review(
-                            aldir_na, {"album": album, "albumartist": artist, "reason": reason},
-                            reason, log, allow_existing=True, carrier=carrier))
-                    except Exception as ex:
-                        log.append(f"  [recovery] WARN review hand-off raised: {type(ex).__name__}")
-                        _queued = False
-                else:
-                    # F4: the carrier could not be reloaded (None/raised). The
-                    # folder is carrier-bound and therefore EXCLUDED from the AI
-                    # batch, so falling through to a bare success here would
-                    # strand it in /downloads with no Review entry. Without the
-                    # carrier we cannot hand the structured identity to Review;
-                    # fail closed via the same path as a failed enqueue below.
-                    log.append("  [recovery] WARN carrier could not be reloaded for "
-                               "review hand-off; failing closed to avoid stranding the folder.")
-                if _queued:
-                    try:
-                        # Fold the result/per-file provenance onto the same
-                        # transition (manual-review recovery has no DOWNLOADED
-                        # leg to carry it).
-                        recovery_carrier.advance_state(
-                            _recovery_carrier_id, "review_required",
-                            payload_extra=_recovery_provenance_payload(aldir_na))
-                    except Exception as ex:
-                        log.append(f"  [recovery] WARN carrier review_required not recorded: {type(ex).__name__}")
-                    download_result["queued_for_review"] = True
-                else:
-                    # QA-4 / F4: the enqueue failed OR the carrier could not be
-                    # reloaded. The carrier folder is excluded from the AI batch,
-                    # so a bare success would strand it in /downloads with no
-                    # Review entry and no retry. Fail closed: mark the carrier
-                    # recoverable-failed (so the status UI shows it, not a false
-                    # success) and return a non-success result the caller can
-                    # surface/retry. Nothing was imported on this path, so the
-                    # existing album is untouched.
-                    try:
-                        recovery_carrier.advance_state(_recovery_carrier_id, "failed")
-                    except Exception as ex:
-                        log.append(f"  [recovery] WARN carrier failed-state not recorded: {type(ex).__name__}")
-                    download_result["ok"] = False
-                    download_result["queued_for_review"] = False
-                    download_result["error"] = "review_handoff_failed"
-                    download_result["recovery_carrier_id"] = _recovery_carrier_id
-            return download_result
-
-        aldir = download_result["aldir"]
-        download_result["mb_albumid"] = resolved_mbid
-        download_result.update(_import_downloaded_album(aldir))
-        return download_result
-
-    _do_and_patch = _mark_queue_done_after(_do, mbid=mb_albumid, album_id=existing_album_id)
-    label = f"{_download_method_job_label(method)} Import: {artist} – {album}"
+    _do_and_patch = _mark_queue_done_after(_do, mbid=req.mb_albumid, album_id=req.existing_album_id)
+    label = f"{_download_method_job_label(req.method)} Import: {req.artist} – {req.album}"
     # One download+import per album at a time, across processes and restarts.
     # A missing-track recovery runs as ONE guarded, resumable workflow keyed on
     # the STABLE server-derived identity (not the ephemeral per-request carrier
@@ -1400,32 +472,1113 @@ def start_album_download(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # restart resumes the same recovery -- cross-request + sequential dedup
     # parity with the full-album content-hash path (ARCH-030). A plain
     # full-album download keeps the per-album download-import workflow.
-    if _is_recovery and _recovery_carrier_id:
+    if req.is_recovery and req.recovery_carrier_id:
         # Hash the identity to a lock-safe 16-char slug (the full-album path
         # hashes its content key the same way); the raw 64-char key exceeds the
         # resource-lock key length limit.
         workflow = recovery_carrier.recovery_workflow_id(
-            job_contract.slug(_recovery_identity_key) if _recovery_identity_key
-            else _recovery_carrier_id)
+            job_contract.slug(req.recovery_identity_key) if req.recovery_identity_key
+            else req.recovery_carrier_id)
     else:
-        workflow = "download-import-" + job_contract.slug(f"{artist}|{album}|{mb_albumid}")
+        workflow = "download-import-" + job_contract.slug(f"{req.artist}|{req.album}|{req.mb_albumid}")
     job = jobs.start_python(job_contract.guarded(_do_and_patch, workflow=workflow, fail_fast_in_process=True), label=label,
-                            metadata={"type": "download-import", "mutating": True, "artist": artist,
-                                      "album": album, "year": year,
-                                      "track_count": track_count,
-                                      "mb_albumid": mb_albumid, "method": method,
-                                      "albumartist": forced_albumartist,
-                                      "existing_album_id": existing_album_id,
-                                      "missing_track_count": len(wanted_tracks),
-                                      "try_source_fallback": try_source_fallback,
-                                      "try_ytdlp_fallback": try_source_fallback,
-                                      "fallback_methods": source_fallback_methods,
-                                      "recovery_carrier_id": _recovery_carrier_id})
+                            metadata={"type": "download-import", "mutating": True, "artist": req.artist,
+                                      "album": req.album, "year": req.year,
+                                      "track_count": req.track_count,
+                                      "mb_albumid": req.mb_albumid, "method": req.method,
+                                      "albumartist": req.forced_albumartist,
+                                      "existing_album_id": req.existing_album_id,
+                                      "missing_track_count": len(req.wanted_tracks),
+                                      "try_source_fallback": req.try_source_fallback,
+                                      "try_ytdlp_fallback": req.try_source_fallback,
+                                      "fallback_methods": req.source_fallback_methods,
+                                      "recovery_carrier_id": req.recovery_carrier_id})
     # Thread the origin job id to the carrier (provenance + recovery-job
     # resume via recovery_carrier.load_for_job). The carrier is created inside
     # _do after the download, by which time this is set.
-    _recovery_box["job_id"] = job.job_id
+    req.job_id = job.job_id
     return {"ok": True, "job_id": job.job_id}, 200
+
+
+class _AlbumDownloadRun:
+    """One run of the album download job: the state that used to be ``_do``'s
+    locals, and one method per step. ``execute`` is the order of the steps."""
+
+    def __init__(self, req: _AlbumDownloadRequest, log: List[str], cancel_event: Any = None) -> None:
+        self.req = req
+        self.log = log
+        self.cancel_event = cancel_event
+        self.resolved_mbid = req.mb_albumid
+        self.effective_track_count = req.track_count
+        self.job_wanted_tracks = list(req.wanted_tracks)
+        self.release_group_requested = False
+        self.resolved_release_group_id = ""
+        self.expected_download_count = 0
+        self.available_fallbacks: List[str] = []
+        self.fallbacks_checked = False
+        self.slskd_skip_candidates: set = set()
+
+    def execute(self) -> Dict[str, Any]:
+        resume_result = self._recovery_resume_short_circuit()
+        if resume_result is not None:
+            return resume_result
+        self._resolve_release()
+        already_complete = self._reconcile_existing_album()
+        if already_complete is not None:
+            return already_complete
+        self.expected_download_count = (
+            len(self.job_wanted_tracks) if self.job_wanted_tracks else self.effective_track_count)
+
+        req = self.req
+        if req.method == "slskd" and not slskd_configured():
+            self.log.append(f"[slskd] Skipped: {SLSKD_NOT_CONFIGURED}; going straight to direct sources.")
+            return self._try_direct_sources_after_slskd(RuntimeError(SLSKD_NOT_CONFIGURED))
+
+        download_result: Dict[str, Any]
+        if req.method == "slskd":
+            # ── Soulseek via slskd ───────────────────────────────────────────
+            if self.job_wanted_tracks:
+                self.log.append(
+                    f"[import] SLSKD batch mode: {len(self.job_wanted_tracks)} "
+                    "requested missing track(s) will be queued together"
+                )
+            else:
+                self.log.append("[import] SLSKD batch mode: album tracks will be queued together")
+            if req.auto_import:
+                return self._slskd_import_candidates()
+            try:
+                dl = self._download_slskd_selection(self.job_wanted_tracks, self.expected_download_count)
+            except Exception as ex:
+                return self._try_direct_sources_after_slskd(ex)
+            download_result = {"aldir": dl["aldir"], "method": "slskd",
+                               "files": len(dl["files"]), "mb_albumid": self.resolved_mbid}
+        else:
+            # ── Direct non-SLSKD source ──────────────────────────────────────
+            download_result = self._download_ytdlp_selection(direct_method=req.method)
+
+        if not req.auto_import:
+            return self._finish_without_import(download_result)
+
+        aldir = download_result["aldir"]
+        download_result["mb_albumid"] = self.resolved_mbid
+        download_result.update(self._import_downloaded_album(aldir))
+        return download_result
+
+    # ── recovery carrier ─────────────────────────────────────────────────────
+
+    def _recovery_resume_short_circuit(self) -> Optional[Dict[str, Any]]:
+        """F7: resume the one guarded recovery workflow from its last durable
+        checkpoint instead of restarting from scratch or splitting jobs. When
+        the carrier already reached IMPORTED (the verified track is on the
+        album) a resume must NOT re-download or re-import -- the carrier CAS
+        claim + merge precheck would already refuse that, but here we skip it
+        entirely and only run the best-effort Plex tail (idempotent if it
+        already ran). Returns a terminal result dict to short-circuit the job,
+        or None to run the normal download/import flow."""
+        req, log = self.req, self.log
+        if not (req.is_recovery and req.recovery_carrier_id):
+            return None
+        try:
+            resumed = (recovery_carrier.get_carrier(req.recovery_carrier_id)
+                       or recovery_carrier.load_for_job(req.job_id))
+        except Exception as ex:
+            # QA-3: a resume whose carrier read FAILED must not silently fall
+            # through to a full re-download/re-import of a recovery that may
+            # already be complete. Surface it as a retryable error instead of
+            # redoing/resetting -- but only for an actual resume (an honored
+            # incoming id); a fresh recovery has no prior state to protect.
+            if req.resume_carrier_id:
+                log.append("[recovery] Could not read carrier to resume "
+                           f"({type(ex).__name__}); not re-running -- retry later.")
+                return {"ok": False, "error": "recovery_carrier_unreadable",
+                        "retryable": True,
+                        "existing_album_id": req.existing_album_id,
+                        "recovery_carrier_id": req.recovery_carrier_id}
+            return None
+        # QA-2: only short-circuit as already-done when the stored carrier is
+        # THIS request's recovery (same album + Release Group) AND covers the
+        # requested track(s). A stale/mismatched completed carrier must not
+        # return a false "imported" success for a different recovery.
+        if not (_acq_carrier_identity_matches(req, resumed) and _acq_requested_tracks_covered(req, resumed)):
+            return None
+        cp = _s((resumed or {}).get("checkpoint"))
+        if not resumed or cp not in ("IMPORTED", "PLEX_SYNCED"):
+            return None
+        log.append(f"[recovery] Resuming workflow at checkpoint {cp}; the verified "
+                   "track is already imported -- not re-downloading or re-importing.")
+        if cp == "IMPORTED":
+            _recovery_plex_sync_leg(resumed, log)
+        return {
+            "imported": True,
+            "resumed": True,
+            "existing_album_id": req.existing_album_id,
+            "recovery_carrier_id": req.recovery_carrier_id,
+            "checkpoint": _s((recovery_carrier.get_carrier(req.recovery_carrier_id) or {}).get("checkpoint")) or cp,
+        }
+
+    def _recovery_provenance_payload(self, folder_path: str) -> Optional[Dict[str, Any]]:
+        """Additive durable provenance (requirement 2) for the carrier
+        ``source`` dict, computed from the landed download ``folder_path``.
+        The discovery query/provider was recorded at create; this adds the
+        CHOSEN-result reference (resolved MB release + method + staged folder)
+        and the per-file source of what was actually delivered. Returned as a
+        ``payload_extra`` fragment so it merges onto an EXISTING carrier
+        advance (no extra lifecycle transition / checkpoint). Records no
+        secret or token. Returns None off the recovery path or when the
+        carrier cannot be read."""
+        req = self.req
+        if not req.recovery_carrier_id or not _s(folder_path).strip():
+            return None
+        try:
+            carrier = recovery_carrier.get_carrier(req.recovery_carrier_id)
+        except Exception:
+            carrier = None
+        if not carrier:
+            return None
+        src = dict(carrier.get("source") or {})
+        src["result"] = {
+            "provider": req.method,
+            "mb_release": _s(self.resolved_mbid),
+            "mb_releasegroupid": _s(carrier.get("mb_releasegroupid")),
+            "staged_folder": _s(folder_path),
+        }
+        try:
+            files = sorted(
+                p.name for p in Path(folder_path).rglob("*")
+                if p.is_file() and p.suffix.lower() in AUDIO_EXT)
+        except OSError:
+            files = []
+        if files:
+            src["per_file"] = [{"name": n, "source": req.method} for n in files]
+        return {"source": src}
+
+    def _recovery_bind_folder(self, folder_path: str) -> None:
+        """Bind the staged download folder to the recovery carrier so
+        load_for_folder() resolves the album identity (AI-batch scan,
+        pending-review, preflight). Best-effort: a store failure never
+        breaks the download/import."""
+        if not self.req.recovery_carrier_id or not _s(folder_path).strip():
+            return
+        try:
+            recovery_carrier.bind_staged_folder(self.req.recovery_carrier_id, folder_path)
+        except Exception as ex:
+            self.log.append(f"  [recovery] WARN could not bind staged folder: {type(ex).__name__}")
+
+    def _recovery_advance(self, state: str, checkpoint: str, *,
+                          source_folder: str = "") -> None:
+        """Advance the recovery carrier as the download progresses
+        (CREATED->DOWNLOADED->STAGED) so the single guarded recovery
+        workflow can resume from the last checkpoint. When ``source_folder``
+        is given, the additive result/per-file provenance is merged onto the
+        SAME transition (no separate write). Best-effort: a store failure
+        never breaks the download/import."""
+        if not self.req.recovery_carrier_id:
+            return
+        payload_extra = (self._recovery_provenance_payload(source_folder)
+                         if source_folder else None)
+        try:
+            recovery_carrier.advance_state(
+                self.req.recovery_carrier_id, state, checkpoint=checkpoint,
+                payload_extra=payload_extra)
+        except Exception as ex:
+            self.log.append(
+                f"  [recovery] WARN could not advance carrier to {checkpoint}: "
+                f"{type(ex).__name__}")
+
+    def _recovery_create_carrier(self) -> None:
+        """Create the carrier once identity is resolved (stage 5). Canonical
+        mb_releasegroupid required; the Release is supporting. Best-effort.
+
+        Finding A: create_carrier is an unconditional upsert that RESETS an
+        existing row's checkpoint->CREATED and verification_evidence->{}. A
+        legitimately-resumed carrier already holds those durable values, so
+        never create OVER an existing carrier -- only mint a brand-new one.
+        A mismatching incoming id was already rejected upstream, so the id
+        here is either this recovery's own existing carrier (skip, resume via
+        the non-resetting advance_state CAS) or a fresh uuid (create)."""
+        req, log = self.req, self.log
+        if not req.recovery_carrier_id:
+            return
+        rgid = _s(self.resolved_release_group_id or req.requested_rgid).strip()
+        if not rgid or not self.job_wanted_tracks:
+            return
+        try:
+            if recovery_carrier.get_carrier(req.recovery_carrier_id) is not None:
+                return
+        except Exception as ex:
+            # F3: fail CLOSED. A transient carrier-read error must NOT fall
+            # through to create_carrier's unconditional upsert, which RESETS
+            # an existing row's checkpoint->CREATED and verification_evidence
+            # ->{} -- re-opening the Finding-A clobber under a read error.
+            # Skip creation this pass; advance_state (non-resetting CAS)
+            # resumes the row on a later leg.
+            log.append("  [recovery] WARN carrier read failed; not creating "
+                       f"over a possibly-existing row: {type(ex).__name__}")
+            return
+        try:
+            recovery_carrier.create_carrier(
+                carrier_id=req.recovery_carrier_id,
+                existing_album_id=req.existing_album_id,
+                mb_releasegroupid=rgid,
+                release_id=_s(self.resolved_mbid),
+                destination_album_path=_s(_album_folder_for_album_id(req.existing_album_id) or ""),
+                wanted_tracks=self.job_wanted_tracks,
+                # Recording-level evidence the verifier (music-identity) needs
+                # to prove a downloaded file IS the expected track. Sourced
+                # from the missing-track queue (already reconciled against MB
+                # completeness by _wanted_tracks_not_in_album). mb_trackid is
+                # the MB recording id; duration is the MB length in ms.
+                expected_tracks=[
+                    {
+                        "recording_id": t.get("mb_trackid"),
+                        "track": t.get("track"),
+                        "disc": t.get("disc"),
+                        "duration": t.get("duration_ms"),
+                        "title": t.get("title"),
+                    }
+                    for t in self.job_wanted_tracks
+                ],
+                # Durable discovery + search provenance (requirement 2): the
+                # provider/method and the discovery QUERY the recovery was
+                # launched from. The chosen-result reference and per-file
+                # source are added after the download lands (see
+                # ``_recovery_provenance_payload``). Additive to the carrier
+                # ``source`` dict; no secret/token is recorded here.
+                source={
+                    "method": req.method,
+                    "provider": req.method,
+                    "provenance": "download-import",
+                    "discovery_query": {
+                        "artist": req.artist,
+                        "album": req.album,
+                        "year": req.year,
+                        "mb_releasegroupid": rgid,
+                        "release_id": _s(self.resolved_mbid),
+                        "tracks": [
+                            {"title": _s(t.get("title")),
+                             "track": t.get("track"),
+                             "disc": t.get("disc")}
+                            for t in self.job_wanted_tracks
+                        ],
+                    },
+                },
+                origin_job_id=req.job_id,
+                state="downloading",
+            )
+        except Exception as ex:
+            log.append(f"  [recovery] WARN could not create recovery carrier: {type(ex).__name__}")
+
+    # ── release and existing album ───────────────────────────────────────────
+
+    def _resolve_release(self) -> None:
+        req, log = self.req, self.log
+        supplied_mbid_match = re.search(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            req.mb_albumid,
+            re.I,
+        )
+        supplied_mbid = supplied_mbid_match.group(0).lower() if supplied_mbid_match else ""
+        self.release_group_requested = "release-group" in _s(req.mb_albumid).casefold()
+        if not (req.auto_import or req.mb_albumid):
+            return
+        log.append("[import] Resolving MusicBrainz release before download…")
+        self.resolved_mbid = _resolve_album_release_for_import(
+            req.mb_albumid, req.artist, req.album, req.year, req.track_count, log)
+        if self.resolved_mbid:
+            if supplied_mbid and supplied_mbid != _s(self.resolved_mbid).strip().lower():
+                # Resolution stayed inside the supplied ID's Release Group;
+                # that group is read from the resolved Release below.
+                self.release_group_requested = True
+            mb_release = _fetch_mb_release_tracklist(self.resolved_mbid, log)
+            mb_tracks = len(mb_release.get("tracks") or []) if mb_release.get("ok") else 0
+            if mb_release.get("release_group"):
+                self.resolved_release_group_id = _s(mb_release.get("release_group")).strip().lower()
+            if mb_tracks and (not self.effective_track_count or self.effective_track_count != mb_tracks):
+                log.append(f"  MusicBrainz track count: {mb_tracks}")
+                self.effective_track_count = mb_tracks
+        elif req.auto_import:
+            raise RuntimeError("Could not resolve a MusicBrainz release ID before download")
+
+    def _reconcile_existing_album(self) -> Optional[Dict[str, Any]]:
+        """Narrow the wanted tracks to what the existing album still lacks; the
+        job's final result when nothing is left to download, else None."""
+        req, log = self.req, self.log
+        if not (req.existing_album_id and self.resolved_mbid):
+            return None
+        if req.replace_existing and self.job_wanted_tracks:
+            log.append(
+                f"[import] Replacement mode: {len(self.job_wanted_tracks)} track(s) "
+                f"will be downloaded for existing album_id {req.existing_album_id}"
+            )
+        else:
+            self.job_wanted_tracks = _wanted_tracks_not_in_album(
+                req.existing_album_id, self.resolved_mbid, self.job_wanted_tracks, log)
+        if self.job_wanted_tracks:
+            log.append(
+                f"[import] Missing-track mode: {len(self.job_wanted_tracks)} track(s) "
+                f"will be downloaded for existing album_id {req.existing_album_id}"
+            )
+            self._recovery_create_carrier()
+            return None
+        review_reason = (
+            "Requested missing track(s) are not missing for the selected "
+            "MusicBrainz release. Verify the release edition before downloading."
+        )
+        log.append(
+            "[import] No requested tracks are still missing for this selected "
+            "MusicBrainz release; skipping download"
+        )
+        album_folder = _album_folder_for_album_id(req.existing_album_id)
+        if album_folder:
+            self._queue_requested_tracks_for_review(album_folder, review_reason)
+        return {
+            "aldir": "",
+            "method": req.method,
+            "files": 0,
+            "mb_albumid": self.resolved_mbid,
+            "imported": True,
+            "already_complete": True,
+            "existing_album_id": req.existing_album_id,
+        }
+
+    def _queue_requested_tracks_for_review(self, album_folder: str, review_reason: str) -> None:
+        req, log = self.req, self.log
+        resolved_mbid = self.resolved_mbid
+        try:
+            comp = _album_mb_completeness(req.existing_album_id, resolved_mbid, log)
+        except Exception:
+            comp = {}
+        requested = _normalise_wanted_tracks(req.wanted_tracks)
+        currently_missing = _normalise_wanted_tracks((comp or {}).get("missing") or [])
+        suggestion = {
+            "albumartist": req.artist,
+            "album": req.album,
+            "year": req.year,
+            "mb_albumid": resolved_mbid,
+            "mb_url": f"https://musicbrainz.org/release/{resolved_mbid}",
+            "mb_valid": bool(_MB_UUID_RE.match(_s(resolved_mbid).strip().lower())),
+            "confidence": "low",
+            "reason": review_reason,
+        }
+        evidence = _ai_match_evidence_packet(
+            "missing_track",
+            folder_path=album_folder,
+            suggestion=suggestion,
+            folder_evidence=_build_folder_evidence(album_folder),
+            preflight=_folder_release_preflight(
+                album_folder,
+                resolved_mbid,
+                existing_album_id=req.existing_album_id,
+                log=None,
+            ),
+            wanted_tracks=requested,
+            reason=review_reason,
+        )
+        evidence["requested_tracks"] = requested
+        evidence["currently_missing_tracks"] = currently_missing
+        if _queue_folder_for_manual_review(
+            album_folder,
+            suggestion,
+            review_reason,
+            log,
+            allow_existing=True,
+            evidence=evidence,
+        ):
+            log.append(
+                "[import] Queued existing album for Review with requested-track evidence."
+            )
+
+    def _maybe_switch_release_for_slskd_candidate(self, candidate_dir: str,
+                                                  candidate_count: int) -> int:
+        log = self.log
+        if (
+            self.job_wanted_tracks
+            or not self.release_group_requested
+            or not self.resolved_release_group_id
+            or not candidate_count
+            or candidate_count == self.effective_track_count
+        ):
+            return 0
+        if self.effective_track_count:
+            min_viable = max(1, min(self.effective_track_count, int(self.effective_track_count * 0.70)))
+            if candidate_count < min_viable:
+                return 0
+        replacement = _resolve_release_group_to_release(
+            self.resolved_release_group_id,
+            log,
+            year=self.req.year,
+            track_count=candidate_count,
+        )
+        replacement = _s(replacement).strip().lower()
+        if not replacement or replacement == _s(self.resolved_mbid).strip().lower():
+            return 0
+        replacement_mb = _fetch_mb_release_tracklist(replacement, log)
+        replacement_count = len(replacement_mb.get("tracks") or []) if replacement_mb.get("ok") else 0
+        if replacement_count != candidate_count:
+            log.append(
+                "  [slskd] Same-release-group candidate did not match downloaded "
+                f"file count: MB has {replacement_count or '?'} track(s), "
+                f"download has {candidate_count}."
+            )
+            return 0
+        preflight = _folder_release_preflight(
+            candidate_dir,
+            replacement,
+            existing_album_id=self.req.existing_album_id,
+            log=None,
+        )
+        if not preflight.get("ok"):
+            log.append(
+                "  [slskd] Same-release-group candidate rejected by downloaded "
+                f"folder tracklist: {preflight.get('matches', 0)}/"
+                f"{preflight.get('expected', 0)} track(s) matched."
+            )
+            return 0
+        old_mbid = _s(self.resolved_mbid).strip().lower()
+        old_count = int(self.effective_track_count or 0)
+        self.resolved_mbid = replacement
+        self.effective_track_count = replacement_count
+        self.expected_download_count = replacement_count
+        log.append(
+            "  [slskd] Downloaded folder has "
+            f"{candidate_count} file(s); switched MusicBrainz release within "
+            f"release-group {self.resolved_release_group_id}: "
+            f"{old_mbid or '?'} ({old_count or '?'} tracks) -> "
+            f"{replacement} ({replacement_count} tracks)."
+        )
+        return replacement_count
+
+    # ── import ───────────────────────────────────────────────────────────────
+
+    def _import_downloaded_album(
+        self,
+        import_dir: str,
+        import_wanted_tracks: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        req, log = self.req, self.log
+        if not self.resolved_mbid:
+            raise RuntimeError("Could not resolve a MusicBrainz release ID for import")
+        # Spine: bind the staged folder so a Review hand-off from the
+        # reimport-disk child job carries the recovery identity, and record
+        # that the files landed in it (DOWNLOADED = folder bound).
+        self._recovery_bind_folder(import_dir)
+        self._recovery_advance("downloaded", "DOWNLOADED", source_folder=import_dir)
+        active_wanted_tracks = (
+            _normalise_wanted_tracks(import_wanted_tracks)
+            if import_wanted_tracks is not None
+            else self.job_wanted_tracks
+        )
+        undelivered: List[Dict[str, Any]] = []
+        deferred_slot_paths: List[str] = []
+        had_wanted_tracks = bool(active_wanted_tracks)
+        if active_wanted_tracks:
+            # Only fingerprint-accepted tracks import inline; the rest stay
+            # missing. A genuine AcoustID NO_RESULT / UNAVAILABLE file is kept
+            # staged (not deleted) for the slot-gate advancer (ARCH-030 C1).
+            active_wanted_tracks, undelivered, deferred_slot_paths = (
+                _validate_wanted_download_identity_before_import(
+                    import_dir,
+                    active_wanted_tracks,
+                    log,
+                    fallback_artist=req.forced_albumartist or req.artist,
+                ))
+        if active_wanted_tracks and deferred_slot_paths:
+            held = self._separate_deferred_files(import_dir, deferred_slot_paths, undelivered)
+            if held is not None:
+                return held
+        _validate_import_source_audio(import_dir, log, reject_downloads=True)
+        # Verified audio is staged and ready for Beets (STAGED). Later
+        # checkpoints (VERIFIED/IMPORTED/PLEX_SYNCED) are advanced by the
+        # downstream import/verify/Plex owners.
+        self._recovery_advance("downloaded", "STAGED")
+        if had_wanted_tracks and not active_wanted_tracks:
+            # ARCH-030 C1: every requested-track file returned a genuine
+            # AcoustID NO_RESULT / UNAVAILABLE and was LEFT staged (not
+            # deleted). Do NOT run the inline Beets import on unverified
+            # audio -- leave the carrier STAGED (an advancer state) so the
+            # DETERMINISTIC_METADATA_SLOT advancer gate, the sole auto-insert
+            # authority, decides accept-vs-review on the staged folder
+            # downstream. (An empty active_wanted_tracks only reaches here
+            # when files were deferred: the validator fails closed and raises
+            # when nothing verified AND nothing was deferred.)
+            log.append(
+                f"[import] No downloaded file fingerprint-accepted; "
+                f"{len(undelivered)} requested track(s) left staged in "
+                f"{import_dir} for the metadata-slot recovery gate to verify."
+            )
+            return {
+                "imported": False,
+                "staged_for_slot_gate": True,
+                "existing_album_id": req.existing_album_id,
+                "missing_track_count": len(undelivered),
+                "undelivered_tracks": undelivered,
+            }
+        return self._run_import_job(import_dir, active_wanted_tracks, undelivered)
+
+    def _separate_deferred_files(self, import_dir: str, deferred_slot_paths: List[str],
+                                 undelivered: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Move deferred files out of a mixed batch; the import's result when
+        they could not all be moved, else None."""
+        # ARCH-030 B2: a MIXED batch (>=1 verified + >=1 deferred). The
+        # deferred NO_RESULT/UNAVAILABLE files are still physically in
+        # import_dir; the inline Beets import below runs on the WHOLE
+        # folder, so they would ride into autotag and bypass the slot gate
+        # ("no track bypasses identity verification", req-5). Separate them
+        # out to a carrier-bound slot-gate folder so only verified audio
+        # imports inline; the deferred files reach the slot gate only.
+        slot_dir, separation_complete = _separate_deferred_slot_files(
+            import_dir, deferred_slot_paths, self.log)
+        if not separation_complete:
+            # ARCH-030 F8: fail CLOSED. At least one deferred
+            # NO_RESULT/UNAVAILABLE file could not be moved out of
+            # import_dir (collision / symlink refusal / I/O). Running the
+            # inline Beets import now would let that leftover UNVERIFIED
+            # file ride into autotag and bypass the slot gate (req-5:
+            # "no track bypasses identity verification"); a later
+            # import-validation raise would then delete the whole folder
+            # and destroy the RETAINED acquisition (B3: retain, never
+            # delete). So do NOT inline-import and do NOT delete -- keep
+            # the carrier bound to import_dir and leave it STAGED for the
+            # metadata-slot recovery gate to verify downstream.
+            self._recovery_advance("downloaded", "STAGED")
+            self.log.append(
+                "[import] ARCH-030 F8: deferred-file separation incomplete; "
+                f"leaving the whole carrier staged in {import_dir} for the "
+                "metadata-slot recovery gate (no inline import, retained "
+                "audio not deleted).")
+            return {
+                "imported": False,
+                "staged_for_slot_gate": True,
+                "existing_album_id": self.req.existing_album_id,
+                "missing_track_count": len(undelivered),
+                "undelivered_tracks": undelivered,
+            }
+        if slot_dir:
+            self._recovery_bind_folder(slot_dir)
+        return None
+
+    def _run_import_job(self, import_dir: str, active_wanted_tracks: List[Dict[str, Any]],
+                        undelivered: List[Dict[str, Any]]) -> Dict[str, Any]:
+        req, log = self.req, self.log
+        log.append(f"[import] Starting Beets import/tag/move for {import_dir}")
+        import_job_id = _start_reimport_disk_job_internal(
+            import_dir, self.resolved_mbid, albumartist=req.forced_albumartist,
+            existing_album_id=req.existing_album_id,
+            wanted_tracks=active_wanted_tracks,
+            replace_existing_item_ids=req.replace_existing_item_ids)
+        log.append(f"[import] Job {import_job_id} started; waiting for completion...")
+        import_result = _wait_for_child_job(import_job_id, log, self.cancel_event,
+                                            prefix="import", timeout=1200)
+        log.append("[import] Complete — files imported, tagged, and moved into the music folder")
+        if undelivered:
+            log.append(
+                f"[import] {len(undelivered)} requested track(s) did not fingerprint-verify "
+                "and are still missing: "
+                + ", ".join(_wanted_track_label(t) for t in undelivered[:8])
+            )
+        return {
+            "imported": True,
+            "import_job_id": import_job_id,
+            "import_result": import_result,
+            "existing_album_id": req.existing_album_id,
+            "missing_track_count": len(active_wanted_tracks),
+            "undelivered_tracks": undelivered,
+        }
+
+    # ── direct sources ───────────────────────────────────────────────────────
+
+    def _direct_dest_dir(self, selection_tracks: Optional[List[Dict[str, Any]]] = None,
+                         direct_method: Optional[str] = None) -> str:
+        req = self.req
+        source_method = _normalise_download_method(direct_method or req.method, "ytdlp")
+        active_tracks = (
+            _normalise_wanted_tracks(selection_tracks)
+            if selection_tracks is not None
+            else self.job_wanted_tracks
+        )
+        if active_tracks:
+            # Step-3: a recovery reuses ONE download folder across retries
+            # (the deterministic recovery-identity prefix) instead of a fresh
+            # per-attempt timestamp family; a non-recovery keeps the unique
+            # timestamp. ``_download_dest_under`` still enforces root
+            # containment (#268 S-1) on the resulting predictable name.
+            suffix = req.recovery_stage_prefix or str(int(time.time() * 1000))
+            source_slug = re.sub(r"[^a-z0-9]+", "", source_method) or "download"
+            return str(_download_dest_under(
+                req.downloads_root, req.safe_artist,
+                f"{req.safe_album}{req.yr_sfx} - {source_slug} missing {suffix}",
+            ))
+        return req.dest_dir
+
+    def _download_ytdlp_selection(
+        self,
+        selection_tracks: Optional[List[Dict[str, Any]]] = None,
+        direct_method: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        req, log = self.req, self.log
+        artist, album, year = req.artist, req.album, req.year
+        source_method = _normalise_download_method(direct_method or req.method, "ytdlp")
+        active_tracks = (
+            _normalise_wanted_tracks(selection_tracks)
+            if selection_tracks is not None
+            else self.job_wanted_tracks
+        )
+        yt_dir = self._direct_dest_dir(active_tracks, source_method)
+        log.append(f"  Downloading via {_download_method_label(source_method)} → {yt_dir}")
+        if active_tracks:
+            if source_method == "spotiflac":
+                n = _spotiflac_missing_tracks_download(
+                    artist, album, year, yt_dir, log, active_tracks)
+            else:
+                n = _ytdlp_missing_tracks_download(
+                    artist, album, year, yt_dir, log, active_tracks,
+                    source=source_method)
+        else:
+            if source_method == "spotiflac":
+                n = _spotiflac_album_download(
+                    artist, album, year, yt_dir, log,
+                    track_count=self.effective_track_count,
+                    mb_albumid=self.resolved_mbid)
+            else:
+                n = _ytdlp_album_download(
+                    artist, album, year, yt_dir, log,
+                    track_count=self.effective_track_count,
+                    source=source_method)
+        return {
+            "aldir": yt_dir,
+            "method": source_method,
+            "files": n,
+            "mb_albumid": self.resolved_mbid,
+        }
+
+    def _try_direct_sources_after_slskd(self, slskd_error: Exception,
+                                        selection_tracks: Optional[List[Dict[str, Any]]] = None,
+                                        fallback_from: str = "slskd") -> Dict[str, Any]:
+        log = self.log
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        active_tracks = (
+            _normalise_wanted_tracks(selection_tracks)
+            if selection_tracks is not None
+            else self.job_wanted_tracks
+        )
+        if not self.req.try_source_fallback:
+            raise slskd_error
+        # ACQ-2: the real slskd reason, in the log and first in the final error.
+        slskd_reason = _redact_security_text(slskd_error)
+        log.append(f"[slskd] Failed: {slskd_reason}")
+        fallback_tracks = active_tracks or None
+        fallback_scope = (
+            f"{len(active_tracks)} missing track(s)"
+            if active_tracks
+            else "the full album"
+        )
+        methods = self._available_fallbacks()
+        if not methods:
+            raise RuntimeError(
+                f"SLSKD failed: {slskd_reason}; no direct-source fallback is available"
+            ) from slskd_error
+        failures: List[str] = []
+        log.append(
+            f"[fallback] SLSKD could not provide a valid candidate for "
+            f"{fallback_scope}; trying direct sources: "
+            + ", ".join(_download_method_label(method) for method in methods)
+        )
+        for fallback_source in methods:
+            fallback_result = None
+            try:
+                log.append(
+                    f"[fallback] Trying {_download_method_label(fallback_source)} "
+                    f"for {fallback_scope}."
+                )
+                fallback_result = self._download_ytdlp_selection(
+                    fallback_tracks, direct_method=fallback_source)
+                fallback_result["fallback_from"] = fallback_from
+                fallback_result["slskd_error"] = str(slskd_error)
+                if self.req.auto_import:
+                    fallback_result.update(
+                        self._import_downloaded_album(
+                            fallback_result["aldir"], fallback_tracks))
+                return fallback_result
+            except Exception as direct_ex:
+                failures.append(
+                    f"{_download_method_label(fallback_source)}: {direct_ex}"
+                )
+                log.append(
+                    f"[fallback] {_download_method_label(fallback_source)} failed: "
+                    f"{direct_ex}"
+                )
+                if fallback_result:
+                    _delete_staged_import_folder(
+                        fallback_result.get("aldir", ""), log
+                    )
+                if import_refusal_reason_code(direct_ex) == EXISTING_ALBUM_MERGE_FAILED:
+                    # #432 B2: imported but not merged; another source
+                    # would leave another partial album row.
+                    raise RuntimeError(
+                        f"Direct-source import stopped: {direct_ex}") from direct_ex
+        raise RuntimeError(
+            f"SLSKD failed: {slskd_reason}; direct-source fallback also failed: "
+            + "; ".join(failures)
+        ) from slskd_error
+
+    def _available_fallbacks(self) -> List[str]:
+        # ACQ-5: cheap availability checks, once per job.
+        if not self.fallbacks_checked:
+            self.fallbacks_checked = True
+            for candidate in self.req.source_fallback_methods:
+                reason = _direct_source_unavailable_reason(candidate)
+                if reason:
+                    self.log.append(
+                        f"[fallback] Skipped {_download_method_label(candidate)}: {reason}")
+                else:
+                    self.available_fallbacks.append(candidate)
+        return self.available_fallbacks
+
+    # ── slskd ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _skip_key(username: str, remote_dir: str) -> tuple:
+        return (
+            _s(username).strip().lower(),
+            _s(remote_dir).replace("\\", "/").strip().lower(),
+        )
+
+    def _download_slskd_selection(
+        self,
+        selection_tracks: List[Dict[str, Any]],
+        expected_count: int,
+    ) -> Dict[str, Any]:
+        req, log, cancel_event = self.req, self.log, self.cancel_event
+        last_slskd_error: Optional[Exception] = None
+        for attempt in range(1, _SLSKD_MAX_ATTEMPTS + 1):
+            username = ""
+            remote_dir = ""
+            queued: List[str] = []
+            try:
+                if attempt > 1:
+                    log.append(
+                        f"  [slskd] Trying another Soulseek candidate "
+                        f"({attempt}/{_SLSKD_MAX_ATTEMPTS})..."
+                    )
+                username, queued, expected, remote_dir = _slskd_search_and_queue(
+                    req.artist, req.album, req.year, log, track_count=self.effective_track_count,
+                    wanted_tracks=selection_tracks,
+                    skip_candidates=self.slskd_skip_candidates, cancel_event=cancel_event)
+                return self._slskd_collect_candidate(
+                    username, queued, expected, remote_dir, selection_tracks, expected_count)
+            except Exception as ex:
+                last_slskd_error = ex
+                # #251: a cancel cleans up the queued candidate, then ends the job.
+                cancelled = cancel_event is not None and cancel_event.is_set()
+                if username or remote_dir:
+                    if queued:
+                        log.append("  [slskd] Candidate failed after queueing; cancelling it before retrying.")
+                        _slskd_cancel_queued_downloads(username, queued, log)
+                        _slskd_cleanup_failed_candidate_files(username, queued, log)
+                    self.slskd_skip_candidates.add(self._skip_key(username, remote_dir))
+                    if attempt < _SLSKD_MAX_ATTEMPTS and not cancelled:
+                        log.append(f"  [slskd] Candidate failed: {ex}")
+                        log.append(
+                            "  [slskd] Skipping that peer/folder and continuing automatically."
+                        )
+                        continue
+                if cancelled:
+                    raise
+                if self.slskd_skip_candidates:
+                    raise RuntimeError(
+                        f"SLSKD could not find a usable candidate after "
+                        f"{len(self.slskd_skip_candidates)} failed candidate(s): {ex}"
+                    ) from ex
+                raise
+        raise RuntimeError(
+            f"SLSKD could not find a usable candidate after {_SLSKD_MAX_ATTEMPTS} attempts"
+            + (f": {last_slskd_error}" if last_slskd_error else "")
+        )
+
+    def _slskd_collect_candidate(self, username: str, queued: List[str], expected: Any, remote_dir: str,
+                                 selection_tracks: List[Dict[str, Any]], expected_count: int) -> Dict[str, Any]:
+        """Wait for one queued candidate and check its files; raises to reject it."""
+        req, log, cancel_event = self.req, self.log, self.cancel_event
+        matched_tracks = _wanted_tracks_satisfied_by_names(
+            queued, selection_tracks)
+        download_target_tracks = (
+            matched_tracks if selection_tracks and matched_tracks
+            else _normalise_wanted_tracks(selection_tracks)
+        )
+        download_expected_count = (
+            len(download_target_tracks)
+            if selection_tracks and download_target_tracks
+            else expected_count
+        )
+        aldir, transfer_hints = _slskd_wait_downloads(
+            username, queued, log, timeout=600, cancel_event=cancel_event)
+        if cancel_event is None:
+            time.sleep(3)
+        elif cancel_event.wait(3):
+            raise RuntimeError("cancelled")
+        aldir, afiles = _find_slskd_downloaded_files(
+            username, queued, expected or aldir, log,
+            artist=req.artist, album=req.album, track_count=download_expected_count,
+            transfer_hints=transfer_hints,
+            wanted_tracks=download_target_tracks,
+            cancel_event=cancel_event)
+        if not afiles:
+            raise RuntimeError(
+                f"No queued Soulseek files found at {aldir} after download; "
+                "refusing unrelated fallback folders"
+            )
+        if (
+            not selection_tracks
+            and download_expected_count
+            and len(afiles) != download_expected_count
+        ):
+            switched_count = self._maybe_switch_release_for_slskd_candidate(
+                aldir,
+                len(afiles),
+            )
+            if switched_count:
+                download_expected_count = switched_count
+        if download_expected_count:
+            required_files = max(1, download_expected_count)
+            if len(afiles) < required_files:
+                raise RuntimeError(
+                    f"Downloaded candidate has only {len(afiles)}/{download_expected_count} "
+                    "expected files; refusing incomplete import"
+                )
+        log.append(f"  [slskd] OK {len(afiles)} file(s) in {aldir}")
+        log.append(
+            "  [slskd] Download phase complete for this candidate; "
+            "no additional Soulseek sources will be queued unless "
+            "import validation fails."
+        )
+        return {
+            "aldir": aldir,
+            "files": afiles,
+            "queued": queued,
+            "username": username,
+            "remote_dir": remote_dir,
+            "wanted_tracks": download_target_tracks,
+        }
+
+    def _slskd_import_candidates(self) -> Dict[str, Any]:
+        """Download and import slskd candidates until one imports, then fill any
+        tracks it left behind; direct sources take over when none does."""
+        req, log = self.req, self.log
+        last_import_error: Optional[Exception] = None
+        for import_attempt in range(1, _SLSKD_MAX_ATTEMPTS + 1):
+            try:
+                dl = self._download_slskd_selection(self.job_wanted_tracks, self.expected_download_count)
+            except Exception as ex:
+                return self._try_direct_sources_after_slskd(ex)
+            aldir = dl["aldir"]
+            afiles = dl["files"]
+            dl_wanted_tracks = _normalise_wanted_tracks(
+                dl.get("wanted_tracks") or self.job_wanted_tracks)
+            import_dir = _stage_selected_audio_files(
+                aldir, afiles, req.artist, req.album, log,
+                target_tracks=dl_wanted_tracks or None,
+                stage_prefix=req.recovery_stage_prefix,
+            )
+            try:
+                download_result = {
+                    "aldir": import_dir,
+                    "method": "slskd",
+                    "files": len(afiles),
+                    "mb_albumid": self.resolved_mbid,
+                    "username": dl.get("username", ""),
+                    "remote_dir": dl.get("remote_dir", ""),
+                }
+                download_result.update(
+                    self._import_downloaded_album(import_dir, dl_wanted_tracks))
+            except Exception as ex:
+                last_import_error = ex
+                if not self._slskd_discard_failed_import(dl, import_dir, ex):
+                    break
+                if import_attempt < _SLSKD_MAX_ATTEMPTS:
+                    log.append(
+                        "  [slskd] Trying the next peer/folder because the "
+                        "downloaded files did not validate."
+                    )
+                    continue
+                break
+            return self._slskd_fill_remaining_tracks(download_result, dl_wanted_tracks)
+        slskd_error = RuntimeError(
+            f"SLSKD could not import a valid candidate after "
+            f"{len(self.slskd_skip_candidates)} failed candidate(s)"
+            + (f": {last_import_error}" if last_import_error else "")
+        )
+        return self._try_direct_sources_after_slskd(slskd_error)
+
+    def _slskd_discard_failed_import(self, dl: Dict[str, Any], import_dir: str, ex: Exception) -> bool:
+        """Clean up a candidate whose import failed. True when another peer's
+        copy could still succeed; raises when no further source may be tried."""
+        log = self.log
+        username = _s(dl.get("username", ""))
+        queued = list(dl.get("queued") or [])
+        remote_dir = _s(dl.get("remote_dir", ""))
+        log.append(
+            "  [slskd] Downloaded candidate failed import validation: "
+            f"{ex}"
+        )
+        if queued:
+            log.append(
+                "  [slskd] Cleaning failed candidate before trying another source."
+            )
+            _slskd_cancel_queued_downloads(username, queued, log)
+            _slskd_cleanup_failed_candidate_files(username, queued, log)
+        _delete_staged_import_folder(import_dir, log)
+        if username or remote_dir:
+            self.slskd_skip_candidates.add(self._skip_key(username, remote_dir))
+        # #406: a refusal that is not about this copy (False in
+        # IMPORT_REFUSAL_REASONS) fails every peer the same way.
+        reason_code = import_refusal_reason_code(ex)
+        if reason_code == EXISTING_ALBUM_MERGE_FAILED:
+            # #432 B2 (see #428): the files were imported but not
+            # merged; another peer or a direct source would import
+            # again and leave another partial album row.
+            log.append(
+                "  [slskd] Not trying other Soulseek peers or direct sources: "
+                "the import into the existing album did not complete "
+                f"({reason_code}); see the import log for its Review status.")
+            raise RuntimeError(
+                f"SLSKD import stopped after one candidate: {ex}") from ex
+        # An unknown code is not proven candidate-specific: stop.
+        if reason_code and not IMPORT_REFUSAL_REASONS.get(reason_code, False):
+            log.append(
+                f"  [slskd] Not trying other Soulseek peers: import refused "
+                f"for a reason that is not specific to this copy "
+                f"({reason_code}); every peer's copy would be refused the same way."
+            )
+            return False
+        return True
+
+    def _slskd_fill_remaining_tracks(self, download_result: Dict[str, Any],
+                                     dl_wanted_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The job's result after a candidate imported: direct sources fetch any
+        requested track the candidate did not deliver."""
+        req, log = self.req, self.log
+        job_wanted_tracks = self.job_wanted_tracks
+        if job_wanted_tracks and dl_wanted_tracks and (
+                len(dl_wanted_tracks) < len(job_wanted_tracks)
+                or download_result.get("undelivered_tracks")):
+            remaining_after_slskd = _wanted_tracks_not_in_album(
+                req.existing_album_id, self.resolved_mbid, job_wanted_tracks, log)
+            slskd_imported_n = len(dl_wanted_tracks) - len(
+                download_result.get("undelivered_tracks") or [])
+            if remaining_after_slskd:
+                remaining_desc = ", ".join(
+                    _wanted_track_label(t) for t in remaining_after_slskd[:8]
+                )
+                if not req.try_source_fallback:
+                    raise RuntimeError(
+                        "SLSKD imported "
+                        f"{slskd_imported_n}/{len(job_wanted_tracks)} "
+                        "requested missing track(s), but these remain: "
+                        f"{remaining_desc}"
+                    )
+                log.append(
+                    "[fallback] SLSKD satisfied "
+                    f"{slskd_imported_n}/{len(job_wanted_tracks)} "
+                    "requested missing track(s); trying direct sources for remaining: "
+                    f"{remaining_desc}"
+                )
+                try:
+                    fallback_result = self._try_direct_sources_after_slskd(
+                        RuntimeError(
+                            "partial SLSKD candidate left unresolved track(s): "
+                            f"{remaining_desc}"
+                        ),
+                        remaining_after_slskd,
+                        fallback_from="partial_slskd",
+                    )
+                except Exception as direct_ex:
+                    raise RuntimeError(
+                        "SLSKD imported "
+                        f"{slskd_imported_n}/{len(job_wanted_tracks)} "
+                        "requested missing track(s), but direct-source fallback for the "
+                        f"remaining track(s) failed: {direct_ex}"
+                    ) from direct_ex
+                combined = dict(download_result)
+                combined["method"] = f"slskd+{fallback_result.get('method') or 'fallback'}"
+                combined["files"] = int(download_result.get("files") or 0) + int(fallback_result.get("files") or 0)
+                combined["fallback_result"] = fallback_result
+                combined["undelivered_tracks"] = list(fallback_result.get("undelivered_tracks") or [])
+                return combined
+        return download_result
+
+    # ── auto_import=false ────────────────────────────────────────────────────
+
+    def _finish_without_import(self, download_result: Dict[str, Any]) -> Dict[str, Any]:
+        req, log = self.req, self.log
+        # Spine: bind the folder left in /downloads so the AI-batch scan
+        # and pending-review resolve the album identity instead of
+        # re-deriving it from the folder name (Phase-1 root cause).
+        aldir_na = _s(download_result.get("aldir"))
+        self._recovery_bind_folder(aldir_na)
+        # F3: a carrier-bound recovery folder is deliberately EXCLUDED from
+        # the generic new-album AI batch (ai_service._ai_batch_find_audio_dirs).
+        # With auto_import=false nothing else would ever import it, so it
+        # would be stranded in /downloads. Hand it to Review WITH its
+        # structured carrier identity (existing album + canonical Release
+        # Group + wanted/expected tracks) so the operator can complete the
+        # recovery, and record the carrier as review_required.
+        if not (req.recovery_carrier_id and aldir_na):
+            return download_result
+        carrier = None
+        try:
+            carrier = recovery_carrier.get_carrier(req.recovery_carrier_id)
+        except Exception:
+            carrier = None
+        _queued = False
+        if carrier:
+            reason = ("Downloaded for an existing album with auto-import off; "
+                      "confirm the missing-track recovery in Review.")
+            try:
+                _queued = bool(_queue_folder_for_manual_review(
+                    aldir_na, {"album": req.album, "albumartist": req.artist, "reason": reason},
+                    reason, log, allow_existing=True, carrier=carrier))
+            except Exception as ex:
+                log.append(f"  [recovery] WARN review hand-off raised: {type(ex).__name__}")
+                _queued = False
+        else:
+            # F4: the carrier could not be reloaded (None/raised). The
+            # folder is carrier-bound and therefore EXCLUDED from the AI
+            # batch, so falling through to a bare success here would
+            # strand it in /downloads with no Review entry. Without the
+            # carrier we cannot hand the structured identity to Review;
+            # fail closed via the same path as a failed enqueue below.
+            log.append("  [recovery] WARN carrier could not be reloaded for "
+                       "review hand-off; failing closed to avoid stranding the folder.")
+        if _queued:
+            try:
+                # Fold the result/per-file provenance onto the same
+                # transition (manual-review recovery has no DOWNLOADED
+                # leg to carry it).
+                recovery_carrier.advance_state(
+                    req.recovery_carrier_id, "review_required",
+                    payload_extra=self._recovery_provenance_payload(aldir_na))
+            except Exception as ex:
+                log.append(f"  [recovery] WARN carrier review_required not recorded: {type(ex).__name__}")
+            download_result["queued_for_review"] = True
+        else:
+            # QA-4 / F4: the enqueue failed OR the carrier could not be
+            # reloaded. The carrier folder is excluded from the AI batch,
+            # so a bare success would strand it in /downloads with no
+            # Review entry and no retry. Fail closed: mark the carrier
+            # recoverable-failed (so the status UI shows it, not a false
+            # success) and return a non-success result the caller can
+            # surface/retry. Nothing was imported on this path, so the
+            # existing album is untouched.
+            try:
+                recovery_carrier.advance_state(req.recovery_carrier_id, "failed")
+            except Exception as ex:
+                log.append(f"  [recovery] WARN carrier failed-state not recorded: {type(ex).__name__}")
+            download_result["ok"] = False
+            download_result["queued_for_review"] = False
+            download_result["error"] = "review_handoff_failed"
+            download_result["recovery_carrier_id"] = req.recovery_carrier_id
+        return download_result
 
 
 def _download_identity_deferral(match: Optional[Dict[str, Any]]) -> str:
