@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **The format replacement retry defers when audio inspection does not finish (#547).** When a retry re-checked the current file and ffprobe timed out, the retry carried on as if the file failed Music Format Preferences and searched for a replacement. When no downloaded candidate verified and at least one could not be inspected, the retry counted as a failed attempt, so a busy host could use up all attempts. Both cases now set the track to "Replacement deferred": no download or replacement, still retryable, attempt count unchanged, and the reason says the audio inspection did not complete. The retry summary reports a `deferred` count. Candidates whose inspection finishes and fails are handled as before.
 ## v0.16.1 - 2026-11-03
 
 ### Fixed

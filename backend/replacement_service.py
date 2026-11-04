@@ -10,7 +10,7 @@ from backend.app_runtime import AUDIO_EXT, MUSIC_ROOT, _MB_UUID_RE, _s
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.acquisition_service import start_album_download
 from backend.playlist_service import _music_format_preferences
-from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, decoded_audio_md5 as _decoded_audio_md5
+from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, decoded_audio_md5 as _decoded_audio_md5, AudioInspectionIncomplete
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _clean_for_mb, _resolve_release_group_to_release, _fetch_mb_release_candidate
 from backend.beets_adapter import beets_adapter
 import backend.composite_workflows as composite_workflows
@@ -332,6 +332,7 @@ def _music_format_find_verified_replacement(row: Dict[str, Any], prefs: Dict[str
     title = _s(row.get("title") or "")
     candidates: List[Dict[str, Any]] = []
     seen_candidate_ids = set()
+    incomplete_paths: List[str] = []
 
     def _add_candidates(rows) -> None:
         for candidate in rows:
@@ -384,6 +385,10 @@ def _music_format_find_verified_replacement(row: Dict[str, Any], prefs: Dict[str
         if original_path and str(final_path.resolve(strict=False)).casefold() == str(Path(original_path).resolve(strict=False)).casefold():
             continue
         validation = _validate_audio_file_preferences(str(final_path), prefs)
+        if validation.get("inspection_incomplete"):
+            # No verdict on this candidate (e.g. ffprobe timed out).
+            incomplete_paths.append(str(final_path))
+            continue
         if validation.get("ok"):
             original_abs = Path(original_path) if original_path else Path("")
             if original_path and not original_abs.is_absolute():
@@ -422,6 +427,11 @@ def _music_format_find_verified_replacement(row: Dict[str, Any], prefs: Dict[str
                 "validation": validation,
                 "fingerprint_validation": fingerprint_validation,
             }
+    if incomplete_paths:
+        # Issue #547: a candidate we could not inspect was not really tried;
+        # the caller defers instead of using up a replacement attempt.
+        raise AudioInspectionIncomplete(
+            f"Audio inspection incomplete for {len(incomplete_paths)} replacement candidate(s); retry later")
     return {}
 
 
@@ -528,6 +538,18 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
     library_rows = _music_format_library_rows(0)
     complete = 0
     failed = 0
+    deferred = 0
+
+    def _defer(target: Dict[str, Any], reason: str, prior_attempts: int) -> None:
+        # Issue #547: an incomplete audio inspection is not a verdict. Keep the
+        # file, stay retryable and do not use up an attempt.
+        log.append(f"Replacement deferred: {target.get('artist') or 'Unknown artist'} - "
+                   f"{target.get('title') or 'Unknown track'}: {reason}")
+        _mark_music_format_needs_replacement([
+            _music_format_retry_state(target, status="Replacement deferred", stage="audio_inspection",
+                                      reason=reason, retryable=True, attempt_count=prior_attempts)
+        ])
+
     log.append(f"Starting replacement retry for {len(pending)} track(s)")
     for index, raw_row in enumerate(pending, start=1):
         if cancel_event is not None and cancel_event.is_set():
@@ -541,6 +563,11 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
             update_state({"phase": "Resolving identity", "processed": index - 1, "total": len(pending), "current": label})
         original_path = _s(row.get("path") or "")
         original_validation = _validate_audio_file_preferences(original_path, prefs) if original_path else {"ok": False, "reasons": ["missing path"]}
+        if original_validation.get("inspection_incomplete"):
+            deferred += 1
+            _defer(row, "Audio inspection of the current file did not complete; retry later "
+                        f"({_s(original_validation.get('message') or 'inspection incomplete')})", attempt_count - 1)
+            continue
         if original_validation.get("ok"):
             skipped += 1
             log.append(f"Skipped replacement: current file now matches preferences: {label}")
@@ -615,6 +642,9 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
             # Terminal until an operator approves the replacement transaction:
             # not retryable, so the pipeline never re-downloads it meanwhile.
             _mark_music_format_needs_replacement([{**resolved, "status": "Replacement awaiting approval", "replacement_status": "Replacement awaiting approval", "replacement_path": replacement.get("path"), "operation_id": removal.get("operation_id"), "reason": "Replacement imported and verified; approve the replacement transaction to swap the file", "queued_retry": False, "retryable": False, "attempt_count": attempt_count}])
+        except AudioInspectionIncomplete as ex:
+            deferred += 1
+            _defer(resolved, str(ex), attempt_count - 1)
         except Exception as ex:
             failed += 1
             reason = str(ex)
@@ -630,9 +660,9 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
                                           attempt_count=attempt_count)
             ])
         if update_state:
-            update_state({"phase": "Replacing", "processed": index, "total": len(pending), "complete": complete, "failed": failed, "skipped": skipped})
-    log.append(f"Replacement retry complete: {complete} complete, {failed} failed, {skipped} skipped")
-    return {"total": len(pending), "complete": complete, "failed": failed, "skipped": skipped}
+            update_state({"phase": "Replacing", "processed": index, "total": len(pending), "complete": complete, "failed": failed, "skipped": skipped, "deferred": deferred})
+    log.append(f"Replacement retry complete: {complete} complete, {failed} failed, {skipped} skipped, {deferred} deferred")
+    return {"total": len(pending), "complete": complete, "failed": failed, "skipped": skipped, "deferred": deferred}
 
 
 def _replacement_destination_check(original_path: str, candidate_path: str) -> Dict[str, Any]:
