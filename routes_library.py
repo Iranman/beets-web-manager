@@ -2372,7 +2372,9 @@ def batch_ai_suggest():
                 continue
             label = f"{album.albumartist or '?'} — {album.album or '?'}"
             prev = existing.get(str_aid, {})
-            if prev.get("confidence") in ("high", "medium") and prev.get("mb_valid"):
+            # Entries cached before the artist gate lack identity_validated: re-check them.
+            if (prev.get("confidence") in ("high", "medium") and prev.get("mb_valid")
+                    and prev.get("identity_validated") is True):
                 skipped += 1
                 log.append(f"[{idx}/{len(album_ids)}] Skip (already suggested): {label}")
                 continue
@@ -2389,6 +2391,8 @@ def batch_ai_suggest():
                     "confidence":     sug.get("confidence", "low"),
                     "reason":         sug.get("reason", ""),
                     "mb_valid":       bool(sug.get("mb_valid")),
+                    "identity_validated": sug.get("identity_validated") is not False,
+                    "candidate_identity_error": sug.get("candidate_identity_error", ""),
                     "mb_url":         sug.get("mb_url", ""),
                     "top_candidates": (ev.get("top_candidates") or [])[:3],
                     "preflight":      ev.get("preflight"),

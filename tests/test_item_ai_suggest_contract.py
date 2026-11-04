@@ -621,5 +621,60 @@ class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):
                 self.assertEqual(reimport.call_args.args[:2], ("/downloads/x", _REL))
 
 
+class BatchAiSuggestCacheKeepsArtistGate(unittest.TestCase):
+    """The batch AI suggest job caches album suggestions for Missing IDs. It
+    stores the artist gate's verdict, and an entry cached before the gate
+    existed (no identity_validated) is checked again instead of skipped."""
+
+    _REJECTED = {"mb_albumid": _REL, "mb_valid": True, "confidence": "low",
+                 "identity_validated": False, "candidate_identity_error": "Rejected: artist mismatch."}
+
+    def _run(self, cached, suggestion):
+        asked, saved = [], []
+        store = mock.Mock(save_suggestions_cache=lambda r: saved.append(dict(r)))
+
+        def run_now(fn, **_kw):
+            fn([])
+            return mock.Mock(job_id="j")
+        albums = {"albums": [{"id": 1, "mb_albumid": ""}], "singletons": []}
+        with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}), \
+                mock.patch.object(routes_library, "_ai_api_key", return_value="k"), \
+                mock.patch.object(routes_library.composite_workflows, "get_unmatched_review_items",
+                                  return_value=albums), \
+                mock.patch.object(routes_library, "_load_album_mb_suggestions", return_value=cached), \
+                mock.patch.object(routes_library.lib, "get_album",
+                                  side_effect=lambda aid: mock.Mock(albumartist="Vitalic", album="Voyager")), \
+                mock.patch.object(routes_library, "_ai_suggest_album_internal",
+                                  side_effect=lambda album, log, existing_album_id: asked.append(existing_album_id)
+                                  or {"suggestion": suggestion, "evidence": {}}), \
+                mock.patch.object(routes_library, "_get_ai_batch_store", return_value=store), \
+                mock.patch.object(routes_library.jobs, "start_python", side_effect=run_now):
+            app_module.app.test_client().post("/api/albums/batch-ai-suggest", json={}, headers=_CSRF)
+        return asked, (saved[-1] if saved else {})
+
+    def test_rejection_is_cached(self):
+        asked, saved = self._run({}, self._REJECTED)
+        self.assertEqual(asked, [1])
+        self.assertIs(saved["1"]["identity_validated"], False)
+        self.assertEqual(saved["1"]["candidate_identity_error"], "Rejected: artist mismatch.")
+        self.assertEqual(saved["1"]["confidence"], "low")
+
+    def test_pre_gate_high_entry_is_rechecked(self):
+        stale = {"1": {"mb_albumid": _REL, "mb_valid": True, "confidence": "high"}}
+        asked, saved = self._run(stale, self._REJECTED)
+        self.assertEqual(asked, [1])
+        self.assertEqual(saved["1"]["confidence"], "low")
+
+    def test_validated_high_entry_is_skipped(self):
+        cached = {"1": {"mb_albumid": _REL, "mb_valid": True, "confidence": "high", "identity_validated": True}}
+        asked, _ = self._run(cached, self._REJECTED)
+        self.assertEqual(asked, [])
+
+    def test_suggestion_without_a_candidate_counts_as_validated(self):
+        _, saved = self._run({}, {"confidence": "low"})
+        self.assertIs(saved["1"]["identity_validated"], True)
+        self.assertEqual(saved["1"]["candidate_identity_error"], "")
+
+
 if __name__ == "__main__":
     unittest.main()
