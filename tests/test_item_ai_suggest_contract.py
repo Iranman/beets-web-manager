@@ -536,6 +536,7 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                     out, opened = self._suggest(path, base + bad + "}")
                     self._assert_evidence_fallback(out)
                     opened.assert_called_once()
+
     def test_wrong_artist_candidate_is_rejected_on_both_paths(self):
         reply = {"candidate_index": 0, "albumartist": "Other", "confidence": "high", "reason": "ai reason"}
         for path in ("album", "folder"):
