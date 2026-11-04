@@ -599,12 +599,15 @@ class RouteTests(_Case):
         self.patch(r + "_reconstruct_track_recording_candidates",
                    side_effect=lambda item, iid: ({"title": "T"}, self.w.candidates[iid], item.path, "5.mp3"))
         self.patch(r + "_fetch_mb_recording_details", return_value={})
-        self.patch(r + "composite_workflows.plan_album_mb_track_repair", return_value={"ok": True, "operation_id": "op1"})
+        # The item is a singleton (album_id=0): the Recording ID goes through
+        # the item metadata family, never the album repair (which needs an album).
+        self.patch(r + "composite_workflows.plan_album_mb_track_repair",
+                   side_effect=AssertionError("album repair used for a singleton"))
 
-        def apply_repair(op_id, write_tags=True):
-            self.w.items[5].mb_trackid = REC
+        def write_item(item_id, fields, **kwargs):
+            self.w.items[item_id].mb_trackid = fields["mb_trackid"]
             return {"ok": True}
-        self.patch(r + "composite_workflows.apply_album_mb_track_repair", side_effect=apply_repair)
+        self.patch(r + "composite_workflows.update_item_metadata", side_effect=write_item)
         pre = self.preview([row["id"]])
         job = self.wait(self.apply(pre).get_json()["job_id"])
         self.assertEqual(job.status, "success", job.log)
