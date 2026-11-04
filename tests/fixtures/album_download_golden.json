@@ -2,6 +2,7 @@
  "advance_write_failure_tolerated": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "CREATED",
     "destination_album_path": "/music/Artist/Album",
@@ -384,6 +385,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -1337,6 +1346,7 @@
  "create_read_failure_fails_closed": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "folders": [
@@ -1579,6 +1589,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -1668,6 +1686,7 @@
  "create_write_failure_tolerated": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "folders": [
@@ -1984,6 +2003,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -2537,6 +2564,7 @@
  "direct_spotiflac_tracks": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -2932,6 +2960,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -4594,6 +4630,7 @@
  "fresh_read_failure_in_job": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -4984,6 +5021,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -9178,6 +9223,7 @@
  "provenance_read_error": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -9528,6 +9574,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -9616,6 +9670,7 @@
  "provenance_without_carrier": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "state": "downloaded"
@@ -9902,6 +9957,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -10000,6 +10063,7 @@
  "recovery_bare_albumid_mb_down": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -10328,6 +10392,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -10416,6 +10488,7 @@
  "recovery_bare_albumid_resolves_group": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -10748,6 +10821,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -10836,6 +10917,7 @@
  "recovery_crafted_release_url": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -11164,6 +11246,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -11252,6 +11342,7 @@
  "recovery_fresh": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -11651,6 +11742,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -11739,6 +11838,7 @@
  "recovery_group_url_in_albumid": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -12071,6 +12171,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -12159,6 +12267,7 @@
  "recovery_stored_tracks_from_queue": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -12494,6 +12603,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -12582,6 +12699,7 @@
  "recovery_without_release_group": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "folders": [
@@ -12787,6 +12905,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -13869,6 +13995,7 @@
  "resume_by_identity": {
   "carriers": {
    "cccccccccccccccccccccccccccccccc": {
+    "active_import_job_id": "import-1",
     "carrier_id": "cccccccccccccccccccccccccccccccc",
     "checkpoint": "STAGED",
     "existing_album_id": 42,
@@ -14123,6 +14250,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "cccccccccccccccccccccccccccccccc",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -14211,6 +14346,7 @@
  "resume_by_identity_error": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -14608,6 +14744,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -14715,6 +14859,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -15114,6 +15259,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -15202,6 +15355,7 @@
  "resume_id_honored": {
   "carriers": {
    "cccccccccccccccccccccccccccccccc": {
+    "active_import_job_id": "import-1",
     "carrier_id": "cccccccccccccccccccccccccccccccc",
     "checkpoint": "STAGED",
     "existing_album_id": 42,
@@ -15456,6 +15610,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "cccccccccccccccccccccccccccccccc",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -15544,6 +15706,7 @@
  "resume_id_malformed_ignored": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -15941,6 +16104,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -16199,6 +16370,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -16603,6 +16775,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -16717,6 +16897,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -17121,6 +17302,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -17235,6 +17424,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -17639,6 +17829,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -17746,6 +17944,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -18150,6 +18349,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -18240,6 +18447,7 @@
  "resume_id_unknown": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -18646,6 +18854,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -18734,6 +18950,7 @@
  "resume_id_uppercase_honored": {
   "carriers": {
    "cccccccccccccccccccccccccccccccc": {
+    "active_import_job_id": "import-1",
     "carrier_id": "cccccccccccccccccccccccccccccccc",
     "checkpoint": "STAGED",
     "existing_album_id": 42,
@@ -18986,6 +19203,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "cccccccccccccccccccccccccccccccc",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -30031,6 +30256,7 @@
  "slskd_tracks_ok": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -30515,6 +30741,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -30607,6 +30841,7 @@
  "slskd_tracks_partial_fallback_fails": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -31060,6 +31295,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -31231,6 +31474,7 @@
  "slskd_tracks_partial_fallback_ok": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -31685,6 +31929,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -31882,6 +32134,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -32001,6 +32261,7 @@
  "slskd_tracks_partial_no_fallback": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -32452,6 +32713,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -32550,6 +32819,7 @@
  "slskd_tracks_partial_nothing_remains": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -33001,6 +33271,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -33658,6 +33936,7 @@
  "slskd_tracks_undelivered_triggers_recheck": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -34136,6 +34415,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -34333,6 +34620,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -34453,6 +34748,7 @@
  "slskd_unconfigured_direct_tracks": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -34864,6 +35160,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -37642,6 +37946,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -38048,6 +38353,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -38160,6 +38473,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -38489,6 +38803,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -38707,6 +39029,7 @@
  "track_position_fallback_unidentified_slot": {
   "carriers": {
    "cccccccccccccccccccccccccccccccc": {
+    "active_import_job_id": "import-1",
     "carrier_id": "cccccccccccccccccccccccccccccccc",
     "checkpoint": "STAGED",
     "existing_album_id": 42,
@@ -38919,6 +39242,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "cccccccccccccccccccccccccccccccc",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -39031,6 +39362,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -39360,6 +39692,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -39472,6 +39812,7 @@
     "wanted_tracks": []
    },
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -39799,6 +40140,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -40775,6 +41124,7 @@
  "validate_mixed_nothing_to_separate": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -41176,6 +41526,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
@@ -41275,6 +41633,7 @@
  "validate_mixed_separated": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -41687,6 +42046,14 @@
     }
    ],
    [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
+   ],
+   [
     "wait_import",
     [
      "import-1",
@@ -41784,6 +42151,7 @@
  "validate_partial_undelivered": {
   "carriers": {
    "ffffffffffffffffffffffffffffffff": {
+    "active_import_job_id": "import-1",
     "carrier_id": "ffffffffffffffffffffffffffffffff",
     "checkpoint": "STAGED",
     "destination_album_path": "/music/Artist/Album",
@@ -42174,6 +42542,14 @@
       }
      ]
     }
+   ],
+   [
+    "carrier_note_import_job",
+    [
+     "ffffffffffffffffffffffffffffffff",
+     "import-1"
+    ],
+    {}
    ],
    [
     "wait_import",
