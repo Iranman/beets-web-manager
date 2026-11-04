@@ -10,14 +10,14 @@ from backend.app_runtime import AUDIO_EXT, MUSIC_ROOT, _MB_UUID_RE, _s
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.acquisition_service import start_album_download
 from backend.playlist_service import _music_format_preferences
-from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, decoded_audio_md5 as _decoded_audio_md5, AudioInspectionIncomplete
+from backend.audio_preferences import load_replacement_statuses as _load_music_format_replacement_statuses, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, decoded_audio_md5 as _decoded_audio_md5, AUDIO_INSPECTION_INCOMPLETE, AudioInspectionIncomplete
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _clean_for_mb, _resolve_release_group_to_release, _fetch_mb_release_candidate
 from backend.beets_adapter import beets_adapter
 import backend.composite_workflows as composite_workflows
 import backend.item_replacement as _item_replacement
 import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _acoustid_hits_or_none, _playlist_artist_name_score, _playlist_title_score, _read_file_media_tags
-from backend.job_service import ALBUM_DOWNLOAD_WAIT, _wait_for_child_job
+from backend.job_service import ALBUM_DOWNLOAD_WAIT, CHILD_OUTCOME_UNKNOWN, ChildJobFailed, _wait_for_child_job
 from backend.serializers import _json_from_flask_response
 
 # ── ARCH-001 extracted code ──
@@ -646,6 +646,15 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
             deferred += 1
             _defer(resolved, str(ex), attempt_count - 1)
         except Exception as ex:
+            if isinstance(ex, ChildJobFailed) and ex.reason_code in (AUDIO_INSPECTION_INCOMPLETE, CHILD_OUTCOME_UNKNOWN):
+                # The download job could not inspect the audio, or its outcome
+                # is unknown (it may still be working on the files): no
+                # verdict, so defer like an incomplete inspection.
+                deferred += 1
+                _defer(resolved, f"Replacement download did not finish ({ex.reason_code}): {ex}", attempt_count - 1)
+                if update_state:
+                    update_state({"phase": "Replacing", "processed": index, "total": len(pending), "complete": complete, "failed": failed, "skipped": skipped, "deferred": deferred})
+                continue
             failed += 1
             reason = str(ex)
             retryable = attempt_count < _MUSIC_FORMAT_REPLACEMENT_MAX_ATTEMPTS

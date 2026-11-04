@@ -8,7 +8,8 @@ import unittest
 from unittest import mock
 
 import backend.replacement_service as rs
-from backend.audio_preferences import AudioInspectionIncomplete
+from backend.audio_preferences import AUDIO_INSPECTION_INCOMPLETE, AudioInspectionIncomplete
+from backend.job_service import CHILD_OUTCOME_UNKNOWN, ChildJobFailed
 
 INCOMPLETE = {"ok": False, "inspection_incomplete": True,
               "reasons": ["ffprobe failed: timed out"],
@@ -76,6 +77,51 @@ class FindVerifiedReplacementTests(unittest.TestCase):
 
     def test_rejected_candidate_returns_nothing(self):
         self.assertEqual(self.find(REJECTED), {})
+
+
+class ReplaceRowsChildJobDeferralTests(unittest.TestCase):
+    """Follow-up: the download child job reports an inspection that did not
+    finish, or an unknown outcome, through ChildJobFailed.reason_code."""
+
+    def run_with_child_failure(self, error):
+        marked = []
+        resolved = {**ROW, "ok": True, "mb_releasegroupid": "22222222-2222-2222-2222-222222222222"}
+        with mock.patch.object(rs, "_music_format_preferences", return_value={}), \
+             mock.patch.object(rs, "_load_music_format_replacement_statuses", return_value={"tracks": [dict(ROW)]}), \
+             mock.patch.object(rs, "_music_format_library_rows", return_value=[]), \
+             mock.patch.object(rs, "_music_format_hydrate_status_row", side_effect=lambda row, _rows: dict(row)), \
+             mock.patch.object(rs, "_validate_audio_file_preferences", return_value=REJECTED), \
+             mock.patch.object(rs, "_mark_music_format_needs_replacement", side_effect=marked.extend), \
+             mock.patch.object(rs, "_music_format_resolve_replacement_identity", return_value=resolved), \
+             mock.patch.object(rs, "_music_format_replacement_payload", return_value={"artist": "Artist", "album": "Album"}), \
+             mock.patch.object(rs, "start_album_download"), \
+             mock.patch.object(rs, "_json_from_flask_response", return_value={"ok": True, "job_id": "j1"}), \
+             mock.patch.object(rs, "_wait_for_child_job", side_effect=error), \
+             mock.patch.object(rs, "_music_format_find_verified_replacement") as find:
+            result = rs._music_format_replace_rows([])
+        find.assert_not_called()
+        return result, marked[-1]
+
+    def test_inspection_incomplete_and_unknown_outcome_defer(self):
+        for code in (AUDIO_INSPECTION_INCOMPLETE, CHILD_OUTCOME_UNKNOWN):
+            with self.subTest(code=code):
+                # Message text deliberately says nothing about inspection: the
+                # decision must come from the reason code alone.
+                result, final = self.run_with_child_failure(ChildJobFailed("child job failed", code))
+                self.assertEqual(result["deferred"], 1)
+                self.assertEqual(result["failed"], 0)
+                self.assertEqual(final["status"], "Replacement deferred")
+                self.assertTrue(final["retryable"])
+                self.assertEqual(final["attempt_count"], ROW["attempt_count"])
+
+    def test_other_child_failure_still_uses_an_attempt(self):
+        for error in (ChildJobFailed("Audio inspection incomplete", ""), ChildJobFailed("boom", "other_code")):
+            with self.subTest(error=error):
+                result, final = self.run_with_child_failure(error)
+                self.assertEqual(result["deferred"], 0)
+                self.assertEqual(result["failed"], 1)
+                self.assertNotEqual(final["status"], "Replacement deferred")
+                self.assertEqual(final["attempt_count"], ROW["attempt_count"] + 1)
 
 
 class ReplaceRowsCandidateDeferralTests(unittest.TestCase):
