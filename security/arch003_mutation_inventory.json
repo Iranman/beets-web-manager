@@ -1552,7 +1552,7 @@
       "machine_classified": true,
       "human_reviewed": true,
       "review_reason": "composite_workflows.update_item_metadata composes the in-process item_metadata_repair_v1 Plan/Apply/Rollback through beets_adapter (embedded Beets, ADR 0006): Apply captures the before-state under the item lock and fails closed when it cannot, or when an expected_current value changed; used for singleton attach, attach rollback and item tag restoration without local beet subprocesses.",
-      "reviewed_in_pr": 546
+      "reviewed_in_pr": 552
     },
     {
       "key": "backend/library_service.py:_run_item_recording_id_restore:b8f6fca99fe9",
@@ -1568,7 +1568,7 @@
       "machine_classified": true,
       "human_reviewed": true,
       "review_reason": "composite_workflows.update_item_metadata composes the in-process item_metadata_repair_v1 Plan/Apply/Rollback through beets_adapter (embedded Beets, ADR 0006): Apply captures the before-state under the item lock and fails closed when it cannot, or when an expected_current value changed; used for singleton attach, attach rollback and item tag restoration without local beet subprocesses.",
-      "reviewed_in_pr": 546
+      "reviewed_in_pr": 552
     },
     {
       "key": "backend/library_service.py:_run_item_recording_id_restore:d3c6139a6b17",
@@ -1584,7 +1584,7 @@
       "machine_classified": true,
       "human_reviewed": true,
       "review_reason": "composite_workflows.update_item_metadata composes the in-process item_metadata_repair_v1 Plan/Apply/Rollback through beets_adapter (embedded Beets, ADR 0006): Apply captures the before-state under the item lock and fails closed when it cannot, or when an expected_current value changed; used for singleton attach, attach rollback and item tag restoration without local beet subprocesses.",
-      "reviewed_in_pr": 546
+      "reviewed_in_pr": 552
     },
     {
       "key": "backend/library_service.py:_run_item_recording_id_restore:99fbdcb32008",
@@ -3072,7 +3072,7 @@
       "machine_classified": true,
       "human_reviewed": true,
       "review_reason": "composite_workflows.update_item_metadata composes the in-process item_metadata_repair_v1 Plan/Apply/Rollback through beets_adapter (embedded Beets, ADR 0006): Apply captures the before-state under the item lock and fails closed when it cannot, or when an expected_current value changed; used for singleton attach, attach rollback and item tag restoration without local beet subprocesses.",
-      "reviewed_in_pr": 546
+      "reviewed_in_pr": 552
     },
     {
       "key": "backend/untracked_inventory.py:build_inventory:4b7f7c56afbb",
@@ -3728,7 +3728,7 @@
       "machine_classified": true,
       "human_reviewed": true,
       "review_reason": "composite_workflows.update_item_metadata composes the in-process item_metadata_repair_v1 Plan/Apply/Rollback through beets_adapter (embedded Beets, ADR 0006): Apply captures the before-state under the item lock and fails closed when it cannot, or when an expected_current value changed; used for singleton attach, attach rollback and item tag restoration without local beet subprocesses.",
-      "reviewed_in_pr": 546
+      "reviewed_in_pr": 552
     },
     {
       "key": "routes_library.py:_item_attach_recording._do:4ef5a1f1c487",
@@ -4112,7 +4112,7 @@
       "machine_classified": true,
       "human_reviewed": true,
       "review_reason": "composite_workflows.update_item_metadata composes the in-process item_metadata_repair_v1 Plan/Apply/Rollback through beets_adapter (embedded Beets, ADR 0006): Apply captures the before-state under the item lock and fails closed when it cannot, or when an expected_current value changed; used for singleton attach, attach rollback and item tag restoration without local beet subprocesses.",
-      "reviewed_in_pr": 546
+      "reviewed_in_pr": 552
     },
     {
       "key": "routes_maintenance.py:api_transaction_rollback:48b889cfcd03",

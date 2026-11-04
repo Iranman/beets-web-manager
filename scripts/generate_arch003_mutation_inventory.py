@@ -190,7 +190,7 @@ _REVIEWED_RULE_DETAILS = {
     "reviewed-wave27-beetsclient-item-metadata-repair": {
         "domain": "album_metadata",
         "review_reason": "composite_workflows.update_item_metadata composes the in-process item_metadata_repair_v1 Plan/Apply/Rollback through beets_adapter (embedded Beets, ADR 0006): Apply captures the before-state under the item lock and fails closed when it cannot, or when an expected_current value changed; used for singleton attach, attach rollback and item tag restoration without local beet subprocesses.",
-        "reviewed_in_pr": 546,
+        "reviewed_in_pr": 552,
     },
     "reviewed-wave27-beetsclient-album-metadata-repair": {
         "domain": "album_metadata",
