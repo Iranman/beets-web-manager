@@ -1112,15 +1112,20 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise AttachRecordingCancelled("rollback cancelled")
-        result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=True,
-                                                         within_transaction=True)
+        item = lib.get_item(item_id)
+        if item is None:
+            raise RuntimeError(f"Item {item_id} no longer exists in the library; nothing was restored.")
+        album_id = int(getattr(item, "album_id", 0) or 0)
+        # A singleton's attach wrote tags without moving the file, and its
+        # path was not recorded, so the undo must not move it either. Album
+        # tracks keep the tag rewrite + relocation they always had.
+        if album_id > 0:
+            result = composite_workflows.update_item_metadata(item_id, restore_fields, force_write_tags=True,
+                                                             within_transaction=True)
+        else:
+            result = composite_workflows.update_item_metadata(item_id, restore_fields, write_tags=True,
+                                                             within_transaction=True)
         _require_attach_stage_success(result, "rollback recording identity restore")
-        album_id = 0
-        try:
-            item = lib.get_item(item_id)
-            album_id = int(getattr(item, "album_id", 0) or 0) if item else 0
-        except Exception:
-            album_id = 0
         if album_id > 0:
             relocate_result = composite_workflows.relocate_album(album_id)
             _require_attach_stage_success(relocate_result, "rollback recording relocation")
