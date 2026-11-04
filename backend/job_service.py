@@ -187,10 +187,19 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
         result = getattr(done, "result", None)
         return _s(result.get("reason_code")) if isinstance(result, dict) else ""
 
+    def _vanished(message: str) -> ChildJobFailed:
+        """The child's record is gone and no success was seen: whether it
+        finished, failed or changed the library is unknown (#548)."""
+        note_job_progress(outcome_unknown=True, mutation_started=True)
+        log.append(f"  [{prefix}] Job {job_id} record is gone and no success was logged; "
+                   "whether it changed the library is unknown.")
+        return ChildJobFailed(message, CHILD_OUTCOME_UNKNOWN)
+
     def _cancel(child: Optional[Any]) -> RuntimeError:
-        if child is None or is_read_only_job(getattr(child, "metadata", None)):
-            if child is not None:
-                child.kill()
+        if child is None:
+            return _vanished("cancelled")
+        if is_read_only_job(getattr(child, "metadata", None)):
+            child.kill()
             return RuntimeError("cancelled")
         done = _settle(child)
         if done is None:
@@ -234,7 +243,7 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
                     f"  [{prefix}] Child job record was already cleaned up after a successful import; continuing."
                 )
                 return {"job_id": job_id, "status": "success", "result_inferred_from_log": True}
-            raise RuntimeError(f"child job not found: {job_id}")
+            raise _vanished(f"child job not found: {job_id}")
         new_lines = _mirror(child)
         child_state = dict(getattr(child, "state", {}) or {})
         state_key = (

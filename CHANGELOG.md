@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **A Soulseek staging folder kept for a retry is no longer swept an hour later (#548).** When a download job kept its staging folder under `_beets_missing_import` because the audio inspection did not finish or its import job was still running, nothing recorded the folder, so the orphan sweep deleted it after an hour and the "retry later" message went stale. The job now writes a `.bwm_kept_for_retry` marker into the folder and logs that it was kept; the sweep leaves a marked folder alone for 7 days after the marker was written, then treats it as an ordinary orphan. A missing-track recovery reuses its `rec-<hex>` folder on retry as before; a plain album download stages afresh from the original Soulseek download, which stays in place.
+- **A missing-track retry no longer restages over files its earlier import job is still reading (#548).** The recovery carrier now records the import job it started (`active_import_job_id`). A retry while that job is still running fails at once ("Import job … from an earlier attempt is still running on the staged files"), before downloading or copying anything into the shared `rec-<hex>` folder; once the job has ended the retry runs normally.
+- When a child job's record disappears without a logged success, the parent job now reports an unknown outcome (the same structured `child_outcome_unknown` reason as a child still running after the wait), on both the wait and the cancel path, instead of a plain "child job not found" error. A download job therefore keeps its staging folder in that case.
+- ffprobe's "error while loading shared libraries" is now recognised only as the dynamic loader's own line (the last stderr line, starting with the program name), so a damaged file whose name contains those words is rejected instead of deferred as an incomplete inspection.
+
 ## v0.16.1 - 2026-11-03
 
 ### Fixed

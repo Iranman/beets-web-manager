@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -217,6 +218,43 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
 # of an in-flight download whose carrier binding has not been written yet (the
 # bind happens once files land). A true old-scheme orphan is far older.
 ORPHAN_MIN_AGE_S = 3600
+
+# #548: acquisition KEEPS a staging folder for a retry when the audio inspection
+# could not finish or the import job was still running when the download job
+# stopped waiting. Nothing else owns such a folder (a plain download has no
+# carrier or Review row), so a marker file keeps this sweep off it for
+# KEPT_STAGING_RETENTION_S after it was last written; then it is an ordinary
+# orphan again. A retry that keeps the folder again refreshes the marker.
+KEPT_STAGING_MARKER = ".bwm_kept_for_retry"
+KEPT_STAGING_RETENTION_S = 7 * 24 * 3600
+
+
+def mark_staging_folder_kept(folder: str) -> bool:
+    """Write the retention marker into a top-level staging folder. Best-effort:
+    False (nothing written) for a folder outside the staging root or on error."""
+    root = _staging_root()
+    if not root or not folder:
+        return False
+    try:
+        if os.path.dirname(os.path.realpath(folder)) != root or os.path.islink(folder):
+            return False
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(os.path.join(folder, KEPT_STAGING_MARKER), flags, 0o600)
+        try:
+            os.write(fd, str(int(time.time())).encode("ascii"))
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
+def _kept_for_retry(folder: str, now: float) -> bool:
+    try:
+        st = os.stat(os.path.join(folder, KEPT_STAGING_MARKER), follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and now - st.st_mtime < KEPT_STAGING_RETENTION_S
 
 
 def _staging_root() -> str:
@@ -451,6 +489,10 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
         if _pending_review_has_path_or_overlap(child, unknown=True):
             summary["kept"] += 1
             log.append(f"[recovery-reconcile] kept {entry.name} (queued for Review).")
+            continue
+        if _kept_for_retry(child, now):
+            summary["kept"] += 1
+            log.append(f"[recovery-reconcile] kept {entry.name} (kept for a retry).")
             continue
         # CLEANUP: no carrier owns it. Age guard against an in-flight download.
         try:

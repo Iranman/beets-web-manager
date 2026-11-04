@@ -385,6 +385,10 @@ class World:
         self._write("bind")
         self.carriers.setdefault(carrier_id, {"carrier_id": carrier_id}).setdefault("folders", []).append(str(folder))
 
+    def note_active_import_job(self, carrier_id, job_id):
+        self._write("note_import_job")
+        self.carriers.setdefault(carrier_id, {"carrier_id": carrier_id})["active_import_job_id"] = job_id
+
     def plex_leg(self, carrier, log):
         self.carriers[carrier["carrier_id"]]["checkpoint"] = "PLEX_SYNCED"
 
@@ -553,6 +557,7 @@ class World:
             "create_carrier": spy("carrier_create", self.create_carrier),
             "advance_state": spy("carrier_advance", self.advance_state),
             "bind_staged_folder": spy("carrier_bind", self.bind_staged_folder),
+            "note_active_import_job": spy("carrier_note_import_job", self.note_active_import_job),
         }
         started = [mock.patch.object(acq, key, value) for key, value in module.items()]
         started += [mock.patch.object(acq.recovery_carrier, key, value) for key, value in carrier.items()]

@@ -162,6 +162,11 @@ _FFPROBE_ENV_FAILURE_RE = re.compile(
     r"|Interrupted system call|Connection timed out|No such device(?: or address)?|Host is down)\s*$",
     re.I,
 )
+#: The dynamic loader's own line, ``<argv0>: error while loading shared
+#: libraries: <lib>: <reason>``, matched on the final stderr line only. argv0 has
+#: no colon, so ffprobe's ``file:<path>: ...`` lines (whose path may carry the
+#: same words) never match (#548).
+_FFPROBE_LOADER_FAILURE_RE = re.compile(r"^[^\s:]+: error while loading shared libraries: \S+: .+$")
 #: 126/127: the ffprobe binary could not run (broken or missing install).
 _FFPROBE_BROKEN_BINARY_CODES = (126, 127)
 
@@ -349,9 +354,10 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         result["error"] = detail[:400] or f"ffprobe exited with code {proc.returncode}"
+        last_line = detail.splitlines()[-1] if detail else ""
         if (proc.returncode < 0 or proc.returncode in _FFPROBE_BROKEN_BINARY_CODES or not detail
-                or "error while loading shared libraries" in detail
-                or _FFPROBE_ENV_FAILURE_RE.search(detail.splitlines()[-1])):
+                or _FFPROBE_LOADER_FAILURE_RE.match(last_line)
+                or _FFPROBE_ENV_FAILURE_RE.search(last_line)):
             # Killed by a signal (e.g. OOM), a broken ffprobe install, exited
             # without saying why, or the host could not read the file (I/O,
             # permissions, memory): no verdict on the audio. A decode/format

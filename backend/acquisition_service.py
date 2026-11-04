@@ -18,6 +18,7 @@ from backend.import_service import _delete_staged_import_folder, _recovery_plex_
 from backend.library_service import _album_folder_for_album_id, _build_folder_evidence, _representative_tracktotal, _resolve_album_release_for_import, get_library_payload
 from backend.pending_review_store import _queue_folder_for_manual_review
 import backend.recovery_carrier as recovery_carrier
+import backend.recovery_service as recovery_service
 from backend.playlist_service import _playlist_download_audio_allowed, _playlist_download_match, _playlist_filter_preview_downloads, _playlist_identity_log, _playlist_stamp_download_tags
 from backend.app_runtime import _path_under, _redact_security_text, validated_downloads_root
 from helpers_mb import _resolve_release_group_to_release
@@ -526,11 +527,13 @@ class _AlbumDownloadRun:
         self.available_fallbacks: List[str] = []
         self.fallbacks_checked = False
         self.slskd_skip_candidates: set = set()
+        self.prior_carrier: Optional[Dict[str, Any]] = None  # set by _recovery_resume_short_circuit
 
     def execute(self) -> Dict[str, Any]:
         resume_result = self._recovery_resume_short_circuit()
         if resume_result is not None:
             return resume_result
+        self._recovery_refuse_while_import_runs()
         self._resolve_release()
         already_complete = self._reconcile_existing_album()
         if already_complete is not None:
@@ -604,6 +607,7 @@ class _AlbumDownloadRun:
                         "existing_album_id": req.existing_album_id,
                         "recovery_carrier_id": req.recovery_carrier_id}
             return None
+        self.prior_carrier = resumed  # #548: read once, also for the running-import check
         # QA-2: only short-circuit as already-done when the stored carrier is
         # THIS request's recovery (same album + Release Group) AND covers the
         # requested track(s). A stale/mismatched completed carrier must not
@@ -672,6 +676,33 @@ class _AlbumDownloadRun:
             recovery_carrier.bind_staged_folder(self.req.recovery_carrier_id, folder_path)
         except Exception as ex:
             self.log.append(f"  [recovery] WARN could not bind staged folder: {type(ex).__name__}")
+
+    def _recovery_note_import_job(self, job_id: str) -> None:
+        """#548: remember the import job reading the deterministic staging
+        folder, so a retry does not restage over it while it runs."""
+        if not self.req.recovery_carrier_id:
+            return
+        for _attempt in range(2):  # one retry on a concurrent carrier write
+            try:
+                recovery_carrier.note_active_import_job(self.req.recovery_carrier_id, job_id)
+                return
+            except Exception as ex:
+                err = ex
+        self.log.append(f"  [recovery] WARN could not record import job {job_id}: {type(err).__name__}")
+
+    def _recovery_refuse_while_import_runs(self) -> None:
+        """#548: an earlier attempt's import job may still be reading the
+        ``rec-<hex>`` staging folder this retry would restage over (an
+        ImportStillRunning outcome). Refuse until that job has ended."""
+        carrier = self.prior_carrier or {}
+        if _s(carrier.get("carrier_id")) != _s(self.req.recovery_carrier_id):
+            return
+        job_id = _s(carrier.get("active_import_job_id")).strip()
+        child = jobs.get(job_id) if job_id else None
+        if child is not None and getattr(child, "status", "") == "running":
+            raise RuntimeError(
+                f"Import job {job_id} from an earlier attempt is still running on the staged files. "
+                "Wait for it to finish in Jobs, then retry the download.")
 
     def _recovery_advance(self, state: str, checkpoint: str, *,
                           source_folder: str = "") -> None:
@@ -1076,6 +1107,7 @@ class _AlbumDownloadRun:
             wanted_tracks=active_wanted_tracks,
             replace_existing_item_ids=req.replace_existing_item_ids)
         log.append(f"[import] Job {import_job_id} started; waiting for completion...")
+        self._recovery_note_import_job(import_job_id)
         try:
             import_result = _wait_for_child_job(import_job_id, log, self.cancel_event,
                                                 prefix="import", timeout=1200)
@@ -1417,7 +1449,13 @@ class _AlbumDownloadRun:
                 download_result.update(
                     self._import_downloaded_album(import_dir, dl_wanted_tracks))
             except AudioInspectionIncomplete:
-                raise  # files kept for retry; do not discard or try another peer
+                # Files kept for retry; do not discard or try another peer, and
+                # keep the orphan sweep off the folder (#548).
+                if recovery_service.mark_staging_folder_kept(import_dir):
+                    days = recovery_service.KEPT_STAGING_RETENTION_S // 86400
+                    log.append(f"  [slskd] Kept {import_dir} for a retry; it is removed after "
+                               f"{days} days if nothing imports it.")
+                raise
             except Exception as ex:
                 last_import_error = ex
                 if not self._slskd_discard_failed_import(dl, import_dir, ex):
