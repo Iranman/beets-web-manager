@@ -152,15 +152,18 @@ def save_music_format_preferences(payload: Dict[str, Any], path: Optional[str] =
     return prefs
 
 
-#: ffprobe stderr that describes the host, not the media: ffprobe ends the
-#: line with the strerror text (`<input>: Input/output error`). Anchored to
-#: the line end so a file name containing these words cannot match.
+#: ffprobe stderr that describes the host, not the media: ffprobe ends its
+#: last line with the strerror text (`<input>: Input/output error`). Matched
+#: against the final line only, anchored to its end, so a file name carrying
+#: these words (or a newline and these words) cannot match.
 _FFPROBE_ENV_FAILURE_RE = re.compile(
     r":\s*(?:Input/output error|Permission denied|Cannot allocate memory|Resource temporarily unavailable"
     r"|Too many open files|Stale file handle|Device or resource busy|Transport endpoint is not connected"
-    r"|Interrupted system call)\s*$",
-    re.I | re.M,
+    r"|Interrupted system call|Connection timed out|No such device(?: or address)?|Host is down)\s*$",
+    re.I,
 )
+#: 126/127: the ffprobe binary could not run (broken or missing install).
+_FFPROBE_BROKEN_BINARY_CODES = (126, 127)
 
 #: Structured code for an incomplete inspection, carried in a child job's
 #: `{"ok": False, "reason_code": ...}` result across the job boundary.
@@ -346,10 +349,13 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         result["error"] = detail[:400] or f"ffprobe exited with code {proc.returncode}"
-        if proc.returncode < 0 or not detail or _FFPROBE_ENV_FAILURE_RE.search(detail):
-            # Killed by a signal (e.g. OOM), exited without saying why, or the
-            # host could not read the file (I/O, permissions, memory): no
-            # verdict on the audio. A decode/format error stays a rejection.
+        if (proc.returncode < 0 or proc.returncode in _FFPROBE_BROKEN_BINARY_CODES or not detail
+                or "error while loading shared libraries" in detail
+                or _FFPROBE_ENV_FAILURE_RE.search(detail.splitlines()[-1])):
+            # Killed by a signal (e.g. OOM), a broken ffprobe install, exited
+            # without saying why, or the host could not read the file (I/O,
+            # permissions, memory): no verdict on the audio. A decode/format
+            # error stays a rejection.
             result["inspection_incomplete"] = True
         return result
     try:

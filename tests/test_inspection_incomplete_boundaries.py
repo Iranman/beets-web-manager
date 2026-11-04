@@ -130,6 +130,62 @@ class ChildJobBoundary(unittest.TestCase):
         self.assertEqual(result.get("reason_code"), _code())
 
 
+class _SettlingChild:
+    """A mutating child still inspecting audio when the parent gives up; once
+    asked to stop, its check ends with the structured failure."""
+
+    def __init__(self):
+        self.status = "running"
+        self.log = ["working"]
+        self.state = {}
+        self.metadata = {}
+        self.result = None
+
+    def kill(self):
+        self.status = "failed"
+        self.log.append("ERROR: Audio inspection did not complete for 1 file(s)")
+        self.result = {"ok": False, "reason_code": _code()}
+
+
+class GiveUpCarriesTheReason(unittest.TestCase):
+    """C1, adopted from QA's probe test_qa544_giveup: the parent's wall timeout
+    (or a cancel) settles the child; its reason code must survive."""
+
+    def _wait(self, **kw):
+        child = _SettlingChild()
+        with mock.patch.object(jobsvc, "jobs", mock.Mock(get=lambda _j: child)), \
+                mock.patch.object(jobsvc, "is_read_only_job", return_value=False):
+            with self.assertRaises(RuntimeError) as caught:
+                jobsvc._wait_for_child_job("c1", [], prefix="import", **kw)
+        return caught.exception
+
+    def test_timeout_settles_child_with_reason_code(self):
+        ex = self._wait(timeout=1)
+        self.assertEqual(getattr(ex, "reason_code", None), _code())
+        self.assertIn("timed out", str(ex))
+
+    def test_cancel_settles_child_with_reason_code(self):
+        cancel = mock.Mock(is_set=mock.Mock(return_value=True))
+        ex = self._wait(cancel_event=cancel)
+        self.assertEqual(getattr(ex, "reason_code", None), _code())
+        self.assertEqual(str(ex), "cancelled")
+
+    def test_real_job_engine_timeout_end_to_end(self):
+        import job_engine
+
+        def child_fn(log, cancel_event):
+            log.append("inspecting")
+            cancel_event.wait(10)  # still inspecting when the parent gives up
+            return {"ok": False, "error": "Audio inspection did not complete", "reason_code": _code()}
+
+        store = job_engine.JobStore()
+        child = store.start_python(child_fn, label="child", metadata={})
+        with mock.patch.object(jobsvc, "jobs", store), \
+                mock.patch.object(jobsvc, "is_read_only_job", return_value=False):
+            with self.assertRaises(jobsvc.ChildJobFailed) as caught:
+                jobsvc._wait_for_child_job(child.job_id, [], prefix="import", timeout=1)
+        self.assertEqual(caught.exception.reason_code, _code())
+
 def _proc(rc, out="", err=""):
     return subprocess.CompletedProcess(["ffprobe"], rc, out, err)
 
@@ -151,10 +207,30 @@ class EnvironmentFailureIsIncomplete(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertTrue(result["inspection_incomplete"])
 
+    def test_more_host_errors_are_incomplete(self):  # N5
+        for stderr in ("file:/mnt/nas/a.flac: Connection timed out",
+                       "file:/mnt/nas/a.flac: No such device",
+                       "file:/mnt/nas/a.flac: No such device or address",
+                       "file:/mnt/nas/a.flac: Host is down"):
+            with self.subTest(stderr=stderr):
+                self.assertTrue(self._validate(stderr)["inspection_incomplete"])
+
+    def test_broken_ffprobe_binary_is_incomplete(self):  # N5
+        cases = ((127, "ffprobe: not found"), (126, "ffprobe: Permission denied"),
+                 (1, "ffprobe: error while loading shared libraries: libavformat.so.61: cannot open shared "
+                     "object file: No such file or directory"))
+        for rc, stderr in cases:
+            with self.subTest(rc=rc), \
+                    mock.patch("backend.audio_preferences.subprocess.run", return_value=_proc(rc, err=stderr)):
+                result = ap.validate_audio_file("/downloads/a.flac", ap.DEFAULT_MUSIC_FORMAT_PREFERENCES)
+                self.assertTrue(result["inspection_incomplete"])
+
     def test_media_errors_are_still_rejected(self):
         for stderr in ("file:/downloads/a.flac: Invalid data found when processing input",
                        # a file name carrying the words does not turn a decode error into a deferral
-                       "file:/downloads/Permission denied.flac: Invalid data found when processing input"):
+                       "file:/downloads/Permission denied.flac: Invalid data found when processing input",
+                       # N6: nor does a file name with a newline and the words
+                       "file:/downloads/x\n: Permission denied\n.flac: Invalid data found when processing input"):
             with self.subTest(stderr=stderr):
                 result = self._validate(stderr)
                 self.assertFalse(result["ok"])

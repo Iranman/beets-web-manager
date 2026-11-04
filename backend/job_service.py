@@ -175,6 +175,10 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
         log.append(f"  [{prefix}] Job {job_id} is still running; whether it changed the library is unknown. "
                    "Check it in Jobs.")
 
+    def _reason_code(done: Any) -> str:
+        result = getattr(done, "result", None)
+        return _s(result.get("reason_code")) if isinstance(result, dict) else ""
+
     def _cancel(child: Optional[Any]) -> RuntimeError:
         if child is None or is_read_only_job(getattr(child, "metadata", None)):
             if child is not None:
@@ -189,7 +193,7 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
                        "it may have changed the library before it stopped.")
         else:
             log.append(f"  [{prefix}] Job {job_id} stopped ({done.status}) before reporting a library change.")
-        return RuntimeError("cancelled")
+        return ChildJobFailed("cancelled", _reason_code(done)) if done is not None else RuntimeError("cancelled")
 
     def _give_up(child: Any, reason: str) -> Any:
         """Timeout or stall: a read-only child is simply stopped; a mutating
@@ -206,7 +210,9 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
             return getattr(done, "result", None)
         if _changed_library(done):
             note_job_progress(mutation_started=True)
-        raise RuntimeError(reason)
+        # The settled child may say why it failed (e.g. audio inspection
+        # incomplete); carry that, as for a child that failed on its own.
+        raise ChildJobFailed(reason, _reason_code(done))
 
     while True:
         now = time.time()
@@ -243,11 +249,8 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
         if child.status != "running":
             if child.status != "success":
                 detail = _child_failure_detail()
-                result = getattr(child, "result", None)
-                raise ChildJobFailed(
-                    f"{prefix} job failed: {detail}" if detail else f"{prefix} job failed",
-                    _s(result.get("reason_code")) if isinstance(result, dict) else "",
-                )
+                raise ChildJobFailed(f"{prefix} job failed: {detail}" if detail else f"{prefix} job failed",
+                                     _reason_code(child))
             return getattr(child, "result", None)
         if deadline is not None and now >= deadline:
             if idle_timeout and (now - last_activity) < idle_timeout:
