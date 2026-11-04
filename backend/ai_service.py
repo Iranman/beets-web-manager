@@ -448,6 +448,9 @@ def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str,
     return selected_candidate, mb_id
 
 
+_VARIOUS_ARTISTS_ALIASES = frozenset({"various artists", "various", "va", "v.a.", "v/a", "v.a"})
+
+
 def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artist: str) -> str:
     """Reject a candidate whose artist doesn't match the source's own artist,
     whatever its album title (2026-07-16, Voyager/Vitalic: "same title,
@@ -455,6 +458,9 @@ def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artis
     source_artist = _s(source_artist).strip()
     cand_artist = _s((candidate or {}).get("artist", "")).strip()
     if not source_artist or not cand_artist:
+        return ""
+    # "VA - Title" folders name MusicBrainz's "Various Artists" by its usual short forms.
+    if {source_artist.casefold(), cand_artist.casefold()} <= _VARIOUS_ARTISTS_ALIASES:
         return ""
     if _playlist_artist_name_score(source_artist, cand_artist) >= 0.45:
         return ""

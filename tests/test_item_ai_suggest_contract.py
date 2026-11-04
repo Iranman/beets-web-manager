@@ -551,6 +551,14 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                 self.assertTrue(s["identity_validated"])
                 self.assertEqual(s["candidate_identity_error"], "")
 
+    def test_va_source_matches_various_artists_candidate_only(self):
+        various = {"artist": "Various Artists"}
+        for source in ("VA", "V.A.", "v/a", "Various", "Various Artists"):
+            with self.subTest(source):
+                self.assertEqual(ai_service._ai_artist_mismatch_reason(various, source), "")
+                self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": "Vitalic"}, source))
+        self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason(various, "Vitalic"))
+
 
 class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):
     """Import All must send a candidate that failed identity validation to Review, not to the reimport."""
