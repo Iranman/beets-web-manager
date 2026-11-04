@@ -761,6 +761,19 @@ def bind_staged_folder(carrier_id: str, folder_path: str, *,
         raise
 
 
+def note_active_import_job(carrier_id: str, job_id: str) -> Optional[Dict[str, Any]]:
+    """Record the import job now reading the carrier's staged folder, without
+    touching ``state``: the job may already be advancing it (#548). A retry
+    reads ``active_import_job_id`` and refuses while that job still runs."""
+    try:
+        return _store().cas_update(carrier_id, None, {}, {"active_import_job_id": _s(job_id)},
+                                   writer_id=carrier_id)
+    except RecoveryCarrierConflictError:
+        if _store().get(carrier_id) is None:
+            return None
+        raise
+
+
 def advance_state(carrier_id: str, state: str, *, checkpoint: str = "",
                   evidence: Optional[Dict[str, Any]] = None,
                   payload_extra: Optional[Dict[str, Any]] = None,

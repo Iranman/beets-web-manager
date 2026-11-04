@@ -262,6 +262,11 @@ _REVIEWED_RULE_DETAILS = {
         "review_reason": "ARCH-030 Step 4 (library-transaction) owner classification: recovery_service.reconcile_orphan_staging_folders cleans up ORPHANED staging folders under the validated <downloads>/_beets_missing_import staging root. The target is pre-verified fail-closed (realpath + commonpath containment inside that root, symlinked children skipped) and then handed to composite_workflows.delete_file (LT-13), which independently re-enforces SEC-007/#325 containment: inside a staging root, never a staging root itself, never MUSIC_ROOT or protected data, no symlink component, fd-relative, lstat-rechecked. A folder still bound to (or whose deterministic rec-<16hex> prefix matches) a live carrier is ADOPTED, never deleted; the live music library is never touched. Staging-containment surface flagged for the Step 6 independent security review.",
         "reviewed_in_pr": ARCH030_RECOVERY_REDESIGN_PR,
     },
+    "reviewed-issue548-kept-staging-marker": {
+        "domain": "import_reconciliation",
+        "review_reason": "#548 (security F1): recovery_service.mark_staging_folder_kept writes the .bwm_kept_for_retry marker in a staging folder directly under the validated <downloads>/_beets_missing_import root. It descends fd-relative with O_DIRECTORY|O_NOFOLLOW, creates a fresh O_CREAT|O_EXCL|O_NOFOLLOW temp there and renames it over the marker with dir_fd, so a planted symlink or hardlink is replaced, never written through; on error it unlinks only its own temp. Never touches MUSIC_ROOT or library media.",
+        "reviewed_in_pr": 553,
+    },
     "reviewed-wave26-pretracking-filename-repair": {
         "domain": "import_reconciliation",
         "review_reason": "Wave 26 independent review: beets_client.move_file used only to strip a broken template token from a file's own name (same directory, collision-avoided, exception-wrapped) on a file that reimport_disk's own docstring confirms is 'not in the beets DB' at this point -- no DB row exists yet to protect or verify against. A real engine-native atomic rename, not a fabricated transaction family; genuinely lower-risk than a DB-tracked mutation, but not yet composed through a dedicated controlled family -- tracked in docs/TECHNICAL_DEBT.md for a future folder/file-rename primitive.",
@@ -582,6 +587,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             # live music library is never touched.
             if func == "reconcile_orphan_staging_folders":
                 return "STAGING_ONLY", "", "reviewed-arch030-recovery-orphan-staging-cleanup"
+            if func == "mark_staging_folder_kept":
+                return "STAGING_ONLY", "", "reviewed-issue548-kept-staging-marker"
             return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
         if file == "backend/recover_service.py":
             if func == "_probe_file_duration":

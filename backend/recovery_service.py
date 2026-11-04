@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -217,6 +218,76 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
 # of an in-flight download whose carrier binding has not been written yet (the
 # bind happens once files land). A true old-scheme orphan is far older.
 ORPHAN_MIN_AGE_S = 3600
+
+# #548: acquisition KEEPS a staging folder for a retry when the audio inspection
+# could not finish or the import job was still running when the download job
+# stopped waiting. Nothing else owns such a folder (a plain download has no
+# carrier or Review row), so a marker file keeps this sweep off it for
+# KEPT_STAGING_RETENTION_S after it was last written; then it is an ordinary
+# orphan again. A retry that keeps the folder again refreshes the marker.
+KEPT_STAGING_MARKER = ".bwm_kept_for_retry"
+KEPT_STAGING_RETENTION_S = 7 * 24 * 3600
+
+
+def _marker_fd_supported() -> bool:
+    return (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+            and os.open in os.supports_dir_fd and os.rename in os.supports_dir_fd
+            and os.unlink in os.supports_dir_fd)
+
+
+def mark_staging_folder_kept(folder: str) -> bool:
+    """Write the retention marker into a top-level staging folder. Best-effort:
+    False (nothing written) for a folder outside the staging root, on a host
+    without fd-relative ops, or on error.
+
+    SEC-007/#325 discipline (as ``slskd._staged_copy_nofollow``): the folder is
+    opened fd-relative from the staging root with O_DIRECTORY|O_NOFOLLOW (a
+    folder swapped for a symlink is refused at open, no path re-resolution),
+    the bytes go to a fresh O_CREAT|O_EXCL|O_NOFOLLOW temp, and ``rename``
+    replaces whatever entry sits at the marker name -- a planted symlink or
+    hard link is unlinked from this folder, its target is never opened."""
+    root = _staging_root()
+    if not root or not folder or not _marker_fd_supported():
+        return False
+    name = os.path.basename(os.path.normpath(folder))
+    if name in ("", ".", "..") or os.path.realpath(os.path.dirname(os.path.normpath(folder))) != root:
+        return False
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fds: List[int] = []
+    try:
+        fds.append(os.open(root, dir_flags))
+        fds.append(os.open(name, dir_flags, dir_fd=fds[0]))
+        folder_fd = fds[1]
+        tmp = f".bwm_kept_{os.urandom(6).hex()}.part"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder_fd)
+        try:
+            try:
+                os.write(fd, str(int(time.time())).encode("ascii"))
+            finally:
+                os.close(fd)
+            os.rename(tmp, KEPT_STAGING_MARKER, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=folder_fd)
+            except OSError:
+                pass
+            raise
+        return True
+    except OSError:
+        return False
+    finally:
+        for opened in reversed(fds):
+            os.close(opened)
+
+
+def _kept_for_retry(folder: str, now: float) -> bool:
+    try:
+        st = os.stat(os.path.join(folder, KEPT_STAGING_MARKER), follow_symlinks=False)
+    except OSError:
+        return False
+    # Only a marker this code wrote counts: a regular file with one link.
+    return (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+            and 0 <= now - st.st_mtime < KEPT_STAGING_RETENTION_S)
 
 
 def _staging_root() -> str:
@@ -451,6 +522,10 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
         if _pending_review_has_path_or_overlap(child, unknown=True):
             summary["kept"] += 1
             log.append(f"[recovery-reconcile] kept {entry.name} (queued for Review).")
+            continue
+        if _kept_for_retry(child, now):
+            summary["kept"] += 1
+            log.append(f"[recovery-reconcile] kept {entry.name} (kept for a retry).")
             continue
         # CLEANUP: no carrier owns it. Age guard against an in-flight download.
         try:
