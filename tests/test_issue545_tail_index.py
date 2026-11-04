@@ -108,21 +108,56 @@ class TailIndexTests(_Sync):
 
     # -- item 3 -------------------------------------------------------------
     def test_paging_does_not_skip_a_running_transaction(self):
-        txs = [self.wrapper() for _ in range(3)]
-        real_list = self.store.list
-        calls = []
+        # QA F1/F3: another thread settles rows between page reads, in two
+        # consecutive passes of a re-read loop. Without one snapshot, S (never
+        # written, oldest) is skipped both times and the second pass adds no
+        # new id, so it was lost.
+        s, k, b, a = (self.wrapper()["id"] for _ in range(4))
+        for n, tx_id in enumerate((s, k, b, a)):  # list() orders by mtime, newest first
+            os.utime(self.store._path(tx_id), (1000 + n, 1000 + n))
+        # After list() call n, the writer settles these rows (page size 1):
+        # a re-read loop's pass 1 reads A then K (B is gone), pass 2 reads K,
+        # and each removal shifts S back past the next offset.
+        script = {1: [a], 2: [b], 4: [k]}
+        todo, done = [], threading.Event()
+        wake = threading.Condition()
+
+        def writer():
+            while True:
+                with wake:
+                    wake.wait_for(lambda: todo)
+                    ids = todo.pop(0)
+                if ids is None:
+                    return
+                for tx_id in ids:
+                    self.store.transition(tx_id, "Running", "Completed")
+                done.set()
+
+        thread = threading.Thread(target=writer, daemon=True)
+        thread.start()
+        real_list, calls = self.store.list, []
 
         def churning_list(**kwargs):
-            page, total = real_list(**kwargs)
+            result = real_list(**kwargs)
             calls.append(1)
-            if len(calls) == 1:  # another writer settles a row between page reads
-                self.store.transition(str(page[0]["id"]), "Running", "Completed")
-            return page, total
+            if len(calls) in script:
+                done.clear()
+                with wake:
+                    todo.append(script[len(calls)])
+                    wake.notify()
+                done.wait(0.3)  # a snapshot holds the store lock, so the writer waits it out
+            return result
 
         with mock.patch.object(ts, "_RUNNING_PAGE", 1, create=True), \
                 mock.patch.object(self.store, "list", churning_list):
-            self.assertTrue(ts._reconcile_running_transactions(_no_jobs(), self.store, time.time() + 60))
-        self.assertNotIn("Running", [self.store.get(t["id"])["status"] for t in txs])
+            ids = {str(r["id"]) for r in ts._running_rows(self.store)}
+        with wake:
+            todo.append(None)
+            wake.notify()
+        thread.join(5)
+        self.assertGreater(len(calls), 1)  # more than one page
+        self.assertIn(s, ids)
+        self.assertEqual(self.store.get(s)["status"], "Running")  # never written by the writer
 
     # -- item 4 -------------------------------------------------------------
     def test_orphan_judging_rechecks_updated_at_under_the_lock(self):
@@ -147,6 +182,29 @@ class TailIndexTests(_Sync):
             self.assertIn("pending the startup job scan", debug.call_args[0][0])
             ts._reconcile_running_transactions(_no_jobs(), self.store, time.time())
             self.assertIn("left unchanged", warn.call_args[0][0])
+
+    def test_retry_pass_after_judging_still_warns(self):
+        # QA F2: once orphans are judged, a pass re-armed by a failed settle
+        # runs without a cutoff; the scan has still finished, so an unbound
+        # row is a warning, not "pending the startup job scan".
+        self.store.create(operation_type="Metadata Update", status="Running",
+                          metadata={"mutation_family": "metadata"})
+        scanned = threading.Event()
+        scanned.set()
+        ticks = []
+        fake = types.SimpleNamespace(start_python=lambda *a, **k: None, all=lambda: [], get=lambda _jid: None,
+                                     tail_transaction_jobs={}, tail_scan_complete=scanned,
+                                     every=lambda _name, _secs, fn: ticks.append(fn))
+        self.install(fake)
+        tick = ticks[0]
+        due = tick.__closure__[tick.__code__.co_freevars.index("reconcile_due")].cell_contents
+        tick()  # the judging pass
+        due.set()  # as settle_transaction does when update_from_job fails
+        with mock.patch.object(ts._app_logger, "warning") as warn, \
+                mock.patch.object(ts._app_logger, "debug") as debug:
+            tick()
+        self.assertTrue(any("left unchanged" in c[0][0] for c in warn.call_args_list))
+        self.assertFalse([c for c in debug.call_args_list if "pending" in c[0][0]])
 
 
 if __name__ == "__main__":
