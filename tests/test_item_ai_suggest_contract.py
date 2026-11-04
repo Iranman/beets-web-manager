@@ -517,12 +517,21 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                     self.assertNotIn(field, s)
                 self.assertNotEqual(s.get("preflight"), {"ok": True})
 
+    def test_ai_reply_year_as_digit_string_becomes_an_int(self):
+        reply = '{"candidate_index": 0, "albumartist": "A", "album": "B", "year": " 2012 ", "confidence": "high"}'
+        for path in ("album", "folder"):
+            with self.subTest(path):
+                out, _ = self._suggest(path, reply)
+                self.assertTrue(out["suggestion"]["ai_available"])
+                self.assertEqual(out["suggestion"]["year"], 2012)
+
     def test_malformed_ai_reply_fields_fall_back_to_the_evidence(self):
         base = '{"candidate_index": 0, "albumartist": "A", "reason": "ai reason", '
         for path in ("album", "folder"):
             for bad in ('"confidence": NaN', '"confidence": 0.99', '"confidence": "certain"', '"confidence": "high", '
                         '"year": NaN', '"confidence": "high", "year": 1.5', '"confidence": "high", "album": ["B"]',
-                        '"confidence": "high", "reason": "' + "x" * 1001 + '"'):
+                        '"confidence": "high", "reason": "' + "x" * 1001 + '"', '"confidence": "high", "year": "soon"',
+                        '"confidence": "high", "year": true', '"confidence": "high", "year": 99999'):
                 with self.subTest(path=path, bad=bad[:40]):
                     out, opened = self._suggest(path, base + bad + "}")
                     self._assert_evidence_fallback(out)

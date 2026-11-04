@@ -375,7 +375,11 @@ def _ai_reply_object(content: Any) -> Dict[str, Any]:
         value = reply.get(key)
         if value is None:
             continue
-        if key == "year" and type(value) is int and abs(value) < 10**9:
+        if key == "year":
+            if isinstance(value, str) and value.strip().isascii() and value.strip().isdigit() and len(value.strip()) <= 4:
+                value = int(value)  # a non-strict provider's "2012"
+            if type(value) is not int or not 0 <= value < 10000:
+                raise ValueError("AI reply field year is not a year")
             clean[key] = value
         elif isinstance(value, str) and len(value) <= 1000:
             clean[key] = value.strip()
