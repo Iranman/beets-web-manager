@@ -691,9 +691,13 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
                 applied = False
                 engine_error = "engine track repair transaction unavailable"
                 try:
+                    # Compare-and-set (#546): both paths write only while the
+                    # item still holds the Recording ID this request saw.
+                    expected = {"mb_trackid": before_snapshot["mb_trackid"]}
                     repair_payload = {
                         "album_id": aid,
                         "track_mbids": {str(iid): mb_trackid},
+                        "expected_track_ids": {str(iid): expected["mb_trackid"]},
                     }
                     acceptance_failpoint = _s(payload.get("_acceptance_failpoint") or "").strip()
                     if acceptance_failpoint:
@@ -705,11 +709,21 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
                         # Same write as the album path: tags written, no move.
                         i_res = composite_workflows.update_item_metadata(
                             iid, {"mb_trackid": mb_trackid}, write_tags=True,
-                            initiating_user=actor,
+                            initiating_user=actor, expected_current=expected,
                         )
                         applied = bool(i_res.get("ok"))
                         if not applied:
                             engine_error = i_res.get("error") or "update_item_metadata failed"
+                        elif i_res.get("operation_id"):
+                            # One Undo per attach (#546): the item metadata
+                            # transaction captured the before-state under the
+                            # write lock and restores exactly what it wrote,
+                            # so it is the Undo; this audit hands it over.
+                            inner_id = i_res["operation_id"]
+                            transactions.update(audit_id, rollback={
+                                "available": False, "operations": [],
+                                "reason": f"Undo this attach from its Metadata Update transaction {inner_id}.",
+                            }, metadata={"undo_transaction_id": inner_id})
                     else:
                         p_res = composite_workflows.plan_album_mb_track_repair(repair_payload)
                         if p_res.get("ok"):

@@ -335,25 +335,33 @@ def _engine_result(st: TransactionStore, operation_id: str, **fields: Any) -> Di
     return {**current, **fields}
 
 
-def _capture_item_before(ad: BeetsAdapter, item_id: Any, fields: Optional[Any] = None) -> Dict[str, Any]:
+def _capture_item_before(ad: BeetsAdapter, item_id: Any, fields: Optional[Any] = None,
+                         expected: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """The live values of the fields an item write will change, so the
-    rollback can put them back (ARCH-023).
+    rollback can put them back (ARCH-023), and a refusal when there is none.
 
-    An unreadable item yields an empty snapshot: the rollback then refuses
-    with ``rollback_unavailable`` rather than reporting a restore that did
-    not happen.
+    Returns ``(before, refusal)``. ``refusal`` is ``{}`` or a
+    ``{"code", "error"}`` the apply fails closed with, writing nothing
+    (#546): the item cannot be read, is gone, or no longer holds a value in
+    ``expected`` (a compare-and-set against what the requester saw; values
+    are compared trimmed and case-insensitively, as identity ids are).
     """
-    if not item_id:
-        return {}
     try:
         row = ad.get_item(int(item_id))
-    except Exception:
-        return {}
+    except Exception as exc:
+        return {}, {"code": "before_state_unavailable",
+                    "error": f"Item {item_id} could not be read ({type(exc).__name__}); nothing was changed."}
     if not row:
-        return {}
+        return {}, {"code": "before_state_unavailable",
+                    "error": f"Item {item_id} no longer exists; nothing was changed."}
+    for key, want in (expected or {}).items():
+        if _s(row.get(key)).strip().lower() != _s(want).strip().lower():
+            return {}, {"code": "item_changed_since_request",
+                        "error": f"Item {item_id} changed since you requested it ({key} is different now); "
+                                 "nothing was changed."}
     wanted = [f for f in (fields or {}) if f not in _RESTORE_SKIP]
     return {"items": [{"id": int(item_id), "fields": _restorable(row, wanted),
-                       "path": _s(row.get("path"))}]}
+                       "path": _s(row.get("path"))}]}, {}
 
 
 def _modify(ad: BeetsAdapter, fields: Dict[str, Any], *, item_ids: Optional[List[int]] = None,
@@ -3449,6 +3457,16 @@ def plan_album_mb_track_repair(
         if not mbid:
             return {"ok": False, "code": "invalid_recording_id", "error": f"Invalid Recording ID for item {iid}."}
         track_mbids[str(iid)] = mbid
+    # Compare-and-set against what the requester saw (#546): an item whose
+    # Recording ID changed since then is refused before anything is planned.
+    # Apply re-checks the plan's live_track_ids, so the chain request -> plan
+    # -> apply holds.
+    for raw_id, want in (payload.get("expected_track_ids") or {}).items():
+        live = _s((by_id.get(int(raw_id)) or {}).get("mb_trackid")).strip().lower()
+        if int(raw_id) not in by_id or live != _s(want).strip().lower():
+            return {"ok": False, "code": "item_changed_since_request",
+                    "error": f"Item {raw_id} changed since you requested it (mb_trackid is different now); "
+                             "nothing was changed."}
 
     current = _album_identity_snapshot(album)
     target_rel = _s(payload.get("mb_albumid")).strip().lower() or current["mb_albumid"]
@@ -3993,7 +4011,13 @@ def apply_item_metadata(
         # Snapshot and write under the same lock the rollback takes (H3): the
         # values captured must be the values this write replaces.
         with _apply_locks(ITEM_METADATA_FAMILY, meta, op_id):
-            before = _capture_item_before(ad, iid, updates)
+            before: Dict[str, Any] = {}
+            if iid and updates:
+                # No before-state, no write (#546): a write the rollback
+                # could not undo is refused, and the transaction ends Failed.
+                before, refusal = _capture_item_before(ad, iid, updates, meta.get("expected_current"))
+                if refusal:
+                    return _apply_claimed(st, op_id, lambda: {"ok": False, "mutated": False, **refusal})
             completed: Dict[str, Any] = {"move": bool(move), "write": bool(write)}
             claimed: Dict[str, Any] = {}
             if before:
@@ -4079,8 +4103,9 @@ def update_item_metadata(
         return {"ok": True, "item_fields_changed": 0}
     apply_res = apply_item_metadata(op_id, force_write_tags=force_write_tags, adapter=adapter, store=store)
     if not apply_res.get("ok"):
-        return {"ok": False, "error": apply_res.get("error") or "Item metadata apply failed", "code": apply_res.get("code")}
-    return {"ok": True, "item_fields_changed": plan_res.get("item_fields_changed", 0)}
+        return {"ok": False, "error": apply_res.get("error") or "Item metadata apply failed",
+                "code": apply_res.get("code"), "operation_id": op_id}
+    return {"ok": True, "item_fields_changed": plan_res.get("item_fields_changed", 0), "operation_id": op_id}
 
 
 # -----------------------------------------------------------------------------

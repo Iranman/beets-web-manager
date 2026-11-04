@@ -575,6 +575,16 @@ class SubprocessOutcomeTests(_AttachIntegrityTestCase):
 # ── Step 14: persisted-state verification ─────────────────────────────────────
 
 class PersistedStateVerificationTests(_AttachIntegrityTestCase):
+    def test_album_path_sends_the_request_snapshot_to_the_plan(self):
+        """#546: the album repair plan gets the request-time Recording ID to
+        compare-and-set against."""
+        iid = 43020
+        self.add_item(iid, mb_trackid=PRIOR_RECORDING_ID)
+        resp = self._post_confirmed(iid, reason="Replacing a wrong ID.")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        _wait_job(resp.get_json()["job_id"])
+        self.assertEqual(self._track_repair_payloads[-1]["expected_track_ids"], {str(iid): PRIOR_RECORDING_ID})
+
     def test_a_correct_persisted_state_matches_reread_item(self):
         iid = 43001
         self.add_item(iid)
@@ -1023,6 +1033,40 @@ class SingletonAttachTests(_AttachIntegrityTestCase):
         self.assertEqual(self.beet_calls, [])
         self.assertEqual(self.items[iid].mb_trackid, "")
         self.assertEqual(APP.transactions.get(resp.get_json()["audit_id"])["status"], "Failed")
+
+    def test_singleton_write_is_compare_and_set_against_the_request(self):
+        """#546: the job writes only while mb_trackid is still what the
+        request saw (the item metadata apply checks it under its lock)."""
+        iid = 45004
+        self.add_item(iid, album_id=0, mb_trackid=PRIOR_RECORDING_ID.upper())
+        resp = self._post_confirmed(iid, mb_trackid=RECORDING_ID, reason="Replacing a wrong ID.")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        _wait_job(resp.get_json()["job_id"])
+        self.assertEqual(self.item_metadata_calls[0][2].get("expected_current"),
+                         {"mb_trackid": PRIOR_RECORDING_ID})
+
+    def test_singleton_attach_hands_its_undo_to_the_item_transaction(self):
+        """#546: one attach, one Undo -- the outer audit stops offering its
+        own once the item metadata transaction recorded the write."""
+        iid = 45005
+        self.add_item(iid, album_id=0)
+
+        def write(item_id, fields, **kwargs):
+            self.items[item_id].mb_trackid = fields["mb_trackid"]
+            return {"ok": True, "operation_id": "txn_inner_546"}
+
+        self._patch(mock.patch.object(APP.composite_workflows, "update_item_metadata", side_effect=write))
+        resp = self._post_safe(iid)
+        audit_id = resp.get_json()["audit_id"]
+        self.assertEqual(_wait_job(resp.get_json()["job_id"]).status, "success")
+        tx = APP.transactions.get(audit_id)
+        self.assertEqual(tx["status"], "Completed")
+        self.assertFalse(tx["rollback"]["available"])
+        self.assertIn("txn_inner_546", tx["rollback"]["reason"])
+        self.assertEqual(tx["metadata"]["undo_transaction_id"], "txn_inner_546")
+        rb = self.client.post(f"/api/transactions/{audit_id}/rollback")
+        self.assertEqual(rb.status_code, 409, rb.get_json())
+        self.assertEqual(APP.transactions.get(audit_id)["status"], "Completed")
 
     def test_item_removed_before_the_job_fails_with_a_clear_message(self):
         iid = 45003
