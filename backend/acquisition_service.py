@@ -103,6 +103,13 @@ _RG_PATH_RE = re.compile(r"/release-group/(" + _RG_UUID_RE + r")", re.I)
 _SLSKD_MAX_ATTEMPTS = 12
 
 
+class AudioInspectionIncomplete(RuntimeError):
+    """A staged download's audio could not be inspected (ffprobe timed out or
+    could not run). Not a verdict on the audio: the staged files are kept, not
+    imported, and the job fails with a retryable message. Callers must not
+    delete the staging folder or try another source for it."""
+
+
 @dataclass
 class _AlbumDownloadRequest:
     """A POST /api/download/album request, parsed. Shared by every run of its
@@ -1200,6 +1207,8 @@ class _AlbumDownloadRun:
                         self._import_downloaded_album(
                             fallback_result["aldir"], fallback_tracks))
                 return fallback_result
+            except AudioInspectionIncomplete:
+                raise  # files kept for retry; do not delete or try another source
             except Exception as direct_ex:
                 failures.append(
                     f"{_download_method_label(fallback_source)}: {direct_ex}"
@@ -1391,6 +1400,8 @@ class _AlbumDownloadRun:
                 }
                 download_result.update(
                     self._import_downloaded_album(import_dir, dl_wanted_tracks))
+            except AudioInspectionIncomplete:
+                raise  # files kept for retry; do not discard or try another peer
             except Exception as ex:
                 last_import_error = ex
                 if not self._slskd_discard_failed_import(dl, import_dir, ex):
@@ -1696,6 +1707,14 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
                 best_idx = idx
 
         format_ok = _playlist_download_audio_allowed(path_value, _identity_log)
+        if format_ok is None:
+            # Inspection did not complete (busy host): keep every staged file
+            # and stop before importing anything; retrying later re-inspects.
+            raise AudioInspectionIncomplete(
+                f"Audio inspection did not complete for {Path(path_value).name} (ffprobe could not "
+                "finish, often because storage or the host was busy). Downloaded files were kept in "
+                f"{import_dir}; retry the download later."
+            )
         if best_idx < 0 or not format_ok:
             # ARCH-030 C1: a file that did not fingerprint-accept is NOT always
             # wrong audio. A genuine AcoustID NO_RESULT (lookup answered empty) or
