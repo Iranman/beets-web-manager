@@ -666,12 +666,15 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
             }],
         }, counts={"items": 1, "changes": 1})
         audit_id = tx["id"]
+        actor = _transaction_user_label()
 
         def _do(log, cancel_event=None):
             transactions.update(audit_id, status="Running")
             try:
                 item_obj = lib.get_item(iid)
-                aid = int(getattr(item_obj, "album_id", 0) or 0) if item_obj else 0
+                if item_obj is None:
+                    raise RuntimeError(f"Item {iid} no longer exists in the library; nothing was changed.")
+                aid = int(getattr(item_obj, "album_id", 0) or 0)
 
                 # SEC-002 / ARCH-003 Wave 24 final review section 31: this
                 # used to fall back to local `_beet_run modify/mbsync/
@@ -695,21 +698,34 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
                     acceptance_failpoint = _s(payload.get("_acceptance_failpoint") or "").strip()
                     if acceptance_failpoint:
                         repair_payload["_acceptance_failpoint"] = acceptance_failpoint
-                    p_res = composite_workflows.plan_album_mb_track_repair(repair_payload)
-                    if p_res.get("ok"):
-                        op_id = p_res.get("operation_id")
-                        if op_id:
-                            a_res = composite_workflows.apply_album_mb_track_repair(op_id, write_tags=True)
-                            if a_res.get("ok"):
-                                applied = True
-                            else:
-                                engine_error = a_res.get("error") or "apply_album_mb_track_repair failed"
-                        else:
-                            # No operation_id with ok=True means there was
-                            # nothing to change -- not a failure.
-                            applied = True
+                    if aid <= 0:
+                        # Singleton (no album): the album repair family needs an
+                        # album_id, so set the Recording ID through the item
+                        # metadata family (plan/apply/before-state/rollback).
+                        # Same write as the album path: tags written, no move.
+                        i_res = composite_workflows.update_item_metadata(
+                            iid, {"mb_trackid": mb_trackid}, write_tags=True,
+                            initiating_user=actor,
+                        )
+                        applied = bool(i_res.get("ok"))
+                        if not applied:
+                            engine_error = i_res.get("error") or "update_item_metadata failed"
                     else:
-                        engine_error = p_res.get("error") or "plan_album_mb_track_repair rejected"
+                        p_res = composite_workflows.plan_album_mb_track_repair(repair_payload)
+                        if p_res.get("ok"):
+                            op_id = p_res.get("operation_id")
+                            if op_id:
+                                a_res = composite_workflows.apply_album_mb_track_repair(op_id, write_tags=True)
+                                if a_res.get("ok"):
+                                    applied = True
+                                else:
+                                    engine_error = a_res.get("error") or "apply_album_mb_track_repair failed"
+                            else:
+                                # No operation_id with ok=True means there was
+                                # nothing to change -- not a failure.
+                                applied = True
+                        else:
+                            engine_error = p_res.get("error") or "plan_album_mb_track_repair rejected"
                 except AttachRecordingCancelled:
                     # Preserve the distinct Cancelled status -- do not fold
                     # a real cancellation into a generic engine-failure

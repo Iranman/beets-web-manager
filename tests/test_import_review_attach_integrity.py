@@ -983,5 +983,62 @@ class URLCredentialRedactionUnitTests(unittest.TestCase):
         self.assertEqual(redacted, APP._CONTROL_CHAR_RE.sub("?", text))
 
 
+# The real album repair plan, captured before any test patches it: it refuses
+# album_id 0 with "album_id required", which is what a singleton used to hit.
+_REAL_PLAN_ALBUM_MB_TRACK_REPAIR = APP.composite_workflows.plan_album_mb_track_repair if APP else None
+
+
+class SingletonAttachTests(_AttachIntegrityTestCase):
+    """Attaching a Recording ID to a singleton (no album) failed on v0.16.0
+    with "album_id required": the route always planned the album repair."""
+
+    def setUp(self):
+        super().setUp()
+        self._patch(mock.patch.object(APP.composite_workflows, "plan_album_mb_track_repair",
+                                      side_effect=_REAL_PLAN_ALBUM_MB_TRACK_REPAIR))
+
+    def test_singleton_attaches_through_item_metadata_family(self):
+        iid = 45001
+        self.add_item(iid, album_id=0)
+        resp = self._post_safe(iid)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        job = _wait_job(resp.get_json()["job_id"])
+        self.assertEqual(job.status, "success", list(job.log))
+        self.assertNotIn("album_id required", "\n".join(job.log))
+        self.assertEqual([(i, f) for i, f, _kw in self.item_metadata_calls], [(iid, {"mb_trackid": RECORDING_ID})])
+        self.assertTrue(self.item_metadata_calls[0][2].get("write_tags"))
+        self.assertFalse(self.item_metadata_calls[0][2].get("within_transaction"))
+        self.assertEqual(self.relocate_calls, [])
+        self.assertEqual(self.items[iid].mb_trackid, RECORDING_ID)
+        self.assertEqual(APP.transactions.get(resp.get_json()["audit_id"])["status"], "Completed")
+
+    def test_singleton_engine_refusal_fails_closed(self):
+        iid = 45002
+        self.add_item(iid, album_id=0)
+        self.rollback_metadata_results[iid] = {"ok": False, "error": "engine refused the write"}
+        resp = self._post_safe(iid)
+        job = _wait_job(resp.get_json()["job_id"])
+        self.assertEqual(job.status, "failed")
+        self.assertIn("refusing local fallback mutation: engine refused the write", "\n".join(job.log))
+        self.assertEqual(self.beet_calls, [])
+        self.assertEqual(self.items[iid].mb_trackid, "")
+        self.assertEqual(APP.transactions.get(resp.get_json()["audit_id"])["status"], "Failed")
+
+    def test_item_removed_before_the_job_fails_with_a_clear_message(self):
+        iid = 45003
+        self.add_item(iid, album_id=0)
+        # The request sees the item; the job thread finds it gone.
+        self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda i: (
+            self.items.get(i) if threading.current_thread() is threading.main_thread() else None)))
+        resp = self._post_safe(iid)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        job = _wait_job(resp.get_json()["job_id"])
+        self.assertEqual(job.status, "failed")
+        log = "\n".join(job.log)
+        self.assertIn(f"Item {iid} no longer exists", log)
+        self.assertNotIn("album_id required", log)
+        self.assertEqual((self.item_metadata_calls, self._track_repair_payloads), ([], []))
+
+
 if __name__ == "__main__":
     unittest.main()

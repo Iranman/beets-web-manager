@@ -543,6 +543,53 @@ class ReconcileTests(_Sync):
         self.assertIn(tx["id"], "".join(logs.output))
         self.assertEqual(self.store.get(tx["id"])["status"], "Running")
 
+    def _orphaned_wrapper(self, job_type="playlist-sync", **meta):
+        """The live record (txn_1792040789_…): created by the job hook, then
+        the process died before the job was attached or its record kept."""
+        return self.store.create(operation_type="Playlist Import", status="Running",
+                                 summary="Playlist sync (automatic)", reason=ts._JOB_WRAPPER_REASON,
+                                 source=job_type, metadata={"type": job_type, "trigger": "auto",
+                                                            "dedupe_key": "playlist-sync", **meta})
+
+    def test_orphaned_job_wrapper_from_an_earlier_process_is_recovery_required(self):
+        tx = self._orphaned_wrapper()
+        time.sleep(0.01)
+        self.install(self.jobstore())
+        self.assertEqual(self.stored_status(tx["id"], "Recovery Required"), "Recovery Required")
+        self.assertIn("job record is gone", " ".join(self.store.get(tx["id"])["logs"]))
+
+    def test_orphaned_read_only_job_wrapper_is_failed(self):
+        tx = self._orphaned_wrapper(job_type="dedup-scan", **{ts._JOB_WRAPPER_MARK: True})
+        jobs = self.jobstore()
+        self.assertTrue(ts._reconcile_running_transactions(jobs, self.store, before=time.time() + 1))
+        self.assertEqual(self.store.get(tx["id"])["status"], "Failed")
+
+    def test_job_wrapper_written_in_this_process_is_left_running(self):
+        # Between the hook's create and its job start there is no job yet.
+        started = time.time()
+        time.sleep(0.01)
+        tx = self._orphaned_wrapper()
+        jobs = self.jobstore()
+        self.assertTrue(ts._reconcile_running_transactions(jobs, self.store, before=started))
+        self.assertTrue(ts._reconcile_running_transactions(jobs, self.store))
+        self.assertEqual(self.store.get(tx["id"])["status"], "Running")
+
+    def test_orphan_with_engine_evidence_is_left_to_the_recovery_sweep(self):
+        txs = [self._orphaned_wrapper(**{ts._JOB_WRAPPER_MARK: True, key: value}) for key, value in (
+            ("mutation_family", "album_relocation_v1"), ("engine_request", {"operation_id": "x"}),
+            ("engine_operation_id", "op1"), ("rollback_request", {"requested_at": 1}),
+            ("engine_result", {"mutation_started": True}), ("mutation_started", True),
+            ("filesystem_mutated", True))]
+        jobs = self.jobstore()
+        self.assertTrue(ts._reconcile_running_transactions(jobs, self.store, before=time.time() + 1))
+        self.assertEqual({self.store.get(t["id"])["status"] for t in txs}, {"Running"})
+
+    def test_hook_marks_the_transactions_it_creates(self):
+        with mock.patch.object(ts, "transactions", self.store):
+            tx = ts._transaction_create_for_job("Playlist sync (automatic)", {"type": "playlist-sync"})
+        self.assertTrue(tx["metadata"][ts._JOB_WRAPPER_MARK])
+        self.assertTrue(ts._is_job_wrapper(tx))
+
     def test_job_that_does_not_name_the_transaction_never_settles_it(self):
         jobs = self.jobstore()
         job = jobs.start_python(lambda log, cancel_event=None: {"ok": True}, label="x", metadata={"type": "t"})

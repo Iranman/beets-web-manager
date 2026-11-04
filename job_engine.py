@@ -542,6 +542,11 @@ class JobStore:
         self._closed = threading.Event()
         self._heartbeat: Optional[threading.Thread] = None
         self._recover_thread: Optional[threading.Thread] = None
+        #: Read-only snapshots of terminal tail records that name a transaction
+        #: (``metadata.transaction_id``), filled by the tail sweep: the only way
+        #: to find a job its transaction never recorded the id of. Not in
+        #: ``_jobs``; the transaction reconcile clears it once consumed.
+        self.tail_transaction_jobs: Dict[str, List["PythonJob"]] = {}
         # Every started job thread, also after clear/prune drops its job:
         # close() must join a thread whose final write is still in flight.
         self._threads: List[threading.Thread] = []
@@ -674,8 +679,9 @@ class JobStore:
         """Background catch-up for records beyond the startup window: resolve
         any interrupted ``running`` straggler, and prune terminal records older
         than ``JOB_RETENTION_DAYS`` from disk. Recent terminal records are left
-        on disk for lazy ``get()``; nothing is held in memory unless it needed
-        resolving, so this does not re-grow the in-memory set."""
+        on disk for lazy ``get()``; nothing joins the in-memory set unless it
+        needed resolving. A terminal record naming a transaction is kept as a
+        snapshot in ``tail_transaction_jobs`` until the reconcile consumes it."""
         cutoff = now - max(0, JOB_RETENTION_DAYS) * 86400.0
         for path in paths:
             if self._closed.is_set():
@@ -687,7 +693,17 @@ class JobStore:
             status = rec.get("status")
             if status == "running":
                 self._load_path(path, now)  # loads + resolves + keeps the straggler
-            elif status in PRUNABLE_STATUSES:
+                continue
+            tx_id = (rec.get("metadata") or {}).get("transaction_id")
+            if tx_id:  # indexed before any prune below: the record may be its only trace
+                try:
+                    snapshot = PythonJob.from_record(rec)
+                except Exception:
+                    snapshot = None
+                if snapshot is not None:
+                    with self._lock:
+                        self.tail_transaction_jobs.setdefault(str(tx_id), []).append(snapshot)
+            if status in PRUNABLE_STATUSES:
                 finished_at = rec.get("finished_at") or rec.get("created_at") or 0
                 if finished_at and finished_at < cutoff:
                     self._delete(rec.get("job_id") or path.stem)
