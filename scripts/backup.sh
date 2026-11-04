@@ -151,7 +151,32 @@ find "${BEETS_CONFIG_DIR}" -maxdepth 1 -name "*.json" -exec cp -p {} "${STAGE}/b
 # local database a very old version created (never used now).
 ( cd "${WEB_MANAGER_DATA_DIR}" && tar -cf - \
     --exclude='./musiclibrary.blb' --exclude='./musiclibrary.blb-wal' --exclude='./musiclibrary.blb-shm' \
-    --exclude='*.lock' . ) | ( cd "${STAGE}/web-manager-data" && tar -xf - )
+    --exclude='*.lock' --exclude='./jobs' . ) | ( cd "${STAGE}/web-manager-data" && tar -xf - )
+# Job records are copied one by one instead: running jobs rewrite jobs/ every
+# few seconds, which makes tar fail ("file changed as we read it"). Web
+# Manager writes each record to a temp file and renames it over <id>.json, so
+# every <id>.json copied here is a complete record: cat reads the one file it
+# opened. (cp is not used: it refuses a file renamed over between its stat and
+# open.) A record pruned between listing and copying is skipped; any other
+# read failure is fatal. Only the top-level <id>.json records are copied.
+JOBS_DIR="${WEB_MANAGER_DATA_DIR}/jobs"
+if [ -d "${JOBS_DIR}" ]; then
+  # An unreadable folder would otherwise look empty to the glob below.
+  { [ -r "${JOBS_DIR}" ] && [ -x "${JOBS_DIR}" ]; } || fail "cannot read the job records folder ${JOBS_DIR}"
+  mkdir -p "${STAGE}/web-manager-data/jobs"
+  shopt -s nullglob
+  for f in "${JOBS_DIR}/"*.json; do
+    dst="${STAGE}/web-manager-data/jobs/${f##*/}"
+    if err="$(cat "$f" 2>&1 > "${dst}")"; then
+      touch -r "$f" "${dst}" 2>/dev/null || :  # mtime only; the record may have been rewritten since
+    elif [ -e "$f" ]; then
+      fail "could not copy job record ${f}: ${err}"
+    else
+      rm -f "${dst}"  # pruned after listing
+    fi
+  done
+  shopt -u nullglob
+fi
 
 {
   echo "created=${STAMP} (UTC)"
