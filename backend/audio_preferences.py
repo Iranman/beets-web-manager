@@ -152,11 +152,28 @@ def save_music_format_preferences(payload: Dict[str, Any], path: Optional[str] =
     return prefs
 
 
+#: ffprobe stderr that describes the host, not the media: ffprobe ends the
+#: line with the strerror text (`<input>: Input/output error`). Anchored to
+#: the line end so a file name containing these words cannot match.
+_FFPROBE_ENV_FAILURE_RE = re.compile(
+    r":\s*(?:Input/output error|Permission denied|Cannot allocate memory|Resource temporarily unavailable"
+    r"|Too many open files|Stale file handle|Device or resource busy|Transport endpoint is not connected"
+    r"|Interrupted system call)\s*$",
+    re.I | re.M,
+)
+
+#: Structured code for an incomplete inspection, carried in a child job's
+#: `{"ok": False, "reason_code": ...}` result across the job boundary.
+AUDIO_INSPECTION_INCOMPLETE = "audio_inspection_incomplete"
+
+
 class AudioInspectionIncomplete(RuntimeError):
     """Audio could not be inspected (ffprobe timed out, was killed or could not
     run). Not a verdict on the audio: the files are kept and not imported, and
     the caller reports a retryable error. Callers must not delete the source or
     staging folder, or try another download source, because of it."""
+
+    reason_code = AUDIO_INSPECTION_INCOMPLETE
 
 
 def _first_audio_stream(probe: Dict[str, Any]) -> Dict[str, Any]:
@@ -329,9 +346,10 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         result["error"] = detail[:400] or f"ffprobe exited with code {proc.returncode}"
-        if proc.returncode < 0 or not detail:
-            # Killed by a signal (e.g. OOM) or exited without saying why: no
-            # verdict on the audio. An ffprobe error message stays a rejection.
+        if proc.returncode < 0 or not detail or _FFPROBE_ENV_FAILURE_RE.search(detail):
+            # Killed by a signal (e.g. OOM), exited without saying why, or the
+            # host could not read the file (I/O, permissions, memory): no
+            # verdict on the audio. A decode/format error stays a rejection.
             result["inspection_incomplete"] = True
         return result
     try:

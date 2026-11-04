@@ -77,7 +77,7 @@ class AudioInspectionTimeoutTests(unittest.TestCase):
         with _HANG, \
                 mock.patch.object(isvc, "_music_format_preferences", return_value=DEFAULT_MUSIC_FORMAT_PREFERENCES), \
                 mock.patch.object(isvc, "_handle_rejected_audio_download") as handle:
-            with self.assertRaisesRegex(RuntimeError, "kept for retry/review"):
+            with self.assertRaisesRegex(RuntimeError, "retry the import later"):
                 isvc._filter_import_review_selected_audio_files([Path("/downloads/x/a.flac")], log)
         handle.assert_not_called()
         joined = "\n".join(log)

@@ -39,6 +39,16 @@ def note_job_progress(**flags: Any) -> None:
         sink(**flags)
 
 
+class ChildJobFailed(RuntimeError):
+    """A child job failed. `reason_code` is the structured code the child
+    returned as `{"ok": False, "reason_code": ...}` ("" when none), so a
+    parent can react to the cause without parsing log text."""
+
+    def __init__(self, message: str, reason_code: str = "") -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 def _call_job_fn(fn, log, cancel=None, update_state=None):
     import inspect as _inspect
     sig = _inspect.signature(fn)
@@ -233,8 +243,10 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
         if child.status != "running":
             if child.status != "success":
                 detail = _child_failure_detail()
-                raise RuntimeError(
-                    f"{prefix} job failed: {detail}" if detail else f"{prefix} job failed"
+                result = getattr(child, "result", None)
+                raise ChildJobFailed(
+                    f"{prefix} job failed: {detail}" if detail else f"{prefix} job failed",
+                    _s(result.get("reason_code")) if isinstance(result, dict) else "",
                 )
             return getattr(child, "result", None)
         if deadline is not None and now >= deadline:

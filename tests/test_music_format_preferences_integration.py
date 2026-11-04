@@ -55,7 +55,7 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertIn('_audio_validation_inspection_failed(row)', helper)
         self.assertIn('source kept in review', helper)
         self.assertIn('deferred.append(path)', helper)
-        self.assertIn('Files were kept for retry/review', helper)
+        self.assertIn('_music_format_inspection_incomplete_error(', helper)
         self.assertIn('Continuing partial import with', helper)
         defer_pos = helper.index('_audio_validation_inspection_failed(row)')
         reject_pos = helper.index('_handle_rejected_audio_download')

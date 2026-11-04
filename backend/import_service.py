@@ -11,7 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_inspection_incomplete_error, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _pending_review_has_path_or_overlap, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
@@ -2077,7 +2077,15 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             with job_contract.held("import-slot", log=log, cancel_event=cancel_event):
                 return _do(log, cancel_event)
 
-    job = jobs.start_python(_do_locked, label=f"Tag+Import disk: {Path(aldir).name}",
+    def _do_reimport_job(log, cancel_event=None):
+        try:
+            return _do_locked(log, cancel_event)
+        except AudioInspectionIncomplete as ex:
+            # A structured failure the parent's _wait_for_child_job carries
+            # back (ChildJobFailed.reason_code): the files were kept, retry.
+            return {"ok": False, "error": str(ex), "reason_code": ex.reason_code}
+
+    job = jobs.start_python(_do_reimport_job, label=f"Tag+Import disk: {Path(aldir).name}",
                             metadata={"aldir": aldir, "mb_albumid": mb_albumid,
                                       "existing_album_id": existing_album_id,
                                       "skip_import_lock": skip_import_lock,
@@ -2344,12 +2352,10 @@ def _filter_import_review_selected_audio_files(audio_files: List[Path], log: lis
         if not source_is_library:
             handled_results.append(_handle_rejected_audio_download(str(path), prefs, log=log))
     if not accepted:
-        if deferred and not rejected:
-            raise AudioInspectionIncomplete(
-                "Audio inspection did not complete for selected files (ffprobe could not finish, "
-                "often because storage or the host was busy). Files were kept for retry/review; "
-                "retry the import later."
-            )
+        if deferred:
+            # Retryable, also when some files were rejected: the uninspected
+            # ones were kept, so this is not a terminal policy outcome.
+            raise _music_format_inspection_incomplete_error(len(deferred), len(rejected), handled_results, prefs)
         raise RuntimeError(
             _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
         )

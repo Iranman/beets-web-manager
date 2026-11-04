@@ -48,6 +48,30 @@ def _ai_thresholds_for(use_case: str) -> Dict[str, Any]:
 def _music_format_policy_rejection_error(rejected_count: int,
                                          handled_results: Optional[List[Dict[str, Any]]] = None,
                                          prefs: Optional[Dict[str, Any]] = None) -> str:
+    handled = _music_format_policy_handled_summary(rejected_count, handled_results, prefs)
+    return (
+        f"{_MUSIC_FORMAT_POLICY_HANDLED_MESSAGE} {handled}. "
+        "Import stopped; choose another source or update Music Format Preferences before retrying."
+    )
+
+
+def _music_format_inspection_incomplete_error(deferred_count: int, rejected_count: int = 0,
+                                              handled_results: Optional[List[Dict[str, Any]]] = None,
+                                              prefs: Optional[Dict[str, Any]] = None) -> AudioInspectionIncomplete:
+    """The retryable error for a batch with uninspected files. A mixed batch
+    also says what happened to the rejected ones, without the policy-handled
+    prefix: the folder is not terminal, the uninspected files were kept."""
+    message = (f"Audio inspection did not complete for {deferred_count} file(s) (ffprobe could not finish, "
+               "often because storage or the host was busy). They were kept in place; retry the import later.")
+    if rejected_count:
+        handled = _music_format_policy_handled_summary(rejected_count, handled_results, prefs)
+        message += f" Separately, {handled} for not matching Music Format Preferences."
+    return AudioInspectionIncomplete(message)
+
+
+def _music_format_policy_handled_summary(rejected_count: int,
+                                         handled_results: Optional[List[Dict[str, Any]]] = None,
+                                         prefs: Optional[Dict[str, Any]] = None) -> str:
     results = list(handled_results or [])
     try:
         count = int(rejected_count or len(results) or 0)
@@ -74,10 +98,7 @@ def _music_format_policy_rejection_error(rejected_count: int,
         handled = f"1 rejected file was {action}"
     else:
         handled = f"{count} rejected files were {action}"
-    return (
-        f"{_MUSIC_FORMAT_POLICY_HANDLED_MESSAGE} {handled}. "
-        "Import stopped; choose another source or update Music Format Preferences before retrying."
-    )
+    return handled
 
 
 def _validate_import_source_audio(path_value: str, log: list, *, reject_downloads: bool = True,
@@ -103,10 +124,7 @@ def _validate_import_source_audio(path_value: str, log: list, *, reject_download
     handled_results: List[Dict[str, Any]] = []
     if not rejected:
         if deferred:
-            raise AudioInspectionIncomplete(
-                f"Audio inspection did not complete for {len(deferred)} file(s) (ffprobe could not finish, "
-                "often because storage or the host was busy). Files were kept in place; retry the import later."
-            )
+            raise _music_format_inspection_incomplete_error(len(deferred))
         return report
     for row in rejected:
         msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"
@@ -129,15 +147,11 @@ def _validate_import_source_audio(path_value: str, log: list, *, reject_download
             "Existing library audio does not match Music Format Preferences. "
             "Current files were kept and marked Needs replacement."
         )
-    policy_error = _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
     if deferred:
         # Mixed batch: the uninspected files are still in the folder, so the
         # caller must keep it (no folder cleanup) and the user retries.
-        raise AudioInspectionIncomplete(
-            f"{policy_error} Audio inspection did not complete for {len(deferred)} other file(s); "
-            "they were kept in place; retry the import later."
-        )
-    raise RuntimeError(policy_error)
+        raise _music_format_inspection_incomplete_error(len(deferred), len(rejected), handled_results, prefs)
+    raise RuntimeError(_music_format_policy_rejection_error(len(rejected), handled_results, prefs))
 
 
 def _ai_match_evidence_packet(use_case: str, *, folder_path: str = "",
@@ -2273,7 +2287,7 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         mark(status="skipped", current_step="canceled" if why == "batch canceled" else why, failure_reason=why)
         return True
 
-    def failed(err: str) -> None:
+    def failed(err: Any) -> None:
         outcome = _ai_batch_import_failure_outcome(err)
         log.append(f"  Import outcome: {outcome['reason']}")
         mark(status=outcome["status"], current_step=outcome["current_step"], failure_reason=outcome["reason"])
@@ -2460,9 +2474,10 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             err.kept_album_ids = [aid]  # type: ignore[attr-defined]
             raise err
     except Exception as ex:
-        outcome = _ai_batch_import_failure_outcome(str(ex))
-        if outcome["status"] == "policy_rejected":
-            failed(str(ex))
+        outcome = _ai_batch_import_failure_outcome(ex)
+        if outcome["status"] != "import_failed" or isinstance(ex, AudioInspectionIncomplete):
+            # Policy-handled (terminal) or not inspected (retryable): no Review row.
+            failed(ex)
             return
         log.append(f"  Automatic import did not complete: {ex}")
         suggestion["reason"] = f"Automatic import did not complete: {ex} " + suggestion["reason"]
@@ -2526,8 +2541,15 @@ def _ai_batch_run_folders(state: Dict[str, Any], log: list, cancel_event=None, u
     return "done"
 
 
-def _ai_batch_import_failure_outcome(error_text: str) -> Dict[str, str]:
-    err = _s(error_text)
+def _ai_batch_import_failure_outcome(error: Any) -> Dict[str, str]:
+    err = _s(error)
+    if isinstance(error, AudioInspectionIncomplete):
+        # Not a verdict on the audio: the folder stays retryable (import_failed).
+        return {
+            "status": "import_failed",
+            "current_step": "audio inspection incomplete; retry",
+            "reason": err,
+        }
     if _is_music_format_policy_handled_error(err):
         return {
             "status": "policy_rejected",
