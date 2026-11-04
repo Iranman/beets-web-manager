@@ -186,6 +186,39 @@ class GiveUpCarriesTheReason(unittest.TestCase):
                 jobsvc._wait_for_child_job(child.job_id, [], prefix="import", timeout=1)
         self.assertEqual(caught.exception.reason_code, _code())
 
+    def test_real_job_engine_child_still_running_after_settle_window(self):
+        import threading
+        import job_engine
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def child_fn(log, cancel_event):
+            log.append("importing")
+            release.wait(30)  # ignores the cancel request past the settle window
+            return {"ok": True}
+
+        store = job_engine.JobStore()
+        child = store.start_python(child_fn, label="child", metadata={})
+        with mock.patch.object(jobsvc, "jobs", store), \
+                mock.patch.object(jobsvc, "is_read_only_job", return_value=False), \
+                mock.patch.object(jobsvc, "CHILD_SETTLE_SECONDS", 1):
+            with self.assertRaises(RuntimeError) as caught:
+                jobsvc._wait_for_child_job(child.job_id, [], prefix="import", timeout=1)
+        self.assertEqual(getattr(caught.exception, "reason_code", None), "child_outcome_unknown")
+        self.assertEqual(child.status, "running")
+
+    def test_acquisition_keeps_staging_when_the_import_job_outlives_the_wait(self):
+        failed_cls = getattr(jobsvc, "ChildJobFailed", RuntimeError)
+        err = failed_cls("import job timed out; job child-1 is still running, so its outcome is unknown",
+                         "child_outcome_unknown")
+        m, ex = ChildJobBoundary._slskd_run(self, err)
+        m["_delete_staged_import_folder"].assert_not_called()
+        m["_slskd_cleanup_failed_candidate_files"].assert_not_called()
+        m["_ytdlp_album_download"].assert_not_called()
+        self.assertEqual(m["_slskd_search_and_queue"].call_count, 1)
+        self.assertIsInstance(ex, ap.AudioInspectionIncomplete)
+        self.assertIn("still running when the wait ended", str(ex))
+
 def _proc(rc, out="", err=""):
     return subprocess.CompletedProcess(["ffprobe"], rc, out, err)
 

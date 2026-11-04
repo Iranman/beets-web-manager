@@ -39,6 +39,14 @@ def note_job_progress(**flags: Any) -> None:
         sink(**flags)
 
 
+#: ChildJobFailed.reason_code when the child was still running after the
+#: settle window (or its record vanished): it may still be working on its
+#: inputs, so the parent must not discard them. Kept here, not next to
+#: AUDIO_INSPECTION_INCOMPLETE, because job_service (layer 1) is the raiser and
+#: must not import audio_preferences.
+CHILD_OUTCOME_UNKNOWN = "child_outcome_unknown"
+
+
 class ChildJobFailed(RuntimeError):
     """A child job failed. `reason_code` is the structured code the child
     returned as `{"ok": False, "reason_code": ...}` ("" when none), so a
@@ -193,7 +201,7 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
                        "it may have changed the library before it stopped.")
         else:
             log.append(f"  [{prefix}] Job {job_id} stopped ({done.status}) before reporting a library change.")
-        return ChildJobFailed("cancelled", _reason_code(done)) if done is not None else RuntimeError("cancelled")
+        return ChildJobFailed("cancelled", _reason_code(done) if done is not None else CHILD_OUTCOME_UNKNOWN)
 
     def _give_up(child: Any, reason: str) -> Any:
         """Timeout or stall: a read-only child is simply stopped; a mutating
@@ -204,7 +212,8 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
         done = _settle(child)
         if done is None:
             _note_unknown()
-            raise RuntimeError(f"{reason}; job {job_id} is still running, so its outcome is unknown")
+            raise ChildJobFailed(f"{reason}; job {job_id} is still running, so its outcome is unknown",
+                                 CHILD_OUTCOME_UNKNOWN)
         if done.status == "success":
             log.append(f"  [{prefix}] Job {job_id} finished its work after all ({reason}); continuing with its result.")
             return getattr(done, "result", None)

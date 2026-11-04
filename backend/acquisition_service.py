@@ -27,11 +27,19 @@ from backend.acoustid_service import _album_track_norm
 from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
 from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED, IMPORT_REFUSAL_REASONS, import_refusal_reason_code, _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
 from backend.app_runtime import jobs, WEB_MANAGER_DATA_DIR
-from backend.job_service import ChildJobFailed, _wait_for_child_job
+from backend.job_service import CHILD_OUTCOME_UNKNOWN, ChildJobFailed, _wait_for_child_job
 from job_engine import DuplicateJobError
 from backend.serializers import _json_from_flask_response
 
 # ── ARCH-001 extracted code ──
+
+
+class ImportStillRunning(AudioInspectionIncomplete):
+    """The parent stopped waiting while the child import job was still
+    running. Same handling as an incomplete inspection (keep the staging
+    folder, no peer cleanup, no fallback source), so it subclasses it."""
+
+    reason_code = CHILD_OUTCOME_UNKNOWN
 
 
 def _wanted_tracks_satisfied_by_names(names: List[Any],
@@ -1076,6 +1084,13 @@ class _AlbumDownloadRun:
                 # The child's own audio check could not inspect a file: keep
                 # the staging folder (no discard, no other source).
                 raise AudioInspectionIncomplete(str(ex)) from ex
+            if ex.reason_code == CHILD_OUTCOME_UNKNOWN:
+                # The import job may still be reading or importing the staged
+                # files: deleting them or trying another source is unsafe.
+                raise ImportStillRunning(
+                    f"Import job {import_job_id} was still running when the wait ended ({ex}). "
+                    f"The staging folder {import_dir} was kept; check the job in Jobs and retry "
+                    "the download later.") from ex
             raise
         log.append("[import] Complete — files imported, tagged, and moved into the music folder")
         if undelivered:
