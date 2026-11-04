@@ -536,6 +536,19 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                     out, opened = self._suggest(path, base + bad + "}")
                     self._assert_evidence_fallback(out)
                     opened.assert_called_once()
+    def test_wrong_artist_candidate_is_rejected_on_both_paths(self):
+        reply = {"candidate_index": 0, "albumartist": "Other", "confidence": "high", "reason": "ai reason"}
+        for path in ("album", "folder"):
+            with self.subTest(path):
+                s = self._suggest(path, reply, artist="Completely Different Band")[0]["suggestion"]
+                self.assertFalse(s["identity_validated"])
+                self.assertIn("artist mismatch", s["candidate_identity_error"])
+                if path == "album":
+                    self.assertEqual(s["confidence"], "low")
+                    self.assertIn("artist mismatch", s["reason"])
+                s = self._suggest(path, reply)[0]["suggestion"]
+                self.assertTrue(s["identity_validated"])
+                self.assertEqual(s["candidate_identity_error"], "")
 
 
 class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):

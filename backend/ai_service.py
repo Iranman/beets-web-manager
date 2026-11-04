@@ -27,7 +27,7 @@ from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
 from backend.import_identity import _recursive_audio, identify_import_folder
 import backend.composite_workflows as composite_workflows
-from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
+from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score
 from backend.artwork_service import _fetch_artwork_after_retag
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_match_score
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok
@@ -448,6 +448,22 @@ def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str,
     return selected_candidate, mb_id
 
 
+def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artist: str) -> str:
+    """Reject a candidate whose artist doesn't match the source's own artist,
+    whatever its album title (2026-07-16, Voyager/Vitalic: "same title,
+    different artist"). Empty string = no rejection."""
+    source_artist = _s(source_artist).strip()
+    cand_artist = _s((candidate or {}).get("artist", "")).strip()
+    if not source_artist or not cand_artist:
+        return ""
+    if _playlist_artist_name_score(source_artist, cand_artist) >= 0.45:
+        return ""
+    return (
+        "Rejected: artist mismatch. Album title matched, but "
+        f"candidate artist is {cand_artist} and source artist is {source_artist}."
+    )
+
+
 def _classify_openai_error(exc: Exception) -> str:
     """Classify an OpenAI request failure into a short, human-readable reason.
 
@@ -792,6 +808,14 @@ def _ai_suggest_album_internal(
             sug["mb_artist_search_url"] = (
                 "https://musicbrainz.org/search?"
                 + urllib.parse.urlencode({"query": _aa, "type": "artist"}))
+        # Same artist gate as the folder path. Album consumers (Missing IDs,
+        # batch cache) read confidence, so a rejection also drops it to low.
+        identity_rejection_reason = _ai_artist_mismatch_reason(selected_candidate, album.albumartist)
+        sug["identity_validated"] = not identity_rejection_reason
+        sug["candidate_identity_error"] = identity_rejection_reason
+        if identity_rejection_reason:
+            sug["confidence"] = "low"
+            sug["reason"] = f"{identity_rejection_reason} {_s(sug.get('reason'))}".strip()
         sug["ai_available"] = ai_available
         sug["ai_unavailable_reason"] = ai_unavailable_reason
         evidence = _ai_match_evidence_packet(
@@ -1608,17 +1632,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         # a matching album title must never rescue a wrong-artist candidate
         # (2026-07-16, Voyager/Vitalic fix: "same title, different artist"
         # was slipping through an earlier AND-based version of this check).
-        identity_rejection_reason = ""
-        if selected_candidate and guessed_artist:
-            cand_artist = _s(selected_candidate.get("artist", "")).strip()
-            cand_album = _s(selected_candidate.get("album", "")).strip()
-            artist_score = _playlist_artist_name_score(guessed_artist, cand_artist)
-            album_score = _playlist_title_score(guessed_album, cand_album)
-            if cand_artist and artist_score < 0.45:
-                identity_rejection_reason = (
-                    "Rejected: artist mismatch. Album title matched, but "
-                    f"candidate artist is {cand_artist} and source artist is {guessed_artist}."
-                )
+        identity_rejection_reason = _ai_artist_mismatch_reason(selected_candidate, guessed_artist)
         sug["identity_validated"] = not bool(identity_rejection_reason)
         sug["candidate_identity_error"] = identity_rejection_reason
         sug["ai_available"] = ai_available
