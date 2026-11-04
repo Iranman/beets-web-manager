@@ -9,6 +9,7 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - **AI album and folder replies keep only the fields the prompt asks for (#521).** Extra keys such as `confidence_score`, `match_total`, `track_mapping` or `trusted_for_apply` are dropped, so these keys can no longer make a weak match eligible for auto-import or break the review page. A reply with a malformed field, including a `NaN` value, now counts as a failed reply and falls back to MusicBrainz and AcoustID evidence.
+- **Album AI suggestions now check the artist, like folder suggestions already did.** Find Match and the batch AI suggest job could label a same-title release by a different artist "high" confidence. The selected MusicBrainz candidate's artist is now compared with the album artist stored in Beets (not the artist the AI names); on a mismatch the suggestion is marked unvalidated, its confidence drops to "low", and the reason starts with the mismatch. Names that score below the match threshold, such as "VA" for "Various Artists" or a romanized name, also show as low confidence.
 
 ## v0.16.2 - 2026-11-04
 
