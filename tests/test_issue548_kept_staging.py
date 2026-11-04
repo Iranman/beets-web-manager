@@ -22,6 +22,7 @@ from tests._module_time import module_time
 
 acq = ap = jobsvc = rc = recovery_service = job_engine = None
 RGID = "37cb4a72-3333-4444-5555-666666666666"
+PREFIX = "rec-0123456789abcdef"
 
 
 def setUpModule():
@@ -33,6 +34,11 @@ def setUpModule():
     import backend.recovery_carrier as rc
     import backend.recovery_service as recovery_service
     import job_engine
+
+
+_needs_fd = unittest.skipUnless(
+    hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd and os.rename in os.supports_dir_fd,
+    "the marker write needs fd-relative ops (Linux CI runs these)")
 
 
 class _Env(unittest.TestCase):
@@ -83,6 +89,7 @@ class KeptFolderSurvivesSweep(_Env):
         t = time.time() - seconds
         os.utime(str(path), (t, t))
 
+    @_needs_fd
     def test_marked_folder_is_kept_until_the_marker_expires(self):
         d = self._old_folder("abc123-A - B")
         self.assertTrue(recovery_service.mark_staging_folder_kept(str(d)))
@@ -99,8 +106,25 @@ class KeptFolderSurvivesSweep(_Env):
         self.assertFalse(recovery_service.mark_staging_folder_kept(str(outside)))
         self.assertFalse((outside / recovery_service.KEPT_STAGING_MARKER).exists())
 
+    @_needs_fd
     def test_folder_kept_by_acquisition_survives_the_sweep(self):
         stage = self._old_folder("abc123-A - B")
+        log, _ex = self._acquire(stage)
+        self._age(stage, recovery_service.ORPHAN_MIN_AGE_S + 3600)
+        self.assertEqual(self._sweep(), [])
+        self.assertTrue((stage / "01.flac").is_file())
+        self.assertTrue(any("removed after 7 days" in line for line in log), log)
+
+    def test_unmarked_folder_says_copies_may_go(self):  # F4
+        stage = self._old_folder("abc123-A - B")
+        with mock.patch.object(recovery_service, "mark_staging_folder_kept", return_value=False):
+            log, ex = self._acquire(stage)
+        self.assertIsInstance(ex, acq.ImportStillRunning)
+        self.assertIn("could not be marked for retention", str(ex))
+        self.assertIn("original Soulseek downloads stay in place", str(ex))
+        self.assertTrue(any("WARN could not mark" in line for line in log), log)
+
+    def _acquire(self, stage):
         dl_root = Path(self.tmp)
         err = jobsvc.ChildJobFailed("import job timed out; job child-1 is still running",
                                     jobsvc.CHILD_OUTCOME_UNKNOWN)
@@ -126,12 +150,55 @@ class KeptFolderSurvivesSweep(_Env):
                                                 "auto_import": True, "try_source_fallback": False})
             self.assertTrue(body["ok"], body)
             log = []
-            with self.assertRaises(acq.ImportStillRunning):
+            with self.assertRaises(acq.ImportStillRunning) as caught:
                 m["jobs"].start_python.call_args[0][0](log)
-        self._age(stage, recovery_service.ORPHAN_MIN_AGE_S + 3600)
-        self.assertEqual(self._sweep(), [])
-        self.assertTrue((stage / "01.flac").is_file())
-        self.assertTrue(any("removed after 7 days" in line for line in log), log)
+        return log, caught.exception
+
+
+@_needs_fd
+class MarkerWriteIsFdSafe(_Env):
+    """F1: the marker write never opens a planted entry's target."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self._old_folder("abc123-A - B")
+        self.marker = self.folder / recovery_service.KEPT_STAGING_MARKER
+        self.outside = Path(self.tmp) / "library-file.flac"
+        self.outside.write_bytes(b"precious audio bytes")
+
+    def _outside_intact(self):
+        self.assertEqual(self.outside.read_bytes(), b"precious audio bytes")
+
+    def test_hardlinked_marker_target_is_untouched(self):
+        os.link(self.outside, self.marker)
+        self.assertTrue(recovery_service.mark_staging_folder_kept(str(self.folder)))
+        self._outside_intact()
+        self.assertEqual(os.stat(self.outside).st_nlink, 1)  # our link was replaced, not written through
+        self.assertEqual(os.stat(self.marker, follow_symlinks=False).st_nlink, 1)
+
+    def test_symlinked_marker_target_is_untouched(self):
+        os.symlink(self.outside, self.marker)
+        recovery_service.mark_staging_folder_kept(str(self.folder))
+        self._outside_intact()
+        self.assertFalse(self.marker.is_symlink())
+
+    def test_symlinked_folder_is_refused(self):
+        target = Path(self.tmp) / "elsewhere"
+        target.mkdir()
+        link = self.root / "rec-0123456789abcdef-X"
+        os.symlink(target, link)
+        self.assertFalse(recovery_service.mark_staging_folder_kept(str(link)))
+        self.assertEqual(os.listdir(target), [])
+
+    def test_planted_hardlink_marker_does_not_keep_the_folder(self):
+        os.link(self.outside, self.marker)
+        self.assertFalse(recovery_service._kept_for_retry(str(self.folder), time.time()))
+        self._outside_intact()
+
+    def test_no_temp_file_left_behind(self):
+        self.assertTrue(recovery_service.mark_staging_folder_kept(str(self.folder)))
+        self.assertEqual(sorted(p.name for p in self.folder.iterdir()),
+                         sorted(["01.flac", recovery_service.KEPT_STAGING_MARKER]))
 
 
 class _ReachedStaging(Exception):
@@ -150,8 +217,31 @@ class RetryWaitsForRunningImport(_Env):
     def _run(self):
         req = SimpleNamespace(recovery_carrier_id=self.cid, forced_albumartist="", existing_album_id=42,
                               replace_existing_item_ids=[], mb_albumid="rel-1", track_count=1,
-                              wanted_tracks=[{"track": 1}])
+                              wanted_tracks=[{"track": 1}], recovery_stage_prefix=PREFIX)
         return acq._AlbumDownloadRun(req, [], None)
+
+    def test_running_import_on_the_prefix_blocks_without_a_carrier_note(self):  # F2/F3
+        child = self.store.start_python(lambda log, cancel: self.release.wait(30) and {"ok": True},
+                                        label="reimport", metadata={"aldir": f"/dl/x/{PREFIX}-A - B"})
+        retry = self._run()  # prior_carrier is None: the carrier read failed / no note
+        with mock.patch.object(acq, "jobs", self.store):
+            with self.assertRaises(RuntimeError) as caught:
+                retry._recovery_refuse_while_import_runs()
+        self.assertIn(child.job_id, str(caught.exception))
+
+    def test_job_listing_failure_fails_closed(self):  # F2
+        broken = mock.Mock()
+        broken.all.side_effect = OSError("boom")
+        with mock.patch.object(acq, "jobs", broken):
+            with self.assertRaises(RuntimeError) as caught:
+                self._run()._recovery_refuse_while_import_runs()
+        self.assertIn("retry the download later", str(caught.exception))
+
+    def test_unrelated_running_job_does_not_block(self):
+        self.store.start_python(lambda log, cancel: self.release.wait(30) and {"ok": True},
+                                label="reimport", metadata={"aldir": "/dl/x/rec-ffffffffffffffff-C - D"})
+        with mock.patch.object(acq, "jobs", self.store):
+            self._run()._recovery_refuse_while_import_runs()
 
     def test_resume_read_is_kept_for_the_check(self):
         run = self._run()
@@ -224,7 +314,10 @@ class LoaderLineOnly(unittest.TestCase):
         for stderr in ("file:/downloads/error while loading shared libraries.flac: "
                        "Invalid data found when processing input",
                        "file:/downloads/x: error while loading shared libraries: y.flac: "
-                       "Invalid data found when processing input"):
+                       "Invalid data found when processing input",
+                       # F5: a spoofed loader line after a newline in a file name
+                       "file:/downloads/a\n/usr/bin/ffprobe: error while loading shared libraries: "
+                       "libx.so: cannot open shared object file"):
             with self.subTest(stderr=stderr):
                 result = self._validate(stderr)
                 self.assertFalse(result["inspection_incomplete"])

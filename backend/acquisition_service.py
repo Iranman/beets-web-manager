@@ -682,27 +682,45 @@ class _AlbumDownloadRun:
         folder, so a retry does not restage over it while it runs."""
         if not self.req.recovery_carrier_id:
             return
+        problem = "carrier not found"
         for _attempt in range(2):  # one retry on a concurrent carrier write
             try:
-                recovery_carrier.note_active_import_job(self.req.recovery_carrier_id, job_id)
-                return
+                if recovery_carrier.note_active_import_job(self.req.recovery_carrier_id, job_id) is not None:
+                    return
+                break
             except Exception as ex:
-                err = ex
-        self.log.append(f"  [recovery] WARN could not record import job {job_id}: {type(err).__name__}")
+                problem = type(ex).__name__
+        # Not fatal: _recovery_refuse_while_import_runs also finds the job by
+        # its staging path, so a retry is still held off.
+        self.log.append(f"  [recovery] WARN could not record import job {job_id} on the carrier: {problem}")
 
     def _recovery_refuse_while_import_runs(self) -> None:
         """#548: an earlier attempt's import job may still be reading the
-        ``rec-<hex>`` staging folder this retry would restage over (an
-        ImportStillRunning outcome). Refuse until that job has ended."""
-        carrier = self.prior_carrier or {}
-        if _s(carrier.get("carrier_id")) != _s(self.req.recovery_carrier_id):
+        deterministic staging folder this retry would restage over (an
+        ImportStillRunning outcome). Refuse while any running job works on a
+        path carrying this recovery's ``rec-<hex>`` prefix, or is the import job
+        noted on the carrier. The path check does not depend on the carrier, so
+        it also holds when the carrier read failed or the note was not written.
+        If the running jobs cannot be listed, refuse (fail closed)."""
+        prefix = _s(self.req.recovery_stage_prefix).strip()
+        if not prefix:
             return
-        job_id = _s(carrier.get("active_import_job_id")).strip()
-        child = jobs.get(job_id) if job_id else None
-        if child is not None and getattr(child, "status", "") == "running":
+        carrier = self.prior_carrier or {}
+        noted = (_s(carrier.get("active_import_job_id")).strip()
+                 if _s(carrier.get("carrier_id")) == _s(self.req.recovery_carrier_id) else "")
+        try:
+            running = [j for j in jobs.all() if getattr(j, "status", "") == "running"]
+        except Exception as ex:
             raise RuntimeError(
-                f"Import job {job_id} from an earlier attempt is still running on the staged files. "
-                "Wait for it to finish in Jobs, then retry the download.")
+                "Could not check whether an earlier import job is still using the staged files "
+                f"({type(ex).__name__}); retry the download later.") from ex
+        for job in running:
+            meta = getattr(job, "metadata", None) or {}
+            if (noted and job.job_id == noted) or any(
+                    prefix in _s(meta.get(key)) for key in ("aldir", "path")):
+                raise RuntimeError(
+                    f"Import job {job.job_id} from an earlier attempt is still running on the staged files. "
+                    "Wait for it to finish in Jobs, then retry the download.")
 
     def _recovery_advance(self, state: str, checkpoint: str, *,
                           source_folder: str = "") -> None:
@@ -1448,14 +1466,19 @@ class _AlbumDownloadRun:
                 }
                 download_result.update(
                     self._import_downloaded_album(import_dir, dl_wanted_tracks))
-            except AudioInspectionIncomplete:
+            except AudioInspectionIncomplete as ex:
                 # Files kept for retry; do not discard or try another peer, and
                 # keep the orphan sweep off the folder (#548).
                 if recovery_service.mark_staging_folder_kept(import_dir):
                     days = recovery_service.KEPT_STAGING_RETENTION_S // 86400
                     log.append(f"  [slskd] Kept {import_dir} for a retry; it is removed after "
                                f"{days} days if nothing imports it.")
-                raise
+                    raise
+                log.append(f"  [slskd] WARN could not mark {import_dir} as kept for a retry.")
+                raise type(ex)(
+                    f"{ex} The staged copies in {import_dir} could not be marked for retention, so the "
+                    "staging cleanup may remove them; the original Soulseek downloads stay in place "
+                    "and a retry stages them again.") from ex
             except Exception as ex:
                 last_import_error = ex
                 if not self._slskd_discard_failed_import(dl, import_dir, ex):

@@ -387,7 +387,9 @@ class World:
 
     def note_active_import_job(self, carrier_id, job_id):
         self._write("note_import_job")
-        self.carriers.setdefault(carrier_id, {"carrier_id": carrier_id})["active_import_job_id"] = job_id
+        row = self.carriers.setdefault(carrier_id, {"carrier_id": carrier_id})
+        row["active_import_job_id"] = job_id
+        return copy.deepcopy(row)
 
     def plex_leg(self, carrier, log):
         self.carriers[carrier["carrier_id"]]["checkpoint"] = "PLEX_SYNCED"
@@ -580,6 +582,7 @@ def run_scenario(cfg):
     world = World(tmp, cfg)
     jobs = mock.Mock()
     jobs.start_python.return_value.job_id = "job-1"
+    jobs.all.return_value = []  # no earlier import job still running (#548 retry guard)
     trace = {}
     patches = world.patches() + [mock.patch.object(acq, "jobs", jobs)]
     for patch in patches:

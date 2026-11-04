@@ -229,24 +229,55 @@ KEPT_STAGING_MARKER = ".bwm_kept_for_retry"
 KEPT_STAGING_RETENTION_S = 7 * 24 * 3600
 
 
+def _marker_fd_supported() -> bool:
+    return (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+            and os.open in os.supports_dir_fd and os.rename in os.supports_dir_fd
+            and os.unlink in os.supports_dir_fd)
+
+
 def mark_staging_folder_kept(folder: str) -> bool:
     """Write the retention marker into a top-level staging folder. Best-effort:
-    False (nothing written) for a folder outside the staging root or on error."""
+    False (nothing written) for a folder outside the staging root, on a host
+    without fd-relative ops, or on error.
+
+    SEC-007/#325 discipline (as ``slskd._staged_copy_nofollow``): the folder is
+    opened fd-relative from the staging root with O_DIRECTORY|O_NOFOLLOW (a
+    folder swapped for a symlink is refused at open, no path re-resolution),
+    the bytes go to a fresh O_CREAT|O_EXCL|O_NOFOLLOW temp, and ``rename``
+    replaces whatever entry sits at the marker name -- a planted symlink or
+    hard link is unlinked from this folder, its target is never opened."""
     root = _staging_root()
-    if not root or not folder:
+    if not root or not folder or not _marker_fd_supported():
         return False
+    name = os.path.basename(os.path.normpath(folder))
+    if name in ("", ".", "..") or os.path.realpath(os.path.dirname(os.path.normpath(folder))) != root:
+        return False
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fds: List[int] = []
     try:
-        if os.path.dirname(os.path.realpath(folder)) != root or os.path.islink(folder):
-            return False
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(os.path.join(folder, KEPT_STAGING_MARKER), flags, 0o600)
+        fds.append(os.open(root, dir_flags))
+        fds.append(os.open(name, dir_flags, dir_fd=fds[0]))
+        folder_fd = fds[1]
+        tmp = f".bwm_kept_{os.urandom(6).hex()}.part"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder_fd)
         try:
-            os.write(fd, str(int(time.time())).encode("ascii"))
-        finally:
-            os.close(fd)
+            try:
+                os.write(fd, str(int(time.time())).encode("ascii"))
+            finally:
+                os.close(fd)
+            os.rename(tmp, KEPT_STAGING_MARKER, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=folder_fd)
+            except OSError:
+                pass
+            raise
         return True
     except OSError:
         return False
+    finally:
+        for opened in reversed(fds):
+            os.close(opened)
 
 
 def _kept_for_retry(folder: str, now: float) -> bool:
@@ -254,7 +285,9 @@ def _kept_for_retry(folder: str, now: float) -> bool:
         st = os.stat(os.path.join(folder, KEPT_STAGING_MARKER), follow_symlinks=False)
     except OSError:
         return False
-    return stat.S_ISREG(st.st_mode) and now - st.st_mtime < KEPT_STAGING_RETENTION_S
+    # Only a marker this code wrote counts: a regular file with one link.
+    return (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+            and now - st.st_mtime < KEPT_STAGING_RETENTION_S)
 
 
 def _staging_root() -> str:
