@@ -287,7 +287,7 @@ def _kept_for_retry(folder: str, now: float) -> bool:
         return False
     # Only a marker this code wrote counts: a regular file with one link.
     return (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
-            and now - st.st_mtime < KEPT_STAGING_RETENTION_S)
+            and 0 <= now - st.st_mtime < KEPT_STAGING_RETENTION_S)
 
 
 def _staging_root() -> str:

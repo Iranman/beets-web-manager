@@ -195,6 +195,12 @@ class MarkerWriteIsFdSafe(_Env):
         self.assertFalse(recovery_service._kept_for_retry(str(self.folder), time.time()))
         self._outside_intact()
 
+    def test_future_dated_marker_does_not_keep_the_folder(self):  # N1
+        self.assertTrue(recovery_service.mark_staging_folder_kept(str(self.folder)))
+        future = time.time() + 365 * 86400
+        os.utime(str(self.marker), (future, future))
+        self.assertFalse(recovery_service._kept_for_retry(str(self.folder), time.time()))
+
     def test_no_temp_file_left_behind(self):
         self.assertTrue(recovery_service.mark_staging_folder_kept(str(self.folder)))
         self.assertEqual(sorted(p.name for p in self.folder.iterdir()),
