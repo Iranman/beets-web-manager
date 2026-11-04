@@ -200,22 +200,21 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
     The exception is a job-wrapper transaction last written before ``before``
     (this process's start) with no job record in memory, by id, or among the
     tail sweep's on-disk records (``tail_transaction_jobs``): no job exists to
-    settle it. Pass ``before`` only once the tail sweep has finished."""
+    settle it. Pass ``before`` only once the tail sweep has finished.
+
+    The tail snapshots speak only for job-wrapper transactions: an engine
+    transaction is reached only by jobs in memory or named by id (#545)."""
     grouped = _jobs_by_transaction(job_store)
-    for tx_id, snapshots in list((getattr(job_store, "tail_transaction_jobs", None) or {}).items()):
-        known = {j.job_id for j in grouped.get(tx_id, [])}
-        grouped.setdefault(tx_id, []).extend(j for j in snapshots if j.job_id not in known)
-    rows, total = store.list(status="Running", limit=500)
-    while len(rows) < total:
-        page, _total = store.list(status="Running", offset=len(rows), limit=500)
-        if not page:
-            break
-        rows += page
+    tail = dict(getattr(job_store, "tail_transaction_jobs", None) or {})
+    rows = _running_rows(store)
     ok, unbound = True, []
     for row in rows:
         tx_id = str(row["id"])
         meta = row.get("metadata") or {}
         candidates = list(grouped.get(tx_id) or [])
+        if tail.get(tx_id) and _is_job_wrapper(row):
+            known = {c.job_id for c in candidates}
+            candidates += [j for j in tail[tx_id] if j.job_id not in known]
         # Beyond the startup window a job is on disk only; get() loads it by id.
         for job_id in (meta.get("rollback_job_id"), row.get("originating_job"), meta.get("job_id")):
             job = job_store.get(job_id) if job_id else None
@@ -241,10 +240,39 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
         except Exception as ex:
             ok = False
             _app_logger.warning("transaction sync failed for %s, will retry: %s", tx_id, type(ex).__name__)
-    if unbound:
+    if unbound and before is None:  # nothing judged yet: the startup job scan is still running
+        _app_logger.debug("%d Running transaction(s) have no job record yet, pending the startup job scan: %s",
+                          len(unbound), ", ".join(unbound[:20]))
+    elif unbound:
         _app_logger.warning("%d Running transaction(s) have no job record and were left unchanged: %s",
                             len(unbound), ", ".join(unbound[:20]))
     return ok
+
+
+#: Rows per ``store.list`` page while collecting Running transactions.
+_RUNNING_PAGE = 500
+
+
+def _running_rows(store) -> List[Dict[str, Any]]:
+    """Every Running transaction. One page is one consistent read. Across
+    several, offsets shift when a row leaves Running between reads and one
+    could be skipped, so the pages are re-read until a pass finds no id it
+    had not seen (#545)."""
+    seen: Dict[str, Dict[str, Any]] = {}
+    for _pass in range(5):  # ponytail: bounded; churn past 5 passes leaves a row for the next pass
+        added, offset, pages = False, 0, 0
+        while True:
+            page, total = store.list(status="Running", offset=offset, limit=_RUNNING_PAGE)
+            pages += 1
+            for row in page:
+                added = added or str(row["id"]) not in seen
+                seen.setdefault(str(row["id"]), row)
+            offset += len(page)
+            if not page or offset >= total:
+                break
+        if pages == 1 or (_pass and not added):
+            break
+    return list(seen.values())
 
 
 def _install_transaction_job_hooks() -> None:
@@ -264,8 +292,10 @@ def _install_transaction_job_hooks() -> None:
         if not reconcile_due.is_set():
             return
         reconcile_due.clear()
-        tail = job_store._recover_thread
-        settled = tail is None or not tail.is_alive()  # read first: the pass must see all of the tail
+        # Read first: the pass must see all of the tail. A sweep thread that
+        # died is not a finished one (#545), so require its completion flag.
+        scanned = getattr(job_store, "tail_scan_complete", None)
+        settled = scanned is None or scanned.is_set()
         try:
             # The tail sweep has finished: every on-disk record naming a
             # transaction is in memory or in tail_transaction_jobs.

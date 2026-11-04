@@ -547,6 +547,11 @@ class JobStore:
         #: to find a job its transaction never recorded the id of. Not in
         #: ``_jobs``; the transaction reconcile clears it once consumed.
         self.tail_transaction_jobs: Dict[str, List["PythonJob"]] = {}
+        #: Set once every on-disk record has been read: at once when there is
+        #: no tail, else when the tail sweep reaches its end. A sweep that died
+        #: or was stopped by close() never sets it, so nothing reads a partial
+        #: tail as a complete one (#545).
+        self.tail_scan_complete = threading.Event()
         # Every started job thread, also after clear/prune drops its job:
         # close() must join a thread whose final write is still in flight.
         self._threads: List[threading.Thread] = []
@@ -556,7 +561,9 @@ class JobStore:
                 self.root.mkdir(parents=True, exist_ok=True)
             except OSError:
                 self.root = None
-        if self.root is not None:
+        if self.root is None:
+            self.tail_scan_complete.set()  # nothing on disk
+        else:
             self._recover()
             self._heartbeat = threading.Thread(target=self._heartbeat_loop, daemon=True, name="job-heartbeat")
             self._heartbeat.start()
@@ -616,6 +623,7 @@ class JobStore:
                 except OSError:
                     continue
         except OSError:
+            self.tail_scan_complete.set()  # nothing readable to scan
             return
         entries.sort(key=lambda e: e[0], reverse=True)  # newest first
         limit = JOB_STARTUP_LOAD_LIMIT if JOB_STARTUP_LOAD_LIMIT > 0 else len(entries)
@@ -627,6 +635,8 @@ class JobStore:
                 target=self._recover_tail, args=(tail, now),
                 daemon=True, name="job-recover-tail")
             self._recover_thread.start()
+        else:
+            self.tail_scan_complete.set()
 
     def _load_path(self, path: Path, now: float) -> Optional["PythonJob"]:
         """Load one persisted record, resolving it if this process never
@@ -681,32 +691,44 @@ class JobStore:
         than ``JOB_RETENTION_DAYS`` from disk. Recent terminal records are left
         on disk for lazy ``get()``; nothing joins the in-memory set unless it
         needed resolving. A terminal record naming a transaction is kept as a
-        snapshot in ``tail_transaction_jobs`` until the reconcile consumes it."""
+        snapshot in ``tail_transaction_jobs`` until the reconcile consumes it.
+        Sets ``tail_scan_complete`` only after the last record; a malformed
+        record is skipped, never the end of the sweep (#545)."""
         cutoff = now - max(0, JOB_RETENTION_DAYS) * 86400.0
         for path in paths:
             if self._closed.is_set():
                 return
             try:
-                rec = json.loads(path.read_text(encoding="utf-8"))
+                self._recover_tail_record(path, now, cutoff)
             except Exception:
-                continue
-            status = rec.get("status")
-            if status == "running":
-                self._load_path(path, now)  # loads + resolves + keeps the straggler
-                continue
-            tx_id = (rec.get("metadata") or {}).get("transaction_id")
-            if tx_id:  # indexed before any prune below: the record may be its only trace
-                try:
-                    snapshot = PythonJob.from_record(rec)
-                except Exception:
-                    snapshot = None
-                if snapshot is not None:
-                    with self._lock:
-                        self.tail_transaction_jobs.setdefault(str(tx_id), []).append(snapshot)
-            if status in PRUNABLE_STATUSES:
-                finished_at = rec.get("finished_at") or rec.get("created_at") or 0
-                if finished_at and finished_at < cutoff:
-                    self._delete(rec.get("job_id") or path.stem)
+                _log.warning("job tail sweep skipped an unreadable record %s", path.name, exc_info=True)
+        self.tail_scan_complete.set()
+
+    def _recover_tail_record(self, path: Path, now: float, cutoff: float) -> None:
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(rec, dict):
+            return
+        status = rec.get("status")
+        if status == "running":
+            self._load_path(path, now)  # loads + resolves + keeps the straggler
+            return
+        meta = rec.get("metadata")
+        tx_id = meta.get("transaction_id") if isinstance(meta, dict) else None
+        if tx_id:  # indexed before any prune below: the record may be its only trace
+            try:
+                snapshot = PythonJob.from_record(rec)
+            except Exception:
+                snapshot = None
+            if snapshot is not None:
+                with self._lock:
+                    self.tail_transaction_jobs.setdefault(str(tx_id), []).append(snapshot)
+        if status in PRUNABLE_STATUSES:
+            finished_at = rec.get("finished_at") or rec.get("created_at") or 0
+            if isinstance(finished_at, (int, float)) and finished_at and finished_at < cutoff:
+                self._delete(rec.get("job_id") or path.stem)
 
     def _heartbeat_loop(self) -> None:
         while not self._closed.wait(HEARTBEAT_SECONDS):

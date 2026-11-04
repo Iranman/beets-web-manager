@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **The startup job scan behind job-transaction recovery is more robust (#545).** One malformed job record (for example `metadata` that is not an object, or a text `finished_at`) no longer stops the background scan of older job records; it is skipped with a warning. Orphaned job transactions are now judged only after that scan has read every record (an explicit completion flag), so a scan that crashed or was stopped can no longer make a job transaction whose job comes later in the scan look orphaned. Job records found by the scan now settle only job transactions; a transaction with engine evidence is settled by its recovery sweep or a job in memory, as before #541 (an interrupted job found by the scan still settles its transaction). Collecting Running transactions re-reads its pages until nothing new appears, so a transaction leaving Running between page reads can no longer hide another one. While the scan is still running, "Running transaction(s) have no job record" is logged at debug level ("pending the startup job scan") instead of as a warning.
+
 ## v0.16.1 - 2026-11-03
 
 ### Fixed
