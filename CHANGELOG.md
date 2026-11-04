@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **An item metadata update no longer writes without a before-state (#546).** When the item could not be read or no longer existed, the update still reported success and its transaction Completed, but its Undo then had nothing to restore. It now writes nothing and the transaction ends Failed with the reason ("Item N no longer exists" or "could not be read").
+- **Attaching a Recording ID checks that the track has not changed since you asked (#546).** The attach job now writes only while the track still has the Recording ID it had when you sent the request, both for singletons and for album tracks. If it changed in between, the job fails with "Item N changed since you requested it" and nothing is written.
+- **A singleton's Recording ID attach shows one Undo (#546).** The attach's "MusicBrainz Match" record now points to its "Metadata Update" transaction and no longer offers its own Undo. That transaction's Undo restores exactly what the attach wrote. Album-track attaches are unchanged for now: they still record the attach, the track repair and the album relocation, each with its own Undo.
+
 ## v0.16.1 - 2026-11-03
 
 ### Fixed
