@@ -79,6 +79,8 @@ def _music_format_scan_library(log: list, cancel_event=None, update_state=None):
         if result.get("ok"):
             if index <= 5:
                 log.append(f"  [audio] {result.get('message')}")
+        elif result.get("inspection_incomplete"):
+            log.append(f"  [audio] {result.get('message')} (skipped, not marked): {row.get('artist')} - {row.get('title')}")
         else:
             reason = "; ".join(result.get("reasons") or ["does not match Music Format Preferences"])
             status = "Replacement queued" if prefs.get("replacement_fallback", {}).get("queue_retry") else "Non-compliant but temporarily kept"

@@ -22,15 +22,24 @@ from backend.playlist_service import _playlist_download_audio_allowed, _playlist
 from backend.app_runtime import _path_under, _redact_security_text, validated_downloads_root
 from helpers_mb import _resolve_release_group_to_release
 import backend.composite_workflows as composite_workflows
+from backend.audio_preferences import AUDIO_INSPECTION_INCOMPLETE, AudioInspectionIncomplete
 from backend.acoustid_service import _album_track_norm
 from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
 from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED, IMPORT_REFUSAL_REASONS, import_refusal_reason_code, _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
 from backend.app_runtime import jobs, WEB_MANAGER_DATA_DIR
-from backend.job_service import _wait_for_child_job
+from backend.job_service import CHILD_OUTCOME_UNKNOWN, ChildJobFailed, _wait_for_child_job
 from job_engine import DuplicateJobError
 from backend.serializers import _json_from_flask_response
 
 # ── ARCH-001 extracted code ──
+
+
+class ImportStillRunning(AudioInspectionIncomplete):
+    """The parent stopped waiting while the child import job was still
+    running. Same handling as an incomplete inspection (keep the staging
+    folder, no peer cleanup, no fallback source), so it subclasses it."""
+
+    reason_code = CHILD_OUTCOME_UNKNOWN
 
 
 def _wanted_tracks_satisfied_by_names(names: List[Any],
@@ -1067,8 +1076,22 @@ class _AlbumDownloadRun:
             wanted_tracks=active_wanted_tracks,
             replace_existing_item_ids=req.replace_existing_item_ids)
         log.append(f"[import] Job {import_job_id} started; waiting for completion...")
-        import_result = _wait_for_child_job(import_job_id, log, self.cancel_event,
-                                            prefix="import", timeout=1200)
+        try:
+            import_result = _wait_for_child_job(import_job_id, log, self.cancel_event,
+                                                prefix="import", timeout=1200)
+        except ChildJobFailed as ex:
+            if ex.reason_code == AUDIO_INSPECTION_INCOMPLETE:
+                # The child's own audio check could not inspect a file: keep
+                # the staging folder (no discard, no other source).
+                raise AudioInspectionIncomplete(str(ex)) from ex
+            if ex.reason_code == CHILD_OUTCOME_UNKNOWN:
+                # The import job may still be reading or importing the staged
+                # files: deleting them or trying another source is unsafe.
+                raise ImportStillRunning(
+                    f"Import job {import_job_id} was still running when the wait ended ({ex}). "
+                    f"The staging folder {import_dir} was kept; check the job in Jobs and retry "
+                    "the download later.") from ex
+            raise
         log.append("[import] Complete — files imported, tagged, and moved into the music folder")
         if undelivered:
             log.append(
@@ -1200,6 +1223,8 @@ class _AlbumDownloadRun:
                         self._import_downloaded_album(
                             fallback_result["aldir"], fallback_tracks))
                 return fallback_result
+            except AudioInspectionIncomplete:
+                raise  # files kept for retry; do not delete or try another source
             except Exception as direct_ex:
                 failures.append(
                     f"{_download_method_label(fallback_source)}: {direct_ex}"
@@ -1391,6 +1416,8 @@ class _AlbumDownloadRun:
                 }
                 download_result.update(
                     self._import_downloaded_album(import_dir, dl_wanted_tracks))
+            except AudioInspectionIncomplete:
+                raise  # files kept for retry; do not discard or try another peer
             except Exception as ex:
                 last_import_error = ex
                 if not self._slskd_discard_failed_import(dl, import_dir, ex):
@@ -1696,6 +1723,14 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
                 best_idx = idx
 
         format_ok = _playlist_download_audio_allowed(path_value, _identity_log)
+        if format_ok is None:
+            # Inspection did not complete (busy host): keep every staged file
+            # and stop before importing anything; retrying later re-inspects.
+            raise AudioInspectionIncomplete(
+                f"Audio inspection did not complete for {Path(path_value).name} (ffprobe could not "
+                "finish, often because storage or the host was busy). Downloaded files were kept in "
+                f"{import_dir}; retry the download later."
+            )
         if best_idx < 0 or not format_ok:
             # ARCH-030 C1: a file that did not fingerprint-accept is NOT always
             # wrong audio. A genuine AcoustID NO_RESULT (lookup answered empty) or

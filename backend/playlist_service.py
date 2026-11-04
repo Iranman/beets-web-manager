@@ -312,20 +312,27 @@ def _playlist_log_line(log, message: str) -> None:
         pass
 
 
-def _playlist_download_audio_allowed(path_value: str, log) -> bool:
+def _playlist_download_audio_allowed(path_value: str, log) -> Optional[bool]:
+    """True = passes Music Format Preferences; False = rejected and handled
+    (quarantined/deleted per settings); None = inspection did not complete
+    (e.g. ffprobe timed out on a busy host): not accepted, file left untouched
+    so the caller can keep it for a retry. None is falsy, so a caller that only
+    tests truthiness still never lets an uninspected file through."""
     prefs = _music_format_preferences()
     try:
         result = _validate_audio_file_preferences(path_value, prefs)
     except Exception as ex:
         _playlist_log_line(
             log,
-            f"  [audio] Rejected download: audio could not be inspected: "
-            f"{Path(path_value).name} ({ex})",
+            f"  [audio] Audio inspection incomplete: {Path(path_value).name} ({ex}); file kept for retry",
         )
-        _handle_rejected_audio_download(path_value, prefs, log=[])
-        return False
+        return None
     if result.get("ok"):
         return True
+    if result.get("inspection_incomplete"):
+        msg = result.get("message") or "Audio inspection incomplete"
+        _playlist_log_line(log, f"  [audio] {msg}: {Path(path_value).name}; file kept for retry")
+        return None
     msg = result.get("message") or "Rejected download: audio does not match Music Format Preferences"
     _playlist_log_line(log, f"  [audio] {msg}: {Path(path_value).name}")
     handling_log: List[str] = []

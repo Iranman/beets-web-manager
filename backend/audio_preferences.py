@@ -152,6 +152,33 @@ def save_music_format_preferences(payload: Dict[str, Any], path: Optional[str] =
     return prefs
 
 
+#: ffprobe stderr that describes the host, not the media: ffprobe ends its
+#: last line with the strerror text (`<input>: Input/output error`). Matched
+#: against the final line only, anchored to its end, so a file name carrying
+#: these words (or a newline and these words) cannot match.
+_FFPROBE_ENV_FAILURE_RE = re.compile(
+    r":\s*(?:Input/output error|Permission denied|Cannot allocate memory|Resource temporarily unavailable"
+    r"|Too many open files|Stale file handle|Device or resource busy|Transport endpoint is not connected"
+    r"|Interrupted system call|Connection timed out|No such device(?: or address)?|Host is down)\s*$",
+    re.I,
+)
+#: 126/127: the ffprobe binary could not run (broken or missing install).
+_FFPROBE_BROKEN_BINARY_CODES = (126, 127)
+
+#: Structured code for an incomplete inspection, carried in a child job's
+#: `{"ok": False, "reason_code": ...}` result across the job boundary.
+AUDIO_INSPECTION_INCOMPLETE = "audio_inspection_incomplete"
+
+
+class AudioInspectionIncomplete(RuntimeError):
+    """Audio could not be inspected (ffprobe timed out, was killed or could not
+    run). Not a verdict on the audio: the files are kept and not imported, and
+    the caller reports a retryable error. Callers must not delete the source or
+    staging folder, or try another download source, because of it."""
+
+    reason_code = AUDIO_INSPECTION_INCOMPLETE
+
+
 def _first_audio_stream(probe: Dict[str, Any]) -> Dict[str, Any]:
     for stream in probe.get("streams") or []:
         if str(stream.get("codec_type") or "").lower() == "audio":
@@ -292,15 +319,18 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
             text=True,
         )
     except subprocess.TimeoutExpired as exc:
+        # Fallback: bound the demuxer probe so a damaged stream fails fast
+        # (``-read_intervals`` limits nothing without ``-show_packets``).
         try:
             proc = subprocess.run(
                 [
                     ffprobe,
                     "-v", "error",
-                    "-read_intervals", "0%+30",
+                    "-probesize", "1000000",
+                    "-analyzeduration", "1000000",
                     "-select_streams", "a:0",
                     "-show_entries",
-                    "stream=codec_name,codec_long_name,profile,channels,channel_layout,sample_rate,bit_rate,side_data_list,tags:format=duration,bit_rate,tags",
+                    "stream=codec_type,codec_name,codec_long_name,profile,channels,channel_layout,sample_rate,bit_rate,side_data_list,tags:format=duration,bit_rate,tags",
                     "-of", "json",
                     ffmpeg_file_input(path),
                 ],
@@ -310,17 +340,29 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
             )
         except Exception as fallback_exc:
             result["error"] = f"ffprobe failed: {exc}; fast probe failed: {fallback_exc}"
+            result["inspection_incomplete"] = True
             return result
     except Exception as exc:
         result["error"] = f"ffprobe failed: {exc}"
+        result["inspection_incomplete"] = True
         return result
     if proc.returncode != 0:
-        result["error"] = (proc.stderr or proc.stdout or "ffprobe failed").strip()[:400]
+        detail = (proc.stderr or proc.stdout or "").strip()
+        result["error"] = detail[:400] or f"ffprobe exited with code {proc.returncode}"
+        if (proc.returncode < 0 or proc.returncode in _FFPROBE_BROKEN_BINARY_CODES or not detail
+                or "error while loading shared libraries" in detail
+                or _FFPROBE_ENV_FAILURE_RE.search(detail.splitlines()[-1])):
+            # Killed by a signal (e.g. OOM), a broken ffprobe install, exited
+            # without saying why, or the host could not read the file (I/O,
+            # permissions, memory): no verdict on the audio. A decode/format
+            # error stays a rejection.
+            result["inspection_incomplete"] = True
         return result
     try:
         probe = json.loads(proc.stdout or "{}")
     except Exception as exc:
         result["error"] = f"ffprobe JSON failed: {exc}"
+        result["inspection_incomplete"] = True
         return result
     stream = _first_audio_stream(probe)
     if not stream:
@@ -408,6 +450,7 @@ def validate_audio_properties(properties: Dict[str, Any], prefs: Optional[Dict[s
             reasons.append(f"{_friendly_format(format_key)} is not enabled in preferred formats")
 
     accepted = not reasons
+    inspection_incomplete = bool(not properties.get("ok") and properties.get("inspection_incomplete"))
     detail = f"{_friendly_layout(layout, channels)} {_friendly_format(format_key)}".strip()
     if accepted:
         if layout == "atmos":
@@ -416,11 +459,17 @@ def validate_audio_properties(properties: Dict[str, Any], prefs: Optional[Dict[s
             message = "Accepted: 2.1 audio"
         else:
             message = f"Accepted: {detail}"
+    elif inspection_incomplete:
+        # Not a verdict on the audio: ffprobe could not run or finish (e.g. a
+        # timeout while storage is busy). Still not accepted; callers decide
+        # whether to keep the file for a retry instead of rejecting it.
+        message = "Audio inspection incomplete: " + reasons[0]
     else:
         message = "Rejected download: " + (reasons[0] if reasons else "audio does not match preferences")
     return {
         "ok": accepted,
         "accepted": accepted,
+        "inspection_incomplete": inspection_incomplete,
         "reasons": reasons,
         "message": message,
         "properties": properties,
@@ -437,14 +486,18 @@ def validate_audio_tree(root: str, prefs: Optional[Dict[str, Any]], audio_exts: 
     files = [p for p in root_path.rglob("*") if p.is_file() and p.suffix.lower() in set(audio_exts)] if root_path.exists() else []
     accepted: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
+    deferred: List[Dict[str, Any]] = []
     for path in files:
         result = validate_audio_file(str(path), prefs)
         row = {"path": str(path), **result}
         if result.get("ok"):
             accepted.append(row)
+        elif result.get("inspection_incomplete"):
+            deferred.append(row)
         else:
             rejected.append(row)
-    return {"ok": not rejected, "accepted": accepted, "rejected": rejected, "total": len(files)}
+    return {"ok": not rejected and not deferred, "accepted": accepted, "rejected": rejected,
+            "deferred": deferred, "total": len(files)}
 
 
 def _rejected_download_keep_reason(path: Path, preserve_source: Optional[bool]) -> str:

@@ -11,7 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_inspection_incomplete_error, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _pending_review_has_path_or_overlap, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
@@ -22,7 +22,7 @@ from backend.import_reconciliation_service import _remaining_audio_files, _resol
 from backend.app_runtime import _path_is_under, _safe_path_component, validated_downloads_root
 from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing
-from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
+from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
@@ -2077,7 +2077,15 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             with job_contract.held("import-slot", log=log, cancel_event=cancel_event):
                 return _do(log, cancel_event)
 
-    job = jobs.start_python(_do_locked, label=f"Tag+Import disk: {Path(aldir).name}",
+    def _do_reimport_job(log, cancel_event=None):
+        try:
+            return _do_locked(log, cancel_event)
+        except AudioInspectionIncomplete as ex:
+            # A structured failure the parent's _wait_for_child_job carries
+            # back (ChildJobFailed.reason_code): the files were kept, retry.
+            return {"ok": False, "error": str(ex), "reason_code": ex.reason_code}
+
+    job = jobs.start_python(_do_reimport_job, label=f"Tag+Import disk: {Path(aldir).name}",
                             metadata={"aldir": aldir, "mb_albumid": mb_albumid,
                                       "existing_album_id": existing_album_id,
                                       "skip_import_lock": skip_import_lock,
@@ -2308,24 +2316,8 @@ def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 12
 
 
 def _audio_validation_inspection_failed(row: Dict[str, Any]) -> bool:
-    props = row.get("properties") if isinstance(row.get("properties"), dict) else {}
-    text = " ".join(
-        _s(value) for value in (
-            row.get("message"),
-            " ".join(row.get("reasons") or []),
-            props.get("error"),
-        )
-    ).casefold()
-    return bool(
-        text
-        and not props.get("ok")
-        and (
-            "ffprobe failed" in text
-            or "ffprobe json failed" in text
-            or "timed out" in text
-            or "timeout" in text
-        )
-    )
+    """True when ffprobe could not run or finish (not a verdict on the audio)."""
+    return bool(not row.get("ok") and row.get("inspection_incomplete"))
 
 
 def _filter_import_review_selected_audio_files(audio_files: List[Path], log: list) -> List[Path]:
@@ -2348,7 +2340,7 @@ def _filter_import_review_selected_audio_files(audio_files: List[Path], log: lis
             continue
         msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"
         if _audio_validation_inspection_failed(row):
-            log.append(f"  [audio] Inspection deferred; source kept in review: {path.name} ({msg})")
+            log.append(f"  [audio] {msg}; source kept in review: {path.name}")
             deferred.append(path)
             continue
         log.append(f"  [audio] {msg}: {path.name}")
@@ -2360,11 +2352,10 @@ def _filter_import_review_selected_audio_files(audio_files: List[Path], log: lis
         if not source_is_library:
             handled_results.append(_handle_rejected_audio_download(str(path), prefs, log=log))
     if not accepted:
-        if deferred and not rejected:
-            raise RuntimeError(
-                "Audio inspection did not complete for selected files. "
-                "Files were kept for retry/review."
-            )
+        if deferred:
+            # Retryable, also when some files were rejected: the uninspected
+            # ones were kept, so this is not a terminal policy outcome.
+            raise _music_format_inspection_incomplete_error(len(deferred), len(rejected), handled_results, prefs)
         raise RuntimeError(
             _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
         )
