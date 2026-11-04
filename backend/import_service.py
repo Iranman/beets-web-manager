@@ -22,7 +22,7 @@ from backend.import_reconciliation_service import _remaining_audio_files, _resol
 from backend.app_runtime import _path_is_under, _safe_path_component, validated_downloads_root
 from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing
-from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
+from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
 from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
@@ -2345,7 +2345,7 @@ def _filter_import_review_selected_audio_files(audio_files: List[Path], log: lis
             handled_results.append(_handle_rejected_audio_download(str(path), prefs, log=log))
     if not accepted:
         if deferred and not rejected:
-            raise RuntimeError(
+            raise AudioInspectionIncomplete(
                 "Audio inspection did not complete for selected files (ffprobe could not finish, "
                 "often because storage or the host was busy). Files were kept for retry/review; "
                 "retry the import later."

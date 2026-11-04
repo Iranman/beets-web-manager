@@ -152,6 +152,13 @@ def save_music_format_preferences(payload: Dict[str, Any], path: Optional[str] =
     return prefs
 
 
+class AudioInspectionIncomplete(RuntimeError):
+    """Audio could not be inspected (ffprobe timed out, was killed or could not
+    run). Not a verdict on the audio: the files are kept and not imported, and
+    the caller reports a retryable error. Callers must not delete the source or
+    staging folder, or try another download source, because of it."""
+
+
 def _first_audio_stream(probe: Dict[str, Any]) -> Dict[str, Any]:
     for stream in probe.get("streams") or []:
         if str(stream.get("codec_type") or "").lower() == "audio":
@@ -303,7 +310,7 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
                     "-analyzeduration", "1000000",
                     "-select_streams", "a:0",
                     "-show_entries",
-                    "stream=codec_name,codec_long_name,profile,channels,channel_layout,sample_rate,bit_rate,side_data_list,tags:format=duration,bit_rate,tags",
+                    "stream=codec_type,codec_name,codec_long_name,profile,channels,channel_layout,sample_rate,bit_rate,side_data_list,tags:format=duration,bit_rate,tags",
                     "-of", "json",
                     ffmpeg_file_input(path),
                 ],
@@ -320,7 +327,12 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
         result["inspection_incomplete"] = True
         return result
     if proc.returncode != 0:
-        result["error"] = (proc.stderr or proc.stdout or "ffprobe failed").strip()[:400]
+        detail = (proc.stderr or proc.stdout or "").strip()
+        result["error"] = detail[:400] or f"ffprobe exited with code {proc.returncode}"
+        if proc.returncode < 0 or not detail:
+            # Killed by a signal (e.g. OOM) or exited without saying why: no
+            # verdict on the audio. An ffprobe error message stays a rejection.
+            result["inspection_incomplete"] = True
         return result
     try:
         probe = json.loads(proc.stdout or "{}")

@@ -22,7 +22,7 @@ from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE
 from backend.app_runtime import _MB_UUID_RE, _extract_mb_uuid, _path_is_under
-from backend.audio_preferences import mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
+from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid_api_key
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
 from backend.import_identity import _recursive_audio, identify_import_folder
@@ -103,7 +103,7 @@ def _validate_import_source_audio(path_value: str, log: list, *, reject_download
     handled_results: List[Dict[str, Any]] = []
     if not rejected:
         if deferred:
-            raise RuntimeError(
+            raise AudioInspectionIncomplete(
                 f"Audio inspection did not complete for {len(deferred)} file(s) (ffprobe could not finish, "
                 "often because storage or the host was busy). Files were kept in place; retry the import later."
             )
@@ -129,9 +129,15 @@ def _validate_import_source_audio(path_value: str, log: list, *, reject_download
             "Existing library audio does not match Music Format Preferences. "
             "Current files were kept and marked Needs replacement."
         )
-    raise RuntimeError(
-        _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
-    )
+    policy_error = _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
+    if deferred:
+        # Mixed batch: the uninspected files are still in the folder, so the
+        # caller must keep it (no folder cleanup) and the user retries.
+        raise AudioInspectionIncomplete(
+            f"{policy_error} Audio inspection did not complete for {len(deferred)} other file(s); "
+            "they were kept in place; retry the import later."
+        )
+    raise RuntimeError(policy_error)
 
 
 def _ai_match_evidence_packet(use_case: str, *, folder_path: str = "",

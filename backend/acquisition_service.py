@@ -22,6 +22,7 @@ from backend.playlist_service import _playlist_download_audio_allowed, _playlist
 from backend.app_runtime import _path_under, _redact_security_text, validated_downloads_root
 from helpers_mb import _resolve_release_group_to_release
 import backend.composite_workflows as composite_workflows
+from backend.audio_preferences import AudioInspectionIncomplete
 from backend.acoustid_service import _album_track_norm
 from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
 from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED, IMPORT_REFUSAL_REASONS, import_refusal_reason_code, _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
@@ -101,13 +102,6 @@ def _download_dest_under(root: Path, *segments: str) -> Path:
 _RG_UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _RG_PATH_RE = re.compile(r"/release-group/(" + _RG_UUID_RE + r")", re.I)
 _SLSKD_MAX_ATTEMPTS = 12
-
-
-class AudioInspectionIncomplete(RuntimeError):
-    """A staged download's audio could not be inspected (ffprobe timed out or
-    could not run). Not a verdict on the audio: the staged files are kept, not
-    imported, and the job fails with a retryable message. Callers must not
-    delete the staging folder or try another source for it."""
 
 
 @dataclass
