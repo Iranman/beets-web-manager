@@ -190,7 +190,8 @@ def _orphaned_job_wrapper(store, row: Dict[str, Any], before: float) -> None:
         store.transition(str(row["id"]), "Running", status, append_logs=[note])
 
 
-def _reconcile_running_transactions(job_store, store, before: Optional[float] = None) -> bool:
+def _reconcile_running_transactions(job_store, store, before: Optional[float] = None,
+                                    scan_done: Optional[bool] = None) -> bool:
     """Settle every Running transaction whose job has ended, whichever process
     or path lost the update. True when every record could be processed.
 
@@ -200,22 +201,27 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
     The exception is a job-wrapper transaction last written before ``before``
     (this process's start) with no job record in memory, by id, or among the
     tail sweep's on-disk records (``tail_transaction_jobs``): no job exists to
-    settle it. Pass ``before`` only once the tail sweep has finished."""
+    settle it. Pass ``before`` only once the tail sweep has finished.
+
+    The tail snapshots speak only for job-wrapper transactions: an engine
+    transaction is reached only by jobs in memory or named by id (#545).
+
+    ``scan_done`` says whether the startup job scan has finished, which
+    decides how unbound rows are logged; it defaults to ``before is not
+    None``, but a retry pass after judging passes it without ``before``."""
+    if scan_done is None:
+        scan_done = before is not None
     grouped = _jobs_by_transaction(job_store)
-    for tx_id, snapshots in list((getattr(job_store, "tail_transaction_jobs", None) or {}).items()):
-        known = {j.job_id for j in grouped.get(tx_id, [])}
-        grouped.setdefault(tx_id, []).extend(j for j in snapshots if j.job_id not in known)
-    rows, total = store.list(status="Running", limit=500)
-    while len(rows) < total:
-        page, _total = store.list(status="Running", offset=len(rows), limit=500)
-        if not page:
-            break
-        rows += page
+    tail = dict(getattr(job_store, "tail_transaction_jobs", None) or {})
+    rows = _running_rows(store)
     ok, unbound = True, []
     for row in rows:
         tx_id = str(row["id"])
         meta = row.get("metadata") or {}
         candidates = list(grouped.get(tx_id) or [])
+        if tail.get(tx_id) and _is_job_wrapper(row):
+            known = {c.job_id for c in candidates}
+            candidates += [j for j in tail[tx_id] if j.job_id not in known]
         # Beyond the startup window a job is on disk only; get() loads it by id.
         for job_id in (meta.get("rollback_job_id"), row.get("originating_job"), meta.get("job_id")):
             job = job_store.get(job_id) if job_id else None
@@ -241,10 +247,35 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
         except Exception as ex:
             ok = False
             _app_logger.warning("transaction sync failed for %s, will retry: %s", tx_id, type(ex).__name__)
-    if unbound:
+    if unbound and not scan_done:  # the startup job scan is still running
+        _app_logger.debug("%d Running transaction(s) have no job record yet, pending the startup job scan: %s",
+                          len(unbound), ", ".join(unbound[:20]))
+    elif unbound:
         _app_logger.warning("%d Running transaction(s) have no job record and were left unchanged: %s",
                             len(unbound), ", ".join(unbound[:20]))
     return ok
+
+
+#: Rows per ``store.list`` page while collecting Running transactions.
+_RUNNING_PAGE = 500
+
+
+def _running_rows(store) -> List[Dict[str, Any]]:
+    """Every Running transaction, as one consistent snapshot (#545).
+
+    Offsets shift when a row leaves Running between page reads, so the store
+    lock is held across the whole paged read: every store write takes that
+    lock, and the web app is one process. It is reentrant (``list`` takes it
+    too), nothing else is acquired while it is held, and it is released
+    before any transaction is settled, so it cannot deadlock against a
+    writer or the settle path. The hold is one directory read per page."""
+    rows: List[Dict[str, Any]] = []
+    with store._lock:
+        while True:
+            page, total = store.list(status="Running", offset=len(rows), limit=_RUNNING_PAGE)
+            rows += page
+            if not page or len(rows) >= total:
+                return rows
 
 
 def _install_transaction_job_hooks() -> None:
@@ -264,13 +295,18 @@ def _install_transaction_job_hooks() -> None:
         if not reconcile_due.is_set():
             return
         reconcile_due.clear()
-        tail = job_store._recover_thread
-        settled = tail is None or not tail.is_alive()  # read first: the pass must see all of the tail
+        # Read first: the pass must see all of the tail. A sweep thread that
+        # died is not a finished one (#545), so require its completion flag.
+        scanned = getattr(job_store, "tail_scan_complete", None)
+        settled = scanned is None or scanned.is_set()
         try:
             # The tail sweep has finished: every on-disk record naming a
             # transaction is in memory or in tail_transaction_jobs.
+            # Judging orphans happens once; "the scan finished" (``settled``
+            # here, never unset) holds for every later retry pass too (F2).
             judge = settled and not orphans["judged"]
-            settled = _reconcile_running_transactions(job_store, tx_store, started if judge else None) and settled
+            settled = _reconcile_running_transactions(job_store, tx_store, started if judge else None,
+                                                      scan_done=settled) and settled
             if judge and settled:
                 orphans["judged"] = True
                 (getattr(job_store, "tail_transaction_jobs", None) or {}).clear()  # consumed; do not hold them

@@ -538,8 +538,10 @@ class ReconcileTests(_Sync):
     def test_running_transaction_with_no_job_is_left_running_and_logged(self):
         tx = self.store.create(operation_type="Delete", status="Running")
         jobs = self.jobstore()
+        # The judging pass (``before`` given) warns; the earlier passes only
+        # log at debug while the startup job scan runs (#545).
         with self.assertLogs(ts._app_logger, "WARNING") as logs:
-            self.assertTrue(ts._reconcile_running_transactions(jobs, self.store))
+            self.assertTrue(ts._reconcile_running_transactions(jobs, self.store, time.time() + 1))
         self.assertIn(tx["id"], "".join(logs.output))
         self.assertEqual(self.store.get(tx["id"])["status"], "Running")
 
