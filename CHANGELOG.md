@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Saving setup values no longer overwrites a saved secret with its mask (#522).** `GET /api/setup/env` and `GET /api/setup/settings` return saved secrets as `********`. An API client that posted that value back to `POST /api/setup/env` (for a secret variable) or `POST /api/setup/settings` (for a field whose name contains `key` or `token`) replaced the real secret with the literal mask. The mask is now ignored there and the saved value is kept. On `/api/setup/env`, clearing a secret still needs it listed in `clear`. A generic secret's `saved_value` in `GET /api/setup/env` now uses the same `********` mask instead of a row of bullets, so an echo of that field is recognised too. Posting the mask for a secret alias that cannot be saved (such as `QBIT_PASS`) is now ignored instead of returning 400.
+- **Saved password and secret settings are masked.** `GET /api/setup/settings` masked a saved setting only when its name contained `key` or `token`, so a setting named like `qbit_password` or `client_secret` was returned in full. It, and the mask check on `POST /api/setup/settings`, now use the same secret-name rule as the `.env` endpoints: names containing `KEY`, `TOKEN`, `PASSWORD` or `SECRET`, plus the known secret aliases.
+- **`GET /api/setup/status`, which answers without a login, no longer returns saved settings.** It used to include them with the same name-only masking, so a password or secret setting, or a secret under a name the rule does not recognise or nested inside another value, was shown to anyone. The web UI never read this `settings` field, so it is removed. Saved settings are still available, masked, from `GET /api/setup/settings`. An API client that read `settings` from the status response should read `/api/setup/settings` instead.
+
 ## v0.16.2 - 2026-11-04
 
 ### Fixed
