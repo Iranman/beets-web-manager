@@ -2577,8 +2577,6 @@ def _beets_setup_warnings(
 
 
 def _build_setup_status_payload() -> Dict[str, Any]:
-    settings = _load_settings()
-
     beets_config_path, config_path_error = _checked_beets_config_path()
     diagnostics = _beets_plugin_diagnostics(beets_config_path)
     remote_paths = diagnostics.get("paths") if isinstance(diagnostics.get("paths"), dict) else {}
@@ -2831,7 +2829,8 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         "plugins_ready": bool(plugins_report.get("all_required_healthy", False)),
         "auth": auth_status,
         "integrations": integrations,
-        "settings": _mask_secret_settings(settings),
+        # No "settings": this endpoint is unauthenticated and nothing read it;
+        # saved settings are only served (masked) by GET /api/setup/settings.
     }
 
 

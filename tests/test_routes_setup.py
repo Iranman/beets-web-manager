@@ -184,17 +184,18 @@ class RoutesSetupStatusTests(unittest.TestCase):
         self.assertIn("beets", body)
         self.assertIn("plugin_failures", body["beets"])
 
-    def test_status_masks_secret_looking_settings(self):
-        # Unauthenticated status used to mask only *key*/*token* names. The old
-        # version POSTed to an unredirected settings store and asserted vacuously.
-        stored = {"qbit_password": "pw-plain-value", "client_secret": "cs-plain-value",
-                  "ai_api_key": "ak-plain-value", "ai_model": "visible-model"}
-        with mock.patch.object(self.module, "_load_settings", return_value=stored):
-            settings = self.client.get("/api/setup/status?refresh=1").get_json()["settings"]
-        self.assertEqual(set(settings), set(stored))
-        self.assertNotIn("plain-value", str(settings))
-        self.assertEqual(settings["qbit_password"], self.module._SECRET_MASK)
-        self.assertEqual(settings["ai_model"], "visible-model")
+    def test_status_does_not_expose_saved_settings(self):
+        # Unauthenticated status used to echo saved settings (masked by name
+        # only). Nothing read them, so they are gone: no name rule can leak.
+        stored = {"qbit_password": "pw-plain-value", "odd_name": "cred-plain-value",
+                  "nested": {"inner_token": "nested-plain-value"}, "ai_model": "visible-model"}
+        record = {"settings": stored, "revision": "r1"}
+        with mock.patch.object(self.module, "_load_settings_record", return_value=record), \
+                mock.patch.object(self.module, "_load_settings", return_value=stored):
+            r = self.client.get("/api/setup/status?refresh=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("settings", r.get_json())
+        self.assertNotIn("plain-value", r.get_data(as_text=True))
 
     def test_status_sanitizes_remote_diagnostic_exceptions(self):
         sensitive = "/database/internal/path token=super-secret-key Traceback... File \"secret.py\", line 7"
@@ -657,10 +658,13 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(stored["ai_model"], "m2")
 
     def test_get_settings_masks_password_and_secret_and_keeps_on_echo(self):
-        r = self.client.post("/api/setup/settings", json={"qbit_password": "pw-plain-value", "client_secret": "cs-x"})
+        # qbit_pass is a secret only via its legacy alias (QBIT_PASS -> QBITTORRENT_PASSWORD).
+        r = self.client.post("/api/setup/settings", json={
+            "qbit_password": "pw-plain-value", "client_secret": "cs-x", "qbit_pass": "alias-x"})
         rev = r.get_json()["revision"]
         got = self.client.get("/api/setup/settings").get_json()["settings"]
-        self.assertEqual(got, {"qbit_password": self.module._SECRET_MASK, "client_secret": self.module._SECRET_MASK})
+        mask = self.module._SECRET_MASK
+        self.assertEqual(got, {"qbit_password": mask, "client_secret": mask, "qbit_pass": mask})
         r = self.client.post("/api/setup/settings", json={
             "qbit_password": got["qbit_password"], "expected_revision": rev})
         self.assertTrue(r.get_json()["ok"])
