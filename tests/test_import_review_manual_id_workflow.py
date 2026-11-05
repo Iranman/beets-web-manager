@@ -452,5 +452,34 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         self.assertEqual(selected["representative_release_id"], RELEASE_ID)
         self.assertTrue(selected["is_importable"])
         self.assertTrue(selected["auto_fix_eligible"])
+
+    def test_revalidated_score_ignores_ai_label_and_stored_scores(self):
+        # QA B1 (#521): 3/10 track evidence must not become auto-fixable
+        # because the AI said "high" or a stale stored score says 0.95.
+        comparison = _comparison()
+        comparison.update({
+            "mb_track_count": 10, "local_track_count": 10, "matched_count": 3,
+            "comparison": [{"status": "matched", "local_title": "Song", "mb_title": "Song"}] * 3,
+            "preflight": {"ok": True, "matches": 3, "expected": 10, "audio_count": 10,
+                          "match_ratio": 0.3, "source_match_ratio": 0.3},
+        })
+        preflight = dict(comparison["preflight"])
+        for suggestion in (
+            {"confidence": "high"},
+            {"confidence": "high", "confidence_score": 0.95, "match_total": 0.97, "score": 99},
+        ):
+            with self.subTest(suggestion=suggestion):
+                selected = self.app_module._import_review_build_revalidated_match(
+                    {"suggestion": suggestion}, comparison, preflight)
+                self.assertTrue(selected["is_importable"])
+                self.assertLessEqual(selected["confidence_score"], 0.3)
+                self.assertFalse(selected["auto_fix_eligible"])
+                self.assertEqual(selected["confidence_level"], "low")
+        # Strong deterministic evidence alone is still eligible, AI label "low" notwithstanding.
+        strong = self.app_module._import_review_build_revalidated_match(
+            {"suggestion": {"confidence": "low"}}, _comparison(),
+            {"ok": True, "matches": 1, "expected": 1, "audio_count": 1, "match_ratio": 1.0, "source_match_ratio": 1.0})
+        self.assertTrue(strong["auto_fix_eligible"])
+        self.assertEqual(strong["confidence_score"], 1.0)
 if __name__ == "__main__":
     unittest.main()
