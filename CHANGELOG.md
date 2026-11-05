@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **An album download now stops when a timed-out import ends with a merge failure (#445).** When an import ran past the 20-minute wait and then failed to merge into the existing album, the download only reported "import job timed out". It then tried the next Soulseek peer or direct source, and each attempt could leave another separate album row. The error now includes the import's own error line, as it does for an import that fails within the wait, so the download stops after the first failed merge.
+
 ## v0.16.2 - 2026-11-04
 
 ### Fixed

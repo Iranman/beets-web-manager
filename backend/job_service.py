@@ -230,7 +230,11 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
             note_job_progress(mutation_started=True)
         # The settled child may say why it failed (e.g. audio inspection
         # incomplete); carry that, as for a child that failed on its own.
-        raise ChildJobFailed(reason, _reason_code(done))
+        # Lead with its error line, in the same form as that path, so a
+        # refusal code in the text still stops the caller's retries (#445).
+        detail = _child_failure_detail()
+        message = f"{prefix} job failed: {detail} (settled after the wait ended: {reason})" if detail else reason
+        raise ChildJobFailed(message, _reason_code(done))
 
     while True:
         now = time.time()
