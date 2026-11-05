@@ -5,7 +5,7 @@ from __future__ import annotations
 from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
-import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
+import functools, hashlib, json, os, re, shutil, stat, threading, time, unicodedata, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
 from backend.matching import (
@@ -448,7 +448,14 @@ def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str,
     return selected_candidate, mb_id
 
 
-_VARIOUS_ARTISTS_ALIASES = frozenset({"various artists", "various", "va", "v.a.", "v/a", "v.a"})
+# Compared after _va_key(): punctuation, spaces and invisible characters removed.
+_VARIOUS_ARTISTS_ALIASES = frozenset({"variousartists", "various", "va"})
+
+
+def _va_key(name: str) -> str:
+    # NFKC + casefold, then drop everything that isn't a letter or digit, so
+    # "V.A.", "V-A", "V⁠A" and "Various Artists." reach the alias check.
+    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", name).casefold())
 
 
 def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artist: str) -> str:
@@ -462,8 +469,8 @@ def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artis
     # "VA - Title" folders name MusicBrainz's "Various Artists" by its usual short forms.
     # Either side being a VA alias means both must be: "VAST" / "Various
     # Cruelties" must not fuzzy-match "VA" / "Various" below.
-    source_va = source_artist.casefold() in _VARIOUS_ARTISTS_ALIASES
-    cand_va = cand_artist.casefold() in _VARIOUS_ARTISTS_ALIASES
+    source_va = _va_key(source_artist) in _VARIOUS_ARTISTS_ALIASES
+    cand_va = _va_key(cand_artist) in _VARIOUS_ARTISTS_ALIASES
     if source_va and cand_va:
         return ""
     if not (source_va or cand_va) and _playlist_artist_name_score(source_artist, cand_artist) >= 0.45:

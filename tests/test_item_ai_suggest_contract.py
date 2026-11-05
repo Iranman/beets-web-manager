@@ -568,6 +568,17 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
         # Ordinary near-identical single-artist names still fuzzy-match.
         self.assertEqual(ai_service._ai_artist_mismatch_reason({"artist": "The Vitalic"}, "Vitalic"), "")
 
+    def test_va_alias_check_ignores_punctuation_and_invisible_characters(self):
+        # Security review F1 (#521): punctuation / zero-width / full-width
+        # spellings of a VA alias must not fall through to the fuzzy scorer.
+        for source in ("VA.", "V-A", "V⁠A", "V​A", "ＶＡ", "Various Artists.", "V. A."):
+            with self.subTest(source=source):
+                self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": "VAST"}, source))
+                self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": source}, "VAST"))
+                self.assertEqual(ai_service._ai_artist_mismatch_reason({"artist": "Various Artists"}, source), "")
+        self.assertIn("artist mismatch",
+                      ai_service._ai_artist_mismatch_reason({"artist": "Various Cruelties"}, "Various Artists."))
+
 
 class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):
     """Import All must send a candidate that failed identity validation to Review, not to the reimport."""

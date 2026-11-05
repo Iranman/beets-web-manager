@@ -24592,11 +24592,31 @@
    ]
   },
   {
+   "name": "_va_key",
+   "module": "backend/ai_service.py",
+   "lines": [
+    455,
+    458
+   ],
+   "size": 4,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_artist_mismatch_reason"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_ai_artist_mismatch_reason",
    "module": "backend/ai_service.py",
    "lines": [
-    454,
-    474
+    461,
+    481
    ],
    "size": 21,
    "body_lines": 17,
@@ -24613,15 +24633,16 @@
    "caller_count": 3,
    "dependencies": [
     "_playlist_artist_name_score",
-    "_s"
+    "_s",
+    "_va_key"
    ]
   },
   {
    "name": "_classify_openai_error",
    "module": "backend/ai_service.py",
    "lines": [
-    477,
-    498
+    484,
+    505
    ],
    "size": 22,
    "body_lines": 14,
@@ -24641,8 +24662,8 @@
    "name": "_ai_suggest_album_internal",
    "module": "backend/ai_service.py",
    "lines": [
-    501,
-    853
+    508,
+    860
    ],
    "size": 353,
    "body_lines": 339,
@@ -24680,8 +24701,8 @@
    "name": "_migrate_legacy_config_state",
    "module": "backend/ai_service.py",
    "lines": [
-    870,
-    880
+    877,
+    887
    ],
    "size": 11,
    "body_lines": 10,
@@ -24698,8 +24719,8 @@
    "name": "_ai_suggestion_names_import",
    "module": "backend/ai_service.py",
    "lines": [
-    892,
-    903
+    899,
+    910
    ],
    "size": 12,
    "body_lines": 7,
@@ -24721,8 +24742,8 @@
    "name": "_record_ai_match",
    "module": "backend/ai_service.py",
    "lines": [
-    906,
-    934
+    913,
+    941
    ],
    "size": 29,
    "body_lines": 27,
@@ -24742,8 +24763,8 @@
    "name": "_score_mb_release_candidate",
    "module": "backend/ai_service.py",
    "lines": [
-    940,
-    1030
+    947,
+    1037
    ],
    "size": 91,
    "body_lines": 83,
@@ -24766,8 +24787,8 @@
    "name": "_ai_preflight_note",
    "module": "backend/ai_service.py",
    "lines": [
-    1033,
-    1060
+    1040,
+    1067
    ],
    "size": 28,
    "body_lines": 27,
@@ -24788,8 +24809,8 @@
    "name": "_run_ai_release_preflight",
    "module": "backend/ai_service.py",
    "lines": [
-    1063,
-    1100
+    1070,
+    1107
    ],
    "size": 38,
    "body_lines": 36,
@@ -24814,8 +24835,8 @@
    "name": "_apply_ai_preflight_to_suggestion",
    "module": "backend/ai_service.py",
    "lines": [
-    1103,
-    1132
+    1110,
+    1139
    ],
    "size": 30,
    "body_lines": 28,
@@ -24839,8 +24860,8 @@
    "name": "find_match_slot",
    "module": "backend/ai_service.py",
    "lines": [
-    1150,
-    1161
+    1157,
+    1168
    ],
    "size": 12,
    "body_lines": 8,
@@ -24861,8 +24882,8 @@
    "name": "_ai_suggest_folder_internal",
    "module": "backend/ai_service.py",
    "lines": [
-    1164,
-    1674
+    1171,
+    1681
    ],
    "size": 511,
    "body_lines": 501,
@@ -24903,8 +24924,8 @@
    "name": "_run_ai_matching_regressions",
    "module": "backend/ai_service.py",
    "lines": [
-    1677,
-    1782
+    1684,
+    1789
    ],
    "size": 106,
    "body_lines": 104,
@@ -24933,8 +24954,8 @@
    "name": "_ai_batch_reserve_worker",
    "module": "backend/ai_service.py",
    "lines": [
-    1812,
-    1826
+    1819,
+    1833
    ],
    "size": 15,
    "body_lines": 5,
@@ -24953,8 +24974,8 @@
    "name": "_ai_batch_promote_worker",
    "module": "backend/ai_service.py",
    "lines": [
-    1829,
-    1840
+    1836,
+    1847
    ],
    "size": 12,
    "body_lines": 5,
@@ -24973,8 +24994,8 @@
    "name": "_ai_batch_release_worker",
    "module": "backend/ai_service.py",
    "lines": [
-    1843,
-    1852
+    1850,
+    1859
    ],
    "size": 10,
    "body_lines": 3,
@@ -24994,8 +25015,8 @@
    "name": "_ai_batch_active_worker_job_id",
    "module": "backend/ai_service.py",
    "lines": [
-    1855,
-    1862
+    1862,
+    1869
    ],
    "size": 8,
    "body_lines": 4,
@@ -25016,8 +25037,8 @@
    "name": "_ai_batch_release_worker_any",
    "module": "backend/ai_service.py",
    "lines": [
-    1865,
-    1879
+    1872,
+    1886
    ],
    "size": 15,
    "body_lines": 3,
@@ -25038,8 +25059,8 @@
    "name": "_ai_batch_validate_worker_handoff",
    "module": "backend/ai_service.py",
    "lines": [
-    1897,
-    1927
+    1904,
+    1934
    ],
    "size": 31,
    "body_lines": 11,
@@ -25060,8 +25081,8 @@
    "name": "_ai_batch_folder_id",
    "module": "backend/ai_service.py",
    "lines": [
-    1933,
-    1935
+    1940,
+    1942
    ],
    "size": 3,
    "body_lines": 2,
@@ -25084,8 +25105,8 @@
    "name": "_ai_batch_state_file",
    "module": "backend/ai_service.py",
    "lines": [
-    1938,
-    1940
+    1945,
+    1947
    ],
    "size": 3,
    "body_lines": 2,
@@ -25104,8 +25125,8 @@
    "name": "_ai_batch_json_safe",
    "module": "backend/ai_service.py",
    "lines": [
-    1943,
-    1952
+    1950,
+    1959
    ],
    "size": 10,
    "body_lines": 9,
@@ -25124,8 +25145,8 @@
    "name": "_ai_batch_persist_job_association",
    "module": "backend/ai_service.py",
    "lines": [
-    1955,
-    1960
+    1962,
+    1967
    ],
    "size": 6,
    "body_lines": 5,
@@ -25148,8 +25169,8 @@
    "name": "_ai_batch_load_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1963,
-    1968
+    1970,
+    1975
    ],
    "size": 6,
    "body_lines": 5,
@@ -25173,8 +25194,8 @@
    "name": "_ai_batch_latest_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1971,
-    1973
+    1978,
+    1980
    ],
    "size": 3,
    "body_lines": 2,
@@ -25200,8 +25221,8 @@
    "name": "_ai_batch_find_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1976,
-    1980
+    1983,
+    1987
    ],
    "size": 5,
    "body_lines": 4,
@@ -25230,8 +25251,8 @@
    "name": "_ai_batch_control",
    "module": "backend/ai_service.py",
    "lines": [
-    1983,
-    1989
+    1990,
+    1996
    ],
    "size": 7,
    "body_lines": 6,
@@ -25254,8 +25275,8 @@
    "name": "_ai_batch_initial_state",
    "module": "backend/ai_service.py",
    "lines": [
-    1992,
-    2020
+    1999,
+    2027
    ],
    "size": 29,
    "body_lines": 28,
@@ -25276,8 +25297,8 @@
    "name": "_ai_batch_find_audio_dirs",
    "module": "backend/ai_service.py",
    "lines": [
-    2023,
-    2106
+    2030,
+    2113
    ],
    "size": 84,
    "body_lines": 71,
@@ -25301,8 +25322,8 @@
    "name": "_ai_batch_already_in_library",
    "module": "backend/ai_service.py",
    "lines": [
-    2109,
-    2116
+    2116,
+    2123
    ],
    "size": 8,
    "body_lines": 7,
@@ -25321,8 +25342,8 @@
    "name": "_ai_batch_albums_present",
    "module": "backend/ai_service.py",
    "lines": [
-    2119,
-    2133
+    2126,
+    2140
    ],
    "size": 15,
    "body_lines": 9,
@@ -25341,8 +25362,8 @@
    "name": "_ai_batch_folder_state",
    "module": "backend/ai_service.py",
    "lines": [
-    2136,
-    2153
+    2143,
+    2160
    ],
    "size": 18,
    "body_lines": 17,
@@ -25363,8 +25384,8 @@
    "name": "_ai_batch_queue_pending_review",
    "module": "backend/ai_service.py",
    "lines": [
-    2156,
-    2168
+    2163,
+    2175
    ],
    "size": 13,
    "body_lines": 12,
@@ -25388,8 +25409,8 @@
    "name": "_ai_batch_evidence_capabilities",
    "module": "backend/ai_service.py",
    "lines": [
-    2176,
-    2188
+    2183,
+    2195
    ],
    "size": 13,
    "body_lines": 7,
@@ -25410,8 +25431,8 @@
    "name": "_ai_batch_capability_warnings",
    "module": "backend/ai_service.py",
    "lines": [
-    2191,
-    2199
+    2198,
+    2206
    ],
    "size": 9,
    "body_lines": 8,
@@ -25430,8 +25451,8 @@
    "name": "_ai_batch_skip_reason",
    "module": "backend/ai_service.py",
    "lines": [
-    2202,
-    2204
+    2209,
+    2211
    ],
    "size": 3,
    "body_lines": 2,
@@ -25452,8 +25473,8 @@
    "name": "_ai_batch_albums_missing_release_group",
    "module": "backend/ai_service.py",
    "lines": [
-    2207,
-    2218
+    2214,
+    2225
    ],
    "size": 12,
    "body_lines": 9,
@@ -25474,8 +25495,8 @@
    "name": "_ai_batch_review_suggestion",
    "module": "backend/ai_service.py",
    "lines": [
-    2221,
-    2237
+    2228,
+    2244
    ],
    "size": 17,
    "body_lines": 14,
@@ -25496,8 +25517,8 @@
    "name": "_ai_batch_preimport_check",
    "module": "backend/ai_service.py",
    "lines": [
-    2240,
-    2282
+    2247,
+    2289
    ],
    "size": 43,
    "body_lines": 32,
@@ -25518,8 +25539,8 @@
    "name": "_has_hardlinked_file",
    "module": "backend/ai_service.py",
    "lines": [
-    2285,
-    2299
+    2292,
+    2306
    ],
    "size": 15,
    "body_lines": 10,
@@ -25539,8 +25560,8 @@
    "name": "_ai_batch_process_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2302,
-    2540
+    2309,
+    2547
    ],
    "size": 239,
    "body_lines": 232,
@@ -25580,8 +25601,8 @@
    "name": "_ai_batch_run_folders",
    "module": "backend/ai_service.py",
    "lines": [
-    2543,
-    2587
+    2550,
+    2594
    ],
    "size": 45,
    "body_lines": 41,
@@ -25606,8 +25627,8 @@
    "name": "_ai_batch_import_failure_outcome",
    "module": "backend/ai_service.py",
    "lines": [
-    2590,
-    2609
+    2597,
+    2616
    ],
    "size": 20,
    "body_lines": 19,
@@ -25630,8 +25651,8 @@
    "name": "_ai_batch_process_decisions",
    "module": "backend/ai_service.py",
    "lines": [
-    2612,
-    2686
+    2619,
+    2693
    ],
    "size": 75,
    "body_lines": 71,
@@ -25656,8 +25677,8 @@
    "name": "_run_ai_batch_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2689,
-    2838
+    2696,
+    2845
    ],
    "size": 150,
    "body_lines": 137,
@@ -25696,8 +25717,8 @@
    "name": "_record_recent_import",
    "module": "backend/ai_service.py",
    "lines": [
-    2852,
-    2870
+    2859,
+    2877
    ],
    "size": 19,
    "body_lines": 16,
@@ -25716,8 +25737,8 @@
    "name": "_record_recent_import_for_album",
    "module": "backend/ai_service.py",
    "lines": [
-    2873,
-    2895
+    2880,
+    2902
    ],
    "size": 23,
    "body_lines": 19,
@@ -25744,8 +25765,8 @@
    "name": "_ai_import_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    2898,
-    3031
+    2905,
+    3038
    ],
    "size": 134,
    "body_lines": 126,
@@ -25777,8 +25798,8 @@
    "name": "_auto_merge_case_duplicate_artist_folder",
    "module": "backend/ai_service.py",
    "lines": [
-    3034,
-    3072
+    3041,
+    3079
    ],
    "size": 39,
    "body_lines": 29,
