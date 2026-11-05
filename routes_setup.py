@@ -2941,7 +2941,9 @@ def setup_save_env():
     for key, raw_value in raw_updates.items():
         key = str(key)
         value = "" if raw_value is None else str(raw_value)
-        if _is_secret_env(key) and value == "" and key not in raw_clear:
+        # GET returns secrets as _SECRET_MASK; posting that echo back must
+        # never replace the saved value (#522). Clearing uses `clear`.
+        if _is_secret_env(key) and (value == _SECRET_MASK or (value == "" and key not in raw_clear)):
             continue
         if _is_redacted_url_echo(key, value.strip(), (str(stored_env.get(key, "")).strip(), config_layers.legacy_env_value(key).strip())):
             continue
@@ -3385,7 +3387,9 @@ def setup_save_settings():
     if record.get("exists") and not expected_revision:
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "settings_missing_revision"}), 428
     settings = dict(json.loads(record.get("content") or "{}"))
-    settings.update(payload)
+    # GET masks key/token fields; a round-tripped mask keeps the stored value (#522).
+    settings.update({k: v for k, v in payload.items()
+                     if not (v == _SECRET_MASK and ("key" in k.lower() or "token" in k.lower()))})
     try:
         result = store.save_json(relative_name, settings, is_secret=False, expected_revision=expected_revision)
     except WebManagerConfigStoreConflictError:

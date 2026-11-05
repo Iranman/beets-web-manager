@@ -637,6 +637,19 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         r = self.client.get("/api/setup/settings")
         self.assertEqual(r.get_json()["settings"]["ai_model"], "gpt-4o-mini")
 
+    def test_posting_masked_key_keeps_saved_value(self):
+        # #522: GET masks key/token settings; echoing that mask back must not overwrite.
+        r = self.client.post("/api/setup/settings", json={"ai_api_key": "fake-saved-key"})
+        rev = r.get_json()["revision"]
+        masked = self.client.get("/api/setup/settings").get_json()["settings"]["ai_api_key"]
+        self.assertEqual(masked, self.module._SECRET_MASK)
+        r = self.client.post("/api/setup/settings", json={
+            "ai_api_key": masked, "ai_model": "m2", "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"])
+        stored = self.module._load_settings()
+        self.assertEqual(stored["ai_api_key"], "fake-saved-key")
+        self.assertEqual(stored["ai_model"], "m2")
+
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
         self.assertEqual(r.status_code, 400)
@@ -695,6 +708,21 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertEqual(variables["PLEX_URL"]["value"], "http://plex:32400")
         self.assertTrue(variables["PLEX_TOKEN"]["has_value"])
         self.assertNotIn("supersecretvalue", str(body))
+
+    def test_posting_masked_secret_keeps_saved_value(self):
+        # #522: the GET mask echoed back must not replace the saved secret.
+        self.env_file.write_text("PLEX_TOKEN=fake-saved-token\n", encoding="utf-8")
+        # (No non-secret key here: a saved value lands in os.environ and can be
+        # captured by config_layers' boot snapshot, pinning it for later tests.)
+        r = self.client.post("/api/setup/env", json={"variables": {"PLEX_TOKEN": self.module._SECRET_MASK}})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["saved"], [])
+        text = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("PLEX_TOKEN=fake-saved-token", text)
+        self.assertNotIn(self.module._SECRET_MASK, text)
+        # An explicit clear still works.
+        self.client.post("/api/setup/env", json={"variables": {"PLEX_TOKEN": ""}, "clear": ["PLEX_TOKEN"]})
+        self.assertNotIn("fake-saved-token", self.env_file.read_text(encoding="utf-8"))
 
     def test_secret_aliases_are_masked_and_not_saveable(self):
         self.env_file.write_text("QBIT_PASS=fake-saved-qbit\nQB_PASS=fake-saved-qb\n", encoding="utf-8")

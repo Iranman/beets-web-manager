@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Saving setup values no longer overwrites a saved secret with its mask (#522).** `GET /api/setup/env` and `GET /api/setup/settings` return saved secrets as `********`. An API client that posted that value back to `POST /api/setup/env` (for a secret variable) or `POST /api/setup/settings` (for a field whose name contains `key` or `token`) replaced the real secret with the literal mask. The mask is now ignored there and the saved value is kept. To clear a secret, list it in `clear` as before.
+
 ## v0.16.2 - 2026-11-04
 
 ### Fixed
