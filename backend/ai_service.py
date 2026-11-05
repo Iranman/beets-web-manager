@@ -453,9 +453,11 @@ _VARIOUS_ARTISTS_ALIASES = frozenset({"variousartists", "various", "va"})
 
 
 def _va_key(name: str) -> str:
-    # NFKC + casefold, then drop everything that isn't a letter or digit, so
-    # "V.A.", "V-A", "V⁠A" and "Various Artists." reach the alias check.
-    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", name).casefold())
+    # NFKD + casefold, then drop everything that isn't a letter or digit, so
+    # "V.A.", "V-A", "V⁠A", "VÁ" and "Various Artists." reach the
+    # alias check. NFKD (not NFKC) so combining marks decompose and get
+    # stripped, matching what the fuzzy scorer's _norm() does with them.
+    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKD", name).casefold())
 
 
 def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artist: str) -> str:

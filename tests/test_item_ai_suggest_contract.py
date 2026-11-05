@@ -571,13 +571,16 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
     def test_va_alias_check_ignores_punctuation_and_invisible_characters(self):
         # Security review F1 (#521): punctuation / zero-width / full-width
         # spellings of a VA alias must not fall through to the fuzzy scorer.
-        for source in ("VA.", "V-A", "V⁠A", "V​A", "ＶＡ", "Various Artists.", "V. A."):
+        for source in ("VA.", "V-A", "V⁠A", "V​A", "ＶＡ", "Various Artists.", "V. A.",
+                       "VÁ", "V́A", "Várious", "‮VA"):
             with self.subTest(source=source):
                 self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": "VAST"}, source))
                 self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": source}, "VAST"))
                 self.assertEqual(ai_service._ai_artist_mismatch_reason({"artist": "Various Artists"}, source), "")
         self.assertIn("artist mismatch",
                       ai_service._ai_artist_mismatch_reason({"artist": "Various Cruelties"}, "Various Artists."))
+        self.assertIn("artist mismatch",
+                      ai_service._ai_artist_mismatch_reason({"artist": "Various Cruelties"}, "Várious"))
 
 
 class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):
