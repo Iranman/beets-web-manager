@@ -5431,10 +5431,12 @@ def _missing_mb_rows(search: str = "") -> List[Dict[str, Any]]:
             # rejected by it, or cached before it existed, stays a low lead.
             validated = stored.get("identity_validated") is True
             mb_url = _s(stored.get("mb_url"))
+            # Import Review prefills its ID box from these, so an unvalidated
+            # entry's IDs would be one click from Apply; drop them.
             row.update({
-                "mb_albumid": stored.get("mb_albumid", ""),
-                "mb_releasegroupid": stored.get("mb_releasegroupid", ""),
-                "mb_releasegroupurl": stored.get("mb_releasegroupurl", ""),
+                "mb_albumid": stored.get("mb_albumid", "") if validated else "",
+                "mb_releasegroupid": stored.get("mb_releasegroupid", "") if validated else "",
+                "mb_releasegroupurl": stored.get("mb_releasegroupurl", "") if validated else "",
                 "confidence": stored.get("confidence", "") if validated else "low",
                 "reason": stored.get("reason", ""),
                 "mb_valid": bool(stored.get("mb_valid")) and validated,

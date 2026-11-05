@@ -129,6 +129,9 @@ class LibraryMissingMbIdsTests(_ClientCase):
             with self.subTest(rid):
                 self.assertEqual((rows[rid]["confidence"], rows[rid]["mb_valid"], rows[rid]["identity_validated"]),
                                  ("low", False, False))
+                # Import Review prefills its ID box from these; a rejected ID must not reach it.
+                self.assertEqual((rows[rid]["mb_albumid"], rows[rid]["mb_releasegroupid"],
+                                  rows[rid]["mb_releasegroupurl"]), ("", "", ""))
         self.assertEqual(rows["album:2"]["candidate_identity_error"], "Rejected: artist mismatch.")
 
     def test_only_a_validated_musicbrainz_url_is_linked(self):
