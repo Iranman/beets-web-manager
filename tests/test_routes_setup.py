@@ -781,6 +781,11 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertNotIn("fake-new", self.env_file.read_text(encoding="utf-8"))
 
+        # #522: echoing the GET mask for an unsaveable alias is ignored, not a 400.
+        r = self.client.post("/api/setup/env", json={"variables": {"QBIT_PASS": self.module._SECRET_MASK}})
+        self.assertEqual((r.status_code, r.get_json()["saved"]), (200, []))
+        self.assertIn("QBIT_PASS=fake-saved-qbit", self.env_file.read_text(encoding="utf-8"))
+
     def test_url_query_credential_is_masked_and_survives_an_echo(self):
         raw = "https://ai.test/v1?api_key=fake-query-credential"
         self.env_file.write_text(f"AI_BASE_URL={raw}\n", encoding="utf-8")
