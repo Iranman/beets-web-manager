@@ -1584,16 +1584,6 @@ def _ai_model_and_endpoint(default_model: str, api_key: Optional[str]) -> Tuple[
     return model, f"{base_url}/chat/completions"
 
 
-def _load_album_mb_suggestions() -> Dict[str, Any]:
-    try:
-        if _ALBUM_MB_SUGGESTIONS_FILE.exists():
-            data = json.loads(_ALBUM_MB_SUGGESTIONS_FILE.read_text())
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        pass
-    return {}
-
-
 def _compact_preflight(preflight: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not preflight:
         return None

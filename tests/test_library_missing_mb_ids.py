@@ -61,8 +61,10 @@ class LibraryMissingMbIdsTests(_ClientCase):
                                     side_effect=AssertionError("per-album Beets call (F6)"))
         self.patch("backend.library_service._load_pending_reviews",
                    return_value=[{"path": "/downloads/x", "suggestion": {"existing_album_ids": [2]}}])
-        self.patch("backend.library_service._load_album_mb_suggestions",
-                   return_value={"1": {"mb_albumid": "rel", "confidence": "high", "mb_valid": True}})
+        self.suggestions = self.patch(
+            "backend.library_service._load_album_mb_suggestions",
+            return_value={"1": {"mb_albumid": "rel", "confidence": "high", "mb_valid": True,
+                                "identity_validated": True}})
 
     def get(self, qs=""):
         res = self.client.get("/api/library/missing-mb-ids" + qs)
@@ -112,6 +114,32 @@ class LibraryMissingMbIdsTests(_ClientCase):
         self.assertEqual(i10["evidence"]["missing_id_type"], "Recording ID")
         self.assertIn("origin_type", i10)
         self.assertNotIn("album:3", rows)
+
+    def test_suggestion_without_artist_gate_pass_is_not_usable(self):
+        """A cached suggestion rejected by the AI artist gate, or cached before
+        the gate existed, is shown as a low lead, never as a valid Release ID."""
+        self.suggestions.return_value = {
+            "1": {"mb_albumid": "rel", "confidence": "high", "mb_valid": True},
+            "2": {"mb_albumid": "rel2", "confidence": "low", "mb_valid": True, "identity_validated": False,
+                  "candidate_identity_error": "Rejected: artist mismatch."},
+        }
+        _, body = self.get("?limit=500")
+        rows = {r["id"]: r for r in body["items"]}
+        for rid in ("album:1", "album:2"):
+            with self.subTest(rid):
+                self.assertEqual((rows[rid]["confidence"], rows[rid]["mb_valid"], rows[rid]["identity_validated"]),
+                                 ("low", False, False))
+        self.assertEqual(rows["album:2"]["candidate_identity_error"], "Rejected: artist mismatch.")
+
+    def test_suggestions_are_read_from_the_batch_store(self):
+        """The batch job saves to the AI batch store; Missing IDs reads the same store."""
+        from backend import ai_batch_state_service as abs_
+        # The store registry keeps the SQLite file open; Windows can't delete it.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d, \
+                mock.patch.dict(os.environ, {"AI_BATCH_STATE_DIR": d}):
+            entry = {"mb_albumid": "rel", "confidence": "high", "mb_valid": True, "identity_validated": True}
+            abs_._get_ai_batch_store().save_suggestions_cache({"1": entry})
+            self.assertEqual(abs_._load_album_mb_suggestions(), {"1": entry})
 
     def test_bad_params_are_400(self):
         for qs in ("?kind=bogus", "?sort=bogus", "?limit=501", "?limit=x", "?offset=-1"):
