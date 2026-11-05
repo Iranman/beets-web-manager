@@ -2383,11 +2383,19 @@ def batch_ai_suggest():
                 res = _ai_suggest_album_internal(album, log, existing_album_id=cur_aid)
                 sug = res.get("suggestion") or {}
                 ev  = res.get("evidence") or {}
+                # The Release Group is the canonical album ID; it comes from the
+                # selected MusicBrainz candidate, never AI text. Kept only when valid.
+                rgid = _s(sug.get("mb_releasegroupid")).strip().lower()
+                if not (sug.get("mb_valid") and sug.get("identity_validated") is True
+                        and _MB_UUID_RE.match(rgid)):
+                    rgid = ""
                 results[str_aid] = {
                     "album_id":       cur_aid,
                     "album":          album.album or "",
                     "albumartist":    album.albumartist or "",
                     "mb_albumid":     sug.get("mb_albumid", ""),
+                    "mb_releasegroupid": rgid,
+                    "mb_releasegroupurl": f"https://musicbrainz.org/release-group/{rgid}" if rgid else "",
                     "confidence":     sug.get("confidence", "low"),
                     "reason":         sug.get("reason", ""),
                     "mb_valid":       bool(sug.get("mb_valid")),

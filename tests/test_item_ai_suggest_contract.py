@@ -675,6 +675,23 @@ class BatchAiSuggestCacheKeepsArtistGate(unittest.TestCase):
         self.assertIs(saved["1"]["identity_validated"], False)
         self.assertEqual(saved["1"]["candidate_identity_error"], "")
 
+    def test_validated_entry_caches_the_release_group(self):
+        rg = _RG
+        sug = {"mb_albumid": _REL, "mb_releasegroupid": rg, "mb_valid": True,
+               "identity_validated": True, "confidence": "high"}
+        _, saved = self._run({}, sug)
+        self.assertEqual(saved["1"]["mb_releasegroupid"], rg)
+        self.assertEqual(saved["1"]["mb_releasegroupurl"], f"https://musicbrainz.org/release-group/{rg}")
+
+    def test_rejected_or_malformed_release_group_is_not_cached(self):
+        rg = _RG
+        for sug in (dict(self._REJECTED, mb_releasegroupid=rg),
+                    {"mb_valid": True, "identity_validated": True, "mb_releasegroupid": "not-a-uuid"}):
+            with self.subTest(sug=sug):
+                _, saved = self._run({}, sug)
+                self.assertEqual(saved["1"]["mb_releasegroupid"], "")
+                self.assertEqual(saved["1"]["mb_releasegroupurl"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
