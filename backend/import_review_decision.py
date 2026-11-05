@@ -136,6 +136,9 @@ def target_preview_block_reason(item: Dict[str, Any], match: Optional[Dict[str, 
     return ""
 
 
+IDENTITY_REJECTED_REASON = "Import blocked: representative release does not belong to selected Release Group."
+
+
 def apply_block_reason(item: Dict[str, Any], mbid: Any, match: Optional[Dict[str, Any]],
                        preview_state: Optional[Dict[str, Any]]) -> str:
     """Why the apply action may not run for this selection; "" when it may."""
@@ -146,6 +149,9 @@ def apply_block_reason(item: Dict[str, Any], mbid: Any, match: Optional[Dict[str
         return "Enter or select a MusicBrainz Release Group ID first."
     import_like = item.get("type") == "pending_ai" and not existing_album_id(item)
     if not import_like:
+        # A repair retags an existing album, so a rejected identity blocks it too.
+        if match and match.get("identity_validated") is False:
+            return match.get("candidate_identity_error") or IDENTITY_REJECTED_REASON
         if match and match.get("preflight_status") == "failed":
             return "Import blocked because this candidate failed tracklist preflight."
         return ""
@@ -159,8 +165,7 @@ def apply_block_reason(item: Dict[str, Any], mbid: Any, match: Optional[Dict[str
         return ("Import blocked because this candidate does not include a representative release for tracklist "
                 "comparison.")
     if match.get("identity_validated") is False:
-        return (match.get("candidate_identity_error")
-                or "Import blocked: representative release does not belong to selected Release Group.")
+        return match.get("candidate_identity_error") or IDENTITY_REJECTED_REASON
     if not (match.get("track_mapping") or []):
         return "Import blocked until the visible candidate track comparison finishes."
     if match.get("preflight_status") in ("not_run", "stale"):
@@ -239,13 +244,13 @@ def blocked_action_hint(reason: Any) -> str:
 
 def action_label(item: Dict[str, Any], match: Optional[Dict[str, Any]] = None,
                  preview: Optional[Dict[str, Any]] = None) -> str:
+    if match and match.get("identity_validated") is False:
+        return "Import blocked"
     if item.get("type") == "library_no_mb":
         return "Attach recording ID" if item.get("target_kind") == "item" else "Match album"
     selected_count = len(selected_import_source_files(match, preview)) if match else 0
     preview_count = _preview_count(preview or {}, selected_count)
     existing = existing_album_id(item)
-    if match and match.get("identity_validated") is False:
-        return "Import blocked"
     if match and match.get("is_partial_import"):
         n = int(max(0, min(selected_count or preview_count, preview_count)))
         plural = "" if n == 1 else "s"
