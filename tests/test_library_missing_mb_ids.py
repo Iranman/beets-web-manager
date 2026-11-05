@@ -158,6 +158,21 @@ class LibraryMissingMbIdsTests(_ClientCase):
             abs_._get_ai_batch_store().save_suggestions_cache({"1": entry})
             self.assertEqual(abs_._load_album_mb_suggestions(), {"1": entry})
 
+    def test_non_object_cache_entry_is_treated_as_absent(self):
+        """A stored entry that is not a JSON object must not 500 the list."""
+        from backend import ai_batch_state_service as abs_
+        self.suggestions.side_effect = abs_._load_album_mb_suggestions
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d, \
+                mock.patch.dict(os.environ, {"AI_BATCH_STATE_DIR": d}):
+            with abs_._get_ai_batch_store()._get_conn() as conn:
+                conn.executemany(
+                    "INSERT INTO ai_suggestions_cache (album_id, schema_version, mb_albumid, payload_json,"
+                    " updated_at) VALUES (?, 1, '', ?, 0)", [(1, '"oops"'), (2, "[1]"), (3, "null")])
+            status, body = self.get("?limit=500")
+        self.assertEqual(status, 200, body)
+        rows = {r["id"]: r for r in body["items"]}
+        self.assertEqual((rows["album:1"].get("mb_albumid", ""), rows["album:2"].get("mb_albumid", "")), ("", ""))
+
     def test_bad_params_are_400(self):
         for qs in ("?kind=bogus", "?sort=bogus", "?limit=501", "?limit=x", "?offset=-1"):
             with self.subTest(qs=qs):

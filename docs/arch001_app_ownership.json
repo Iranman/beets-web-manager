@@ -19960,10 +19960,10 @@
    "module": "backend/ai_batch_state_service.py",
    "lines": [
     88,
-    95
+    97
    ],
-   "size": 8,
-   "body_lines": 5,
+   "size": 10,
+   "body_lines": 6,
    "route": null,
    "mutation_capable": false,
    "domain": "MATCHING",
@@ -19982,8 +19982,8 @@
    "name": "_ai_batch_worker_registered",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    144,
-    151
+    146,
+    153
    ],
    "size": 8,
    "body_lines": 4,
@@ -20004,8 +20004,8 @@
    "name": "_ai_batch_write_state",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    207,
-    212
+    209,
+    214
    ],
    "size": 6,
    "body_lines": 5,
@@ -20028,8 +20028,8 @@
    "name": "_ai_batch_public_state",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    215,
-    225
+    217,
+    227
    ],
    "size": 11,
    "body_lines": 10,
@@ -20059,8 +20059,8 @@
    "name": "_ai_batch_effective_folder_status",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    228,
-    238
+    230,
+    240
    ],
    "size": 11,
    "body_lines": 10,
@@ -20086,8 +20086,8 @@
    "name": "_ai_batch_normalize_folder_outcome",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    241,
-    252
+    243,
+    254
    ],
    "size": 12,
    "body_lines": 11,
@@ -20110,8 +20110,8 @@
    "name": "_ai_batch_recompute_counts",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    255,
-    292
+    257,
+    294
    ],
    "size": 38,
    "body_lines": 37,
@@ -20135,8 +20135,8 @@
    "name": "_ai_batch_terminal_summary",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    295,
-    301
+    297,
+    303
    ],
    "size": 7,
    "body_lines": 6,
@@ -20156,8 +20156,8 @@
    "name": "_ai_batch_recalculate_batch_state",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    304,
-    356
+    306,
+    358
    ],
    "size": 53,
    "body_lines": 52,
@@ -20182,8 +20182,8 @@
    "name": "_ai_batch_commit",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    359,
-    369
+    361,
+    371
    ],
    "size": 11,
    "body_lines": 10,
@@ -20215,8 +20215,8 @@
    "name": "_ai_batch_mark_folder",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    372,
-    383
+    374,
+    385
    ],
    "size": 12,
    "body_lines": 11,
@@ -20243,8 +20243,8 @@
    "name": "_ai_batch_mark_stale_ai_running_folders",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    386,
-    403
+    388,
+    405
    ],
    "size": 18,
    "body_lines": 17,
@@ -20265,8 +20265,8 @@
    "name": "_ai_batch_mark_orphaned_ai_completed_for_review",
    "module": "backend/ai_batch_state_service.py",
    "lines": [
-    406,
-    419
+    408,
+    421
    ],
    "size": 14,
    "body_lines": 13,
