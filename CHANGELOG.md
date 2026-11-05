@@ -8,7 +8,7 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
-- **Saving setup values no longer overwrites a saved secret with its mask (#522).** `GET /api/setup/env` and `GET /api/setup/settings` return saved secrets as `********`. An API client that posted that value back to `POST /api/setup/env` (for a secret variable) or `POST /api/setup/settings` (for a field whose name contains `key` or `token`) replaced the real secret with the literal mask. The mask is now ignored there and the saved value is kept. To clear a secret, list it in `clear` as before.
+- **Saving setup values no longer overwrites a saved secret with its mask (#522).** `GET /api/setup/env` and `GET /api/setup/settings` return saved secrets as `********`. An API client that posted that value back to `POST /api/setup/env` (for a secret variable) or `POST /api/setup/settings` (for a field whose name contains `key` or `token`) replaced the real secret with the literal mask. The mask is now ignored there and the saved value is kept. On `/api/setup/env`, clearing a secret still needs it listed in `clear`. A generic secret's `saved_value` in `GET /api/setup/env` now uses the same `********` mask instead of a row of bullets, so an echo of that field is recognised too. Posting the mask for a secret alias that cannot be saved (such as `QBIT_PASS`) is now ignored instead of returning 400.
 
 ## v0.16.2 - 2026-11-04
 

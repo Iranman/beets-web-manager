@@ -711,7 +711,15 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
 
     def test_posting_masked_secret_keeps_saved_value(self):
         # #522: the GET mask echoed back must not replace the saved secret.
-        self.env_file.write_text("PLEX_TOKEN=fake-saved-token\n", encoding="utf-8")
+        self.env_file.write_text("PLEX_TOKEN=fake-saved-token\nLIDARR_API_KEY=fake-saved-lidarr\n", encoding="utf-8")
+        variables = {v["name"]: v for v in self.client.get("/api/setup/env").get_json()["variables"]}
+        # Every masked field GET returns uses the one mask POST recognises.
+        self.assertEqual(variables["LIDARR_API_KEY"]["saved_value"], self.module._SECRET_MASK)
+        self.assertEqual(variables["LIDARR_API_KEY"]["value"], self.module._SECRET_MASK)
+        r = self.client.post("/api/setup/env", json={"variables": {
+            "LIDARR_API_KEY": variables["LIDARR_API_KEY"]["saved_value"]}})
+        self.assertEqual(r.get_json()["saved"], [])
+        self.assertIn("LIDARR_API_KEY=fake-saved-lidarr", self.env_file.read_text(encoding="utf-8"))
         # (No non-secret key here: a saved value lands in os.environ and can be
         # captured by config_layers' boot snapshot, pinning it for later tests.)
         r = self.client.post("/api/setup/env", json={"variables": {"PLEX_TOKEN": self.module._SECRET_MASK}})
@@ -721,7 +729,8 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertIn("PLEX_TOKEN=fake-saved-token", text)
         self.assertNotIn(self.module._SECRET_MASK, text)
         # An explicit clear still works.
-        self.client.post("/api/setup/env", json={"variables": {"PLEX_TOKEN": ""}, "clear": ["PLEX_TOKEN"]})
+        self.client.post("/api/setup/env", json={
+            "variables": {"PLEX_TOKEN": self.module._SECRET_MASK}, "clear": ["PLEX_TOKEN"]})
         self.assertNotIn("fake-saved-token", self.env_file.read_text(encoding="utf-8"))
 
     def test_secret_aliases_are_masked_and_not_saveable(self):

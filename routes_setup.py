@@ -1059,7 +1059,8 @@ def _resolve_setting_item(
             type="secret",
             value=_mask(env_val or persisted_val) if configured else "",
             effective_value=None,
-            saved_value="••••••••••••••••" if has_stored else None,
+            # One mask value everywhere, so POST can recognise an echo (#522).
+            saved_value=_SECRET_MASK if has_stored else None,
             has_saved_value=has_stored,
             is_overridden=is_overridden,
             default=default_val,
