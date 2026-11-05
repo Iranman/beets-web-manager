@@ -275,6 +275,11 @@ def _is_secret_env(name: str) -> bool:
     return config_layers.is_secret_name(upper) or any(part in upper for part in _SECRET_ENV_PARTS)
 
 
+def _mask_secret_settings(settings: dict) -> dict:
+    """Mask settings.json values by the env secret rule, not just key/token."""
+    return {k: (_mask(v) if _is_secret_env(str(k)) else v) for k, v in settings.items()}
+
+
 def _decode_env_value(raw: str) -> str:
     raw = raw.strip()
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
@@ -2826,8 +2831,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         "plugins_ready": bool(plugins_report.get("all_required_healthy", False)),
         "auth": auth_status,
         "integrations": integrations,
-        "settings": {k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v)
-                     for k, v in settings.items()},
+        "settings": _mask_secret_settings(settings),
     }
 
 
@@ -3368,9 +3372,8 @@ def setup_test_plex():
 def setup_get_settings():
     record = _load_settings_record()
     settings = dict(record.get("settings") or {})
-    return jsonify({"ok": True, "revision": record.get("revision"), "settings": {
-        k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v) for k, v in settings.items()
-    }})
+    return jsonify({"ok": True, "revision": record.get("revision"),
+                    "settings": _mask_secret_settings(settings)})
 
 
 @app.post("/api/setup/settings")
@@ -3388,9 +3391,9 @@ def setup_save_settings():
     if record.get("exists") and not expected_revision:
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "settings_missing_revision"}), 428
     settings = dict(json.loads(record.get("content") or "{}"))
-    # GET masks key/token fields; a round-tripped mask keeps the stored value (#522).
+    # GET masks secret fields; a round-tripped mask keeps the stored value (#522).
     settings.update({k: v for k, v in payload.items()
-                     if not (v == _SECRET_MASK and ("key" in k.lower() or "token" in k.lower()))})
+                     if not (v == _SECRET_MASK and _is_secret_env(str(k)))})
     try:
         result = store.save_json(relative_name, settings, is_secret=False, expected_revision=expected_revision)
     except WebManagerConfigStoreConflictError:

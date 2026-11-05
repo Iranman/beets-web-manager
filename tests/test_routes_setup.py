@@ -185,10 +185,16 @@ class RoutesSetupStatusTests(unittest.TestCase):
         self.assertIn("plugin_failures", body["beets"])
 
     def test_status_masks_secret_looking_settings(self):
-        self.client.post("/api/setup/settings", json={"ai_api_key": "sk-verysecretvalue123"})
-        r = self.client.get("/api/setup/status")
-        settings = r.get_json()["settings"]
-        self.assertNotIn("verysecretvalue123", str(settings))
+        # Unauthenticated status used to mask only *key*/*token* names. The old
+        # version POSTed to an unredirected settings store and asserted vacuously.
+        stored = {"qbit_password": "pw-plain-value", "client_secret": "cs-plain-value",
+                  "ai_api_key": "ak-plain-value", "ai_model": "visible-model"}
+        with mock.patch.object(self.module, "_load_settings", return_value=stored):
+            settings = self.client.get("/api/setup/status?refresh=1").get_json()["settings"]
+        self.assertEqual(set(settings), set(stored))
+        self.assertNotIn("plain-value", str(settings))
+        self.assertEqual(settings["qbit_password"], self.module._SECRET_MASK)
+        self.assertEqual(settings["ai_model"], "visible-model")
 
     def test_status_sanitizes_remote_diagnostic_exceptions(self):
         sensitive = "/database/internal/path token=super-secret-key Traceback... File \"secret.py\", line 7"
@@ -649,6 +655,22 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         stored = self.module._load_settings()
         self.assertEqual(stored["ai_api_key"], "fake-saved-key")
         self.assertEqual(stored["ai_model"], "m2")
+
+    def test_get_settings_masks_password_and_secret_and_keeps_on_echo(self):
+        r = self.client.post("/api/setup/settings", json={"qbit_password": "pw-plain-value", "client_secret": "cs-x"})
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        self.assertEqual(got, {"qbit_password": self.module._SECRET_MASK, "client_secret": self.module._SECRET_MASK})
+        r = self.client.post("/api/setup/settings", json={
+            "qbit_password": got["qbit_password"], "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings()["qbit_password"], "pw-plain-value")
+
+    def test_posting_empty_string_clears_settings_secret(self):
+        r = self.client.post("/api/setup/settings", json={"ai_api_key": "fake-saved-key"})
+        r = self.client.post("/api/setup/settings", json={"ai_api_key": "", "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings()["ai_api_key"], "")
 
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
