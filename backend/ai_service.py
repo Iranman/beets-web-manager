@@ -460,9 +460,13 @@ def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artis
     if not source_artist or not cand_artist:
         return ""
     # "VA - Title" folders name MusicBrainz's "Various Artists" by its usual short forms.
-    if {source_artist.casefold(), cand_artist.casefold()} <= _VARIOUS_ARTISTS_ALIASES:
+    # Either side being a VA alias means both must be: "VAST" / "Various
+    # Cruelties" must not fuzzy-match "VA" / "Various" below.
+    source_va = source_artist.casefold() in _VARIOUS_ARTISTS_ALIASES
+    cand_va = cand_artist.casefold() in _VARIOUS_ARTISTS_ALIASES
+    if source_va and cand_va:
         return ""
-    if _playlist_artist_name_score(source_artist, cand_artist) >= 0.45:
+    if not (source_va or cand_va) and _playlist_artist_name_score(source_artist, cand_artist) >= 0.45:
         return ""
     return (
         "Rejected: artist mismatch. Album title matched, but "
