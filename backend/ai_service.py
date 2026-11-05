@@ -5,7 +5,7 @@ from __future__ import annotations
 from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
-import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
+import functools, hashlib, json, os, re, shutil, stat, threading, time, unicodedata, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
 from backend.matching import (
@@ -27,7 +27,7 @@ from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
 from backend.import_identity import _recursive_audio, identify_import_folder
 import backend.composite_workflows as composite_workflows
-from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score, _playlist_title_score
+from backend.acoustid_service import _acoustid_lookup_cached_outcome, _acoustid_multi_file, acoustid_failure_status, _album_track_norm, _audio_identity_score, _playlist_artist_name_score
 from backend.artwork_service import _fetch_artwork_after_retag
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_file_wanted_match_score
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint, _album_preflight_folder, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_match_ratio, _preflight_oversized_subset_complete, _preflight_tracklist_gate_ok
@@ -363,13 +363,35 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
 
 
 def _ai_reply_object(content: Any) -> Dict[str, Any]:
-    """The parsed AI reply; a non-object or a non-string albumartist is a failed reply, like unparseable text."""
+    """The keys the album/folder prompt asks for, validated; anything else in the
+    reply is dropped, so scores and identity can only come from evidence. A reply
+    of the wrong shape is a failed reply, like unparseable text.
+    """
     reply = json.loads(content)
     if not isinstance(reply, dict):
         raise ValueError("AI reply is not a JSON object")
-    if not isinstance(reply.get("albumartist"), (str, type(None))):
-        raise ValueError("AI reply albumartist is not a string")
-    return reply
+    clean: Dict[str, Any] = {}
+    for key in ("album", "albumartist", "year", "label", "country", "confidence", "reason"):
+        value = reply.get(key)
+        if value is None:
+            continue
+        if key == "year":
+            if isinstance(value, str) and value.strip().isascii() and value.strip().isdigit() and len(value.strip()) <= 4:
+                value = int(value)  # a non-strict provider's "2012"
+            if type(value) is not int or not 0 <= value < 10000:
+                raise ValueError("AI reply field year is not a year")
+            clean[key] = value
+        elif isinstance(value, str) and len(value) <= 1000:
+            clean[key] = value.strip()
+        else:
+            raise ValueError(f"AI reply field {key} has the wrong type or size")
+    if "confidence" in clean:
+        clean["confidence"] = clean["confidence"].lower()
+        if clean["confidence"] not in ("high", "medium", "low"):
+            raise ValueError("AI reply confidence is not high, medium or low")
+    if "candidate_index" in reply:
+        clean["candidate_index"] = reply["candidate_index"]  # _ai_bind_selected_release validates it
+    return clean
 
 
 def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str, Any]]) -> tuple:
@@ -424,6 +446,41 @@ def _ai_bind_selected_release(sug: Dict[str, Any], mb_candidates: List[Dict[str,
     if not sug.get("reason"):
         sug["reason"] = ""
     return selected_candidate, mb_id
+
+
+# Compared after _va_key(): punctuation, spaces and invisible characters removed.
+_VARIOUS_ARTISTS_ALIASES = frozenset({"variousartists", "various", "va"})
+
+
+def _va_key(name: str) -> str:
+    # NFKD + casefold, then drop everything that isn't a letter or digit, so
+    # "V.A.", "V-A", "V⁠A", "VÁ" and "Various Artists." reach the
+    # alias check. NFKD (not NFKC) so combining marks decompose and get
+    # stripped, matching what the fuzzy scorer's _norm() does with them.
+    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKD", name).casefold())
+
+
+def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artist: str) -> str:
+    """Reject a candidate whose artist doesn't match the source's own artist,
+    whatever its album title (2026-07-16, Voyager/Vitalic: "same title,
+    different artist"). Empty string = no rejection."""
+    source_artist = _s(source_artist).strip()
+    cand_artist = _s((candidate or {}).get("artist", "")).strip()
+    if not source_artist or not cand_artist:
+        return ""
+    # "VA - Title" folders name MusicBrainz's "Various Artists" by its usual short forms.
+    # Either side being a VA alias means both must be: "VAST" / "Various
+    # Cruelties" must not fuzzy-match "VA" / "Various" below.
+    source_va = _va_key(source_artist) in _VARIOUS_ARTISTS_ALIASES
+    cand_va = _va_key(cand_artist) in _VARIOUS_ARTISTS_ALIASES
+    if source_va and cand_va:
+        return ""
+    if not (source_va or cand_va) and _playlist_artist_name_score(source_artist, cand_artist) >= 0.45:
+        return ""
+    return (
+        "Rejected: artist mismatch. Album title matched, but "
+        f"candidate artist is {cand_artist} and source artist is {source_artist}."
+    )
 
 
 def _classify_openai_error(exc: Exception) -> str:
@@ -770,6 +827,14 @@ def _ai_suggest_album_internal(
             sug["mb_artist_search_url"] = (
                 "https://musicbrainz.org/search?"
                 + urllib.parse.urlencode({"query": _aa, "type": "artist"}))
+        # Same artist gate as the folder path. Album consumers (Missing IDs,
+        # batch cache) read confidence, so a rejection also drops it to low.
+        identity_rejection_reason = _ai_artist_mismatch_reason(selected_candidate, album.albumartist)
+        sug["identity_validated"] = not identity_rejection_reason
+        sug["candidate_identity_error"] = identity_rejection_reason
+        if identity_rejection_reason:
+            sug["confidence"] = "low"
+            sug["reason"] = f"{identity_rejection_reason} {_s(sug.get('reason'))}".strip()
         sug["ai_available"] = ai_available
         sug["ai_unavailable_reason"] = ai_unavailable_reason
         evidence = _ai_match_evidence_packet(
@@ -1586,17 +1651,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         # a matching album title must never rescue a wrong-artist candidate
         # (2026-07-16, Voyager/Vitalic fix: "same title, different artist"
         # was slipping through an earlier AND-based version of this check).
-        identity_rejection_reason = ""
-        if selected_candidate and guessed_artist:
-            cand_artist = _s(selected_candidate.get("artist", "")).strip()
-            cand_album = _s(selected_candidate.get("album", "")).strip()
-            artist_score = _playlist_artist_name_score(guessed_artist, cand_artist)
-            album_score = _playlist_title_score(guessed_album, cand_album)
-            if cand_artist and artist_score < 0.45:
-                identity_rejection_reason = (
-                    "Rejected: artist mismatch. Album title matched, but "
-                    f"candidate artist is {cand_artist} and source artist is {guessed_artist}."
-                )
+        identity_rejection_reason = _ai_artist_mismatch_reason(selected_candidate, guessed_artist)
         sug["identity_validated"] = not bool(identity_rejection_reason)
         sug["candidate_identity_error"] = identity_rejection_reason
         sug["ai_available"] = ai_available

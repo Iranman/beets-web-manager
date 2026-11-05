@@ -66,8 +66,9 @@ import {
   shouldShowBlockedBucket,
   shouldShowReadyBucket,
   blockedActionHint,
+  identityRejectionFor,
 } from './importReviewDecision';
-import type { MatchBucket, MatchConfidenceLevel, TrackRow, TargetPreviewState, SelectedMatch } from './importReviewDecision';
+import type { IdentityRejectionSource, MatchBucket, MatchConfidenceLevel, TrackRow, TargetPreviewState, SelectedMatch } from './importReviewDecision';
 import { MusicBrainzUnavailableNotice, acoustidNotCheckedText, fingerprintNotCheckedLabel } from '../../components/MusicBrainzUnavailableNotice';
 import type {
   AiSuggestResponse,
@@ -1508,11 +1509,14 @@ function buildCandidateSelectedMatch(
   trackData: TrackData | null,
   status: SelectedMatch['preflight_status'] = trackData ? 'passed' : 'not_run',
   reason = '',
+  identityRejection?: IdentityRejectionSource,
 ): SelectedMatch {
   const releaseGroupId = (trackData?.selected_release_group_id || trackData?.mb_releasegroupid || candidate.mb_releasegroupid || '').trim();
   const representativeReleaseId = (trackData?.representative_release_id || candidate.mb_albumid || '').trim();
-  const identityValidated = trackData?.identity_validated !== false;
-  const candidateIdentityError = (trackData?.candidate_identity_error || '').trim();
+  // The track comparison does not run the artist gate; keep the suggestion's rejection.
+  const rejectedReason = identityRejectionFor(releaseGroupId, representativeReleaseId, identityRejection);
+  const identityValidated = trackData?.identity_validated !== false && rejectedReason === null;
+  const candidateIdentityError = (trackData?.candidate_identity_error || '').trim() || rejectedReason || '';
   const totalTracks = trackData?.mb_track_count ?? (typeof candidate.tracks === 'number' ? candidate.tracks : null);
   const localCount = trackData?.local_track_count ?? null;
   const matched = trackData?.matched_count ?? null;
@@ -2132,18 +2136,21 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
   );
 }
 
-function CandidateCarousel({
+export function CandidateCarousel({
   candidates,
   selectedMbid,
   folder,
   onUseCandidate,
   onSelectMatch,
+  identityRejection,
 }: {
   candidates: ReviewCandidate[];
   selectedMbid?: string;
   folder?: string;
   onUseCandidate: (mbid: string) => void;
   onSelectMatch?: (match: SelectedMatch) => void;
+  /** The suggestion whose identity rejection must survive a rebuilt match. */
+  identityRejection?: IdentityRejectionSource;
 }) {
   const initialIndex = useMemo(() => {
     if (!selectedMbid) return 0;
@@ -2160,6 +2167,7 @@ function CandidateCarousel({
   const containerRef = useRef<HTMLDivElement>(null);
   const onUseCandidateRef = useRef(onUseCandidate);
   const onSelectMatchRef = useRef(onSelectMatch);
+  const identityRejectionRef = useRef(identityRejection);
 
   const total = candidates.length;
   const current = candidates[currentIndex] ?? null;
@@ -2167,7 +2175,8 @@ function CandidateCarousel({
   useEffect(() => {
     onUseCandidateRef.current = onUseCandidate;
     onSelectMatchRef.current = onSelectMatch;
-  }, [onSelectMatch, onUseCandidate]);
+    identityRejectionRef.current = identityRejection;
+  }, [identityRejection, onSelectMatch, onUseCandidate]);
 
   const goTo = useCallback((index: number) => {
     const clamped = Math.max(0, Math.min(total - 1, index));
@@ -2196,7 +2205,7 @@ function CandidateCarousel({
     setTrackLoading(true);
     setTrackData(null);
     setTrackError('');
-    const pendingMatch = buildCandidateSelectedMatch(current, null, 'not_run');
+    const pendingMatch = buildCandidateSelectedMatch(current, null, 'not_run', '', identityRejectionRef.current);
     if (pendingMatch.release_group_id) {
       onUseCandidateRef.current(pendingMatch.release_group_id);
       onSelectMatchRef.current?.(pendingMatch);
@@ -2212,7 +2221,7 @@ function CandidateCarousel({
         if (!active) return;
         if (data.ok) {
           setTrackData(data);
-          const selected = buildCandidateSelectedMatch(current, data);
+          const selected = buildCandidateSelectedMatch(current, data, undefined, '', identityRejectionRef.current);
           if (selected.release_group_id) {
             onUseCandidateRef.current(selected.release_group_id);
           }
@@ -2223,7 +2232,7 @@ function CandidateCarousel({
         if (!active) return;
         const message = errorMessage(err);
         setTrackError(message);
-        onSelectMatchRef.current?.(buildCandidateSelectedMatch(current, null, 'failed', `Track comparison failed: ${message}`));
+        onSelectMatchRef.current?.(buildCandidateSelectedMatch(current, null, 'failed', `Track comparison failed: ${message}`, identityRejectionRef.current));
       })
       .finally(() => {
         if (active) setTrackLoading(false);
@@ -2246,7 +2255,7 @@ function CandidateCarousel({
     : current.tracks
       ? `${current.tracks} tracks`
       : '';
-  const visibleMatch = buildCandidateSelectedMatch(current, trackData);
+  const visibleMatch = buildCandidateSelectedMatch(current, trackData, undefined, '', identityRejection);
   const visibleConfidence = rgid
     ? visibleMatch.confidence_level
     : 'blocked';
@@ -2372,7 +2381,7 @@ function CandidateCarousel({
                         onClick={() => {
                           onUseCandidate(rgid);
                           onSelectMatch?.({
-                            ...buildCandidateSelectedMatch(current, trackData, 'stale', 'Release Group ID saved; preflight must pass before import.'),
+                            ...buildCandidateSelectedMatch(current, trackData, 'stale', 'Release Group ID saved; preflight must pass before import.', identityRejection),
                             preflight_status: 'stale',
                             preflight_ok: null,
                             is_importable: false,
@@ -2404,7 +2413,7 @@ function CandidateCarousel({
                     color="primary"
                     onClick={() => {
                       onUseCandidate(rgid);
-                      onSelectMatch?.(buildCandidateSelectedMatch(current, trackData));
+                      onSelectMatch?.(buildCandidateSelectedMatch(current, trackData, undefined, '', identityRejection));
                     }}
                   >
                     Use This Match
@@ -2504,6 +2513,7 @@ function AiSuggestionPanel({
           selectedMbid={suggestion?.mb_releasegroupid || suggestion?.mb_albumid}
           onUseCandidate={onUseCandidate}
           onSelectMatch={onSelectMatch}
+          identityRejection={suggestion}
         />
       ) : null}
     </div>
@@ -3013,6 +3023,7 @@ export function ReviewCard({
                 selectedMbid={mbid}
                 onUseCandidate={onUseCandidate}
                 onSelectMatch={onSelectMatch}
+                identityRejection={item.suggestion}
               />
             ) : null}
             {!isRecordingReview ? (

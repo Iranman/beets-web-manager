@@ -7,7 +7,7 @@ import os, threading, time
 from backend.ai_batch_state_store import AiBatchStateStore
 from pathlib import Path
 from typing import Any, Dict, Optional
-from backend.app_runtime import WEB_MANAGER_DATA_DIR, _s
+from backend.app_runtime import WEB_MANAGER_DATA_DIR, _app_logger, _s
 
 # ── ARCH-001 extracted code ──
 
@@ -83,6 +83,18 @@ def _get_ai_batch_store() -> AiBatchStateStore:
             store = AiBatchStateStore(db_path)
             _ai_batch_store_registry[key] = store
         return store
+
+
+def _load_album_mb_suggestions() -> Dict[str, Any]:
+    """Batch AI suggest results by album id, from the store the batch job
+    writes. (The old album_mb_suggestions.json is only a migration source.)
+    An entry that is not a JSON object is dropped, so callers can ``.get`` it."""
+    try:
+        cache = _get_ai_batch_store().load_suggestions_cache()
+    except Exception as ex:
+        _app_logger.warning("Could not read the AI suggestions cache: %s", ex)
+        return {}
+    return {k: v for k, v in cache.items() if isinstance(v, dict)}
 
 
 _AI_BATCH_MAX_AI_WORKERS = max(1, min(10, int(os.environ.get("AI_BATCH_MAX_AI_WORKERS", "3") or "3")))
