@@ -519,6 +519,40 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         self.assertTrue(build(folder_item, right, preflight)["is_importable"])
         self.assertTrue(build({"suggestion": {}}, wrong, preflight)["is_importable"])
 
+    def test_artist_rejection_survives_a_membership_failed_revalidation(self):
+        # #521 N1: a revalidation that fails Release Group membership must not
+        # replace the stored artist rejection, or the next passing revalidation
+        # (artist unknown) finds no artist verdict and turns importable.
+        preflight = {"ok": True, "matches": 1, "expected": 1, "audio_count": 1,
+                     "match_ratio": 1.0, "source_match_ratio": 1.0}
+        build = self.app_module._import_review_build_revalidated_match
+        stored_error = ("Rejected: artist mismatch. Album title matched, but candidate artist is "
+                        "Vitalic and source artist is Voyager.")
+        membership_error = "Representative Release ID rejected: it does not belong to selected Release Group."
+        failed_membership = dict(_comparison(), identity_validated=False,
+                                 candidate_identity_error=membership_error)
+
+        first = build({"suggestion": {"identity_validated": False,
+                                      "candidate_identity_error": stored_error}},
+                      failed_membership, preflight)
+        self.assertIs(first["identity_validated"], False)
+        self.assertTrue(first["candidate_identity_error"].startswith(stored_error))
+        self.assertIn(membership_error, first["candidate_identity_error"])
+
+        # The stored suggestion now carries the first result; membership passes.
+        second = build({"suggestion": {"identity_validated": False,
+                                       "candidate_identity_error": first["candidate_identity_error"]}},
+                       _comparison(), preflight)
+        self.assertIs(second["identity_validated"], False)
+        self.assertFalse(second["is_importable"])
+        self.assertTrue(second["candidate_identity_error"].startswith("Rejected: artist mismatch."))
+
+        # With both artists known the gate re-runs and leads the error too.
+        folder_item = {"suggestion": {}, "evidence": {"folder": {"guessed_artist": "Voyager"}}}
+        rerun = build(folder_item, dict(failed_membership, release_artist="Vitalic"), preflight)
+        self.assertTrue(rerun["candidate_identity_error"].startswith("Rejected: artist mismatch."))
+        self.assertIn(membership_error, rerun["candidate_identity_error"])
+
 
 class AiBatchStoreConnectionTests(unittest.TestCase):
     def test_each_call_closes_its_connection(self):

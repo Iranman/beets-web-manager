@@ -31327,10 +31327,10 @@
    "module": "backend/import_review_service.py",
    "lines": [
     1128,
-    1225
+    1228
    ],
-   "size": 98,
-   "body_lines": 93,
+   "size": 101,
+   "body_lines": 96,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT_REVIEW",
@@ -31354,8 +31354,8 @@
    "name": "_update_pending_review_revalidation",
    "module": "backend/import_review_service.py",
    "lines": [
-    1228,
-    1293
+    1231,
+    1296
    ],
    "size": 66,
    "body_lines": 60,
@@ -31379,8 +31379,8 @@
    "name": "_redact_unmatched_draft_tracks",
    "module": "backend/import_review_service.py",
    "lines": [
-    1299,
-    1320
+    1302,
+    1323
    ],
    "size": 22,
    "body_lines": 11,
@@ -31401,8 +31401,8 @@
    "name": "_run_import_review_revalidation",
    "module": "backend/import_review_service.py",
    "lines": [
-    1329,
-    1466
+    1332,
+    1469
    ],
    "size": 138,
    "body_lines": 131,
@@ -31433,8 +31433,8 @@
    "name": "_compact_revalidation_summary",
    "module": "backend/import_review_service.py",
    "lines": [
-    1472,
-    1492
+    1475,
+    1495
    ],
    "size": 21,
    "body_lines": 17,

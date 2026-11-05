@@ -1139,11 +1139,14 @@ def _import_review_build_revalidated_match(
     )
     identity_validated = comparison.get("identity_validated") is not False
     candidate_identity_error = _s(comparison.get("candidate_identity_error")).strip()
-    if identity_validated:
-        artist_rejection = _revalidated_artist_rejection(item, suggestion, comparison)
-        if artist_rejection:
-            identity_validated = False
-            candidate_identity_error = artist_rejection
+    # Run the gate even when membership already fails: the artist verdict must
+    # lead the stored error, or the next revalidation can no longer see it.
+    artist_rejection = _revalidated_artist_rejection(item, suggestion, comparison)
+    if artist_rejection:
+        if not identity_validated and candidate_identity_error and candidate_identity_error not in artist_rejection:
+            artist_rejection = f"{artist_rejection} {candidate_identity_error}"
+        identity_validated = False
+        candidate_identity_error = artist_rejection
     mapping = comparison.get("comparison") if isinstance(comparison.get("comparison"), list) else []
     importable_count = sum(
         1 for row in mapping
