@@ -131,6 +131,20 @@ class LibraryMissingMbIdsTests(_ClientCase):
                                  ("low", False, False))
         self.assertEqual(rows["album:2"]["candidate_identity_error"], "Rejected: artist mismatch.")
 
+    def test_only_a_validated_musicbrainz_url_is_linked(self):
+        """The UI renders mb_url as a link; an old cache entry may hold an AI-written one."""
+        mb = "https://musicbrainz.org/release/rel"
+        self.suggestions.return_value = {
+            "1": {"mb_albumid": "rel", "mb_valid": True, "identity_validated": True, "mb_url": mb},
+            "2": {"mb_albumid": "rel", "mb_valid": True, "identity_validated": True, "mb_url": "https://evil.example/x"},
+        }
+        _, body = self.get("?limit=500")
+        rows = {r["id"]: r for r in body["items"]}
+        self.assertEqual((rows["album:1"]["mb_url"], rows["album:2"]["mb_url"]), (mb, ""))
+        self.suggestions.return_value = {"1": {"mb_albumid": "rel", "mb_valid": True, "mb_url": mb}}
+        _, body = self.get("?limit=500")
+        self.assertEqual({r["id"]: r for r in body["items"]}["album:1"]["mb_url"], "")
+
     def test_suggestions_are_read_from_the_batch_store(self):
         """The batch job saves to the AI batch store; Missing IDs reads the same store."""
         from backend import ai_batch_state_service as abs_

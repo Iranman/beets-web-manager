@@ -2391,7 +2391,7 @@ def batch_ai_suggest():
                     "confidence":     sug.get("confidence", "low"),
                     "reason":         sug.get("reason", ""),
                     "mb_valid":       bool(sug.get("mb_valid")),
-                    "identity_validated": sug.get("identity_validated") is not False,
+                    "identity_validated": sug.get("identity_validated") is True,
                     "candidate_identity_error": sug.get("candidate_identity_error", ""),
                     "mb_url":         sug.get("mb_url", ""),
                     "top_candidates": (ev.get("top_candidates") or [])[:3],

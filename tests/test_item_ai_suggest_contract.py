@@ -670,9 +670,9 @@ class BatchAiSuggestCacheKeepsArtistGate(unittest.TestCase):
         asked, _ = self._run(cached, self._REJECTED)
         self.assertEqual(asked, [])
 
-    def test_suggestion_without_a_candidate_counts_as_validated(self):
+    def test_suggestion_without_a_gate_verdict_is_not_validated(self):
         _, saved = self._run({}, {"confidence": "low"})
-        self.assertIs(saved["1"]["identity_validated"], True)
+        self.assertIs(saved["1"]["identity_validated"], False)
         self.assertEqual(saved["1"]["candidate_identity_error"], "")
 
 

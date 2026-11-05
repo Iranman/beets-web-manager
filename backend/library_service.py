@@ -5430,6 +5430,7 @@ def _missing_mb_rows(search: str = "") -> List[Dict[str, Any]]:
             # Only a suggestion that passed the artist gate counts as usable; one
             # rejected by it, or cached before it existed, stays a low lead.
             validated = stored.get("identity_validated") is True
+            mb_url = _s(stored.get("mb_url"))
             row.update({
                 "mb_albumid": stored.get("mb_albumid", ""),
                 "mb_releasegroupid": stored.get("mb_releasegroupid", ""),
@@ -5439,7 +5440,8 @@ def _missing_mb_rows(search: str = "") -> List[Dict[str, Any]]:
                 "mb_valid": bool(stored.get("mb_valid")) and validated,
                 "identity_validated": validated,
                 "candidate_identity_error": _s(stored.get("candidate_identity_error")),
-                "mb_url": stored.get("mb_url", ""),
+                # A pre-allowlist cache entry could hold an AI-written URL; the UI renders it as a link.
+                "mb_url": mb_url if validated and mb_url.startswith("https://musicbrainz.org/") else "",
                 "top_candidates": stored.get("top_candidates") or [],
                 "preflight": stored.get("preflight"),
             })
