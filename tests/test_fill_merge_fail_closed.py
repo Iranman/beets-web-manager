@@ -216,6 +216,37 @@ class FillMergeFailClosedTests(_JobHarness):
         self.assertEqual([t["track"] for t in res["result"]["undelivered_tracks"]], [3])
         self.assertTrue(any("did not deliver 1 requested track(s)" in line for line in res["log"]), res["log"])
 
+    def test_slot_match_with_a_conflicting_recording_is_not_the_wanted_track(self):
+        """#447: the imported row sits in the wanted slot but carries another
+        recording id, so it is not the requested track and the fill fails
+        closed instead of being verified on the slot alone."""
+        self.items[IMPORTED] = [{"id": 92, "disc": 1, "track": 2, "mb_trackid": "rec-other"}]
+        res = self._run({"side_effect": self._move_items})
+        self.assertEqual(res["status"], "failed", res)
+        self.assertIn(CODE, res["error"])
+        self.assertFalse(any("Verified" in line for line in res["log"]), res["log"])
+
+    def test_slot_is_the_fallback_when_either_side_has_no_recording_id(self):
+        """#447: without a recording id on the row (or on the request) the
+        disc/track slot still identifies the requested track."""
+        for row_id, want_id in (("", "rec-2"), ("rec-2", "")):
+            with self.subTest(row_id=row_id, want_id=want_id):
+                self.setUp()
+                self.items[IMPORTED] = [{"id": 92, "disc": 1, "track": 2, "mb_trackid": row_id}]
+                res = self._run({"side_effect": self._move_items},
+                                wanted_tracks=[{"disc": 1, "track": 2, "mb_trackid": want_id}])
+                self.assertEqual(res["status"], "completed", res)
+                self.assertTrue(any("Verified 1 requested track(s)" in line for line in res["log"]), res["log"])
+
+    def test_existing_row_in_the_slot_with_another_recording_is_still_undelivered(self):
+        """#447: an existing row in the requested slot with a different
+        recording id does not count as delivering that request."""
+        self.items[EXISTING].append({"id": 52, "disc": 1, "track": 3, "mb_trackid": "rec-elsewhere"})
+        res = self._run({"side_effect": self._move_items}, wanted_tracks=WANTED + [
+            {"disc": 1, "track": 3, "title": "Three", "mb_trackid": "rec-3"}])
+        self.assertEqual(res["status"], "completed", res)
+        self.assertEqual([t["track"] for t in res["result"]["undelivered_tracks"]], [3])
+
     def test_no_review_entry_is_logged_truthfully(self):
         """Integration C: when Review could not be written, the log says so."""
         with mock.patch.object(isvc, "_queue_folder_for_manual_review", return_value=False):

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Missing-track fill read-back: when both the imported row and the requested track carry a MusicBrainz recording id, the recording id now decides whether the row is the requested track. A row in the requested disc/track slot with a different recording no longer counts, so the fill fails closed instead of being verified, and the request is reported as undelivered. The slot is used only when either side has no recording id. (#447)
+
 ## v0.16.2 - 2026-11-04
 
 ### Fixed

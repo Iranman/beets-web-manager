@@ -1738,12 +1738,16 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
     fill_item_ids: List[int] = []
     if verify_fill:
         def _is_wanted(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
+            # When both sides carry a recording id it decides (#447): with
+            # album-wide numbering a matching disc/track slot can hold a
+            # different recording. The slot is only the fallback.
             rid = _s(t.get("mb_trackid")).strip().lower()
-            return bool(
-                (int(t.get("track") or 0)
-                 and (int(row.get("disc") or 1), int(row.get("track") or 0))
-                 == (int(t.get("disc") or 1), int(t.get("track") or 0)))
-                or (rid and _s(row.get("mb_trackid")).strip().lower() == rid))
+            row_rid = _s(row.get("mb_trackid")).strip().lower()
+            if rid and row_rid:
+                return row_rid == rid
+            return bool(int(t.get("track") or 0)
+                        and (int(row.get("disc") or 1), int(row.get("track") or 0))
+                        == (int(t.get("disc") or 1), int(t.get("track") or 0)))
         try:
             imported_rows = composite_workflows.find_all_items_by_album_id(int(aid))
         except Exception as ex:
