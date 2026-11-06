@@ -2622,6 +2622,25 @@ def reimport_disk():
     return json_route_result(body, status)
 
 
+def _import_all_discovery_accepted(result: Dict[str, Any]) -> bool:
+    """Whether Import All may import a discovered match without review (#520).
+
+    Needs a valid, medium/high-confidence release whose identity was not
+    rejected and whose preflight did not fail. A failed preflight goes to
+    Import Review instead of relying only on the child job's own preflight.
+    """
+    sug = (result or {}).get("suggestion") or {}
+    preflight = sug.get("preflight") if isinstance(sug.get("preflight"), dict) else {}
+    return bool(
+        result.get("ok")
+        and (sug.get("mb_albumid") or "").strip()
+        and (sug.get("confidence") or "low").lower() in ("high", "medium")
+        and sug.get("mb_valid")
+        and sug.get("identity_validated") is not False
+        and preflight.get("ok") is not False
+    )
+
+
 @app.post("/api/library/import-all")
 def library_import_all():
     """Queue a single parent job that repairs/imports selected library albums.
@@ -2679,10 +2698,9 @@ def library_import_all():
                 try:
                     result = _ai_suggest_folder_internal(album["aldir"])
                     sug    = result.get("suggestion") or {}
-                    conf   = (sug.get("confidence") or "low").lower()
                     found  = (sug.get("mb_albumid") or "").strip()
-                    if result.get("ok") and found and conf in ("high", "medium") \
-                            and sug.get("mb_valid") and sug.get("identity_validated") is not False:
+                    if _import_all_discovery_accepted(result):
+                        conf = (sug.get("confidence") or "low").lower()
                         mb_albumid = found
                         album["mb_albumid"] = mb_albumid
                         log.append(
@@ -2690,7 +2708,11 @@ def library_import_all():
                             f"{sug.get('album')} [{conf}]"
                         )
                     else:
-                        reason = (sug.get("candidate_identity_error") or sug.get("reason")
+                        _pf = sug.get("preflight") if isinstance(sug.get("preflight"), dict) else {}
+                        reason = (sug.get("candidate_identity_error")
+                                  or (("Preflight failed: " + (_s(_pf.get("error")) or "the folder does not match the release."))
+                                      if _pf.get("ok") is False else "")
+                                  or sug.get("reason")
                                   or result.get("error") or "Could not identify album")
                         log.append(f"  Queuing for Import Review: {reason}")
                         _queue_folder_for_manual_review(

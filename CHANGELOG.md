@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Import All no longer imports a discovered match whose release preflight failed. Previously a failure that only lowered confidence to "medium" still started the import, so only the import job's own check stopped it. Such albums now go to Import Review with the preflight reason. The AcoustID fingerprint shortcut (2+ tracks matched the same release) now records its identity decision explicitly. Fingerprint evidence outranks the folder-name artist guess, and the release preflight still checks the tags' artist. (#520)
+
 ## v0.16.2 - 2026-11-04
 
 ### Fixed
