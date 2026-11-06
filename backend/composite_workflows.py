@@ -5175,8 +5175,9 @@ def apply_confirmed_import(
                     "or the release is already in the library). Nothing was imported; review the folder.")
         # #428: why Beets skipped it (plugin 1.10.0 ``skipped[].reason``), only
         # when every skipped path agrees; mixed or missing reasons stay "".
-        reasons = {_s(r.get("reason")) for r in (imported.get("skipped") or [])
-                   if isinstance(r, dict)} if isinstance(imported, dict) \
+        # A non-dict entry counts as an unknown reason, never as agreement.
+        reasons = {_s(r.get("reason")) if isinstance(r, dict) else ""
+                   for r in (imported.get("skipped") or [])} if isinstance(imported, dict) \
             and isinstance(imported.get("skipped"), list) else set()
         res["skip_reason"] = reasons.pop() if len(reasons) == 1 else ""
         return res

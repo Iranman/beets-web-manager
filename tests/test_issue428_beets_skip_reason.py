@@ -38,7 +38,10 @@ class ConfirmedImportReportsSkipReason(unittest.TestCase):
 
     def test_mixed_missing_or_malformed_reasons_report_none(self):
         for result in (_skipped("no_candidates", "no_strong_match"), {"success": True},
-                       {"skipped": "no_candidates"}, {"skipped": ["no_candidates"]}, None):
+                       {"skipped": "no_candidates"}, {"skipped": ["no_candidates"]}, None,
+                       # A non-dict entry beside a real one is an unknown reason, not agreement.
+                       {"skipped": [{"path": "/d/1", "reason": "no_candidates"}, "/d/2"]},
+                       {"skipped": [{"path": "/d/1", "reason": "duplicate"}, None]}):
             res = self._run(result)
             self.assertEqual((res["code"], res["skip_reason"]), ("not_imported", ""), result)
 
