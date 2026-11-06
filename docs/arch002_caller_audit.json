@@ -313,6 +313,10 @@
       "COMPATIBILITY_WRAPPER",
       "AI identification then reimport_disk (canonical preflight + engine deterministic gate)."
     ],
+    "routes_library.py::_import_all_discovery_accepted": [
+      "COMPATIBILITY_WRAPPER",
+      "Import All pre-gate (#520): refuses low confidence, rejected identity or failed canonical preflight before reimport_disk; never accepts on its own."
+    ],
     "app.py::modify_item": [
       "DISPLAY_ONLY",
       "Transaction metadata for a user edit."
