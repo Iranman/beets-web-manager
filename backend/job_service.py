@@ -156,6 +156,7 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
         outcome: the terminal child, or None when it is still running after
         CHILD_SETTLE_SECONDS (or its record vanished): outcome unknown."""
         if child.status != "running":
+            _mirror(child)  # it may have ended since the loop last read its log
             return child
         child.kill()
         log.append(f"  [{prefix}] Asked job {job_id} to stop; waiting up to {CHILD_SETTLE_SECONDS}s "
