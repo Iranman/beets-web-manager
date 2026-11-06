@@ -2700,6 +2700,7 @@ def library_import_all():
                     result = _ai_suggest_folder_internal(
                         album["aldir"],
                         existing_album_id=int(album.get("existing_album_id") or 0),
+                        wanted_tracks=album.get("wanted_tracks") or None,
                     )
                     sug    = result.get("suggestion") or {}
                     found  = (sug.get("mb_albumid") or "").strip()

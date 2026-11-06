@@ -12,6 +12,7 @@ from unittest import mock
 import backend.ai_service as ai_service
 import backend.recovery_carrier as recovery_carrier
 import routes_library
+import tests.test_missing_track_recording_proof as mtp
 
 REL = "083b9009-2222-2222-2222-222222222222"
 RG = "37cb4a72-1111-1111-1111-111111111111"
@@ -25,6 +26,7 @@ _FAILED_PF = {"ok": False, "matches": 7, "expected": 9, "audio_count": 9,
               "min_required": 6, "artist_ok": False, "artist_score": 0.1,
               "error": "", "examples": []}
 _OK_PF = dict(_FAILED_PF, ok=True, matches=9, artist_ok=True, artist_score=1.0)
+_WANTED = [{"mb_trackid": "c0000000-0000-0000-0000-000000000002", "title": "Two", "track": 2, "disc": 1}]
 
 
 def _accepted(sug, ok=True):
@@ -38,7 +40,7 @@ class FingerprintShortcutThroughImportAllGate(unittest.TestCase):
         self.folder = Path(tmp.name)
         self.preflight_mock = mock.Mock()
 
-    def _run(self, preflight, existing_album_id=0, fingerprint_hits=None):
+    def _run(self, preflight, existing_album_id=0, fingerprint_hits=None, wanted_tracks=None):
         ev = {"audio_files": [str(self.folder / "01.flac")], "folder_track_count": 9,
               "nested_audio_count": 0, "guessed_artist": "Folder Artist",
               "guessed_artist_mbid": "", "guessed_album": "Forever",
@@ -66,7 +68,8 @@ class FingerprintShortcutThroughImportAllGate(unittest.TestCase):
         try:
             if existing_album_id:
                 return ai_service._ai_suggest_folder_internal(
-                    str(self.folder), existing_album_id=existing_album_id)
+                    str(self.folder), existing_album_id=existing_album_id,
+                    wanted_tracks=wanted_tracks)
             return ai_service._ai_suggest_folder_internal(str(self.folder))
         finally:
             for p in reversed(patches):
@@ -78,12 +81,12 @@ class FingerprintShortcutThroughImportAllGate(unittest.TestCase):
         for hits in (None, {}):  # fingerprint shortcut, then the MusicBrainz path
             with self.subTest(fingerprint_hits=hits):
                 self.preflight_mock.reset_mock()
-                self._run(_OK_PF, existing_album_id=42, fingerprint_hits=hits)
-                self.preflight_mock.assert_called_with(str(self.folder), REL, 42)
+                self._run(_OK_PF, existing_album_id=42, fingerprint_hits=hits, wanted_tracks=_WANTED)
+                self.preflight_mock.assert_called_with(str(self.folder), REL, 42, _WANTED)
 
     def test_new_folder_preflight_has_no_existing_album(self):
         self._run(_OK_PF)
-        self.preflight_mock.assert_called_with(str(self.folder), REL, 0)
+        self.preflight_mock.assert_called_with(str(self.folder), REL, 0, None)
 
     def test_shortcut_sets_identity_fields_explicitly(self):
         sug = self._run(_OK_PF)["suggestion"]
@@ -160,13 +163,45 @@ class ImportAllRouteHonoursGate(unittest.TestCase):
         queue, reimport = self._run({**self.BASE, "preflight": {"ok": True}})
         queue.assert_not_called()
         reimport.assert_called_once()
-        self.suggest.assert_called_once_with("/downloads/x", existing_album_id=0)
+        self.suggest.assert_called_once_with("/downloads/x", existing_album_id=0, wanted_tracks=None)
 
     def test_repair_discovery_gets_the_existing_album(self):
-        # QA N3: the same existing album the repair job is given.
-        _queue, reimport = self._run({**self.BASE, "preflight": {"ok": True}}, existing_album_id=42)
-        self.suggest.assert_called_once_with("/downloads/x", existing_album_id=42)
+        # QA N3: the same existing album and wanted tracks the repair job is given.
+        _queue, reimport = self._run({**self.BASE, "preflight": {"ok": True}},
+                                     existing_album_id=42, wanted_tracks=_WANTED)
+        self.suggest.assert_called_once_with("/downloads/x", existing_album_id=42,
+                                             wanted_tracks=reimport.call_args.kwargs["wanted_tracks"])
         self.assertEqual(reimport.call_args.kwargs["existing_album_id"], 42)
+        self.assertEqual([t["mb_trackid"] for t in reimport.call_args.kwargs["wanted_tracks"]],
+                         [_WANTED[0]["mb_trackid"]])
+
+
+class RealPreflightForMissingTrackFill(mtp._Fixture):
+    """Album 7 holds tracks 1 and 3; the folder has 2, 4 and 5 (fixture in
+    test_missing_track_recording_proof). Runs the real release preflight."""
+
+    def _discovery_preflight(self, wanted):
+        return self._run(ai_service._run_ai_release_preflight, str(self.folder), mtp.REL,
+                         mtp.ALBUM_ID, wanted)
+
+    def test_wanted_tracks_let_a_proven_fill_pass_discovery(self):
+        pre = self._discovery_preflight(mtp._wanted(2, 4, 5))
+        self.assertTrue(pre["ok"], pre.get("missing_track_proof"))
+        self.assertTrue(routes_library._import_all_discovery_accepted(
+            {"ok": True, "suggestion": {"mb_albumid": mtp.REL, "mb_valid": True, "confidence": "high",
+                                        "identity_validated": True, "preflight": pre}}))
+
+    def test_without_wanted_tracks_the_same_fill_is_refused(self):
+        # What discovery did before: Import All sent a valid fill to Review.
+        for wanted in (None, []):
+            with self.subTest(wanted=wanted):
+                self.assertFalse(self._discovery_preflight(wanted)["ok"])
+
+    def test_unproven_file_still_refused(self):
+        self.hits[self.paths[2]] = []
+        pre = self._discovery_preflight(mtp._wanted(2, 4, 5))
+        self.assertFalse(pre["ok"])
+        self.assertEqual(pre["missing_track_proof"]["reason_code"], "file_unverified")
 
 
 class ImportAllDiscoveryGate(unittest.TestCase):

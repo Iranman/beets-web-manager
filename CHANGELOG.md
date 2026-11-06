@@ -9,7 +9,7 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - Import All no longer imports a discovered match whose release preflight failed. Previously a failure that only lowered confidence to "medium" still started the import, so only the import job's own check stopped it. Such albums now go to Import Review with the preflight reason. The AcoustID fingerprint shortcut (2+ tracks matched the same release) now records its identity decision explicitly. Fingerprint evidence outranks the folder-name artist guess, and the release preflight still runs its tracklist and folder-artist checks. (#520)
-- When Import All repairs an existing library album that has no MusicBrainz ID, its discovery preflight now checks the folder against that album, as the repair job's own preflight does. A folder that holds only some of the album's tracks is no longer sent to Import Review just because the album already has the other tracks. (#520)
+- When Import All repairs an existing library album that has no MusicBrainz ID, its discovery preflight now checks the folder against that album, as the repair job's own preflight does. A folder that holds only some of the album's tracks is no longer sent to Import Review just because the album already has the other tracks. A missing-track fill sent without a MusicBrainz ID also gets its wanted tracks checked during discovery, so a fill whose files each fingerprint to a wanted recording is no longer sent to Import Review. (#520)
 
 ## v0.16.2 - 2026-11-04
 
