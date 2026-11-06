@@ -2622,14 +2622,15 @@ def reimport_disk():
     return json_route_result(body, status)
 
 
-def _import_all_discovery_accepted(result: Dict[str, Any]) -> bool:
+def _import_all_discovery_accepted(result: Optional[Dict[str, Any]]) -> bool:
     """Whether Import All may import a discovered match without review (#520).
 
     Needs a valid, medium/high-confidence release whose identity was not
     rejected and whose preflight did not fail. A failed preflight goes to
     Import Review instead of relying only on the child job's own preflight.
     """
-    sug = (result or {}).get("suggestion") or {}
+    result = result or {}
+    sug = result.get("suggestion") or {}
     preflight = sug.get("preflight") if isinstance(sug.get("preflight"), dict) else {}
     return bool(
         result.get("ok")
@@ -2709,10 +2710,14 @@ def library_import_all():
                         )
                     else:
                         _pf = sug.get("preflight") if isinstance(sug.get("preflight"), dict) else {}
+                        # A failed preflight's detail is in its error, or else
+                        # already prefixed onto sug["reason"] by the preflight note.
                         reason = (sug.get("candidate_identity_error")
-                                  or (("Preflight failed: " + (_s(_pf.get("error")) or "the folder does not match the release."))
-                                      if _pf.get("ok") is False else "")
+                                  or (("Preflight failed: " + _s(_pf.get("error")))
+                                      if _pf.get("ok") is False and _s(_pf.get("error")) else "")
                                   or sug.get("reason")
+                                  or ("Preflight failed: the folder does not match the release."
+                                      if _pf.get("ok") is False else "")
                                   or result.get("error") or "Could not identify album")
                         log.append(f"  Queuing for Import Review: {reason}")
                         _queue_folder_for_manual_review(

@@ -1322,11 +1322,13 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                         r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
                         _aid_id, re.I,
                     )),
-                    # #520: 2+ independent fingerprint hits outrank the
+                    # #520: 2+ fingerprint hits on this release outrank the
                     # folder-name artist guess, so the AI path's name-based
                     # artist gate is not applied here. The release preflight
-                    # below still checks the tags' artist, and Import All
-                    # refuses a failed preflight.
+                    # below still runs its tracklist and folder-artist checks,
+                    # and Import All refuses a failed preflight.
+                    # ponytail: hits count recordings, not distinct files, so
+                    # one file can contribute 2 hits; count per file if that bites.
                     "identity_validated": True,
                     "candidate_identity_error": "",
                 }

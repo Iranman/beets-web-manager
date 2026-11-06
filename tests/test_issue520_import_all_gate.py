@@ -85,6 +85,62 @@ class FingerprintShortcutThroughImportAllGate(unittest.TestCase):
         self.assertTrue(routes_library._import_all_discovery_accepted(out))
 
 
+class ImportAllRouteHonoursGate(unittest.TestCase):
+    """Drives /api/library/import-all so the route's use of the gate is covered."""
+    BASE = {"mb_albumid": REL, "mb_valid": True, "confidence": "medium", "album": "X",
+            "albumartist": "A", "identity_validated": True, "candidate_identity_error": "",
+            "reason": "Preflight failed for A - X: 7/9 release track(s) matched; artist check failed."}
+
+    def _run(self, sug):
+        import app as app_module
+        jobs = []
+
+        def start_job(fn, **_kw):
+            jobs.append(fn)
+            return {"ok": True}, 200
+
+        queue, reimport = mock.Mock(return_value=True), mock.Mock(return_value="child")
+        with mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
+                mock.patch.multiple(
+                    routes_library,
+                    _start_job=start_job,
+                    _queue_folder_for_manual_review=queue,
+                    _start_reimport_disk_job_internal=reimport,
+                    _wait_for_child_job=mock.Mock(return_value={"status": "ok"}),
+                    _invalidate_lib_cache=mock.Mock(),
+                    _library_import_all_write_last=mock.Mock(),
+                    _ai_suggest_folder_internal=mock.Mock(return_value={"ok": True, "suggestion": sug}),
+                ):
+            app_module.app.test_client().post(
+                "/api/library/import-all", headers={"X-Requested-With": "XMLHttpRequest"},
+                json={"albums": [{"aldir": "/downloads/x", "artist": "A"}]})
+            self.assertEqual(len(jobs), 1)
+            jobs[0]([])
+        return queue, reimport
+
+    def test_failed_preflight_goes_to_review_with_detailed_reason(self):
+        queue, reimport = self._run({**self.BASE, "preflight": {"ok": False, "error": ""}})
+        reimport.assert_not_called()
+        self.assertEqual(queue.call_args.args[2], self.BASE["reason"])
+
+    def test_failed_preflight_error_is_named(self):
+        queue, reimport = self._run({**self.BASE, "preflight": {"ok": False, "error": "Folder has 12 files"}})
+        reimport.assert_not_called()
+        self.assertEqual(queue.call_args.args[2], "Preflight failed: Folder has 12 files")
+
+    def test_identity_error_takes_precedence(self):
+        queue, reimport = self._run({**self.BASE, "identity_validated": False,
+                                     "candidate_identity_error": "Rejected: artist mismatch.",
+                                     "preflight": {"ok": False}})
+        reimport.assert_not_called()
+        self.assertEqual(queue.call_args.args[2], "Rejected: artist mismatch.")
+
+    def test_passing_preflight_reimports(self):
+        queue, reimport = self._run({**self.BASE, "preflight": {"ok": True}})
+        queue.assert_not_called()
+        reimport.assert_called_once()
+
+
 class ImportAllDiscoveryGate(unittest.TestCase):
     BASE = {"mb_albumid": REL, "mb_valid": True, "confidence": "high",
             "identity_validated": True, "preflight": {"ok": True}}
@@ -104,6 +160,7 @@ class ImportAllDiscoveryGate(unittest.TestCase):
                 self.assertFalse(_accepted({**self.BASE, **change}))
         self.assertFalse(_accepted(dict(self.BASE), ok=False))
         self.assertFalse(routes_library._import_all_discovery_accepted({"ok": True}))
+        self.assertFalse(routes_library._import_all_discovery_accepted(None))
 
 
 if __name__ == "__main__":
