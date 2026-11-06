@@ -2710,13 +2710,12 @@ def library_import_all():
                         )
                     else:
                         _pf = sug.get("preflight") if isinstance(sug.get("preflight"), dict) else {}
-                        # A failed preflight's detail is in its error, or else
-                        # already prefixed onto sug["reason"] by the preflight note.
+                        # A failed preflight's note (counts, artist, error) is
+                        # already prefixed onto sug["reason"]; fall back to its error.
                         reason = (sug.get("candidate_identity_error")
-                                  or (("Preflight failed: " + _s(_pf.get("error")))
-                                      if _pf.get("ok") is False and _s(_pf.get("error")) else "")
                                   or sug.get("reason")
-                                  or ("Preflight failed: the folder does not match the release."
+                                  or (("Preflight failed: " + (_s(_pf.get("error"))
+                                                               or "the folder does not match the release."))
                                       if _pf.get("ok") is False else "")
                                   or result.get("error") or "Could not identify album")
                         log.append(f"  Queuing for Import Review: {reason}")

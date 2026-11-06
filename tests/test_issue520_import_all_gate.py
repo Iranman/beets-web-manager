@@ -123,8 +123,9 @@ class ImportAllRouteHonoursGate(unittest.TestCase):
         reimport.assert_not_called()
         self.assertEqual(queue.call_args.args[2], self.BASE["reason"])
 
-    def test_failed_preflight_error_is_named(self):
-        queue, reimport = self._run({**self.BASE, "preflight": {"ok": False, "error": "Folder has 12 files"}})
+    def test_failed_preflight_error_is_named_without_reason(self):
+        queue, reimport = self._run({**self.BASE, "reason": "",
+                                     "preflight": {"ok": False, "error": "Folder has 12 files"}})
         reimport.assert_not_called()
         self.assertEqual(queue.call_args.args[2], "Preflight failed: Folder has 12 files")
 
