@@ -5170,9 +5170,16 @@ def apply_confirmed_import(
         refused = _import_refused(ex)
         return _fail("Running", refused["code"], refused["error"], refused["mutated"])
     if not new:
-        return _fail("Running", "not_imported",
-                     "Beets did not import this folder as the selected release (no confident match, "
-                     "or the release is already in the library). Nothing was imported; review the folder.")
+        res = _fail("Running", "not_imported",
+                    "Beets did not import this folder as the selected release (no confident match, "
+                    "or the release is already in the library). Nothing was imported; review the folder.")
+        # #428: why Beets skipped it (plugin 1.10.0 ``skipped[].reason``), only
+        # when every skipped path agrees; mixed or missing reasons stay "".
+        reasons = {_s(r.get("reason")) for r in (imported.get("skipped") or [])
+                   if isinstance(r, dict)} if isinstance(imported, dict) \
+            and isinstance(imported.get("skipped"), list) else set()
+        res["skip_reason"] = reasons.pop() if len(reasons) == 1 else ""
+        return res
     if len(new) > 1:
         return _fail("Running", "import_ambiguous",
                      f"Beets created {len(new)} album rows for this release; review them before continuing.",

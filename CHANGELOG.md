@@ -9,6 +9,7 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - **An album download now stops when a timed-out import ends with a merge failure (#445).** When an import ran past the 20-minute wait and then failed to merge into the existing album, the download only reported "import job timed out". It then tried the next Soulseek peer or direct source, and each attempt could leave another separate album row. The error now includes the import's own error line, as it does for an import that fails within the wait, so the download stops after the first failed merge. This also covers an import that fails at the moment the wait ends.
+- **An album download no longer tries every Soulseek peer when Beets skips the import for a reason unrelated to the download (#428).** When Beets skipped a confirmed import because the MusicBrainz lookup of the chosen release returned nothing, or because the release is already in the library, the download still tried up to 12 more peers, and each one failed the same way. The import error now carries Beets' skip reason as a code (`beets_no_candidates`, `beets_duplicate`, `beets_no_strong_match`), and the download stops after the first peer for the first two. A skip because this particular copy did not match well enough (`beets_no_strong_match`) still moves on to the next peer.
 
 ## v0.16.2 - 2026-11-04
 

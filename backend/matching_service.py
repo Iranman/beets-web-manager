@@ -109,6 +109,16 @@ IMPORT_REFUSAL_REASONS: Dict[str, bool] = {
     "duplicate_track": True,             # two files, or a file and the album, hold the same recording
     "identity_conflict": True,           # the canonical evaluator found a conflict or refused the proof
     "duration_conflict": True,           # an AcoustID-proven file's length disagrees with the expected recording (likely a truncated/wrong copy; another peer's may match)
+    # #428: Beets skipped the confirmed import (plugin ``skipped[].reason``).
+    "beets_no_strong_match": True,       # this copy's tags/lengths are too far from the pinned release
+    "beets_no_candidates": False,        # the lookup of the pinned release returned nothing (outage, bad ID)
+    "beets_duplicate": False,            # the release is already in the library (duplicate_action=skip)
+}
+#: The plugin's skip reason -> its IMPORT_REFUSAL_REASONS code (#428).
+BEETS_SKIP_REASON_CODES: Dict[str, str] = {
+    "no_strong_match": "beets_no_strong_match",
+    "no_candidates": "beets_no_candidates",
+    "duplicate": "beets_duplicate",
 }
 #: A missing-track fill imported but its merge into the existing album did not
 #: complete. Terminal for the whole acquisition: every further peer or direct
@@ -126,6 +136,8 @@ _REFUSAL_CODE_RE = re.compile(
     r"(?:import job failed: )?(?:ERROR: )?(?:"
     r"Could not resolve a MusicBrainz release ID for import \[reason_code=([a-z_]+)\]"
     r"|Could not merge the imported track\(s\) into the existing album \[reason_code=(existing_album_merge_failed)\]"
+    r"|Beets could not confidently match this source to the selected MusicBrainz release "
+    r"\[reason_code=(beets_[a-z_]+)\]"
     r")"
 )
 
@@ -137,7 +149,8 @@ def import_refusal_reason_code(message: Any) -> str:
         return ""
     if match.group(2):
         return EXISTING_ALBUM_MERGE_FAILED
-    return match.group(1) if match.group(1) in IMPORT_REFUSAL_REASONS else ""
+    code = match.group(1) or match.group(3)
+    return code if code in IMPORT_REFUSAL_REASONS else ""
 
 
 def _missing_track_recording_proof(file_hits: List[Tuple[str, Optional[List[Dict[str, Any]]]]], *,
