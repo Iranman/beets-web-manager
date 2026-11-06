@@ -2,10 +2,13 @@
 terminal refusal (existing_album_merge_failed) must still stop acquisition:
 the wait error keeps the child's error line, so the refusal code survives."""
 
+import threading
+import time
 import unittest
 from unittest import mock
 
 import backend.acquisition_service as acq
+from job_engine import PythonJob
 import backend.job_service as jobsvc
 from backend.matching_service import (EXISTING_ALBUM_MERGE_FAILED, EXISTING_ALBUM_MERGE_FAILED_MESSAGE,
                                       import_refusal_reason_code)
@@ -162,6 +165,79 @@ class _Clock:
 
     def sleep(self, seconds):
         self.t += seconds
+
+
+class _TerminalOrderSpy(PythonJob):
+    """Records whether an ERROR line is in the log at the moment the job turns
+    terminal (finished_at set), which is what the wait loops rely on."""
+
+    error_logged_when_terminal = None
+
+    def __setattr__(self, name, value):
+        if name == "finished_at" and value is not None and self.error_logged_when_terminal is None:
+            self.error_logged_when_terminal = any(str(line).startswith("ERROR:") for line in self.log)
+        super().__setattr__(name, value)
+
+
+def _merge_error():
+    return RuntimeError(f"{EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: existing album_id 5, boom.")
+
+
+class RealJobEngineOrder(unittest.TestCase):
+    """QA N3: pin the job_engine order (ERROR line, then terminal) with real
+    PythonJobs, so a job_engine change cannot silently undo the #445 fix."""
+
+    def _ran(self, fn):
+        job = _TerminalOrderSpy("j445", fn, "import", start=False)
+        job._run()
+        return job
+
+    def test_raised_error_is_logged_before_the_job_turns_terminal(self):
+        def fn(log):
+            raise _merge_error()
+        job = self._ran(fn)
+        self.assertEqual(job.status, "failed")
+        self.assertTrue(job.error_logged_when_terminal, job.log)
+
+    def test_failed_result_is_logged_before_the_job_turns_terminal(self):
+        job = self._ran(lambda log: {"ok": False, "error": str(_merge_error())})
+        self.assertEqual(job.status, "failed")
+        self.assertTrue(job.error_logged_when_terminal, job.log)
+
+    def test_real_child_failing_after_the_wait_keeps_the_merge_code(self):
+        release = threading.Event()
+
+        def fn(log, _cancel):  # never polls the cancel, like a Beets operation
+            log.append("importing")
+            release.wait(10)
+            raise _merge_error()
+
+        child = PythonJob("j445", fn, "import")
+        kill = child.kill
+
+        def kill_and_release():
+            kill()
+            release.set()
+
+        class _YieldingClock(_Clock):
+            def sleep(self, seconds):
+                time.sleep(0.01)  # let the child thread run
+                super().sleep(seconds)
+
+        child.kill = kill_and_release
+        try:
+            with mock.patch.object(jobsvc, "jobs", mock.Mock(get=lambda _j: child)), \
+                    mock.patch.object(jobsvc, "time", _YieldingClock()):
+                with self.assertRaises(jobsvc.ChildJobFailed) as caught:
+                    jobsvc._wait_for_child_job("j445", [], prefix="import", timeout=1)
+        finally:
+            release.set()
+            if child._thread is not None:
+                child._thread.join(5)
+        self.assertEqual(child.status, "failed")
+        self.assertEqual(import_refusal_reason_code(caught.exception), EXISTING_ALBUM_MERGE_FAILED,
+                         str(caught.exception))
+        self.assertIn("timed out", str(caught.exception))
 
 
 class _FinishesUnseen:
