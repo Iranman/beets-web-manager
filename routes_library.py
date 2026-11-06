@@ -2697,7 +2697,10 @@ def library_import_all():
             if not mb_albumid:
                 log.append(f"[{idx}/{len(albums)}] Discovering: {label}")
                 try:
-                    result = _ai_suggest_folder_internal(album["aldir"])
+                    result = _ai_suggest_folder_internal(
+                        album["aldir"],
+                        existing_album_id=int(album.get("existing_album_id") or 0),
+                    )
                     sug    = result.get("suggestion") or {}
                     found  = (sug.get("mb_albumid") or "").strip()
                     if _import_all_discovery_accepted(result):

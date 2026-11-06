@@ -36,8 +36,9 @@ class FingerprintShortcutThroughImportAllGate(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.folder = Path(tmp.name)
+        self.preflight_mock = mock.Mock()
 
-    def _run(self, preflight):
+    def _run(self, preflight, existing_album_id=0, fingerprint_hits=None):
         ev = {"audio_files": [str(self.folder / "01.flac")], "folder_track_count": 9,
               "nested_audio_count": 0, "guessed_artist": "Folder Artist",
               "guessed_artist_mbid": "", "guessed_album": "Forever",
@@ -47,24 +48,42 @@ class FingerprintShortcutThroughImportAllGate(unittest.TestCase):
             mock.patch.object(ai_service, "_build_folder_evidence", return_value=ev),
             mock.patch.object(ai_service, "_resolve_import_review_source_path",
                               return_value=(self.folder, None)),
-            mock.patch.object(ai_service, "_acoustid_multi_file", return_value={REL: 3}),
+            mock.patch.object(ai_service, "_acoustid_multi_file",
+                              return_value={REL: 3} if fingerprint_hits is None else fingerprint_hits),
             mock.patch.object(ai_service, "_acoustid_lookup_cached_outcome", return_value=None),
             mock.patch.object(ai_service, "_mb_release_search", return_value=[dict(_CAND)]),
             mock.patch.object(ai_service, "_mb_release_search_by_folder_tracks", return_value=[]),
             mock.patch.object(ai_service, "_fetch_mb_release_candidate", return_value={}),
             mock.patch.object(ai_service, "_score_mb_release_candidate",
                               side_effect=lambda ev, c: {"total": 0.9}),
-            mock.patch.object(ai_service, "_run_ai_release_preflight", return_value=dict(preflight)),
+            mock.patch.object(ai_service, "_run_ai_release_preflight", self.preflight_mock),
             mock.patch.object(ai_service, "_ai_match_evidence_packet", return_value={}),
             mock.patch.object(recovery_carrier, "load_for_folder", return_value=None),
         ]
+        self.preflight_mock.return_value = dict(preflight)
         for p in patches:
             p.start()
         try:
+            if existing_album_id:
+                return ai_service._ai_suggest_folder_internal(
+                    str(self.folder), existing_album_id=existing_album_id)
             return ai_service._ai_suggest_folder_internal(str(self.folder))
         finally:
             for p in reversed(patches):
                 p.stop()
+
+    def test_repair_preflight_is_judged_against_the_existing_album(self):
+        # QA N3: a partial repair folder must get the same existing-album
+        # preflight the repair job uses, or Import All refuses it first.
+        for hits in (None, {}):  # fingerprint shortcut, then the MusicBrainz path
+            with self.subTest(fingerprint_hits=hits):
+                self.preflight_mock.reset_mock()
+                self._run(_OK_PF, existing_album_id=42, fingerprint_hits=hits)
+                self.preflight_mock.assert_called_with(str(self.folder), REL, 42)
+
+    def test_new_folder_preflight_has_no_existing_album(self):
+        self._run(_OK_PF)
+        self.preflight_mock.assert_called_with(str(self.folder), REL, 0)
 
     def test_shortcut_sets_identity_fields_explicitly(self):
         sug = self._run(_OK_PF)["suggestion"]
@@ -91,9 +110,10 @@ class ImportAllRouteHonoursGate(unittest.TestCase):
             "albumartist": "A", "identity_validated": True, "candidate_identity_error": "",
             "reason": "Preflight failed for A - X: 7/9 release track(s) matched; artist check failed."}
 
-    def _run(self, sug):
+    def _run(self, sug, **album):
         import app as app_module
         jobs = []
+        self.suggest = mock.Mock(return_value={"ok": True, "suggestion": sug})
 
         def start_job(fn, **_kw):
             jobs.append(fn)
@@ -109,11 +129,11 @@ class ImportAllRouteHonoursGate(unittest.TestCase):
                     _wait_for_child_job=mock.Mock(return_value={"status": "ok"}),
                     _invalidate_lib_cache=mock.Mock(),
                     _library_import_all_write_last=mock.Mock(),
-                    _ai_suggest_folder_internal=mock.Mock(return_value={"ok": True, "suggestion": sug}),
+                    _ai_suggest_folder_internal=self.suggest,
                 ):
             app_module.app.test_client().post(
                 "/api/library/import-all", headers={"X-Requested-With": "XMLHttpRequest"},
-                json={"albums": [{"aldir": "/downloads/x", "artist": "A"}]})
+                json={"albums": [{"aldir": "/downloads/x", "artist": "A", **album}]})
             self.assertEqual(len(jobs), 1)
             jobs[0]([])
         return queue, reimport
@@ -140,6 +160,13 @@ class ImportAllRouteHonoursGate(unittest.TestCase):
         queue, reimport = self._run({**self.BASE, "preflight": {"ok": True}})
         queue.assert_not_called()
         reimport.assert_called_once()
+        self.suggest.assert_called_once_with("/downloads/x", existing_album_id=0)
+
+    def test_repair_discovery_gets_the_existing_album(self):
+        # QA N3: the same existing album the repair job is given.
+        _queue, reimport = self._run({**self.BASE, "preflight": {"ok": True}}, existing_album_id=42)
+        self.suggest.assert_called_once_with("/downloads/x", existing_album_id=42)
+        self.assertEqual(reimport.call_args.kwargs["existing_album_id"], 42)
 
 
 class ImportAllDiscoveryGate(unittest.TestCase):

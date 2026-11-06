@@ -118,7 +118,7 @@ class FolderAiSuggestFallbackSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.fn = _function_source(
-            APP_SOURCE, "def _ai_suggest_folder_internal(folder_path: str) -> dict:", "\n\ndef _candidate_track_local_candidates("
+            APP_SOURCE, "def _ai_suggest_folder_internal(folder_path: str, existing_album_id: int = 0) -> dict:", "\n\ndef _candidate_track_local_candidates("
         )
 
     def test_does_not_return_early_on_missing_api_key(self):
