@@ -20,7 +20,7 @@ from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
 from backend.app_runtime import _path_is_under, _safe_path_component, validated_downloads_root
-from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
+from backend.slskd import APP_DOWNLOAD_MARKER, stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing
 from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
@@ -3563,7 +3563,8 @@ def _folder_import_clean_source(log: list, source_folder_path: str, album_ids: L
                 _move_artwork_to_target(src_dir, list(album_ids), log)
                 # Walk remaining files; skip directories (already handled above)
                 remaining_files = [f for f in src_dir.rglob("*") if f.is_file()]
-                unknown = [f for f in remaining_files if f.suffix.lower() not in _ART_EXTS]
+                markers = [f for f in remaining_files if f.name == APP_DOWNLOAD_MARKER]
+                unknown = [f for f in remaining_files if f.suffix.lower() not in _ART_EXTS and f not in markers]
                 if unknown:
                     log.append(
                         f"  [cleanup] {len(unknown)} unknown file(s) in source — not removing: "
@@ -3584,6 +3585,8 @@ def _folder_import_clean_source(log: list, source_folder_path: str, album_ids: L
                     # remove_empty is the correct action: Apply only
                     # rmdir()s if the directory is verified truly empty,
                     # failing closed (not raising) otherwise.
+                    for marker in markers:  # the app's own ownership proof, not content
+                        composite_workflows.delete_file(str(marker))
                     p_cl = composite_workflows.plan_folder_cleanup({"source": str(src_dir), "action": "remove_empty"})
                     if not p_cl.get("ok") or not p_cl.get("operation_id"):
                         raise RuntimeError(p_cl.get("error") or f"Engine plan_folder_cleanup failed for {src_dir}")

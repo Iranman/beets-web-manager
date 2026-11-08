@@ -51,6 +51,7 @@ from backend.app_runtime import (
 from backend.audio_preferences import ffmpeg_file_input, inspect_audio_file
 from backend.auth_service import _yt_auth_source_failed_message, _yt_bot_check_message
 from backend.acquisition_service import _download_dest_under, _download_folder_segment
+from backend.slskd import make_app_download_dir
 from backend.beets_adapter import beets_adapter
 from backend.ytdlp_guard import YtdlpTargetRejected, check_ytdlp_target, ytdlp_guarded_options
 from backend.ytdlp_service import (
@@ -1853,7 +1854,7 @@ def _recover_fetch_one(url: str, log: list, *, run_id: str = "",
     expected_duration = probe.get("duration")
 
     stage_dir = _recover_stage_dir(platform, run_id)
-    os.makedirs(stage_dir, exist_ok=True)
+    make_app_download_dir(stage_dir)
     outtmpl = _ytdlp_outtmpl(stage_dir, "%(title).120s [%(id)s].%(ext)s")
 
     opts: Dict[str, Any] = {

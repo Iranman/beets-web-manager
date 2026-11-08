@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- **An Import batch over the downloads folder no longer queues the app's own download folders.** The batch skipped app downloads only by their exact folder name, which missed the slot-gate folders (`<album> - soundcloud missing <id>__slot_deferred`), recovery download folders (`... missing rec-<id>`), full-album direct downloads (`<Artist>/<Album> (<Year>)`) and Recover My Uploads staging (`recovered/<platform>/<run>`), so their files reached Review. Every folder the app creates under the downloads root now gets a `.bwm_app_download` marker file, written only when the app created the folder (an existing folder is never claimed) and never through a symlink. A folder counts as the app's only under a validated downloads root, when it or a folder above it holds that marker as a regular file, or (for folders made before this release) when it has one of the exact generated names; a symlinked folder or a symlinked marker is never proof, so a torrent folder named like an app download is still preserved and never moved. The marker does not stop the source-folder cleanup after an import.
+
 ## v0.16.2 - 2026-11-04
 
 ### Fixed

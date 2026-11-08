@@ -25,6 +25,7 @@ from helpers_mb import _resolve_release_group_to_release
 import backend.composite_workflows as composite_workflows
 from backend.audio_preferences import AUDIO_INSPECTION_INCOMPLETE, AudioInspectionIncomplete
 from backend.acoustid_service import _album_track_norm
+from backend.slskd import SLOT_DEFERRED_SUFFIX, direct_download_folder_name, mark_app_download_dir
 from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
 from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED, IMPORT_REFUSAL_REASONS, import_refusal_reason_code, _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
 from backend.app_runtime import jobs, WEB_MANAGER_DATA_DIR
@@ -1179,7 +1180,7 @@ class _AlbumDownloadRun:
             source_slug = re.sub(r"[^a-z0-9]+", "", source_method) or "download"
             return str(_download_dest_under(
                 req.downloads_root, req.safe_artist,
-                f"{req.safe_album}{req.yr_sfx} - {source_slug} missing {suffix}",
+                direct_download_folder_name(f"{req.safe_album}{req.yr_sfx}", source_slug, suffix),
             ))
         return req.dest_dir
 
@@ -1902,7 +1903,10 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
     creates the destination parents safely) -- never a raw ``os.replace``, so it
     introduces no new unhardened filesystem mutation sink."""
     base = Path(import_dir)
-    slot_dir = base.parent / f"{base.name}__slot_deferred"
+    slot_dir = base.parent / f"{base.name}{SLOT_DEFERRED_SUFFIX}"
+    # Ownership proof only for a folder this call creates (an existing one may
+    # be the user's); move_staging_file validated it before it is marked.
+    slot_dir_is_new = not os.path.lexists(slot_dir)
     base_resolved = base.resolve(strict=False)
     moved: List[Tuple[Path, Path]] = []
     failures = 0
@@ -1925,6 +1929,8 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
     complete = failures == 0
     if not moved:
         return "", complete
+    if slot_dir_is_new:
+        mark_app_download_dir(slot_dir)
     # Carry the moved files' ORIGINAL pre-rename names (ARCH-030 B1) into the
     # slot folder so the slot gate still has the genuine download name there and
     # does not fall back to the laundered ``{track:02d} {title}`` staged name.

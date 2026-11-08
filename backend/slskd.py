@@ -15,6 +15,52 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 #: the staged folder, values the original basenames.
 RECOVERY_ORIGINAL_NAMES_SIDECAR = ".bwm_recovery_original_names.json"
 
+#: Ownership proof: written into each download folder the app creates outside
+#: its private roots (``_beets_missing_import``, playlist roots), so a user
+#: Import never picks it up and ``library_service._app_managed_download_path``
+#: need not trust a folder name. Dot-prefixed: scans and Beets skip it.
+APP_DOWNLOAD_MARKER = ".bwm_app_download"
+#: Sibling folder the slot gate moves deferred files into (ARCH-030 B2).
+SLOT_DEFERRED_SUFFIX = "__slot_deferred"
+
+
+def direct_download_folder_name(album: str, source_slug: str, suffix: str) -> str:
+    """The folder name a direct-source (yt-dlp/SoundCloud/SpotiFLAC) download
+    of missing tracks gets; ``suffix`` is an epoch-ms or recovery ``rec-`` prefix."""
+    return f"{album} - {source_slug} missing {suffix}"
+
+
+#: Legacy proof for folders made before APP_DOWNLOAD_MARKER existed: exactly the
+#: names direct_download_folder_name and the slot gate generate (#325 S-3).
+APP_DOWNLOAD_NAME_RE = re.compile(
+    r" - (?:yt|ytdlp|soundcloud|spotiflac) missing (?:\d{13}|rec-[0-9a-f]{16})"
+    "(?:" + SLOT_DEFERRED_SUFFIX + ")?$")
+
+
+def make_app_download_dir(path: Any) -> None:
+    """``os.makedirs(path, exist_ok=True)`` that marks the folder as an app
+    download only when this call created it: a folder that already existed may
+    be the user's, and a marked folder may be moved or deleted by the app."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        if path.is_dir():
+            return
+        raise
+    mark_app_download_dir(path)
+
+
+def mark_app_download_dir(path: Any) -> None:
+    """Write APP_DOWNLOAD_MARKER into a folder the app just created, never
+    through a symlink (SEC-007/#325). Best-effort: an unmarked folder is only
+    treated as the user's (kept, never moved)."""
+    try:
+        _write_text_nofollow(Path(path) / APP_DOWNLOAD_MARKER, "beets-web-manager\n")
+    except OSError:
+        pass
+
 
 def _s(value) -> str:
     if value is None:

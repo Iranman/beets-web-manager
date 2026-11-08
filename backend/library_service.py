@@ -5,7 +5,7 @@ from __future__ import annotations
 from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
-import json, os, re, sqlite3, threading, time
+import json, os, re, sqlite3, stat, threading, time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -26,6 +26,7 @@ import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags, same_recording_proof
 from backend.artwork_service import _album_dir_for_art, _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
+from backend.slskd import APP_DOWNLOAD_MARKER, APP_DOWNLOAD_NAME_RE
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _load_album_mb_suggestions, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
 from job_engine import DuplicateJobError
@@ -634,15 +635,35 @@ def _app_managed_download_path(path: Path) -> bool:
         path_res = path
     if any(_path_is_under(path_res, root) for root in managed_roots):
         return True
-    # #325 S-3: a name alone is spoofable; it must be the exact name the
-    # acquisition flow generates ("<album> - <source> missing <epoch ms>")
-    # and sit under a validated downloads root.
-    # ponytail: name-based; a marker file written at creation would be proof.
-    return bool(_APP_MANAGED_NAME.search(path.name.casefold())) and any(
-        _path_is_under(path_res, root) for root in DOWNLOADS_ALLOWED_ROOTS)
-
-
-_APP_MANAGED_NAME = re.compile(r" - (?:yt|ytdlp|soundcloud|spotiflac) missing \d{13}$")
+    root = next((r for r in DOWNLOADS_ALLOWED_ROOTS if _path_is_under(path_res, r)), None)
+    if root is None:
+        return False
+    # Ownership proof under a validated downloads root: APP_DOWNLOAD_MARKER (a
+    # regular file) in the folder or a folder above it, written when the app
+    # created it; or, for folders made before the marker, the exact generated
+    # name (#325 S-3: a bare name elsewhere is spoofable). Nothing counts through
+    # a symlinked folder. One or two lstats per level below the root.
+    try:
+        depth = len(path_res.relative_to(root.resolve(strict=False)).parts)
+    except ValueError:
+        return False
+    folder = Path(os.path.abspath(path))
+    proven = False
+    for level in range(depth):
+        try:
+            if stat.S_ISLNK(os.lstat(folder).st_mode):
+                return False
+        except OSError:
+            pass  # not there (yet): its name may still prove it
+        if not proven:
+            proven = level == 0 and bool(APP_DOWNLOAD_NAME_RE.search(folder.name.casefold()))
+        if not proven:
+            try:
+                proven = stat.S_ISREG(os.lstat(folder / APP_DOWNLOAD_MARKER).st_mode)
+            except OSError:
+                pass
+        folder = folder.parent
+    return proven
 
 
 def _preserve_torrent_source_path(path_value: str | Path) -> bool:
@@ -735,7 +756,8 @@ def _source_proven_in_library(folder_path: str, album_id: int, target_releasegro
         return ev
     audio = [p for p in files if p.suffix.lower() in AUDIO_EXT]
     unrecognised = [p for p in files
-                    if p.suffix.lower() not in AUDIO_EXT and p.suffix.lower() not in _PROVEN_SOURCE_SIDECAR_EXTS]
+                    if p.suffix.lower() not in AUDIO_EXT and p.suffix.lower() not in _PROVEN_SOURCE_SIDECAR_EXTS
+                    and p.name != APP_DOWNLOAD_MARKER]
     if unrecognised:
         ev["reason"] = "unrecognised_file"
         ev["files"] = [{"path": str(p), "proof": ""} for p in unrecognised[:20]]
