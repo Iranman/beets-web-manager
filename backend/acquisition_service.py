@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import backend.job_contract as job_contract
 from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
 from backend.ytdlp_service import _audio_files_in_dir, _direct_source_unavailable_reason, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
-from backend.ai_service import _ai_match_evidence_packet, _validate_import_source_audio
+from backend.ai_service import _ai_match_evidence_packet, _qbit_rel_name_unsafe, _validate_import_source_audio
 from backend.import_service import _delete_staged_import_folder, _recovery_plex_sync_leg, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
 from backend.library_service import _album_folder_for_album_id, _build_folder_evidence, _representative_tracktotal, _resolve_album_release_for_import, get_library_payload
 from backend.pending_review_store import _queue_folder_for_manual_review
@@ -3087,6 +3087,51 @@ def _qbit_candidate_target_paths(torrent: Dict[str, Any],
         seen.add(text)
         out.append(candidate)
     return out
+
+
+# Completed states, seeding included (progress can trail 1.0 briefly after a recheck).
+_QBIT_COMPLETED_STATES = frozenset({
+    "uploading", "stalledUP", "pausedUP", "stoppedUP", "queuedUP", "forcedUP", "checkingUP"})
+
+
+def qbit_import_inventory(cancel_event=None):
+    """Read-only qBittorrent inventory for an Import batch (qBittorrent source).
+
+    Yields ``(torrent, files)`` per torrent, sorted by hash so a rerun sees
+    the same order. ``files`` is None for an incomplete torrent (no files call
+    is made for it); otherwise one dict per file row with ``name``, ``size``,
+    ``progress``, ``priority`` and ``paths`` (the alias-mapped candidate
+    paths, empty when the torrent-relative name is unsafe). Login, transport
+    or a malformed response raises: the caller fails closed and never falls
+    back to walking the filesystem. Never writes to qBittorrent."""
+    cookie = _qbit_login_cookie()
+    torrents = _qbit_request_json("/api/v2/torrents/info", {}, cookie)
+    if not isinstance(torrents, list) or not all(isinstance(t, dict) for t in torrents):
+        raise ValueError("qBittorrent returned a malformed torrent list")
+    keep = ("hash", "name", "progress", "state", "save_path", "content_path")
+    slim = sorted(({k: t.get(k) for k in keep} for t in torrents), key=lambda t: _s(t.get("hash")))
+    del torrents
+    for torrent in slim:
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        thash = _s(torrent.get("hash")).strip()
+        try:
+            progress = float(torrent.get("progress") or 0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        if not thash or not (progress >= 1 or _s(torrent.get("state")) in _QBIT_COMPLETED_STATES):
+            yield torrent, None
+            continue
+        rows = _qbit_request_json("/api/v2/torrents/files", {"hash": thash}, cookie)
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise ValueError(f"qBittorrent returned a malformed file list for torrent {thash}")
+        files = []
+        for row in rows:
+            name = _s(row.get("name"))
+            paths = [] if _qbit_rel_name_unsafe(name) else [str(p) for p in _qbit_candidate_target_paths(torrent, row)]
+            files.append({"name": name, "size": row.get("size"), "progress": row.get("progress"),
+                          "priority": row.get("priority"), "paths": paths})
+        yield torrent, files
 
 
 def _library_file_candidates_for_qbit(file_name: str, size: int) -> List[Dict[str, Any]]:

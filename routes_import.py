@@ -27,6 +27,7 @@ from backend.pending_review_store import PendingReviewLoadError, _add_to_pending
 from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
+import backend.acquisition_service as _acquisition_service
 from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
 
 # ── ARCH-001 extracted code ──
@@ -1503,7 +1504,12 @@ def ai_batch_import_recover():
         return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
     if state.get("status") in _AI_BATCH_TERMINAL_STATUSES and not retry_failed:
         return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
-    return _start_ai_batch_job(source_path, recover_batch_job_id=batch_job_id, retry_failed=retry_failed)
+    # The batch keeps its own source: a qBittorrent batch never re-walks the folder.
+    return _start_ai_batch_job(source_path, recover_batch_job_id=batch_job_id, retry_failed=retry_failed,
+                               source=_s(state.get("source_mode") or "local"))
+
+
+_AI_BATCH_SOURCES = ("local", "qbittorrent")
 
 
 @app.post("/api/ai-batch-import")
@@ -1511,18 +1517,30 @@ def start_ai_batch_import():
     """Start or reconnect the durable AI batch import worker."""
     payload = request.get_json(silent=True) or {}
     recover_batch_job_id = _s(payload.get("recover_batch_job_id") or payload.get("batch_job_id")).strip()
+    source = _s(payload.get("source") or "local").strip().lower()
+    if source not in _AI_BATCH_SOURCES:
+        return jsonify({"ok": False, "code": "invalid_source",
+                        "error": "source must be 'local' or 'qbittorrent'"}), 400
     if recover_batch_job_id:
         state = _ai_batch_find_state(recover_batch_job_id)
         if not state:
             return jsonify({"ok": False, "error": "AI batch state not found"}), 404
+        source = _s(state.get("source_mode") or "local")  # a stored batch keeps its source
         # Stored job state is untrusted at execution time (it can be old,
         # or a recover/retry call can race a state file edited between
         # requests) -- revalidate exactly like a fresh caller-supplied path,
         # not "already validated when queued".
         scan_path = _s(state.get("source_path") or payload.get("path") or str(DOWNLOADS_ROOT)).strip()
+    elif source == "qbittorrent":
+        # qBittorrent decides what is imported; the path only labels the batch.
+        scan_path = str(DOWNLOADS_ROOT)
     else:
         scan_path = _s(payload.get("path") or str(DOWNLOADS_ROOT)).strip()
 
+    if source == "qbittorrent" and not _acquisition_service.QBIT_URL:
+        return jsonify({"ok": False, "code": "source_verification_required",
+                        "error": "qBittorrent is not configured. Set QBITTORRENT_URL (and its username "
+                                 "and password) to import from qBittorrent."}), 400
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
     # Deterministic import (#288): no AI key needed. The scan root may be a
@@ -1534,7 +1552,8 @@ def start_ai_batch_import():
 
     if not recover_batch_job_id:
         latest = _ai_batch_latest_state()
-        if latest and _s(latest.get("source_path")) == scan_path:
+        if (latest and _s(latest.get("source_path")) == scan_path
+                and _s(latest.get("source_mode") or "local") == source):
             latest = _ai_batch_reconcile_state(latest)
             status = _s(latest.get("status"))
             if status not in _AI_BATCH_TERMINAL_STATUSES:
@@ -1547,7 +1566,7 @@ def start_ai_batch_import():
                     "reconnected": True,
                 })
 
-    return _start_ai_batch_job(scan_path, recover_batch_job_id=recover_batch_job_id)
+    return _start_ai_batch_job(scan_path, recover_batch_job_id=recover_batch_job_id, source=source)
 
 
 IMPORT_NOT_MATCHED_STATUS = "not matched; left in place for review"
@@ -1830,7 +1849,8 @@ def _ai_batch_reconnect_response(batch_job_id: str):
     }), 409
 
 
-def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False):
+def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False,
+                        source: str = "local"):
     # Authoritative gate, not merely a route-level convenience: scan_path
     # reaches _ai_batch_find_audio_dirs(), which queues every folder the
     # engine discovers for AI-driven import review. Both callers of this
@@ -1890,6 +1910,7 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
                 return _run_ai_batch_import(
                     batch_job_id, scan_path, log, cancel_event, update_state,
                     recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=owned_job_id,
+                    source=source, qbit_inventory=_acquisition_service.qbit_import_inventory,
                 )
         finally:
             # Ownership-safe regardless of which startup outcome applies:
@@ -1905,6 +1926,7 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
             _ai_batch_controls[batch_job_id] = {"pause": False, "skip_current": False, "skip_folder_ids": set()}
         if not recover_batch_job_id:
             state = _ai_batch_initial_state(batch_job_id, scan_path)
+            state["source_mode"] = source
             _ai_batch_commit(state, None)
 
         # jobs.start_python() spawns its worker thread before returning, and
@@ -1918,9 +1940,10 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
         # job_id for longer than necessary.
         job = jobs.start_python(
             _do,
-            label=f"Import: {Path(scan_path).name or scan_path}" + (" retry" if retry_failed else ""),
+            label=("Import: qBittorrent" if source == "qbittorrent" else f"Import: {Path(scan_path).name or scan_path}")
+            + (" retry" if retry_failed else ""),
             metadata={"type": "ai-batch-import", "workflow": "import-batch",
-                      "batch_job_id": batch_job_id, "source_path": scan_path},
+                      "batch_job_id": batch_job_id, "source_path": scan_path, "source": source},
         )
         # From this point on, a worker thread exists and is blocked waiting
         # for handoff_ready. Cleanup responsibility transfers to it

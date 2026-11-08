@@ -18,10 +18,11 @@ from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_
 from backend.library_service import _app_managed_download_path, _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _remove_pending_review_for_path
 from backend.playlist_service import _music_format_preferences
-from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_QUEUED_FOLDER_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
+from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_QUEUED_FOLDER_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_SOURCE_MISSING_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE
-from backend.app_runtime import _MB_UUID_RE, _extract_mb_uuid, _path_is_under
+from backend.app_runtime import _MB_UUID_RE, _extract_mb_uuid, _path_is_under, _redact_security_text, DOWNLOADS_ALLOWED_ROOTS, TORRENT_SOURCE_ROOTS, validated_downloads_root
+from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid_api_key
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
@@ -2025,39 +2026,223 @@ def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None,
         if here != base and _AI_EVIDENCE_DISC_FOLDER_RE.match(here.name):
             here = here.parent
         found.add(str(here))
-    result = []
-    for folder in sorted(found):
-        _ok, err = _resolve_import_review_source_path(folder, allow_music=True, expected_type="dir")
-        if err:
-            if log is not None:
-                log.append(f"folder left in place (not importable as a folder: {err}): {folder}")
-            continue
-        # HOOK(music-identity): a discovered folder with a recovery carrier
-        # (backend.recovery_carrier.load_for_folder) is a single-track recovery
-        # for a KNOWN album, not an unknown new-album. Its canonical identity
-        # (existing album + canonical mb_releasegroupid) comes from the carrier
-        # store, never re-derived from the folder name (ADR-0002, Phase-1 root
-        # cause). The generic new-album batch must not import it as a new
-        # album; its own guarded recovery workflow owns it (carrier-driven),
-        # so it is consumed here and left out of the new-album scan.
+    return [folder for folder in sorted(found) if not _ai_batch_unit_refusal(folder, log)]
+
+
+def _ai_batch_unit_refusal(folder: str, log: Optional[List[str]] = None) -> str:
+    """Reason code when a discovered album folder must not be queued, else "".
+    Shared by the local walk and the qBittorrent source."""
+    _ok, err = _resolve_import_review_source_path(folder, allow_music=True, expected_type="dir")
+    if err:
+        if log is not None:
+            log.append(f"folder left in place (not importable as a folder: {err}): {folder}")
+        return "protected_location"
+    # HOOK(music-identity): a discovered folder with a recovery carrier
+    # (backend.recovery_carrier.load_for_folder) is a single-track recovery
+    # for a KNOWN album, not an unknown new-album. Its canonical identity
+    # (existing album + canonical mb_releasegroupid) comes from the carrier
+    # store, never re-derived from the folder name (ADR-0002, Phase-1 root
+    # cause). The generic new-album batch must not import it as a new
+    # album; its own guarded recovery workflow owns it (carrier-driven),
+    # so it is consumed here and left out of the new-album scan.
+    carrier = None
+    try:
+        from backend import recovery_carrier
+        carrier = recovery_carrier.load_for_folder(folder)
+    except Exception:
         carrier = None
-        try:
-            from backend import recovery_carrier
-            carrier = recovery_carrier.load_for_folder(folder)
-        except Exception:
-            carrier = None
-        if carrier and _s(carrier.get("mb_releasegroupid")).strip():
-            if log is not None:
-                log.append(
-                    "recovery carrier folder skipped (single-track recovery for "
-                    f"album_id {int(carrier.get('existing_album_id') or 0)}, "
-                    f"Release Group {_s(carrier.get('mb_releasegroupid'))}); "
-                    f"handled by the missing-track recovery workflow, not re-imported "
-                    f"as a new album: {folder}"
-                )
+    if carrier and _s(carrier.get("mb_releasegroupid")).strip():
+        if log is not None:
+            log.append(
+                "recovery carrier folder skipped (single-track recovery for "
+                f"album_id {int(carrier.get('existing_album_id') or 0)}, "
+                f"Release Group {_s(carrier.get('mb_releasegroupid'))}); "
+                f"handled by the missing-track recovery workflow, not re-imported "
+                f"as a new album: {folder}"
+            )
+        return "recovery_carrier"
+    return ""
+
+
+class QbitSourceUnverified(RuntimeError):
+    """The qBittorrent inventory could not be read or trusted. The batch fails
+    closed: no folder states, and never a filesystem walk instead."""
+
+
+_QBIT_SOURCE_SAMPLES_PER_REASON = 20
+
+
+def _qbit_rel_name_unsafe(name: Any) -> bool:
+    """A torrent-relative file name that could point outside its torrent:
+    blank, NUL, absolute (POSIX, UNC or drive letter) or a ``..`` part."""
+    text = _s(name).replace("\\", "/")
+    return (not text.strip() or "\x00" in text or text.startswith("/")
+            or bool(re.match(r"^[A-Za-z]:", text)) or ".." in text.split("/"))
+
+
+def _ai_batch_qbit_units(inventory, log: List[str], cancel_event=None):
+    """``(units, report)`` from a qBittorrent inventory (``(torrent, files)``
+    pairs, see ``acquisition_service.qbit_import_inventory``): ``units`` maps
+    an album folder to the torrent-owned audio in it (names relative to the
+    folder), ``report`` counts every file left out by reason. Only files
+    qBittorrent reports complete and selected, that exist as regular files
+    under a torrent/downloads root (no link below the root), are non-empty
+    audio, not app-managed, not in the library, and not already taken by an
+    earlier torrent (same device+inode; torrents in hash order) are kept. A
+    Disc N folder folds into its album folder, as in the local walk. Reads
+    only lstat; no directory is listed."""
+    roots = []
+    for r in (TORRENT_SOURCE_ROOTS or DOWNLOADS_ALLOWED_ROOTS):
+        for form in (os.path.abspath(str(r)), os.path.realpath(str(r))):
+            if form not in roots:
+                roots.append(form)
+    counts: Dict[str, int] = {}
+    samples: List[Dict[str, str]] = []
+    report: Dict[str, Any] = {"source": "qbittorrent", "torrents": 0, "torrents_complete": 0,
+                              "audio_files": 0, "ownership_verified": 0, "eligible_files": 0,
+                              "units": 0, "exclusions": counts, "exclusion_samples": samples}
+
+    def exclude(reason: str, path: str, torrent: str) -> None:
+        counts[reason] = counts.get(reason, 0) + 1
+        if counts[reason] <= _QBIT_SOURCE_SAMPLES_PER_REASON:
+            samples.append({"reason": reason, "path": path, "torrent": torrent})
+
+    dir_cache: Dict[str, tuple] = {}
+
+    def dir_info(d: str) -> tuple:
+        """(root, reason) for a file's folder; reason "" when files there may be kept."""
+        hit = dir_cache.get(d)
+        if hit is not None:
+            return hit
+        root = next((r for r in roots if d == r or d.startswith(r.rstrip(os.sep) + os.sep)), "")
+        reason = ""
+        if not root:
+            reason = "outside_allowed_root"
+        elif _path_is_under(Path(d), MUSIC_ROOT):
+            reason = "protected_location"
+        else:
+            p = Path(d)
+            while str(p) != root and len(str(p)) > len(root):
+                if p.is_symlink() or os.path.isjunction(p):
+                    reason = "symlink"
+                    break
+                p = p.parent
+            if not reason and _app_managed_download_path(Path(d)):
+                reason = "app_managed"
+        dir_cache[d] = (root, reason)
+        return root, reason
+
+    seen: set = set()
+    found: Dict[str, List[str]] = {}
+    for torrent, files in inventory:
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        report["torrents"] += 1
+        tname = _s(torrent.get("name"))[:200]
+        if files is None:
+            exclude("incomplete_torrent", "", tname)
             continue
-        result.append(folder)
-    return result
+        report["torrents_complete"] += 1
+        for row in files:
+            name = _s(row.get("name"))
+            if _qbit_rel_name_unsafe(name):
+                exclude("unsafe_path", name[:300], tname)
+                continue
+            if Path(name).suffix.lower() not in AUDIO_EXT:
+                counts["not_audio"] = counts.get("not_audio", 0) + 1
+                continue
+            report["audio_files"] += 1
+            try:
+                priority = int(row.get("priority") if row.get("priority") is not None else 1)
+                progress = float(row.get("progress") or 0)
+            except (TypeError, ValueError):
+                exclude("unsafe_path", name[:300], tname)
+                continue
+            if priority == 0:
+                exclude("not_selected", name[:300], tname)
+                continue
+            if progress < 1:
+                exclude("incomplete_torrent", name[:300], tname)
+                continue
+            chosen = None
+            reason = "missing"
+            outside = True
+            for raw in row.get("paths") or []:
+                raw = _s(raw)
+                if "\x00" in raw or ".." in Path(raw).parts or not os.path.isabs(raw):
+                    reason = "unsafe_path"
+                    break
+                path = os.path.abspath(raw)
+                root, dreason = dir_info(os.path.dirname(path))
+                if dreason == "outside_allowed_root":
+                    continue
+                outside = False
+                try:
+                    st = os.lstat(path)
+                except OSError:
+                    continue
+                chosen = (path, st, root, dreason)
+                break
+            if chosen is None:
+                if reason != "unsafe_path" and outside and row.get("paths"):
+                    reason = "outside_allowed_root"
+                exclude(reason, name[:300], tname)
+                continue
+            path, st, root, dreason = chosen
+            if dreason:
+                exclude(dreason, path, tname)
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                exclude("symlink", path, tname)
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                exclude("unsafe_path", path, tname)
+                continue
+            report["ownership_verified"] += 1
+            if st.st_size <= 0:
+                exclude("empty_file", path, tname)
+                continue
+            key = (st.st_dev, st.st_ino)
+            if key in seen:
+                exclude("duplicate", path, tname)
+                continue
+            seen.add(key)
+            unit = os.path.dirname(path)
+            if unit != root and _AI_EVIDENCE_DISC_FOLDER_RE.match(os.path.basename(unit)):
+                unit = os.path.dirname(unit)
+            if unit in roots:
+                exclude("protected_location", path, tname)  # loose file in a downloads root
+                continue
+            found.setdefault(unit, []).append(path)
+    units: Dict[str, List[str]] = {}
+    for unit in sorted(found):
+        paths = found.pop(unit)
+        refusal = _ai_batch_unit_refusal(unit, log)
+        if refusal:
+            for path in paths:
+                exclude(refusal, path, "")
+            continue
+        units[unit] = sorted(Path(p).relative_to(unit).as_posix() for p in paths)
+        report["eligible_files"] += len(paths)
+    report["units"] = len(units)
+    audio = report["audio_files"]
+    report["ownership_verified_pct"] = round(100.0 * report["ownership_verified"] / audio, 1) if audio else 0.0
+    return units, report
+
+
+def _ai_batch_source_summary_line(report: Dict[str, Any]) -> str:
+    counts = report.get("exclusions") or {}
+    if report.get("source") == "local":
+        return (f"source summary: source=local discovered={report.get('units', 0)} queued={report.get('units', 0)}"
+                + (f" unreadable={counts['unreadable']}" if counts.get("unreadable") else ""))
+    other = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())
+                      if k not in {"app_managed", "duplicate", "missing"})
+    return (f"source summary: source={report.get('source')} torrents={report.get('torrents', 0)} "
+            f"ownership_verified={report.get('ownership_verified_pct', 0.0)}% "
+            f"discovered={report.get('audio_files', 0)} eligible={report.get('eligible_files', 0)} "
+            f"excluded_app_managed={counts.get('app_managed', 0)} "
+            f"excluded_duplicates={counts.get('duplicate', 0)} missing={counts.get('missing', 0)} "
+            f"queued={report.get('units', 0)}" + (f"; other exclusions: {other}" if other else ""))
 
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
@@ -2358,11 +2543,58 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             mark(status="review_required", current_step="imported; awaiting Review row", **fields)
         return
 
+    # ── Source still there? Gone is permanent: no retry, no Review row ──────
+    def source_missing(why: str) -> None:
+        log.append(f"  Source missing ({why}); not retried. Start a new batch to pick up moved content.")
+        mark(status="source_missing", current_step="source missing", failure_reason=f"source_missing: {why}")
+
+    if not os.path.lexists(folder):
+        source_missing("the folder no longer exists")
+        return
+    # A qBittorrent unit imports only the torrent's own files: never the other
+    # files in its folder, and its source is always copied, never moved.
+    qbit_files: List[Path] = []
+    if folder_state.get("source_mode") == "qbittorrent":
+        listed = list(folder_state.get("source_files") or [])
+        for rel in listed:
+            if _qbit_rel_name_unsafe(rel):
+                continue
+            p = Path(folder, *_s(rel).split("/"))
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+                qbit_files.append(p)
+        if not qbit_files:
+            source_missing("none of the torrent's files are in the folder any more")
+            return
+        if len(qbit_files) < len(listed):
+            log.append(f"  {len(listed) - len(qbit_files)} torrent file(s) gone since discovery; "
+                       f"importing the {len(qbit_files)} still present")
+        try:
+            # Returns the folder itself when it holds exactly these audio files.
+            staged = _stage_selected_audio_files_impl(
+                validated_downloads_root(), AUDIO_EXT, folder, qbit_files, Path(folder).parent.name,
+                Path(folder).name, log, stage_prefix=fid[:16])
+        except Exception as ex:
+            failed(f"Could not separate the torrent's files from the other files in its folder: {ex}")
+            return
+        if staged != folder:
+            # Our own copy of the torrent's files only; the torrent is untouched.
+            mark(staged_folder=staged)
+            folder = staged
+            qbit_files = []
+
     # ── Stage 1: Beets quiet autotag import of this one folder ──────────────
-    preserve = _preserve_torrent_source_path(folder)
+    preserve = True if qbit_files else _preserve_torrent_source_path(folder)
     mark(status="importing", current_step="Stage 1: Beets import", stage="beets_import")
     try:
         audio_files, conflict = _ai_batch_preimport_check(folder)
+        if not conflict and qbit_files and {os.path.normcase(os.path.abspath(str(p))) for p in audio_files} != {
+                os.path.normcase(os.path.abspath(str(p))) for p in qbit_files}:
+            conflict = {"conflict": "unverifiable_folder", "paths": [],
+                        "reason": "unverifiable_folder: the folder holds audio the torrent does not own; import refused"}
         if conflict:
             reason = conflict["reason"]
             log.append(f"  {reason}")
@@ -2462,7 +2694,7 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     log.append(f"  Stage 2b: every file proven; Beets import pinned to release {release_id}")
     try:
         # Re-checks torrent and hardlinks itself right before planning (N10).
-        out = _ai_import_folder(folder, release_id, {}, log, cancel_event)
+        out = _ai_import_folder(folder, release_id, {}, log, cancel_event, copy_source=bool(qbit_files))
         aid = int(out["album_id"])
         # post_conditions: beets_strong_match (quiet_fallback skip in the
         # Apply) and single_new_album_with_release_group (the Apply checks one
@@ -2567,7 +2799,7 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
     """Final pass over the batch: count outcomes and give each folder that was
     skipped by the user or failed one review row (a canceled or
     already-imported folder gets none)."""
-    imported = already_cnt = queued = errors = skipped = warnings = replacements = 0
+    imported = already_cnt = queued = errors = skipped = warnings = replacements = missing = 0
     folders = state.get("folder_states") or {}
     batch_id = state.get("batch_job_id", "")
     last_commit_at = 0.0
@@ -2616,7 +2848,9 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
         folder_state = folders[fid]
         folder = folder_state.get("source_folder", "")
         status = _ai_batch_effective_folder_status(folder_state)
-        if status in _AI_BATCH_SKIPPED_FOLDER_STATUSES:
+        if status in _AI_BATCH_SOURCE_MISSING_FOLDER_STATUSES:
+            missing += 1  # permanent; never a Review row
+        elif status in _AI_BATCH_SKIPPED_FOLDER_STATUSES:
             reason = folder_state.get("failure_reason") or "skipped by user"
             if reason == "already in library":
                 already_cnt += 1
@@ -2637,10 +2871,33 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
         elif status in _AI_BATCH_POLICY_WARNING_STATUSES:
             warnings += 1
     _commit(True)
-    return {"imported": imported, "already": already_cnt, "queued": queued, "errors": errors, "skipped": skipped, "warnings": warnings, "replacements": replacements}
+    return {"imported": imported, "already": already_cnt, "queued": queued, "errors": errors, "skipped": skipped, "warnings": warnings, "replacements": replacements, "missing": missing}
 
 
-def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_event=None, update_state=None, *, recover: bool = False, retry_failed: bool = False, job_id: str = "") -> Dict[str, Any]:
+def _ai_batch_source_unverified(state: Dict[str, Any], ex: BaseException, log: list, update_state=None,
+                                cancel_event=None) -> Dict[str, Any]:
+    """Fail a qBittorrent-source batch closed: no folder states are created
+    and the filesystem is never walked instead."""
+    if cancel_event and cancel_event.is_set():
+        state.update(status="canceled", current_step="canceled by user", completed_at=time.time())
+        log.append("batch canceled during qBittorrent discovery; nothing queued")
+        _ai_batch_commit(state, update_state)
+        return _ai_batch_public_state(state)
+    message = _redact_security_text(f"{type(ex).__name__}: {ex}")[:300]
+    state.update(status="failed", current_step="source_verification_required", completed_at=time.time(),
+                 last_error=f"qBittorrent ownership could not be verified; nothing was queued. {message}",
+                 source_error={"code": "source_verification_required", "message": message})
+    log.append(f"ERROR: source_verification_required: qBittorrent could not be read ({message}); "
+               "nothing was queued and the downloads folder was not scanned instead.")
+    _ai_batch_commit(state, update_state)
+    raise QbitSourceUnverified(state["last_error"])
+
+
+def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_event=None, update_state=None, *, recover: bool = False, retry_failed: bool = False, job_id: str = "",
+                         source: str = "local", qbit_inventory=None) -> Dict[str, Any]:
+    """``source``: "local" walks ``scan_path``; "qbittorrent" takes album
+    folders from ``qbit_inventory()`` (injected by the web layer) and never
+    walks. A stored batch keeps its own source on recover/retry."""
     # Always load the persisted state first, for the fresh (non-recover) run
     # too. _start_ai_batch_job already created -- and bumped the revision of
     # -- this batch's store row before unblocking this worker, so a freshly
@@ -2658,6 +2915,8 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         state = _ai_batch_initial_state(batch_job_id, scan_path, job_id=job_id)
     state["batch_job_id"] = batch_job_id
     state["source_path"] = scan_path
+    source = _s(state.get("source_mode") or source or "local")
+    state["source_mode"] = source
     if job_id:
         # The JobStore job_id is only known to the caller after jobs.start_python()
         # returns; stamp it here (on the same state object this thread commits
@@ -2693,14 +2952,32 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         # runs. The single commit after the if/else below always sees
         # fully-reconciled folder_states first.
         _ai_batch_commit(state, update_state)
-        unreadable: List[str] = []
-        folders = _ai_batch_find_audio_dirs(scan_path, log, unreadable)
-        state["folders_unreadable"] = len(unreadable)
-        log.append(f"folders discovered count: {len(folders)}")
-        for folder in folders:
-            fid = _ai_batch_folder_id(folder)
-            folder_states[fid] = _ai_batch_folder_state(batch_job_id, folder)
-            log.append(f"folder queued: {folder}")
+        if source == "qbittorrent":
+            try:
+                if not callable(qbit_inventory):
+                    raise QbitSourceUnverified("the qBittorrent source is not available")
+                units, report = _ai_batch_qbit_units(qbit_inventory(cancel_event), log, cancel_event)
+            except Exception as ex:
+                return _ai_batch_source_unverified(state, ex, log, update_state, cancel_event)
+            state["source_report"] = report
+            for folder, files in units.items():
+                fs = _ai_batch_folder_state(batch_job_id, folder)
+                fs.update(source_mode="qbittorrent", source_files=files)
+                folder_states[_ai_batch_folder_id(folder)] = fs
+        elif source == "local":
+            unreadable: List[str] = []
+            folders = _ai_batch_find_audio_dirs(scan_path, log, unreadable)
+            state["folders_unreadable"] = len(unreadable)
+            log.append(f"folders discovered count: {len(folders)}")
+            for folder in folders:
+                fid = _ai_batch_folder_id(folder)
+                folder_states[fid] = _ai_batch_folder_state(batch_job_id, folder)
+            report = {"source": "local", "units": len(folders),
+                      "exclusions": {"unreadable": len(unreadable)} if unreadable else {}}
+        else:
+            raise ValueError(f"Unknown import source: {source}")
+        # One summary instead of a line per queued folder; each folder's detail is in its state.
+        log.append(_ai_batch_source_summary_line(report))
     else:
         log.append(f"loaded existing batch with {len(folder_states)} folder state(s)")
         pending_review_paths = _pending_review_path_set()
@@ -2786,7 +3063,7 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
             f"Done: {summary.get('imported', 0)} imported, {summary.get('already', 0)} skipped already in library, "
             f"{summary.get('queued', 0)} queued for review, {summary.get('warnings', 0)} warning(s), "
             f"{summary.get('replacements', 0)} replacement handoff(s), {summary.get('errors', 0)} true failure(s), "
-            f"{summary.get('skipped', 0)} skipped"
+            f"{summary.get('skipped', 0)} skipped, {summary.get('missing', 0)} source missing"
         )
         _ai_batch_commit(state, update_state)
     return _ai_batch_public_state(state)
