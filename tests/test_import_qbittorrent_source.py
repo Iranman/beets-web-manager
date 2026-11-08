@@ -66,14 +66,15 @@ class FakeQbit:
         self.torrents = []
         self.files = {}
         self.calls = []
+        self.info_params = []  # params of every torrents/info call
         self.fail = None  # (api_path suffix, exception)
 
     def add(self, dl, name, files, *, progress=1.0, state="stalledUP", thash=None, content=None,
-            file_progress=1.0, priority=1):
+            file_progress=1.0, priority=1, category="", tags=""):
         thash = thash or hashlib.sha1(name.encode()).hexdigest()
         self.torrents.append({"hash": thash, "name": name, "progress": progress, "state": state,
                               "save_path": str(dl), "content_path": str(content or (Path(dl) / name)),
-                              "category": "", "tags": "", "extra": "x" * 50})
+                              "category": category, "tags": tags, "extra": "x" * 50})
         self.files[thash] = [{"name": f, "size": 1, "progress": file_progress, "priority": priority}
                              for f in files]
         return thash
@@ -83,7 +84,12 @@ class FakeQbit:
         if self.fail and api_path.endswith(self.fail[0]):
             raise self.fail[1]
         if api_path.endswith("/torrents/info"):
-            return [dict(t) for t in self.torrents]
+            params = dict(params or {})
+            self.info_params.append(params)
+            # qBittorrent's own filtering: exact category, one tag of a comma list.
+            return [dict(t) for t in self.torrents
+                    if ("category" not in params or t["category"] == params["category"])
+                    and ("tag" not in params or params["tag"] in [x.strip() for x in t["tags"].split(",")])]
         if api_path.endswith("/torrents/files"):
             return [dict(r) for r in self.files[params["hash"]]]
         raise AssertionError(f"unexpected qBittorrent call {api_path}")
@@ -375,7 +381,7 @@ class BatchTests(_Batch):
         self.assertEqual([_fingerprint(f) for f in files], before)
         self.assertTrue(all(f.is_file() for f in files))
 
-    def test_pinned_import_never_moves_the_torrent_folder_even_with_an_app_marker(self):
+    def test_pinned_import_never_moves_the_torrent_folder(self):
         self.torrent("Album", ["01.flac"])
         f = self.dl / "Album" / "01.flac"
         before = _fingerprint(f)
@@ -384,16 +390,18 @@ class BatchTests(_Batch):
                        "not_matched": [str(self.dl / "Album")], "not_matched_known": True}
         real_units = ai._ai_batch_qbit_units
 
-        def units_then_marker(*a, **k):
+        def units_then_extra(*a, **k):
             out = real_units(*a, **k)
-            # A marker appearing after discovery never turns the unit into a move.
-            slskd.mark_app_download_dir(self.dl / "Album")
+            # A file the torrent does not own appears after discovery. (An app
+            # marker appearing now refuses the unit instead: F2, see
+            # SourceRecheckTests.)
+            (self.dl / "Album" / "notes.txt").write_bytes(b"not from the torrent")
             return out
 
-        with mock.patch.object(ai, "_ai_batch_qbit_units", side_effect=units_then_marker):
+        with mock.patch.object(ai, "_ai_batch_qbit_units", side_effect=units_then_extra):
             out, folders = self.run_batch()
         self.assertEqual(folders[str(self.dl / "Album")]["status"], "imported", self.log)
-        # The marker is not the torrent's: the unit is imported from our staged
+        # The extra file is not the torrent's: the unit is imported from our staged
         # copy (which may be moved), and the torrent's own folder is never moved.
         plan = self.plan.call_args.args[0]
         self.assertNotEqual(Path(plan["source_folder"]), self.dl / "Album")
@@ -629,6 +637,252 @@ class LocalMissingSourceTests(_Batch):
         folder = out["folders"][0]
         self.assertEqual(folder["status"], "source_missing", self.log)
         self.queued.assert_not_called()
+
+
+def _dir_link(target, link):
+    """A directory link: a junction on Windows (no privilege needed), else a symlink."""
+    if os.name == "nt":
+        import _winapi
+        try:
+            _winapi.CreateJunction(str(target), str(link))
+        except OSError as ex:
+            raise unittest.SkipTest(f"junctions unavailable here: {ex}")
+        return
+    _symlink(target, link, True)
+
+
+class SourceRecheckTests(_Batch):
+    """B3 (copy + integrity check), F2 (processing-time re-check) and F4
+    (the batch's source governs every folder). A refused unit is permanent,
+    never imported from and never given a Review row."""
+
+    def after_discovery(self, change):
+        real_units = ai._ai_batch_qbit_units
+
+        def units_then(*a, **k):
+            out = real_units(*a, **k)
+            change()
+            return out
+
+        return mock.patch.object(ai, "_ai_batch_qbit_units", side_effect=units_then)
+
+    def assert_refused(self, out, folders, code, name="Album"):
+        state = folders[str(self.dl / name)]
+        self.assertEqual(state["status"], "source_missing", self.log)
+        self.assertEqual(state["source_check"]["code"], code, state)
+        self.assertTrue(state["failure_reason"].startswith(code + ":"), state)
+        self.assertEqual(out["folders_retryable"], 0)
+        self.queued.assert_not_called()  # no Review row, inline or in the final pass
+        return state
+
+    @staticmethod
+    def rewrite_same_size(f):
+        """New bytes, same length, same inode, mtime put back: only sha256 differs."""
+        st = os.stat(f)
+        data = Path(f).read_bytes()
+        with open(f, "r+b") as fh:
+            fh.write(bytes(b ^ 0xFF for b in data))
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    # B3: integrity
+    def test_source_sha_inode_size_mtime_unchanged_after_a_successful_import(self):
+        self.torrent("Album", ["01.flac", "02.flac"], state="uploading")
+        files = [self.dl / "Album" / n for n in ("01.flac", "02.flac")]
+        before = [(_fingerprint(f), os.stat(f).st_dev) for f in files]
+        out, folders = self.run_batch()
+        state = folders[str(self.dl / "Album")]
+        self.assertEqual(state["status"], "imported", self.log)
+        self.assertNotIn("source_check", state)
+        self.assertTrue(self.reimport.call_args.args[1]["copy"])
+        self.assertFalse(self.reimport.call_args.args[1]["move"])
+        self.assertEqual([(_fingerprint(f), os.stat(f).st_dev) for f in files], before)
+
+    def test_source_modified_during_import_fails_the_unit_without_a_review_row(self):
+        not_eligible = {"candidates": [], "warnings": [], "auto_import": {"eligible": False, "reasons": ["x"]}}
+        skipped = {"ok": True, "albums_imported": 0, "imported_album_ids": [], "skipped": [],
+                   "not_matched": ["x"], "not_matched_known": True}
+        cases = {
+            "imported": dict(result=None, album_ids=[7]),
+            "skipped": dict(result=skipped, identify=not_eligible, album_ids=None),  # would be reviewed
+            "raised": dict(raises=True, album_ids=None),
+            "pinned": dict(result=skipped, pinned=True, album_ids=[9]),  # Stage 2b
+        }
+        default_result = self.result
+        for label, case in cases.items():
+            with self.subTest(label):
+                self.qbit.torrents.clear()
+                self.queued.reset_mock()
+                name = f"Album {label}"
+                self.torrent(name, ["01.flac"])
+                src = self.dl / name / "01.flac"
+                self.result = case.get("result") or default_result
+
+                def beets(folder, opts, timeout, case=case, src=src):
+                    if not case.get("pinned"):
+                        self.rewrite_same_size(src)
+                    if case.get("raises"):
+                        raise RuntimeError("Beets crashed")
+                    return self.result
+
+                def plan(*a, src=src, **k):
+                    self.rewrite_same_size(src)
+                    return {"ok": True, "operation_id": "op"}
+
+                self.reimport.side_effect = beets
+                self.plan.side_effect = plan
+                patches = ([mock.patch.object(ai, "identify_import_folder", return_value=case["identify"])]
+                           if case.get("identify") else [])
+                for p in patches:
+                    p.start()
+                try:
+                    out, folders = self.run_batch()
+                finally:
+                    for p in patches:
+                        p.stop()
+                state = self.assert_refused(out, folders, "source_modified_during_import", name)
+                self.assertIn("01.flac", state["failure_reason"])
+                if case["album_ids"]:
+                    self.assertEqual(state["album_ids"], case["album_ids"])
+                    self.assertIn(f"album_id {case['album_ids'][0]}", state["failure_reason"])
+
+    # F2: re-check at processing time
+    def test_file_replaced_by_another_inode_is_refused(self):
+        self.torrent("Album", ["01.flac"])
+        f = self.dl / "Album" / "01.flac"
+
+        def replace():
+            data = f.read_bytes()
+            os.rename(f, self.outside / "old.flac")  # keeps the old inode in use
+            f.write_bytes(data)  # same name, size and bytes; another file
+
+        with self.after_discovery(replace):
+            out, folders = self.run_batch()
+        self.assert_refused(out, folders, "source_changed")
+        self.reimport.assert_not_called()
+
+    def test_file_swapped_for_a_symlink_is_refused(self):
+        self.torrent("Album", ["01.flac"])
+        f = self.dl / "Album" / "01.flac"
+        (self.outside / "elsewhere.flac").write_bytes(b"audio-bytes")
+
+        def swap():
+            f.unlink()
+            _symlink(self.outside / "elsewhere.flac", f, False)
+
+        with self.after_discovery(swap):
+            out, folders = self.run_batch()
+        self.assert_refused(out, folders, "source_unsafe")
+        self.reimport.assert_not_called()
+
+    def test_folder_swapped_for_a_link_is_refused(self):
+        self.torrent("Album", ["01.flac"])
+
+        def swap():
+            os.rename(self.dl / "Album", self.dl / "Moved")  # same files, same inodes
+            _dir_link(self.dl / "Moved", self.dl / "Album")
+
+        with self.after_discovery(swap):
+            out, folders = self.run_batch()
+        state = self.assert_refused(out, folders, "source_unsafe")
+        self.assertIn("symlink", state["failure_reason"])
+        self.reimport.assert_not_called()
+
+    def test_folder_moved_under_music_root_is_refused(self):
+        self.torrent("Album", ["01.flac"])
+
+        def move():
+            os.rename(self.dl / "Album", self.music / "Album")  # same inodes, now in the library
+            _dir_link(self.music / "Album", self.dl / "Album")
+
+        with self.after_discovery(move):
+            out, folders = self.run_batch()
+        state = self.assert_refused(out, folders, "source_unsafe")
+        self.assertIn("protected_location", state["failure_reason"])
+        self.reimport.assert_not_called()
+
+    def test_folder_that_became_app_managed_is_refused(self):
+        self.torrent("Album", ["01.flac"])
+        with self.after_discovery(lambda: slskd.mark_app_download_dir(self.dl / "Album")):
+            out, folders = self.run_batch()
+        state = self.assert_refused(out, folders, "source_unsafe")
+        self.assertIn("app_managed", state["failure_reason"])
+        self.reimport.assert_not_called()
+
+    def test_unit_without_a_discovery_record_is_refused(self):
+        self.torrent("Album", ["01.flac"])
+        fid = ai._ai_batch_folder_id(str(self.dl / "Album"))
+        fs = ai._ai_batch_folder_state(self.batch_id, str(self.dl / "Album"))
+        fs.update(source_mode="qbittorrent", source_files=["01.flac"])  # e.g. a state from before F2
+        self.stored = {"batch_job_id": self.batch_id, "source_path": str(self.dl), "source_mode": "qbittorrent",
+                       "status": "running", "folder_states": {fid: fs}}
+        out, folders = self.run_batch(recover=True, qbit_inventory=None)
+        self.assert_refused(out, folders, "source_changed")
+        self.reimport.assert_not_called()
+
+    # F4: the batch's source_mode governs every folder
+    def test_folder_source_mode_mismatch_is_refused(self):
+        self.torrent("Album", ["01.flac"])
+        fid = ai._ai_batch_folder_id(str(self.dl / "Album"))
+        for batch_mode, folder_fields in (("qbittorrent", {}),
+                                          ("qbittorrent", {"source_mode": "local"}),
+                                          ("local", {"source_mode": "qbittorrent", "source_files": ["01.flac"],
+                                                     "source_file_ids": {"01.flac": [0, 0, 11]}})):
+            with self.subTest(batch=batch_mode, folder=folder_fields.get("source_mode")):
+                self.queued.reset_mock()
+                fs = ai._ai_batch_folder_state(self.batch_id, str(self.dl / "Album"))
+                fs.update(folder_fields)
+                self.stored = {"batch_job_id": self.batch_id, "source_path": str(self.dl),
+                               "source_mode": batch_mode, "status": "running", "folder_states": {fid: fs}}
+                out, folders = self.run_batch(recover=True, source=batch_mode, qbit_inventory=None)
+                self.assert_refused(out, folders, "source_mode_mismatch")
+                self.reimport.assert_not_called()
+                self.local_walk.assert_not_called()
+                self.assertEqual(self.qbit.calls, [])
+
+
+class ImportFilterTests(_Batch):
+    """Optional QBITTORRENT_IMPORT_CATEGORY / QBITTORRENT_IMPORT_TAG."""
+
+    def setUp(self):
+        super().setUp()
+        self.torrent("Music Album", ["01.flac"], category="music-import", tags="beets, flac")
+        self.torrent("Other Album", ["01.flac"], category="music", tags="")
+
+    def run_filtered(self, category="", tag=""):
+        with mock.patch.object(acq, "QBIT_IMPORT_CATEGORY", category), \
+                mock.patch.object(acq, "QBIT_IMPORT_TAG", tag), \
+                mock.patch.object(acq, "QBIT_CATEGORY", "music"):  # the repair tools' setting is ignored
+            f = acq.qbit_import_filter()
+            return self.run_batch(qbit_inventory=lambda ce: acq.qbit_import_inventory(ce, f), qbit_filter=f)
+
+    def summary(self):
+        lines = [line for line in self.log if line.startswith("source summary:")]
+        self.assertEqual(len(lines), 1, self.log)
+        return lines[0]
+
+    def test_empty_filter_queues_every_completed_torrent(self):
+        out, folders = self.run_filtered()
+        self.assertEqual(self.qbit.info_params, [{}])
+        self.assertEqual(sorted(folders), [str(self.dl / "Music Album"), str(self.dl / "Other Album")])
+        self.assertEqual(out["source_report"]["filter"], {})
+        self.assertIn("filter=all", self.summary())
+
+    def test_category_or_tag_is_sent_to_qbittorrent_and_only_matches_are_queued(self):
+        for kw, params, text in ((dict(category="music-import"), {"category": "music-import"},
+                                  "filter=category:music-import"),
+                                 (dict(tag="beets"), {"tag": "beets"}, "filter=tag:beets")):
+            with self.subTest(**kw):
+                self.qbit.info_params.clear()
+                out, folders = self.run_filtered(**kw)
+                self.assertEqual(self.qbit.info_params, [params])
+                self.assertEqual(list(folders), [str(self.dl / "Music Album")])
+                self.assertEqual(out["source_report"]["filter"], params)
+                self.assertIn(text, self.summary())
+
+    def test_inventory_reads_the_setting_by_default(self):
+        with mock.patch.object(acq, "QBIT_IMPORT_TAG", "beets"), mock.patch.object(acq, "QBIT_IMPORT_CATEGORY", ""):
+            list(acq.qbit_import_inventory())
+        self.assertEqual(self.qbit.info_params, [{"tag": "beets"}])
 
 
 class RouteTests(_Roots):

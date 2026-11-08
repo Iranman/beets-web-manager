@@ -2081,7 +2081,41 @@ def _qbit_rel_name_unsafe(name: Any) -> bool:
             or bool(re.match(r"^[A-Za-z]:", text)) or ".." in text.split("/"))
 
 
-def _ai_batch_qbit_units(inventory, log: List[str], cancel_event=None):
+def _qbit_source_roots() -> List[str]:
+    """Torrent/downloads roots in both their configured and resolved form."""
+    roots: List[str] = []
+    for r in (TORRENT_SOURCE_ROOTS or DOWNLOADS_ALLOWED_ROOTS):
+        for form in (os.path.abspath(str(r)), os.path.realpath(str(r))):
+            if form not in roots:
+                roots.append(form)
+    return roots
+
+
+def _qbit_source_dir_reason(d: str, roots: List[str]) -> tuple:
+    """``(root, reason)`` for a torrent file's folder; reason is "" when files
+    there may be imported: under a torrent/downloads root (also once
+    resolved), no link between the root and it, not in the library and not
+    app-managed. Used at discovery and again right before processing (F2)."""
+    root = next((r for r in roots if d == r or d.startswith(r.rstrip(os.sep) + os.sep)), "")
+    if not root:
+        return "", "outside_allowed_root"
+    if _path_is_under(Path(d), MUSIC_ROOT):
+        return root, "protected_location"
+    p = Path(d)
+    while str(p) != root and len(str(p)) > len(root):
+        if p.is_symlink() or os.path.isjunction(p):
+            return root, "symlink"
+        p = p.parent
+    real, real_root = os.path.realpath(d), os.path.realpath(root)
+    if real != real_root and not real.startswith(real_root.rstrip(os.sep) + os.sep):
+        return root, "symlink"
+    if _app_managed_download_path(Path(d)):
+        return root, "app_managed"
+    return root, ""
+
+
+def _ai_batch_qbit_units(inventory, log: List[str], cancel_event=None,
+                         file_ids: Optional[Dict[str, Dict[str, list]]] = None):
     """``(units, report)`` from a qBittorrent inventory (``(torrent, files)``
     pairs, see ``acquisition_service.qbit_import_inventory``): ``units`` maps
     an album folder to the torrent-owned audio in it (names relative to the
@@ -2091,12 +2125,10 @@ def _ai_batch_qbit_units(inventory, log: List[str], cancel_event=None):
     audio, not app-managed, not in the library, and not already taken by an
     earlier torrent (same device+inode; torrents in hash order) are kept. A
     Disc N folder folds into its album folder, as in the local walk. Reads
-    only lstat; no directory is listed."""
-    roots = []
-    for r in (TORRENT_SOURCE_ROOTS or DOWNLOADS_ALLOWED_ROOTS):
-        for form in (os.path.abspath(str(r)), os.path.realpath(str(r))):
-            if form not in roots:
-                roots.append(form)
+    only lstat; no directory is listed. ``file_ids``, when given, receives
+    each unit's ``{relative name: [st_dev, st_ino, st_size]}`` from that
+    lstat, re-checked when the unit is processed (F2)."""
+    roots = _qbit_source_roots()
     counts: Dict[str, int] = {}
     samples: List[Dict[str, str]] = []
     report: Dict[str, Any] = {"source": "qbittorrent", "torrents": 0, "torrents_complete": 0,
@@ -2113,25 +2145,9 @@ def _ai_batch_qbit_units(inventory, log: List[str], cancel_event=None):
     def dir_info(d: str) -> tuple:
         """(root, reason) for a file's folder; reason "" when files there may be kept."""
         hit = dir_cache.get(d)
-        if hit is not None:
-            return hit
-        root = next((r for r in roots if d == r or d.startswith(r.rstrip(os.sep) + os.sep)), "")
-        reason = ""
-        if not root:
-            reason = "outside_allowed_root"
-        elif _path_is_under(Path(d), MUSIC_ROOT):
-            reason = "protected_location"
-        else:
-            p = Path(d)
-            while str(p) != root and len(str(p)) > len(root):
-                if p.is_symlink() or os.path.isjunction(p):
-                    reason = "symlink"
-                    break
-                p = p.parent
-            if not reason and _app_managed_download_path(Path(d)):
-                reason = "app_managed"
-        dir_cache[d] = (root, reason)
-        return root, reason
+        if hit is None:
+            hit = dir_cache[d] = _qbit_source_dir_reason(d, roots)
+        return hit
 
     seen: set = set()
     found: Dict[str, List[str]] = {}
@@ -2214,17 +2230,20 @@ def _ai_batch_qbit_units(inventory, log: List[str], cancel_event=None):
             if unit in roots:
                 exclude("protected_location", path, tname)  # loose file in a downloads root
                 continue
-            found.setdefault(unit, []).append(path)
+            found.setdefault(unit, []).append((path, [st.st_dev, st.st_ino, st.st_size]))
     units: Dict[str, List[str]] = {}
     for unit in sorted(found):
-        paths = found.pop(unit)
+        entries = found.pop(unit)
         refusal = _ai_batch_unit_refusal(unit, log)
         if refusal:
-            for path in paths:
+            for path, _ident in entries:
                 exclude(refusal, path, "")
             continue
-        units[unit] = sorted(Path(p).relative_to(unit).as_posix() for p in paths)
-        report["eligible_files"] += len(paths)
+        rels = {Path(p).relative_to(unit).as_posix(): ident for p, ident in entries}
+        units[unit] = sorted(rels)
+        if file_ids is not None:
+            file_ids[unit] = rels
+        report["eligible_files"] += len(entries)
     report["units"] = len(units)
     audio = report["audio_files"]
     report["ownership_verified_pct"] = round(100.0 * report["ownership_verified"] / audio, 1) if audio else 0.0
@@ -2243,7 +2262,9 @@ def _ai_batch_source_summary_line(report: Dict[str, Any]) -> str:
             f"discovered={report.get('audio_files', 0)} eligible={report.get('eligible_files', 0)} "
             f"excluded_app_managed={counts.get('app_managed', 0)} "
             f"excluded_duplicates={counts.get('duplicate', 0)} missing={counts.get('missing', 0)} "
-            f"queued={report.get('units', 0)}" + (f"; other exclusions: {other}" if other else ""))
+            f"queued={report.get('units', 0)} "
+            f"filter={','.join(f'{k}:{v}' for k, v in sorted((report.get('filter') or {}).items())) or 'all'}"
+            + (f"; other exclusions: {other}" if other else ""))
 
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
@@ -2278,6 +2299,88 @@ class _QbitUnitGone(Exception):
     """None of a qBittorrent unit's files is left in its folder."""
 
 
+class _QbitSourceChanged(Exception):
+    """A qBittorrent unit's source is not the one discovery verified (F2), or
+    changed while it was imported (B3). ``code`` is the reason code stored
+    on the folder: ``source_unsafe`` (now behind a link, outside the torrent
+    roots, in the library or app-managed), ``source_changed`` (another file
+    or another size than at discovery) or ``source_modified_during_import``.
+    The unit is never imported from, reviewed or retried."""
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(f"{code}: {detail}")
+        self.code, self.detail = code, detail
+
+
+def _qbit_source_file_record(path: str, expected: Any, *, with_hash: bool) -> Dict[str, Any]:
+    """Open one torrent file without following a link and return its
+    ``dev/ino/size/mtime_ns`` (and ``sha256`` when asked) from the open
+    descriptor, after checking it is still the regular file discovery saw
+    (same ``[dev, ino, size]``). Where the platform has no O_NOFOLLOW
+    (Windows) it lstats, opens and compares the two identities, and fails
+    closed when the platform reports no inode. A missing file raises
+    FileNotFoundError; anything else wrong raises _QbitSourceChanged."""
+    name = os.path.basename(path)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0)
+    try:
+        before = None if nofollow else os.lstat(path)
+        if before is not None and not stat.S_ISREG(before.st_mode):
+            raise _QbitSourceChanged("source_unsafe", f"{name} is no longer a regular file (link or other)")
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as ex:
+        if os.path.islink(path):
+            raise _QbitSourceChanged("source_unsafe", f"{name} is now a symbolic link") from ex
+        raise _QbitSourceChanged("source_changed", f"{name} could not be opened ({type(ex).__name__})") from ex
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise _QbitSourceChanged("source_unsafe", f"{name} is no longer a regular file")
+        if not st.st_ino or (before is not None and (before.st_dev, before.st_ino) != (st.st_dev, st.st_ino)):
+            raise _QbitSourceChanged("source_changed", f"{name}: file identity cannot be verified here")
+        try:
+            same = [int(v) for v in expected] == [st.st_dev, st.st_ino, st.st_size]
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            raise _QbitSourceChanged("source_changed", f"{name} is not the file discovery saw (replaced or resized)")
+        rec: Dict[str, Any] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        if with_hash:
+            h = hashlib.sha256()
+            while chunk := os.read(fd, 1 << 20):
+                h.update(chunk)
+            rec["sha256"] = h.hexdigest()
+        return rec
+    finally:
+        os.close(fd)
+
+
+def _qbit_source_changes(folder: str, records: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Torrent files whose sha256, inode, size or mtime differ from
+    ``records`` (taken right before the import), or that are gone (B3)."""
+    changed: List[str] = []
+    for rel, rec in records.items():
+        try:
+            now = _qbit_source_file_record(os.path.join(folder, *rel.split("/")),
+                                           [rec["dev"], rec["ino"], rec["size"]], with_hash=True)
+        except (OSError, _QbitSourceChanged):
+            changed.append(rel)
+            continue
+        if now != rec:
+            changed.append(rel)
+    return changed
+
+
+def _sha256_file(path: Any) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _ai_batch_tree_entries(root: str) -> set:
     """Every non-directory entry under ``root`` (symlinked dirs included, never
     followed) as a ``/``-joined relative name. An unreadable subfolder raises,
@@ -2296,34 +2399,50 @@ def _ai_batch_tree_entries(root: str) -> set:
 
 
 def _ai_batch_qbit_unit_folder(folder_state: Dict[str, Any], fid: str, batch_id: str,
-                               log: list) -> tuple:
-    """``(folder, files)`` a qBittorrent unit is imported or reviewed from: its
-    source folder when that holds nothing but the torrent's own listed files,
-    otherwise our staged copy of exactly those files, checked after staging so
-    a file left in the stage by an earlier attempt is never imported. The
-    torrent's files are only ever read. Raises ``_QbitUnitGone`` when none of
-    them is left."""
+                               log: list, *, with_hash: bool = False) -> tuple:
+    """``(folder, files, records)`` a qBittorrent unit is imported or
+    reviewed from: its source folder when that holds nothing but the
+    torrent's own listed files, otherwise our staged copy of exactly those
+    files, checked after staging so a file left in the stage by an earlier
+    attempt is never imported. Every folder and file is re-checked first as
+    at discovery (F2) and must be the file discovery recorded; ``records``
+    maps each present file to its identity (with ``sha256`` when
+    ``with_hash``), and a staged copy must hash the same. The torrent's files
+    are only ever read. Raises ``_QbitUnitGone`` when none of them is left,
+    ``_QbitSourceChanged`` when any is unsafe or not the discovered file."""
     folder = _s(folder_state.get("source_folder"))
-    wanted: Dict[str, Path] = {}
+    ids = folder_state.get("source_file_ids")
     listed = list(folder_state.get("source_files") or [])
+    if not isinstance(ids, dict) or not listed:
+        raise _QbitSourceChanged("source_changed", "no discovery record for this unit; start a new batch")
+    refusal = _ai_batch_unit_refusal(folder, log)
+    if refusal:
+        raise _QbitSourceChanged("source_unsafe", f"the folder is no longer importable ({refusal})")
+    roots = _qbit_source_roots()
+    dir_reasons: Dict[str, str] = {}
+    wanted: Dict[str, Path] = {}
+    records: Dict[str, Dict[str, Any]] = {}
     for rel in listed:
-        if _qbit_rel_name_unsafe(rel):
-            continue
-        parts = _s(rel).replace("\\", "/").split("/")
-        p = Path(folder, *parts)
+        if _qbit_rel_name_unsafe(rel) or rel not in ids:
+            raise _QbitSourceChanged("source_changed", "the stored file list is not the discovered one")
+        p = Path(folder, *rel.split("/"))
+        d = os.path.abspath(str(p.parent))
+        if d not in dir_reasons:
+            dir_reasons[d] = _qbit_source_dir_reason(d, roots)[1]
+        if dir_reasons[d]:
+            raise _QbitSourceChanged("source_unsafe", f"{rel}: {dir_reasons[d]}")
         try:
-            st = os.lstat(p)
-        except OSError:
+            records[rel] = _qbit_source_file_record(str(p), ids[rel], with_hash=with_hash)
+        except FileNotFoundError:
             continue
-        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
-            wanted["/".join(parts)] = p
+        wanted[rel] = p
     if not wanted:
         raise _QbitUnitGone("none of the torrent's files are in the folder any more")
     if len(wanted) < len(listed):
         log.append(f"  {len(listed) - len(wanted)} torrent file(s) gone since discovery; "
                    f"importing the {len(wanted)} still present")
     if _ai_batch_tree_entries(folder) == set(wanted):
-        return folder, list(wanted.values())
+        return folder, list(wanted.values()), records
     # Any other entry (audio, sidecar, app marker, link) means a copy of only
     # the torrent's files. The batch id keeps one batch's stage out of another's.
     prefix = hashlib.sha256(f"{batch_id}\0{fid}".encode("utf-8")).hexdigest()[:16]
@@ -2334,8 +2453,14 @@ def _ai_batch_qbit_unit_folder(folder_state: Dict[str, Any], fid: str, batch_id:
             _ai_batch_tree_entries(staged) - {RECOVERY_ORIGINAL_NAMES_SIDECAR} != set(wanted):
         raise RuntimeError("the staged copy does not hold exactly the torrent's files "
                            "(left over from an earlier attempt?); import refused")
+    staged_files = [Path(staged, *rel.split("/")) for rel in wanted]
+    if with_hash:
+        for rel, f in zip(wanted, staged_files):
+            if _sha256_file(f) != records[rel]["sha256"]:
+                raise _QbitSourceChanged("source_modified_during_import",
+                                         f"{rel} changed while it was copied for import")
     folder_state["staged_folder"] = staged
-    return staged, [Path(staged, *rel.split("/")) for rel in wanted]
+    return staged, staged_files, records
 
 
 def _ai_batch_folder_state(batch_job_id: str, source_folder: str) -> Dict[str, Any]:
@@ -2540,6 +2665,7 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     folder_state = state["folder_states"][fid]
     folder = _s(folder_state.get("source_folder"))
     batch_id = _s(state.get("batch_job_id"))
+    batch_mode = _s(state.get("source_mode") or "local")  # F4: the batch's source governs
     caps = state.get("evidence_capabilities") or {}
 
     def mark(**fields) -> None:
@@ -2608,7 +2734,35 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         log.append(f"  Source missing ({why}); not retried. Start a new batch to pick up moved content.")
         mark(status="source_missing", current_step="source missing", failure_reason=f"source_missing: {why}")
 
+    # The source is not the one this batch verified (F2/F4/B3): permanent like
+    # a missing source, never imported from, never a Review row, never retried.
+    def source_refused(code: str, detail: str, **fields) -> None:
+        log.append(f"  Source refused ({code}: {detail}); no Review row, not retried. "
+                   "Start a new batch once the torrent is settled.")
+        mark(status="source_missing", current_step=code.replace("_", " "), failure_reason=f"{code}: {detail}",
+             source_check={"code": code, "detail": detail}, **fields)
+
+    qbit_records: Dict[str, Dict[str, Any]] = {}
+
+    def source_changed_during_import(album_ids: Any = None) -> bool:
+        """B3: the torrent's files must be byte-for-byte what was imported."""
+        if not qbit_records:
+            return False
+        changed = _qbit_source_changes(_s(folder_state.get("source_folder")), qbit_records)
+        if not changed:
+            return False
+        ids = [a for a in (album_ids or []) if a]
+        detail = (f"{len(changed)} torrent file(s) changed while being imported: {', '.join(changed[:5])}"
+                  + (f"; album_id {', '.join(str(a) for a in ids)} was imported from them, check it in Library"
+                     if ids else ""))
+        source_refused("source_modified_during_import", detail, **({"album_ids": ids} if ids else {}))
+        return True
+
     log.append(f"\n{Path(folder).name}")
+    if _s(folder_state.get("source_mode") or "local") != batch_mode:
+        source_refused("source_mode_mismatch", f"folder source {_s(folder_state.get('source_mode')) or 'local'} "
+                       f"differs from the batch source {batch_mode}")
+        return
     prior_albums = [a for a in (folder_state.get("imported_album_ids") or []) if a]
     if not prior_albums and not os.path.lexists(folder):
         source_missing("the folder no longer exists")
@@ -2656,11 +2810,15 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     # the torrent's own files are always copied, never moved.
     qbit_files: List[Path] = []
     in_place = False
-    if folder_state.get("source_mode") == "qbittorrent":
+    if batch_mode == "qbittorrent":
         try:
-            folder, qbit_files = _ai_batch_qbit_unit_folder(folder_state, fid, batch_id, log)
+            folder, qbit_files, qbit_records = _ai_batch_qbit_unit_folder(
+                folder_state, fid, batch_id, log, with_hash=True)
         except _QbitUnitGone as ex:
             source_missing(_s(ex))
+            return
+        except _QbitSourceChanged as ex:
+            source_refused(ex.code, ex.detail)
             return
         except Exception as ex:
             failed(f"Could not separate the torrent's files from the other files in its folder: {ex}")
@@ -2702,7 +2860,10 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             folder, {"quiet_fallback": "skip", "copy": preserve, "move": not preserve, "write": True},
             timeout=max(300, min(1200, 180 + 20 * audio)))
     except Exception as ex:
-        failed(str(ex))
+        if not source_changed_during_import():
+            failed(str(ex))
+        return
+    if source_changed_during_import(res.get("imported_album_ids")):
         return
     if not res.get("ok"):
         failed(_s(res.get("error") or "Beets import failed."))
@@ -2810,6 +2971,8 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             err.kept_album_ids = [aid]  # type: ignore[attr-defined]
             raise err
     except Exception as ex:
+        if source_changed_during_import(getattr(ex, "kept_album_ids", None)):
+            return
         outcome = _ai_batch_import_failure_outcome(ex)
         if outcome["status"] != "import_failed" or isinstance(ex, AudioInspectionIncomplete):
             # Policy-handled (terminal) or not inspected (retryable): no Review row.
@@ -2822,6 +2985,8 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             suggestion["kept_album_ids"] = kept
         evidence["stage2b_error"] = _s(ex)
         review(suggestion, evidence, failure_reason=_s(ex), stage="done")
+        return
+    if source_changed_during_import([aid]):
         return
     mark(status="imported", current_step="imported (pinned release)", stage="done", album_id=aid, album_ids=[aid],
          pinned_release_id=release_id, metadata_imported=True,
@@ -2918,12 +3083,13 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
     def _queue(fid: str, folder_state: Dict[str, Any], folder: str, reason: str, status: str, key: str) -> None:
         if folder_state.get("review_item_id") or not folder:
             return
-        if folder_state.get("source_mode") == "qbittorrent":
+        if _s(state.get("source_mode") or "local") == "qbittorrent":
             # B2: the row must never point at a folder holding files the torrent
             # does not own: use the folder itself only when it holds nothing
             # else, otherwise our verified copy of just the torrent's files.
+            # F2: a source that is no longer the discovered one gets no row.
             try:
-                folder, _files = _ai_batch_qbit_unit_folder(folder_state, fid, batch_id, log)
+                folder, _files, _records = _ai_batch_qbit_unit_folder(folder_state, fid, batch_id, log)
             except Exception as ex:
                 log.append(f"review item not created ({ex}): {folder}")
                 return
@@ -3009,10 +3175,13 @@ def _ai_batch_source_unverified(state: Dict[str, Any], ex: BaseException, log: l
 
 
 def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_event=None, update_state=None, *, recover: bool = False, retry_failed: bool = False, job_id: str = "",
-                         source: str = "local", qbit_inventory=None) -> Dict[str, Any]:
+                         source: str = "local", qbit_inventory=None,
+                         qbit_filter: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """``source``: "local" walks ``scan_path``; "qbittorrent" takes album
     folders from ``qbit_inventory()`` (injected by the web layer) and never
-    walks. A stored batch keeps its own source on recover/retry."""
+    walks; ``qbit_filter`` is the category/tag that inventory was limited to,
+    for the source report. A stored batch keeps its own source on
+    recover/retry, and that source governs every folder (F4)."""
     # Always load the persisted state first, for the fresh (non-recover) run
     # too. _start_ai_batch_job already created -- and bumped the revision of
     # -- this batch's store row before unblocking this worker, so a freshly
@@ -3071,13 +3240,15 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
             try:
                 if not callable(qbit_inventory):
                     raise QbitSourceUnverified("the qBittorrent source is not available")
-                units, report = _ai_batch_qbit_units(qbit_inventory(cancel_event), log, cancel_event)
+                file_ids: Dict[str, Dict[str, list]] = {}
+                units, report = _ai_batch_qbit_units(qbit_inventory(cancel_event), log, cancel_event, file_ids)
             except Exception as ex:
                 return _ai_batch_source_unverified(state, ex, log, update_state, cancel_event)
+            report["filter"] = {k: _s(v) for k, v in (qbit_filter or {}).items() if _s(v)}
             state["source_report"] = report
             for folder, files in units.items():
                 fs = _ai_batch_folder_state(batch_job_id, folder)
-                fs.update(source_mode="qbittorrent", source_files=files)
+                fs.update(source_mode="qbittorrent", source_files=files, source_file_ids=file_ids[folder])
                 folder_states[_ai_batch_folder_id(folder)] = fs
         elif source == "local":
             unreadable: List[str] = []

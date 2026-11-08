@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import backend.job_contract as job_contract
-from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
+from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_IMPORT_CATEGORY, QBIT_IMPORT_TAG, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
 from backend.ytdlp_service import _audio_files_in_dir, _direct_source_unavailable_reason, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
 from backend.ai_service import _ai_match_evidence_packet, _qbit_rel_name_unsafe, _validate_import_source_audio
 from backend.import_service import _delete_staged_import_folder, _recovery_plex_sync_leg, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
@@ -3094,9 +3094,18 @@ _QBIT_COMPLETED_STATES = frozenset({
     "uploading", "stalledUP", "pausedUP", "stoppedUP", "queuedUP", "forcedUP", "checkingUP"})
 
 
-def qbit_import_inventory(cancel_event=None):
+def qbit_import_filter() -> Dict[str, str]:
+    """The optional category/tag an Import batch's qBittorrent inventory is
+    limited to (``QBITTORRENT_IMPORT_CATEGORY`` / ``QBITTORRENT_IMPORT_TAG``),
+    as qBittorrent ``torrents/info`` parameters; empty means every torrent."""
+    return {k: v for k, v in (("category", QBIT_IMPORT_CATEGORY), ("tag", QBIT_IMPORT_TAG)) if v}
+
+
+def qbit_import_inventory(cancel_event=None, qbit_filter: Optional[Dict[str, str]] = None):
     """Read-only qBittorrent inventory for an Import batch (qBittorrent source).
 
+    ``qbit_filter`` (default ``qbit_import_filter()``) is passed to
+    qBittorrent's own ``torrents/info`` so only matching torrents are listed.
     Yields ``(torrent, files)`` per torrent, sorted by hash so a rerun sees
     the same order. ``files`` is None for an incomplete torrent (no files call
     is made for it); otherwise one dict per file row with ``name``, ``size``,
@@ -3105,7 +3114,8 @@ def qbit_import_inventory(cancel_event=None):
     or a malformed response raises: the caller fails closed and never falls
     back to walking the filesystem. Never writes to qBittorrent."""
     cookie = _qbit_login_cookie()
-    torrents = _qbit_request_json("/api/v2/torrents/info", {}, cookie)
+    params = dict(qbit_import_filter() if qbit_filter is None else qbit_filter)
+    torrents = _qbit_request_json("/api/v2/torrents/info", params, cookie)
     if not isinstance(torrents, list) or not all(isinstance(t, dict) for t in torrents):
         raise ValueError("qBittorrent returned a malformed torrent list")
     keep = ("hash", "name", "progress", "state", "save_path", "content_path")

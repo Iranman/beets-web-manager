@@ -1894,6 +1894,9 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
     job_id_holder: Dict[str, str] = {}
     handoff_ready = threading.Event()
     startup_aborted = threading.Event()
+    # Optional QBITTORRENT_IMPORT_CATEGORY/_TAG: read once, sent to
+    # qBittorrent and recorded in the batch's source report.
+    qbit_filter = _acquisition_service.qbit_import_filter() if source == "qbittorrent" else None
 
     def _do(log, cancel_event=None, update_state=None):
         signaled = handoff_ready.wait(timeout=10)
@@ -1910,7 +1913,8 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
                 return _run_ai_batch_import(
                     batch_job_id, scan_path, log, cancel_event, update_state,
                     recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=owned_job_id,
-                    source=source, qbit_inventory=_acquisition_service.qbit_import_inventory,
+                    source=source, qbit_inventory=lambda ce: _acquisition_service.qbit_import_inventory(ce, qbit_filter),
+                    qbit_filter=qbit_filter,
                 )
         finally:
             # Ownership-safe regardless of which startup outcome applies:
