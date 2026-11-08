@@ -22,7 +22,7 @@ from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE
 from backend.app_runtime import _MB_UUID_RE, _extract_mb_uuid, _path_is_under, _redact_security_text, DOWNLOADS_ALLOWED_ROOTS, TORRENT_SOURCE_ROOTS, validated_downloads_root
-from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
+from backend.slskd import RECOVERY_ORIGINAL_NAMES_SIDECAR, stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid_api_key
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
@@ -2272,6 +2272,70 @@ def _ai_batch_albums_present(album_ids: List[Any]) -> bool:
     return False
 
 
+class _QbitUnitGone(Exception):
+    """None of a qBittorrent unit's files is left in its folder."""
+
+
+def _ai_batch_tree_entries(root: str) -> set:
+    """Every non-directory entry under ``root`` (symlinked dirs included, never
+    followed) as a ``/``-joined relative name. An unreadable subfolder raises,
+    so an unlisted file can never hide behind it."""
+    out: set = set()
+
+    def fail(err):
+        raise err
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=fail):
+        rel = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        prefix = "" if rel == "." else rel + "/"
+        out.update(prefix + n for n in filenames)
+        out.update(prefix + d for d in dirnames if os.path.islink(os.path.join(dirpath, d)))
+    return out
+
+
+def _ai_batch_qbit_unit_folder(folder_state: Dict[str, Any], fid: str, batch_id: str,
+                               log: list) -> tuple:
+    """``(folder, files)`` a qBittorrent unit is imported or reviewed from: its
+    source folder when that holds nothing but the torrent's own listed files,
+    otherwise our staged copy of exactly those files, checked after staging so
+    a file left in the stage by an earlier attempt is never imported. The
+    torrent's files are only ever read. Raises ``_QbitUnitGone`` when none of
+    them is left."""
+    folder = _s(folder_state.get("source_folder"))
+    wanted: Dict[str, Path] = {}
+    listed = list(folder_state.get("source_files") or [])
+    for rel in listed:
+        if _qbit_rel_name_unsafe(rel):
+            continue
+        parts = _s(rel).replace("\\", "/").split("/")
+        p = Path(folder, *parts)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+            wanted["/".join(parts)] = p
+    if not wanted:
+        raise _QbitUnitGone("none of the torrent's files are in the folder any more")
+    if len(wanted) < len(listed):
+        log.append(f"  {len(listed) - len(wanted)} torrent file(s) gone since discovery; "
+                   f"importing the {len(wanted)} still present")
+    if _ai_batch_tree_entries(folder) == set(wanted):
+        return folder, list(wanted.values())
+    # Any other entry (audio, sidecar, app marker, link) means a copy of only
+    # the torrent's files. The batch id keeps one batch's stage out of another's.
+    prefix = hashlib.sha256(f"{batch_id}\0{fid}".encode("utf-8")).hexdigest()[:16]
+    staged = _stage_selected_audio_files_impl(
+        validated_downloads_root(), AUDIO_EXT, folder, list(wanted.values()), Path(folder).parent.name,
+        Path(folder).name, log, stage_prefix=prefix, force_stage=True)
+    if os.path.normcase(os.path.abspath(staged)) == os.path.normcase(os.path.abspath(folder)) or \
+            _ai_batch_tree_entries(staged) - {RECOVERY_ORIGINAL_NAMES_SIDECAR} != set(wanted):
+        raise RuntimeError("the staged copy does not hold exactly the torrent's files "
+                           "(left over from an earlier attempt?); import refused")
+    folder_state["staged_folder"] = staged
+    return staged, [Path(staged, *rel.split("/")) for rel in wanted]
+
+
 def _ai_batch_folder_state(batch_job_id: str, source_folder: str) -> Dict[str, Any]:
     return {
         "folder_id": _ai_batch_folder_id(source_folder),
@@ -2508,14 +2572,28 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         # No candidates: folder name only, empty IDs.
         return dict(_ai_batch_review_suggestion(folder, "", {}), reason=reason)
 
+    # ── Source still there? Gone is permanent: no retry, no Review row ──────
+    # Checked first, so a vanished folder is never looked up in the library or
+    # the Review Queue (C7). A folder a prior run already imported (ARCH-033
+    # N1, below) may legitimately be gone and keeps its own hand-off.
+    def source_missing(why: str) -> None:
+        log.append(f"  Source missing ({why}); not retried. Start a new batch to pick up moved content.")
+        mark(status="source_missing", current_step="source missing", failure_reason=f"source_missing: {why}")
+
     log.append(f"\n{Path(folder).name}")
+    prior_albums = [a for a in (folder_state.get("imported_album_ids") or []) if a]
+    if not prior_albums and not os.path.lexists(folder):
+        source_missing("the folder no longer exists")
+        return
     if stop(interrupted()):
         return
     if _ai_batch_already_in_library(folder):
         log.append("  Already in library - skipped; no source folder deleted")
         mark(status="skipped", current_step="already in library", failure_reason="already in library")
         return
-    if not folder_state.get("review_item_id") and _pending_review_has_path(folder):
+    staged_before = _s(folder_state.get("staged_folder"))
+    if not folder_state.get("review_item_id") and (
+            _pending_review_has_path(folder) or (staged_before and _pending_review_has_path(staged_before))):
         log.append("  Already in the Review Queue - skipped")
         mark(status="review_created", current_step="review item already exists", review_item_id=fid)
         return
@@ -2526,7 +2604,6 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     # Those albums were moved out of the source folder, so the library check
     # above cannot see them. Re-create the Review row from the stashed payload
     # (ARCH-033 N2) and never re-run Stage 1 against an already-imported folder.
-    prior_albums = [a for a in (folder_state.get("imported_album_ids") or []) if a]
     if prior_albums and _ai_batch_albums_present(prior_albums):
         fields = {"album_ids": prior_albums, "album_id": prior_albums[0],
                   "metadata_imported": True, "stage": "done"}
@@ -2543,51 +2620,29 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             mark(status="review_required", current_step="imported; awaiting Review row", **fields)
         return
 
-    # ── Source still there? Gone is permanent: no retry, no Review row ──────
-    def source_missing(why: str) -> None:
-        log.append(f"  Source missing ({why}); not retried. Start a new batch to pick up moved content.")
-        mark(status="source_missing", current_step="source missing", failure_reason=f"source_missing: {why}")
-
-    if not os.path.lexists(folder):
+    if not os.path.lexists(folder):  # a prior import whose albums are gone again
         source_missing("the folder no longer exists")
         return
-    # A qBittorrent unit imports only the torrent's own files: never the other
-    # files in its folder, and its source is always copied, never moved.
+    # A qBittorrent unit imports only the torrent's own listed files, from its
+    # folder when nothing else is in it, else from our verified staged copy;
+    # the torrent's own files are always copied, never moved.
     qbit_files: List[Path] = []
+    in_place = False
     if folder_state.get("source_mode") == "qbittorrent":
-        listed = list(folder_state.get("source_files") or [])
-        for rel in listed:
-            if _qbit_rel_name_unsafe(rel):
-                continue
-            p = Path(folder, *_s(rel).split("/"))
-            try:
-                st = os.lstat(p)
-            except OSError:
-                continue
-            if stat.S_ISREG(st.st_mode) and st.st_size > 0:
-                qbit_files.append(p)
-        if not qbit_files:
-            source_missing("none of the torrent's files are in the folder any more")
-            return
-        if len(qbit_files) < len(listed):
-            log.append(f"  {len(listed) - len(qbit_files)} torrent file(s) gone since discovery; "
-                       f"importing the {len(qbit_files)} still present")
         try:
-            # Returns the folder itself when it holds exactly these audio files.
-            staged = _stage_selected_audio_files_impl(
-                validated_downloads_root(), AUDIO_EXT, folder, qbit_files, Path(folder).parent.name,
-                Path(folder).name, log, stage_prefix=fid[:16])
+            folder, qbit_files = _ai_batch_qbit_unit_folder(folder_state, fid, batch_id, log)
+        except _QbitUnitGone as ex:
+            source_missing(_s(ex))
+            return
         except Exception as ex:
             failed(f"Could not separate the torrent's files from the other files in its folder: {ex}")
             return
-        if staged != folder:
-            # Our own copy of the torrent's files only; the torrent is untouched.
-            mark(staged_folder=staged)
-            folder = staged
-            qbit_files = []
+        in_place = folder == _s(folder_state.get("source_folder"))
+        if not in_place:
+            mark(staged_folder=folder)
 
     # ── Stage 1: Beets quiet autotag import of this one folder ──────────────
-    preserve = True if qbit_files else _preserve_torrent_source_path(folder)
+    preserve = True if in_place else _preserve_torrent_source_path(folder)
     mark(status="importing", current_step="Stage 1: Beets import", stage="beets_import")
     try:
         audio_files, conflict = _ai_batch_preimport_check(folder)
@@ -2694,7 +2749,7 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     log.append(f"  Stage 2b: every file proven; Beets import pinned to release {release_id}")
     try:
         # Re-checks torrent and hardlinks itself right before planning (N10).
-        out = _ai_import_folder(folder, release_id, {}, log, cancel_event, copy_source=bool(qbit_files))
+        out = _ai_import_folder(folder, release_id, {}, log, cancel_event, copy_source=in_place)
         aid = int(out["album_id"])
         # post_conditions: beets_strong_match (quiet_fallback skip in the
         # Apply) and single_new_album_with_release_group (the Apply checks one
@@ -2811,8 +2866,19 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
             _ai_batch_commit(state, update_state)
             last_commit_at = now
 
-    def _queue(folder_state: Dict[str, Any], folder: str, reason: str, status: str, key: str) -> None:
-        if folder_state.get("review_item_id") or not folder or _pending_review_has_path(folder):
+    def _queue(fid: str, folder_state: Dict[str, Any], folder: str, reason: str, status: str, key: str) -> None:
+        if folder_state.get("review_item_id") or not folder:
+            return
+        if folder_state.get("source_mode") == "qbittorrent":
+            # B2: the row must never point at a folder holding files the torrent
+            # does not own: use the folder itself only when it holds nothing
+            # else, otherwise our verified copy of just the torrent's files.
+            try:
+                folder, _files = _ai_batch_qbit_unit_folder(folder_state, fid, batch_id, log)
+            except Exception as ex:
+                log.append(f"review item not created ({ex}): {folder}")
+                return
+        if _pending_review_has_path(folder):
             return
         # ARCH-033 N2: when an inline Review enqueue failed earlier, it stashed
         # the full suggestion+evidence (conflict / skipped_paths /
@@ -2857,10 +2923,10 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                 continue
             skipped += 1
             if reason != "batch canceled":
-                _queue(folder_state, folder, reason, status, "ai_batch_skip")
+                _queue(fid, folder_state, folder, reason, status, "ai_batch_skip")
         elif status in _AI_BATCH_FAILED_FOLDER_STATUSES:
             errors += 1
-            _queue(folder_state, folder, folder_state.get("failure_reason") or "Import failed", status,
+            _queue(fid, folder_state, folder, folder_state.get("failure_reason") or "Import failed", status,
                    "ai_batch_failure")
         elif status in _AI_BATCH_IMPORTED_FOLDER_STATUSES:
             imported += 1

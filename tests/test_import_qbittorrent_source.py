@@ -342,7 +342,7 @@ class _Batch(_Roots):
     @staticmethod
     def fake_stage(root, exts, aldir, files, artist, album, log, stage_prefix=None, **_kw):
         present = {p.resolve() for p in Path(aldir).rglob("*") if p.is_file() and p.suffix.lower() in exts}
-        if present == {Path(f).resolve() for f in files}:
+        if not _kw.get("force_stage") and present == {Path(f).resolve() for f in files}:
             return aldir
         stage = Path(root) / "_beets_missing_import" / f"{stage_prefix}-{artist} - {album}"
         for f in files:
@@ -375,7 +375,7 @@ class BatchTests(_Batch):
         self.assertEqual([_fingerprint(f) for f in files], before)
         self.assertTrue(all(f.is_file() for f in files))
 
-    def test_pinned_import_of_a_qbit_unit_plans_a_copy_even_with_an_app_marker(self):
+    def test_pinned_import_never_moves_the_torrent_folder_even_with_an_app_marker(self):
         self.torrent("Album", ["01.flac"])
         f = self.dl / "Album" / "01.flac"
         before = _fingerprint(f)
@@ -393,8 +393,11 @@ class BatchTests(_Batch):
         with mock.patch.object(ai, "_ai_batch_qbit_units", side_effect=units_then_marker):
             out, folders = self.run_batch()
         self.assertEqual(folders[str(self.dl / "Album")]["status"], "imported", self.log)
-        self.assertFalse(self.plan.call_args.args[0]["use_move"])
-        self.assertTrue(self.reimport.call_args.args[1]["copy"])
+        # The marker is not the torrent's: the unit is imported from our staged
+        # copy (which may be moved), and the torrent's own folder is never moved.
+        plan = self.plan.call_args.args[0]
+        self.assertNotEqual(Path(plan["source_folder"]), self.dl / "Album")
+        self.assertEqual(Path(plan["source_folder"]), Path(folders[str(self.dl / "Album")]["staged_folder"]))
         self.assertEqual(_fingerprint(f), before)
 
     def test_mixed_folder_imports_only_the_torrent_files(self):
@@ -508,6 +511,103 @@ class BatchTests(_Batch):
         self.assertEqual(out["source_mode"], "local")
         self.assertEqual(folders[str(self.dl / "Local Album")]["status"], "imported")
         self.assertNotIn("source_files", folders[str(self.dl / "Local Album")])
+
+
+class QaFindingsTests(_Batch):
+    """QA blocking findings B2/C2, N2, M5 and C7 on the qBittorrent source."""
+
+    def staged_names(self, staged):
+        return sorted(p.relative_to(staged).as_posix() for p in Path(staged).rglob("*")
+                      if p.is_file() and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR)
+
+    def mixed_album(self):
+        self.torrent("Album", ["01.flac", "02.flac"])
+        self.audio("Album/03 not from the torrent.flac")
+        return self.dl / "Album"
+
+    def test_failed_mixed_unit_review_row_points_at_the_staged_copy(self):  # B2
+        src = self.mixed_album()
+        self.result = {"ok": False, "error": "Beets import failed"}
+        out, folders = self.run_batch()
+        state = folders[str(src)]
+        self.assertEqual(state["status"], "import_failed", self.log)
+        self.queued.assert_called_once()
+        row_folder = Path(self.queued.call_args.args[0])
+        self.assertNotEqual(row_folder, src)
+        self.assertEqual(self.staged_names(row_folder), ["01.flac", "02.flac"])
+
+    def test_skipped_mixed_unit_review_row_points_at_the_staged_copy(self):  # B2
+        src = self.mixed_album()
+        ai._ai_batch_control(self.batch_id)["skip_folder_ids"].add(ai._ai_batch_folder_id(str(src)))
+        out, folders = self.run_batch()
+        self.assertEqual(folders[str(src)]["status"], "skipped", self.log)
+        self.reimport.assert_not_called()
+        self.queued.assert_called_once()
+        row_folder = Path(self.queued.call_args.args[0])
+        self.assertNotEqual(row_folder, src)
+        self.assertEqual(self.staged_names(row_folder), ["01.flac", "02.flac"])
+
+    def test_stale_file_in_a_reused_stage_is_never_imported(self):  # C2
+        src = self.mixed_album()
+        self.result = {"ok": False, "error": "Beets import failed"}
+        self.queued.side_effect = ai.PendingReviewLoadError("unreadable")  # keep the unit retryable
+        out, folders = self.run_batch()
+        state = folders[str(src)]
+        self.assertEqual(self.staged_names(state["staged_folder"]), ["01.flac", "02.flac"])
+        (src / "02.flac").unlink()  # the torrent's second file is gone before the retry
+        self.stored = {k: v for k, v in out.items() if k != "folders"}
+        self.stored["folder_states"] = {state["folder_id"]: dict(state)}
+        self.result = {"ok": True, "albums_imported": 1, "imported_album_ids": [7], "skipped": [],
+                       "not_matched": [], "not_matched_known": True}
+        seen = []
+        self.reimport.side_effect = lambda f, opts, timeout: (seen.append(self.staged_names(f)), self.result)[1]
+        self.run_batch(recover=True, retry_failed=True, qbit_inventory=None)
+        for names in seen:
+            self.assertNotIn("02.flac", names)
+
+    def test_unlisted_non_audio_file_forces_staging(self):  # N2
+        self.torrent("Album", ["01.flac"])
+        (self.dl / "Album" / "cover.jpg").write_bytes(b"not from the torrent")
+        out, folders = self.run_batch()
+        imported_from = Path(self.reimport.call_args.args[0])
+        self.assertNotEqual(imported_from, self.dl / "Album")
+        self.assertEqual(self.staged_names(imported_from), ["01.flac"])
+
+    def test_real_staging_rechecks_the_staged_audio_before_import(self):  # M5
+        if not slskd._staging_fd_supported():
+            self.skipTest("real fd-relative staging needs POSIX (runs on Linux CI)")
+        src = self.mixed_album()
+        before = {p: _fingerprint(p) for p in src.rglob("*.flac")}
+        real_check = ai._ai_batch_preimport_check
+
+        def intruder_then_check(folder):
+            # Audio the torrent does not own lands in the folder about to be imported.
+            Path(folder, "99 intruder.flac").write_bytes(b"x")
+            return real_check(folder)
+
+        with mock.patch.object(ai, "_ai_batch_preimport_check", side_effect=intruder_then_check):
+            out, folders = self.run_batch()
+        state = folders[str(src)]
+        self.assertEqual(self.staged_names(state["staged_folder"]),
+                         ["01.flac", "02.flac", "99 intruder.flac"])
+        self.reimport.assert_not_called()
+        self.assertEqual(state["failure_reason"], "unverifiable_folder", self.log)
+        self.assertEqual({p: _fingerprint(p) for p in src.rglob("*.flac")}, before)
+
+    def test_vanished_folder_is_never_looked_up_in_the_library_or_review(self):  # C7
+        self.torrent("Album", ["01.flac"])
+        real_process = ai._ai_batch_process_folder
+
+        def gone_then_process(*a, **k):
+            shutil.rmtree(self.dl / "Album", ignore_errors=True)
+            return real_process(*a, **k)
+
+        with mock.patch.object(ai, "_ai_batch_process_folder", side_effect=gone_then_process):
+            out, folders = self.run_batch()
+        self.assertEqual(folders[str(self.dl / "Album")]["status"], "source_missing", self.log)
+        ai._ai_batch_already_in_library.assert_not_called()
+        ai._pending_review_has_path.assert_not_called()
+        self.queued.assert_not_called()
 
 
 class LocalMissingSourceTests(_Batch):

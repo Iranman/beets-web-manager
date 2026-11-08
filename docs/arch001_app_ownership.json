@@ -25271,6 +25271,52 @@
    ]
   },
   {
+   "name": "_ai_batch_tree_entries",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2279,
+    2293
+   ],
+   "size": 15,
+   "body_lines": 11,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_ai_batch_qbit_unit_folder",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2296,
+    2336
+   ],
+   "size": 41,
+   "body_lines": 33,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_process_decisions",
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_ai_batch_tree_entries",
+    "_qbit_rel_name_unsafe",
+    "_s",
+    "validated_downloads_root"
+   ]
+  },
+  {
    "name": "_ai_batch_unit_refusal",
    "module": "backend/ai_service.py",
    "lines": [
