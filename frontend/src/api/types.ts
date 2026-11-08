@@ -1217,6 +1217,7 @@ export type AiBatchFolderStatus =
   | 'replacement_unavailable'
   | 'completed_with_fallback'
   | 'handled_warning'
+  | 'source_missing'
   | 'failed'
   | 'import_failed'
   | 'ai_failed'
@@ -1264,7 +1265,29 @@ export interface AiBatchEvidenceCapabilities {
   ai_configured: boolean;
 }
 
+export type AiBatchSource = 'local' | 'qbittorrent';
+
+/** What the batch source offered (backend/ai_service.py _ai_batch_qbit_units). */
+export interface AiBatchSourceReport {
+  source: AiBatchSource | string;
+  units?: number;
+  torrents?: number;
+  torrents_complete?: number;
+  audio_files?: number;
+  ownership_verified?: number;
+  ownership_verified_pct?: number;
+  eligible_files?: number;
+  /** Files left out, by reason code. */
+  exclusions?: Record<string, number>;
+  exclusion_samples?: Array<{ reason: string; path: string; torrent?: string }>;
+}
+
 export interface AiBatchState {
+  source_mode?: AiBatchSource | string;
+  source_report?: AiBatchSourceReport;
+  /** Set when the source could not be verified; nothing was queued. */
+  source_error?: { code: string; message: string };
+  folders_source_missing?: number;
   evidence_capabilities?: AiBatchEvidenceCapabilities;
   /** Batch-level warnings, as full sentences. */
   warnings?: string[];
