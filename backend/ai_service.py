@@ -8,6 +8,7 @@ import backend.provider_boundary as provider_boundary
 import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
+from backend.matching.duplicate_identity import duplicate_is_already_in_library
 from backend.matching import (
     DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR as _SLOT_ARTIST_TEXT_FLOOR,
     candidate_is_unrelated as _candidate_is_unrelated,
@@ -2246,9 +2247,10 @@ def _ai_batch_source_summary_line(report: Dict[str, Any]) -> str:
 
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
+    """True when library items already live under this folder (a folder inside
+    the music root). ``resolve_folder_to_albums`` returns the album ids."""
     try:
-        res = composite_workflows.resolve_folder_to_albums(folder_path)
-        return bool(int(res.get("track_count") or 0) > 0 or res.get("item_ids"))
+        return bool(composite_workflows.resolve_folder_to_albums(folder_path))
     except BeetsUnavailableError:
         raise
     except Exception:
@@ -2405,6 +2407,32 @@ def _ai_batch_capability_warnings(caps: Dict[str, Any]) -> List[str]:
 def _ai_batch_skip_reason(res: Dict[str, Any]) -> str:
     reasons = {_s(r.get("reason")) for r in (res.get("skipped") or []) if isinstance(r, dict)}
     return next((r for r in _AI_BATCH_SKIP_REASON_ORDER if r in reasons), "")
+
+
+def _ai_batch_duplicate_verdict(res: Dict[str, Any]) -> Dict[str, Any]:
+    """Did Beets skip this folder only because it is already in the library?
+    True only when every skipped task is a ``duplicate`` that passes
+    ``duplicate_is_already_in_library`` (same Release Group, every recording
+    present); one task skipped for any other reason, or one unproven
+    duplicate, means no. ``reason`` is the rule's verdict for the evidence."""
+    rows = [r for r in (res.get("skipped") or []) if isinstance(r, dict)]
+    if not rows or any(_s(r.get("reason")) != "duplicate" for r in rows):
+        return {"proven": False, "reason": "not_only_duplicates" if rows else ""}
+    album_ids: List[int] = []
+    groups: List[str] = []
+    why = ""
+    for row in rows:
+        ok, why = duplicate_is_already_in_library(row.get("duplicate_evidence"))
+        if not ok:
+            return {"proven": False, "reason": why}
+        ev = row["duplicate_evidence"]
+        rg = _s(ev.get("release_group_id")).strip().lower()
+        groups.append(rg)
+        album_ids += [d["album_id"] for d in ev.get("duplicates") or [] if isinstance(d, dict)
+                      and _s(d.get("mb_releasegroupid")).strip().lower() == rg
+                      and isinstance(d.get("album_id"), int) and d["album_id"] not in album_ids]
+    return {"proven": True, "reason": why, "release_group_id": groups[0] if len(set(groups)) == 1 else "",
+            "album_ids": album_ids}
 
 
 def _ai_batch_albums_missing_release_group(album_ids: List[Any]) -> List[int]:
@@ -2705,13 +2733,21 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             log.append(f"  {reason}")
             mark(status="review_required", current_step="imported; Release Group missing",
                  failure_reason=reason, missing_release_group_album_ids=missing, **fields)
+        elif partial and (dup := _ai_batch_duplicate_verdict(res))["proven"]:
+            note = (f"Imported; {len(partial)} skipped path(s) are already in the library "
+                    f"(same Release Group, every recording present): {', '.join(partial)}")
+            log.append(f"  {note}")
+            mark(status="imported", current_step="imported; rest already in library", note=note,
+                 already_in_library_evidence={k: dup[k] for k in ("reason", "release_group_id", "album_ids")},
+                 **fields)
         elif partial:
             reason = f"Beets imported part of this folder and skipped {len(partial)} path(s): {', '.join(partial)}"
             log.append(f"  {reason}")
             # One review row so the skipped paths are visible (QA394-N1).
             review(dict(plain_suggestion(reason), kept_album_ids=ids),
                    {"origin_step": "beets_partial", "skipped_paths": partial, "kept_album_ids": ids,
-                    "beets_skip_reason": _ai_batch_skip_reason(res), "ai_rank": None, "batch_job_id": batch_id},
+                    "beets_skip_reason": _ai_batch_skip_reason(res), "duplicate_rule": dup["reason"],
+                    "ai_rank": None, "batch_job_id": batch_id},
                    status="review_required", current_step="imported in part", failure_reason=reason, **fields)
         else:
             mark(status="imported", current_step="imported", **fields)
@@ -2719,6 +2755,17 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
 
     # ── Stage 2: Web Manager MB/AcoustID evidence for a folder Beets skipped ─
     reason = _ai_batch_skip_reason(res)
+    dup = _ai_batch_duplicate_verdict(res)
+    if dup["proven"]:
+        # Beets' duplicate check is name-only; this is the identity proof that
+        # the library already holds every recording (B1). A lossless torrent
+        # of a lossy library copy also lands here: skipped, no Review row
+        # (product question pending; change this branch to route it to Review).
+        log.append("  Already in library (same Release Group, every recording present) - skipped; "
+                   "no Review row")
+        mark(status="skipped", current_step="already in library", failure_reason="already in library",
+             already_in_library_evidence={k: dup[k] for k in ("reason", "release_group_id", "album_ids")})
+        return
     log.append(f"  Beets skipped it ({reason or 'not matched'}); gathering MusicBrainz/AcoustID evidence")
     if stop(interrupted()):
         return
@@ -2732,6 +2779,8 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     suggestion = _ai_batch_review_suggestion(folder, reason, identity)
     evidence = {"origin_step": "beets_skip", "beets_skip_reason": reason, "deterministic_decision": identity,
                 "ai_rank": None, "batch_job_id": batch_id}
+    if dup["reason"]:
+        evidence["duplicate_rule"] = dup["reason"]
     found = {"auto_import": {"eligible": bool(auto.get("eligible")), "reasons": list(auto.get("reasons") or [])},
              "warnings": list(identity.get("warnings") or []),
              "suggested_release_group_id": suggestion["mb_releasegroupid"],

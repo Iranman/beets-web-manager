@@ -25317,6 +25317,28 @@
    ]
   },
   {
+   "name": "_ai_batch_duplicate_verdict",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2412,
+    2435
+   ],
+   "size": 24,
+   "body_lines": 18,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "DEDUP",
+   "desired_owner": "backend/dedup_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
    "name": "_ai_batch_unit_refusal",
    "module": "backend/ai_service.py",
    "lines": [
