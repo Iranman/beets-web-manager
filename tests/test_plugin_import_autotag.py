@@ -432,7 +432,11 @@ class PluginImportAutotagTests(unittest.TestCase):
         self._import(paths=[src], copy=True, move=False)
         res = self._import(paths=[src], copy=True, move=False, duplicate_action="skip")
         self.assertEqual(res.get_json()["skipped_paths"], [src])
-        self.assertEqual(res.get_json()["skipped"], [{"path": src, "reason": "duplicate"}])
+        [row] = res.get_json()["skipped"]
+        self.assertEqual((row["path"], row["reason"]), (src, "duplicate"))
+        ev = row["duplicate_evidence"]  # plugin 1.20.0: as-is import, so no match fields
+        self.assertEqual((ev["choice"], ev["release_id"], ev["task_item_count"]), ("ASIS", None, 2))
+        self.assertEqual([d["item_count"] for d in ev["duplicates"]], [2])
         self.assertEqual(len(self.lib.albums()), 1)
 
     def test_in_place_only_inside_the_library_directory(self):

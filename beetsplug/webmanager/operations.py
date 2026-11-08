@@ -446,7 +446,7 @@ def get_upstream_web_readonly() -> bool:
         return True
 
 
-_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_art_fetch", "album_row_remove", "import_rollback", "item_path_restore", "album_relocation", "album_relocation_link", "operations", "status", "library_fields"]
+_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_art_fetch", "album_row_remove", "import_rollback", "item_path_restore", "album_relocation", "album_relocation_link", "import_duplicate_evidence", "operations", "status", "library_fields"]
 _PLUGIN_GATED_CAPABILITIES = ["mbsync", "mbsync_library", "fetchart", "embedart", "lastgenre", "mbsubmit"]
 
 
@@ -792,6 +792,57 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     return None
 
 
+_EVIDENCE_MAX_IDS = 200
+_EVIDENCE_MAX_DUPLICATES = 10
+
+
+def _attr(fn):
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _duplicate_entry(obj) -> Dict[str, Any]:
+    """One library object Beets' duplicate check matched (an Album, or an Item
+    for a singleton import)."""
+    is_album = callable(getattr(obj, "items", None))
+    items = _attr(lambda: list(obj.items())) if is_album else [obj]
+    return {
+        "album_id": _attr(lambda: obj.id) if is_album else None,
+        "item_id": None if is_album else _attr(lambda: obj.id),
+        "mb_releasegroupid": _attr(lambda: obj.get("mb_releasegroupid") or None),
+        "mb_albumid": _attr(lambda: obj.get("mb_albumid") or None),
+        "item_count": len(items) if items is not None else None,
+        "recording_ids": [_attr(lambda it=it: it.get("mb_trackid") or None)
+                          for it in (items or [])[:_EVIDENCE_MAX_IDS]],
+    }
+
+
+def duplicate_evidence(task, found_duplicates) -> Dict[str, Any]:
+    """Identity evidence for a task Beets' (name-only) duplicate check flagged:
+    what the task matched and what the matched library albums hold, so Web
+    Manager can tell a true re-import from a same-named different release.
+    Each field is None when Beets did not provide it (e.g. no match, as-is)."""
+    m = getattr(task, "match", None)
+    info = getattr(m, "info", None)
+    mapping = getattr(m, "mapping", None)  # AlbumMatch only
+    return {
+        "choice": _attr(lambda: task.choice_flag.name),
+        "data_source": _attr(lambda: info.data_source),
+        "distance": _attr(lambda: float(m.distance)) if m is not None else None,
+        "release_id": _attr(lambda: info.album_id),
+        "release_group_id": _attr(lambda: info.releasegroup_id),
+        "release_track_count": _attr(lambda: len(info.tracks)),
+        "task_item_count": _attr(lambda: len(task.items)),
+        "mapped_count": _attr(lambda: len(mapping)),
+        "extra_items": _attr(lambda: len(m.extra_items)),
+        "extra_tracks": _attr(lambda: len(m.extra_tracks)),
+        "recording_ids": _attr(lambda: [ti.track_id for ti in list(mapping.values())[:_EVIDENCE_MAX_IDS]]),
+        "duplicates": [_duplicate_entry(d) for d in list(found_duplicates or [])[:_EVIDENCE_MAX_DUPLICATES]],
+    }
+
+
 def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: str = "",
                           allow_missing_tracks: bool = False, existing_album_id: int = 0):
     """Beets' own import session: the quiet terminal session (what
@@ -843,6 +894,10 @@ def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: st
 
         def get_duplicate_action(self, task, found_duplicates):
             task.webmanager_duplicate = True
+            try:
+                task.webmanager_duplicate_evidence = duplicate_evidence(task, found_duplicates)
+            except Exception:  # evidence is advisory; never break Beets' import
+                task.webmanager_duplicate_evidence = None
             if task not in tasks:
                 tasks.append(task)
             return super().get_duplicate_action(task, found_duplicates)
@@ -1088,7 +1143,7 @@ def run_import():
                     _IMPORTED_ALBUM_IDS = None
 
                 skipped: List[str] = []
-                skipped_reasons: List[Dict[str, str]] = []
+                skipped_reasons: List[Dict[str, Any]] = []
                 for task in tasks:
                     if getattr(task, "skip", False):
                         if getattr(task, "webmanager_blank_identity", False):
@@ -1103,7 +1158,10 @@ def run_import():
                             shown = util.displayable_path(tp)
                             if shown not in skipped:
                                 skipped.append(shown)
-                                skipped_reasons.append({"path": shown, "reason": reason})
+                                row = {"path": shown, "reason": reason}
+                                if reason == "duplicate":
+                                    row["duplicate_evidence"] = getattr(task, "webmanager_duplicate_evidence", None)
+                                skipped_reasons.append(row)
                 result = {
                     "success": True,
                     "imported_paths": safe_paths,
