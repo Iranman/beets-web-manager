@@ -3456,6 +3456,24 @@ def _folder_import_recovery_handoff(ctx: _FolderImportContext, mb_albumid: str, 
     return False
 
 
+def _selected_sources_need_copy(paths: Iterable[Path]) -> bool:
+    """F8: True when any selected Review file must stay where it is: a
+    preserved torrent source (the shared rule, which fails closed) or a file
+    that is not a single-link regular file (a hardlink shares its bytes with a
+    seeding torrent; a symlink or an unreadable file is unproven). The partial
+    import then copies and never moves or deletes the selected sources."""
+    for p in paths:
+        if composite_workflows._preserved_torrent_file(str(p)):
+            return True
+        try:
+            st = os.lstat(p)
+        except OSError:
+            return True
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return True
+    return False
+
+
 def _folder_import_selected_sources(folder_path: str, payload: Dict[str, Any]) -> Tuple[Any, Any]:
     """(selected source files, None), or (None, the HTTP refusal)."""
     raw_track_mapping = payload.get("track_mapping") if isinstance(payload.get("track_mapping"), list) else []
@@ -3880,7 +3898,16 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "[torrent] Move requested, but source is under a protected "
                 "torrent root; using --copy so qBittorrent source files remain."
             )
-        import_mode = "--move" if selected_subset_import else ("--copy" if preserve_torrent_source or not use_move else "--move")
+        # F8: a selected torrent source or hardlinked file is copied and kept.
+        keep_selected_sources = selected_subset_import and (
+            preserve_torrent_source or _selected_sources_need_copy(selected_source_files))
+        if keep_selected_sources:
+            log.append("[torrent] A selected file is a protected torrent source or hardlinked; "
+                       "using --copy and keeping the source files.")
+        if selected_subset_import:
+            import_mode = "--copy" if keep_selected_sources else "--move"
+        else:
+            import_mode = "--copy" if preserve_torrent_source or not use_move else "--move"
         # The confirmed Release is imported as confirmed: never swapped for
         # another Release (or Release Group) here.
         mb_identity, resolved_releasegroupid, selected_releasegroupid = _folder_import_settle_release_group(
@@ -3958,6 +3985,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             removed_selected = 0
             music_root_path = Path(music_root).resolve(strict=False)
             for src in active_selected_source_files:
+                if keep_selected_sources:
+                    log.append(f"  [cleanup] Kept protected source file: {Path(src).name}")
+                    continue
                 try:
                     resolved_src = Path(src).resolve(strict=False)
                     try:
@@ -3971,13 +4001,21 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 except Exception as ex:
                     log.append(f"  [cleanup] WARN could not remove imported source file {src}: {ex}")
             partial_remaining_audio = _remaining_audio_files(source_folder_path)
+            if keep_selected_sources:  # the kept, imported files are not unmatched
+                imported = {Path(p).resolve(strict=False) for p in active_selected_source_files}
+                partial_remaining_audio = [p for p in partial_remaining_audio
+                                           if Path(p).resolve(strict=False) not in imported]
             if partial_remaining_audio:
                 log.append(
                     f"Partial import complete. {len(partial_remaining_audio)} unmatched file(s) remain in review."
                 )
             else:
                 log.append(f"Partial import complete. Removed {removed_selected} imported source file(s).")
-        _folder_import_clean_source(log, source_folder_path, album_ids, selected_subset_import, partial_remaining_audio)
+        if keep_selected_sources:
+            log.append("  [cleanup] Source folder kept: it holds protected torrent or hardlinked files.")
+        else:
+            _folder_import_clean_source(log, source_folder_path, album_ids, selected_subset_import,
+                                        partial_remaining_audio)
 
         if selected_subset_import and import_folder_path != source_folder_path:
             try:
