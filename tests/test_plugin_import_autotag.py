@@ -555,6 +555,42 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(real)), ["01.wav", "02.wav"])
         self.assertEqual(len(self.lib.albums()), 0)
 
+    def test_move_accepted_through_symlinked_import_root(self):
+        """N-6: an import root that is itself a symlink still accepts a move
+        import of the resolved path the backend sends."""
+        real_root = os.path.join(self.td, "real_downloads")
+        src = os.path.join(real_root, "Album")
+        _album(src, "Some Artist", "Moved")
+        link_root = os.path.join(self.td, "dl_link")
+        try:
+            os.symlink(real_root, link_root, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        ops_mod.set_import_roots([link_root])
+        res = self._import(paths=[os.path.realpath(os.path.join(link_root, "Album"))], copy=False, move=True)
+        self.assertNotEqual(res.status_code, 400, res.get_json())
+        self.assertEqual(res.status_code, 200, res.get_json())
+
+    def test_move_refused_for_symlinked_subfolder(self):
+        """N-2: Beets' walk follows a symlinked subfolder, so a move import of a
+        folder holding `Disc 1 -> <seeding folder>` is refused, nothing moved."""
+        seeding = os.path.join(self.downloads, "Torrent")
+        _album(seeding, "Some Artist", "Seeding")
+        stage = os.path.join(self.downloads, "_stage")
+        os.makedirs(stage)
+        try:
+            os.symlink(seeding, os.path.join(stage, "Disc 1"), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        res = self._import(paths=[stage], copy=False, move=True)
+        self.assertEqual((res.status_code, res.get_json()["error_code"]), (400, "PATH_NOT_ALLOWED"))
+        self.assertEqual(sorted(os.listdir(seeding)), ["01.wav", "02.wav"])
+        self.assertEqual(len(self.lib.albums()), 0)
+        # A copy import of the same folder is unaffected by the move guard.
+        res = self._import(paths=[stage], copy=True, move=False)
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.assertEqual(sorted(os.listdir(seeding)), ["01.wav", "02.wav"])
+
     def test_in_place_refused_when_library_dir_covers_config_dir(self):
         """L2: the same _covers_config_dir guard as _derived_allowed_roots."""
         beets_config["directory"] = str(beets_config.config_dir())

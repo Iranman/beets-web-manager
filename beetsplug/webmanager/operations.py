@@ -921,15 +921,41 @@ _FORCED_OFF_IMPORT_MODES = ("link", "hardlink", "reflink", "delete")
 def _symlink_free_below(path: str, roots: List[str]) -> bool:
     """Whether ``path`` lies lexically inside one of ``roots`` with no symlink
     component below it. A move import must not follow a link out of an
-    app-managed folder into, say, a seeding torrent folder."""
+    app-managed folder into, say, a seeding torrent folder. A root that is
+    itself a symlink is accepted as configured and as its real path (the
+    backend sends resolved paths); only components below it are checked."""
     from . import folder_ops  # it imports this module
     for root in roots:
-        try:
-            folder_ops.contained_path(path, os.path.abspath(root))
-            return True
-        except folder_ops._Refused:
-            continue
+        for candidate in {os.path.abspath(root), os.path.realpath(root)}:
+            try:
+                folder_ops.contained_path(path, candidate)
+                return True
+            except folder_ops._Refused:
+                continue
     return False
+
+
+def _is_link(path: str) -> bool:
+    return os.path.islink(path) or os.path.isjunction(path)
+
+
+def _tree_has_link(path: str) -> bool:
+    """Whether ``path`` or anything below it is a symlink or junction. Beets'
+    sorted_walk follows symlinked subfolders, so a move import of a folder
+    holding ``Disc 1 -> <seeding folder>`` would move the seeding files."""
+    if _is_link(path):
+        return True
+    for top, dirs, files in os.walk(path, followlinks=False):
+        if any(_is_link(os.path.join(top, n)) for n in dirs + files):
+            return True
+    return False
+
+
+_MOVE_LINK_ERROR = "A move import source must not be or contain a symlink"
+
+
+class _MoveSourceRefused(Exception):
+    """A move import source gained a symlink after the request check."""
 
 
 @webmanager_bp.route("/import", methods=["POST"])
@@ -1045,7 +1071,7 @@ def run_import():
             )
         if move and not _symlink_free_below(p, import_roots):
             return jsonify({
-                "error": "A move import source must not have a symlink component",
+                "error": _MOVE_LINK_ERROR,
                 "error_code": "PATH_NOT_ALLOWED",
             }), 400
         safe_paths.append(safe_p)
@@ -1118,6 +1144,13 @@ def run_import():
 
     def _execute_import(lib, op_id_arg: Optional[str] = None):
         with mutation_lock:
+            # Re-checked under the lock right before Beets runs, so a swap
+            # after the request check is narrowed (N-2).
+            if move and any(not _symlink_free_below(sp, import_roots) or _tree_has_link(sp)
+                            for sp in safe_paths):
+                if op_id_arg:
+                    update_operation(op_id_arg, "failed", error=_MOVE_LINK_ERROR, error_code="PATH_NOT_ALLOWED")
+                raise _MoveSourceRefused()
             # Snapshot importer config
             orig_pretend = beets_config["import"]["pretend"].get()
             orig_copy = beets_config["import"]["copy"].get()
@@ -1263,6 +1296,8 @@ def run_import():
     try:
         res = _execute_import(g.lib, op_id)
         return jsonify(res)
+    except _MoveSourceRefused:
+        return jsonify({"error": _MOVE_LINK_ERROR, "error_code": "PATH_NOT_ALLOWED"}), 400
     except Exception:
         return jsonify({"error": "Import failed", "error_code": "IMPORT_FAILED"}), 500
 
