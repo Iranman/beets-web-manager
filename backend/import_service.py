@@ -38,7 +38,7 @@ from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
 from backend.serializers import _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
-from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
+from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_matches, _pending_review_path_key
 from backend.app_runtime import PLEX_SYNC_AUTO_REFRESH
 from backend.plex_service import _plex_configured, _trigger_plex_refresh
 
@@ -882,6 +882,23 @@ def _start_reimport_disk_job_internal(aldir: str, mb_albumid: str,
     if not data.get("ok") or not data.get("job_id"):
         raise RuntimeError(data.get("error") or "failed to start import job")
     return data["job_id"]
+
+
+def _review_row_is_torrent_source(folder_path: str) -> bool:
+    """True when a Review row from a qBittorrent batch points at this folder
+    itself (not at our staged copy): its files are a torrent's and are
+    always copied, whatever ALLOW_TORRENT_SOURCE_MOVE says. An unreadable
+    queue reads as True (copying is the safe side)."""
+    if _app_managed_download_path(Path(folder_path)):
+        return False
+    key = _pending_review_path_key(folder_path)
+    try:
+        rows = _load_pending_reviews(prune_resolved=False, strict=True)
+    except Exception:
+        return True
+    return any(_pending_review_path_key(_s(r.get("path"))) == key
+               and _s((r.get("evidence") or {}).get("source_mode")) == "qbittorrent"
+               for r in rows if isinstance(r, dict))
 
 
 def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
@@ -3821,7 +3838,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if selection_refusal:
         return selection_refusal
     selected_subset_import = bool(selected_source_files)
-    preserve_torrent_source = _preserve_torrent_source_path(folder_path)
+    preserve_torrent_source = (_preserve_torrent_source_path(folder_path)
+                               or _review_row_is_torrent_source(folder_path))
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(folder_path)
@@ -4011,7 +4029,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 )
             else:
                 log.append(f"Partial import complete. Removed {removed_selected} imported source file(s).")
-        if keep_selected_sources:
+        if keep_selected_sources or (preserve_torrent_source and not selected_subset_import):
+            # A copied torrent source keeps every file, its artwork included.
             log.append("  [cleanup] Source folder kept: it holds protected torrent or hardlinked files.")
         else:
             _folder_import_clean_source(log, source_folder_path, album_ids, selected_subset_import,

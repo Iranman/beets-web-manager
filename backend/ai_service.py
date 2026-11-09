@@ -2400,6 +2400,40 @@ def _ai_batch_tree_entries(root: str) -> set:
     return out
 
 
+def _ai_batch_qbit_stage_prefix(fid: str) -> str:
+    """The stage-name prefix of one qBittorrent unit (its folder id), the same
+    in every batch."""
+    return hashlib.sha256(f"qbit-unit\0{fid}".encode("utf-8")).hexdigest()[:16]
+
+
+def _ai_batch_qbit_stage_dirs(fid: str) -> List[str]:
+    """This unit's staged copies under ``_beets_missing_import`` (links never
+    followed or listed)."""
+    prefix = _ai_batch_qbit_stage_prefix(fid) + "-"
+    try:
+        root = validated_downloads_root() / "_beets_missing_import"
+        with os.scandir(root) as entries:
+            return sorted(e.path for e in entries
+                          if e.name.startswith(prefix) and e.is_dir(follow_symlinks=False))
+    except (OSError, ValueError, RuntimeError):
+        return []
+
+
+def _ai_batch_qbit_stage_in_review(fid: str) -> bool:
+    return any(_pending_review_has_path(d) for d in _ai_batch_qbit_stage_dirs(fid))
+
+
+def _ai_batch_qbit_stage_cleanup(fid: str, stage_cleanup, log: list) -> None:
+    """Remove this unit's staged copies through the app's staging cleanup
+    (``import_service._delete_staged_import_folder``, injected: a higher
+    layer), which keeps any copy a Review row points at and any copy whose
+    Review state cannot be read. The torrent's own files are never touched."""
+    if stage_cleanup is None:
+        return
+    for d in _ai_batch_qbit_stage_dirs(fid):
+        stage_cleanup(d, log)
+
+
 def _ai_batch_qbit_unit_folder(folder_state: Dict[str, Any], fid: str, batch_id: str,
                                log: list, *, with_hash: bool = False) -> tuple:
     """``(folder, files, records)`` a qBittorrent unit is imported or
@@ -2451,8 +2485,9 @@ def _ai_batch_qbit_unit_folder(folder_state: Dict[str, Any], fid: str, batch_id:
     if _ai_batch_tree_entries(folder) == set(wanted):
         return folder, list(wanted.values()), records
     # Any other entry (audio, sidecar, app marker, link) means a copy of only
-    # the torrent's files. The batch id keeps one batch's stage out of another's.
-    prefix = hashlib.sha256(f"{batch_id}\0{fid}".encode("utf-8")).hexdigest()[:16]
+    # the torrent's files, in the unit's one stage: every batch reuses it
+    # (deterministic prefix, files replaced in place), so re-runs never pile up copies.
+    prefix = _ai_batch_qbit_stage_prefix(fid)
     staged = _stage_selected_audio_files_impl(
         validated_downloads_root(), AUDIO_EXT, folder, list(wanted.values()), Path(folder).parent.name,
         Path(folder).name, log, stage_prefix=prefix, force_stage=True,
@@ -2729,9 +2764,12 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         mark(status=outcome["status"], current_step=outcome["current_step"], failure_reason=outcome["reason"])
 
     def review(suggestion: Dict[str, Any], evidence: Dict[str, Any], status: str = "review_created",
-               current_step: str = "review item created", **fields) -> None:
+               current_step: str = "review item created", at: str = "", **fields) -> None:
+        if batch_mode == "qbittorrent":
+            evidence = {**evidence, "source_mode": "qbittorrent"}
         try:
-            review_id = _ai_batch_queue_pending_review(folder, suggestion, evidence=evidence, batch_job_id=batch_id)
+            review_id = _ai_batch_queue_pending_review(at or folder, suggestion, evidence=evidence,
+                                                       batch_job_id=batch_id)
         except PendingReviewLoadError:
             # SEC-006: queue left untouched; keep this folder's own fields and leave it retryable.
             # ARCH-033 N2: stash the full suggestion+evidence so the final pass
@@ -2758,9 +2796,12 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     def upgrade_review(dup: Dict[str, Any], upgrade: Dict[str, Any], **fields) -> None:
         # Informational only: nothing is imported, moved or replaced (the
         # replace action is a later change); torrent files stay untouched.
+        # The row points at the source folder, never at a staged copy, so no
+        # copy is kept for it (a qBittorrent row lists the torrent's own files).
+        source = _s(folder_state.get("source_folder")) or folder
         first = next(iter(dup.get("library") or []), {})
-        artist = _s(first.get("albumartist")) or Path(folder).name
-        album = _s(first.get("album")) or Path(folder).name
+        artist = _s(first.get("albumartist")) or Path(source).name
+        album = _s(first.get("album")) or Path(source).name
         ids = ", ".join(str(a) for a in upgrade["library_album_ids"])
         why = (f"Quality upgrade available: {artist} - {album} (Release Group {upgrade['release_group_id']}) "
                f"is already in the library{f' as album_id {ids}' if ids else ''} in {upgrade['library_format']}; "
@@ -2769,8 +2810,10 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         review({"artist": artist, "albumartist": artist, "album": album, "mb_albumid": "",
                 "mb_releasegroupid": upgrade["release_group_id"], "confidence": "low", "reason": why},
                {"origin_step": "quality_upgrade", "duplicate_rule": "quality_upgrade", "identity_rule": dup["reason"],
-                "quality_upgrade": upgrade, "ai_rank": None, "batch_job_id": batch_id},
-               status="review_required", current_step="upgrade available",
+                "quality_upgrade": upgrade, "ai_rank": None, "batch_job_id": batch_id,
+                **({"torrent_files": list(folder_state.get("source_files") or [])}
+                   if batch_mode == "qbittorrent" else {})},
+               status="review_required", current_step="upgrade available", at=source,
                already_in_library_evidence={k: dup[k] for k in ("reason", "release_group_id", "album_ids")},
                **fields)
 
@@ -2827,7 +2870,8 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         return
     staged_before = _s(folder_state.get("staged_folder"))
     if not folder_state.get("review_item_id") and (
-            _pending_review_has_path(folder) or (staged_before and _pending_review_has_path(staged_before))):
+            _pending_review_has_path(folder) or (staged_before and _pending_review_has_path(staged_before))
+            or (batch_mode == "qbittorrent" and _ai_batch_qbit_stage_in_review(fid))):
         log.append("  Already in the Review Queue - skipped")
         mark(status="review_created", current_step="review item already exists", review_item_id=fid)
         return
@@ -3054,7 +3098,8 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
          artwork_retryable=bool(out.get("artwork_retryable", False)))
 
 
-def _ai_batch_run_folders(state: Dict[str, Any], log: list, cancel_event=None, update_state=None) -> str:
+def _ai_batch_run_folders(state: Dict[str, Any], log: list, cancel_event=None, update_state=None,
+                          stage_cleanup=None) -> str:
     """Process queued folders one at a time inside the batch job (F11: no
     per-folder threads). Pause and Stop take effect between folders; Skip and
     Stop also between a folder's stages."""
@@ -3091,6 +3136,10 @@ def _ai_batch_run_folders(state: Dict[str, Any], log: list, cancel_event=None, u
             log.append(f"folder failed with reason: {folders[fid].get('source_folder', fid)} — {ex}")
             _ai_batch_mark_folder(state, fid, status="import_failed", current_step="import failed",
                                   failure_reason=_s(ex) or "Import failed")
+        if _s(state.get("source_mode")) == "qbittorrent":
+            # Done with the unit: its stage stays only while a Review row points
+            # at it (the final pass re-stages a failed unit for its row).
+            _ai_batch_qbit_stage_cleanup(fid, stage_cleanup, log)
         _ai_batch_commit(state, update_state)
     if cancel_event and cancel_event.is_set():
         state["status"] = "canceled"
@@ -3123,7 +3172,8 @@ def _ai_batch_import_failure_outcome(error: Any) -> Dict[str, str]:
     }
 
 
-def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=None, update_state=None) -> Dict[str, int]:
+def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=None, update_state=None,
+                                stage_cleanup=None) -> Dict[str, int]:
     """Final pass over the batch: count outcomes and give each folder that was
     skipped by the user or failed one review row (a canceled or
     already-imported folder gets none)."""
@@ -3147,6 +3197,8 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
             # does not own: use the folder itself only when it holds nothing
             # else, otherwise our verified copy of just the torrent's files.
             # F2: a source that is no longer the discovered one gets no row.
+            if _ai_batch_qbit_stage_in_review(fid):
+                return
             try:
                 folder, _files, _records = _ai_batch_qbit_unit_folder(folder_state, fid, batch_id, log)
             except Exception as ex:
@@ -3173,6 +3225,8 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                 "reason": reason,
             }
             evidence = {key: reason, "status": status, "batch_job_id": batch_id}
+        if _s(state.get("source_mode") or "local") == "qbittorrent":
+            evidence = {**(evidence or {}), "source_mode": "qbittorrent"}
         try:
             folder_state["review_item_id"] = _ai_batch_queue_pending_review(
                 folder, suggestion, evidence=evidence, batch_job_id=batch_id)
@@ -3210,6 +3264,9 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
             replacements += 1
         elif status in _AI_BATCH_POLICY_WARNING_STATUSES:
             warnings += 1
+    if _s(state.get("source_mode")) == "qbittorrent":
+        for fid in folders:  # a stage no Review row ended up pointing at goes
+            _ai_batch_qbit_stage_cleanup(fid, stage_cleanup, log)
     _commit(True)
     return {"imported": imported, "already": already_cnt, "queued": queued, "errors": errors, "skipped": skipped, "warnings": warnings, "replacements": replacements, "missing": missing}
 
@@ -3235,7 +3292,7 @@ def _ai_batch_source_unverified(state: Dict[str, Any], ex: BaseException, log: l
 
 def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_event=None, update_state=None, *, recover: bool = False, retry_failed: bool = False, job_id: str = "",
                          source: str = "local", qbit_inventory=None,
-                         qbit_filter: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                         qbit_filter: Optional[Dict[str, str]] = None, stage_cleanup=None) -> Dict[str, Any]:
     """``source``: "local" walks ``scan_path``; "qbittorrent" takes album
     folders from ``qbit_inventory()`` (injected by the web layer) and never
     walks; ``qbit_filter`` is the category/tag that inventory was limited to,
@@ -3384,14 +3441,14 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         log.append("No unfinished folder work remains; batch is terminal.")
         return _ai_batch_public_state(state)
 
-    run_status = _ai_batch_run_folders(state, log, cancel_event, update_state)
+    run_status = _ai_batch_run_folders(state, log, cancel_event, update_state, stage_cleanup)
     if run_status in {"canceled", "paused"}:
         _invalidate_lib_cache()
         return _ai_batch_public_state(state)
 
     state["current_step"] = "finishing batch"
     _ai_batch_commit(state, update_state)
-    summary = _ai_batch_process_decisions(state, log, cancel_event, update_state)
+    summary = _ai_batch_process_decisions(state, log, cancel_event, update_state, stage_cleanup)
     _invalidate_lib_cache()
     if summary.get("imported"):
         _trigger_plex_refresh(log, workflow="batch")
