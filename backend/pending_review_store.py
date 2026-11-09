@@ -750,14 +750,14 @@ def _pending_review_evidence_is_upgrade(evidence: Dict[str, Any]) -> bool:
     return "quality_upgrade" in (evidence.get("origin_step"), evidence.get("duplicate_rule"))
 
 
-def _pending_review_row_overlaps(folder_path: str, wanted) -> bool:
+def _pending_review_row_overlaps(folder_path: str, wanted, items: Optional[list] = None) -> bool:
     """True when a Review row whose evidence satisfies ``wanted`` is at,
-    inside or above ``folder_path``. Read-only: a raw snapshot read, so the
-    check never prunes or rewrites the queue."""
+    inside or above ``folder_path``. Read-only: checks ``items`` when given,
+    else a raw snapshot read, so the check never prunes or rewrites the queue."""
     key = _pending_review_path_key(folder_path)
     if not key:
         return False
-    for row in _read_pending_snapshot():
+    for row in (items if items is not None else _read_pending_snapshot()):
         evidence = row.get("evidence") if isinstance(row, dict) else None
         if (isinstance(evidence, dict) and wanted(evidence)
                 and _pending_review_keys_overlap(_pending_review_path_key(_s(row.get("path"))), key)):
@@ -782,7 +782,9 @@ def _pending_review_is_quality_upgrade(folder_path: str) -> bool:
         return True
     if not isinstance(items, list):
         return True
-    return _pending_review_row_overlaps(folder_path, _pending_review_evidence_is_upgrade)
+    # Check the rows just read strictly: a second, lenient read would turn a
+    # read failure into "no upgrade row" (fail open).
+    return _pending_review_row_overlaps(folder_path, _pending_review_evidence_is_upgrade, items)
 
 
 def _pending_review_is_torrent_source(folder_path: str) -> bool:

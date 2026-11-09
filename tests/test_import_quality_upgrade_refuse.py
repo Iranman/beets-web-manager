@@ -173,6 +173,14 @@ class QualityUpgradeRowRefusedTests(unittest.TestCase):
         self.store.unlink()  # a missing queue is an empty queue, not an error
         self.assertFalse(prs._pending_review_is_quality_upgrade(str(self.normal)))
 
+    def test_overlap_uses_the_strict_read_not_a_second_lenient_one(self):
+        # The strict read sees the upgrade row; a failing later read must not
+        # turn the check into "no upgrade row" (fail open).
+        queue = mock.Mock()
+        queue.read_text.side_effect = [self.store.read_text(), OSError("gone")]
+        with mock.patch.object(prs, "_AI_PENDING_FILE", new=queue):
+            self.assertTrue(prs._pending_review_is_quality_upgrade(str(self.torrent / "CD 01")))
+
     def test_dismiss_still_removes_the_row(self):
         resp = self.client.delete("/api/ai-pending-review", headers=_CSRF, json={"path": str(self.torrent)})
         self.assertEqual(resp.status_code, 200, resp.get_json())
