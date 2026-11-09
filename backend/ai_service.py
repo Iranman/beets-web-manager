@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _env_int, _s
 from backend.library_service import _app_managed_download_path, _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _remove_pending_review_for_path
+from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, _pending_review_is_quality_upgrade
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI_BATCH_IMPORTED_FOLDER_STATUSES, _AI_BATCH_MAX_AI_WORKERS, _AI_BATCH_POLICY_WARNING_STATUSES, _AI_BATCH_QUEUED_FOLDER_STATUSES, _AI_BATCH_REPLACEMENT_FOLDER_STATUSES, _AI_BATCH_RETRYABLE_FOLDER_STATUSES, _AI_BATCH_REVIEW_FOLDER_STATUSES, _AI_BATCH_SKIPPED_FOLDER_STATUSES, _AI_BATCH_SOURCE_MISSING_FOLDER_STATUSES, _AI_BATCH_TERMINAL_STATUSES, _AI_BATCH_UNFINISHED_FOLDER_STATUSES, _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE, _ai_batch_active_workers, _ai_batch_commit, _ai_batch_effective_folder_status, _ai_batch_mark_folder, _ai_batch_public_state, _ai_batch_recalculate_batch_state, _ai_batch_state_lock, _ai_batch_terminal_summary, _ai_batch_worker_lock, _ai_batch_worker_registered, _ai_batch_write_state, _get_ai_batch_store, _is_music_format_policy_handled_error, _music_format_policy_review_note
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
@@ -3536,6 +3537,8 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     copied, never moved, and so is a folder holding a hardlinked file (checked
     right before planning, N10); ``copy_source`` forces a copy too.
     Runs directly -- safe for background threads."""
+    if _pending_review_is_quality_upgrade(folder_path):
+        raise RuntimeError(QUALITY_UPGRADE_INFORMATIONAL["error"])
     torrent_source = _preserve_torrent_source_path(folder_path)
     if torrent_source:
         log.append("  [torrent] Protected source detected; Beets copies it, "

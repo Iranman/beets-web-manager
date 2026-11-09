@@ -23,7 +23,7 @@ from backend.import_service import _cached_import_target_preview, _delete_staged
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
+from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError,_add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
 from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
@@ -879,6 +879,8 @@ def import_reconciliation_resolve(review_id: str):
 def import_review_auto_enqueue():
     payload = request.get_json(silent=True) or {}
     eligibility = evaluate_import_eligibility(payload)
+    if QUALITY_UPGRADE_INFORMATIONAL["error"] in (eligibility.get("blocking_reasons") or []):
+        return jsonify({**QUALITY_UPGRADE_INFORMATIONAL, "queued": False, "eligibility": eligibility}), 409
     if not eligibility.get("eligible"):
         reason = "; ".join(eligibility.get("blocking_reasons") or []) or "Import is not eligible to queue."
         return jsonify({"ok": False, "queued": False, "error": reason, "eligibility": eligibility}), 400

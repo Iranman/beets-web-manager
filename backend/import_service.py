@@ -39,6 +39,7 @@ from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
 from backend.serializers import _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_matches, _pending_review_path_key
+from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, _pending_review_is_quality_upgrade
 from backend.app_runtime import PLEX_SYNC_AUTO_REFRESH
 from backend.plex_service import _plex_configured, _trigger_plex_refresh
 
@@ -3065,6 +3066,8 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = []
     if not folder_path:
         blockers.append("source path missing")
+    elif _pending_review_is_quality_upgrade(folder_path):
+        blockers.append(QUALITY_UPGRADE_INFORMATIONAL["error"])
     elif not Path(folder_path).exists():
         blockers.append("source path not found")
     if review_item_id and not _pending_review_matches(folder_path, review_item_id):
@@ -3795,6 +3798,10 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if folder_error or trusted_folder is None:
         return {"ok": False, "error": folder_error or "Source path is not allowed."}, 400
     folder_path = str(trusted_folder)
+    # A quality-upgrade Review row is informational: replacing the library
+    # album is not available yet, so no import may start from its folder.
+    if _pending_review_is_quality_upgrade(folder_path):
+        return dict(QUALITY_UPGRADE_INFORMATIONAL), 409
     # ARCH-030 Step 4: an UNATTENDED recovery auto-insert is marked by
     # recovery_carrier_id (set by the advancer; a human Review confirm never
     # sends it). The ONLY authorization to auto-insert the staged files is the

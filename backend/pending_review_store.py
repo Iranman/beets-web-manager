@@ -737,6 +737,31 @@ def _pending_review_has_path(folder_path: str, *, unknown: bool = False) -> bool
         return unknown
 
 
+QUALITY_UPGRADE_INFORMATIONAL = {
+    "ok": False,
+    "error_code": "quality_upgrade_informational",
+    "code": "quality_upgrade_informational",
+    "error": ("This folder is a quality upgrade of an album already in the library. "
+              "Replacing a library album with an upgrade is not available yet; nothing was imported."),
+}
+
+
+def _pending_review_is_quality_upgrade(folder_path: str) -> bool:
+    """True when a Review row at ``folder_path`` is an informational quality
+    upgrade (ai_service ``upgrade_review``). Every import path refuses it.
+    Read-only: a raw snapshot read, so the check never prunes or rewrites the queue."""
+    key = _pending_review_path_key(folder_path)
+    if not key:
+        return False
+    for row in _read_pending_snapshot():
+        evidence = row.get("evidence") if isinstance(row, dict) else None
+        if (isinstance(evidence, dict)
+                and "quality_upgrade" in (evidence.get("origin_step"), evidence.get("duplicate_rule"))
+                and _pending_review_path_key(_s(row.get("path"))) == key):
+            return True
+    return False
+
+
 def _pending_review_has_path_or_overlap(folder_path: str, *, unknown: bool = False) -> bool:
     """Like ``_pending_review_has_path`` but also True when a Review row points
     at an ANCESTOR or DESCENDANT of ``folder_path``, not only an exact match.

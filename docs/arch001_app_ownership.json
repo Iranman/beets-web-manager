@@ -21273,6 +21273,32 @@
    ]
   },
   {
+   "name": "_pending_review_is_quality_upgrade",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    749,
+    762
+   ],
+   "size": 14,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_import_folder",
+    "evaluate_import_eligibility",
+    "start_folder_import_with_id"
+   ],
+   "caller_count": 3,
+   "dependencies": [
+    "_pending_review_path_key",
+    "_read_pending_snapshot",
+    "_s"
+   ]
+  },
+  {
    "name": "_pending_review_has_path_or_overlap",
    "module": "backend/pending_review_store.py",
    "lines": [
