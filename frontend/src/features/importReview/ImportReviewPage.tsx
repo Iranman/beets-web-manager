@@ -1333,9 +1333,17 @@ export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
   );
 }
 
-function isQualityUpgrade(evidence?: ReviewEvidence): boolean {
-  return Boolean(evidence?.quality_upgrade || evidence?.duplicate_rule === 'quality_upgrade');
+export function isQualityUpgrade(evidence?: ReviewEvidence): boolean {
+  return Boolean(
+    evidence?.quality_upgrade
+    || evidence?.duplicate_rule === 'quality_upgrade'
+    || evidence?.origin_step === 'quality_upgrade',
+  );
 }
+
+/** Why Import is off on a quality-upgrade row. The backend refuses it too
+ * (error_code quality_upgrade_informational); this only keeps the button honest. */
+export const QUALITY_UPGRADE_IMPORT_REASON = 'Replacing a library album with an upgrade is not available yet.';
 
 /** Same release as a library album but a better-quality download. Informational only:
  * nothing replaces the library copy from here. */
@@ -2793,6 +2801,8 @@ export function ReviewCard({
   const selectedMatchActive = Boolean(selectedMatch);
   const audioMismatchActive = hasAudioMismatchEvidence(item);
   const applyBlockedReason = applyBlockReason(item, mbid, selectedMatch, targetPreviewState);
+  const upgradeRow = isQualityUpgrade(item.evidence);
+  const upgradeReasonId = `quality-upgrade-reason-${item.id}`;
   const blockedActive = shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState);
   const visibleMatchBucket: MatchBucket = audioMismatchActive
     ? 'audio_mismatch'
@@ -2944,7 +2954,7 @@ export function ReviewCard({
               // ARCH-030 C8: the carrier identity is pinned & valid, so the
               // page-level "enter/select an MBID" block never gates a recovery
               // apply; the backend re-validates in runApply.
-              primaryActionDisabled={busy || (!recoveryIdentity && Boolean(applyBlockedReason))}
+              primaryActionDisabled={busy || upgradeRow || (!recoveryIdentity && Boolean(applyBlockedReason))}
             />
 
             {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
@@ -3173,12 +3183,14 @@ export function ReviewCard({
                   size="small"
                   variant="contained"
                   onClick={onApply}
-                  disabled={busy || Boolean(applyBlockedReason)}
+                  disabled={busy || upgradeRow || Boolean(applyBlockedReason)}
+                  aria-describedby={upgradeRow ? upgradeReasonId : undefined}
                 >
                   {actionLabel(item, selectedMatch, targetPreviewState?.preview)}
                 </Button>
               )}
             </div>
+            {upgradeRow ? <p id={upgradeReasonId} className="text-xs text-zinc-600">{QUALITY_UPGRADE_IMPORT_REASON}</p> : null}
 
             <Button size="small" variant="text" color="inherit" onClick={onDismiss} disabled={busy}>
               {item.type === 'pending_ai' || item.type === 'skipped' ? 'Remove from Review' : 'Hide'}
@@ -4424,6 +4436,7 @@ export function ImportReviewPage({
   }, [setAction]);
 
   const startApply = useCallback((item: ReviewItem) => {
+    if (isQualityUpgrade(item.evidence)) { setAction(item.id, { status: 'error', message: QUALITY_UPGRADE_IMPORT_REASON }); return; }
     // ARCH-030 C8: a carrier-backed recovery item imports into the pinned
     // destination album the card displays. Confirm + submit the carrier's
     // canonical Release Group, never the editable page-level mbid/selectedMatch
