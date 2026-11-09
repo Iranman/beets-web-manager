@@ -3032,8 +3032,9 @@ def _qbit_map_path(path_value: str) -> Optional[Path]:
     the process's current working directory in any downstream containment
     check or filesystem call.
     """
-    text = _s(path_value).strip().replace("\\", "/")
-    if not text or "\x00" in text:
+    # Never strip: a torrent named " Album " lives in a folder named exactly that.
+    text = _s(path_value).replace("\\", "/")
+    if not text.strip() or "\x00" in text:
         return None
     for src, dst in _qbit_path_alias_pairs():
         if text == src or text.startswith(src + "/"):
@@ -3054,14 +3055,12 @@ def _qbit_allowed_repair_path(path: Path) -> bool:
 
 def _qbit_candidate_target_paths(torrent: Dict[str, Any],
                                  file_row: Dict[str, Any]) -> List[Path]:
-    rel_name = _s(file_row.get("name")).strip().replace("\\", "/").lstrip("/")
-    if not rel_name:
+    rel_name = _s(file_row.get("name")).replace("\\", "/").lstrip("/")
+    if not rel_name.strip():
         return []
     rel = Path(rel_name)
-    content_raw = _s(torrent.get("content_path")).strip()
-    save_raw = _s(torrent.get("save_path")).strip()
-    content = _qbit_map_path(content_raw) if content_raw else None
-    save = _qbit_map_path(save_raw) if save_raw else None
+    content = _qbit_map_path(torrent.get("content_path"))
+    save = _qbit_map_path(torrent.get("save_path"))
     candidates: List[Path] = []
 
     if content:

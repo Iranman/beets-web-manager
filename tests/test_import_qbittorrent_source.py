@@ -1024,5 +1024,15 @@ class SourceOpenHardeningTests(_Roots):
         self.assertEqual(out["error"].code, "source_unsafe")
 
 
+class QbitPathNameTests(_Roots):
+    def test_padded_torrent_and_file_names_map_to_their_exact_path(self):  # NEW-6
+        torrent = {"content_path": str(self.dl / " Padded Album "), "save_path": str(self.dl)}
+        paths = acq._qbit_candidate_target_paths(torrent, {"name": " Padded Album / 01 .flac"})
+        self.assertIn(self.dl / " Padded Album " / " 01 .flac", paths)
+        self.assertTrue(all(" Padded Album " in p.parts for p in paths), paths)
+        self.assertEqual(acq._qbit_candidate_target_paths(torrent, {"name": "  "}), [])
+        self.assertIsNone(acq._qbit_map_path("  "))
+
+
 if __name__ == "__main__":
     unittest.main()
