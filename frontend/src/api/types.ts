@@ -313,6 +313,8 @@ export interface ReviewEvidence {
   unreadable_paths?: string[];
   /** beets_partial: paths Beets skipped while importing the rest. */
   skipped_paths?: string[];
+  /** Where the folder came from; "qbittorrent" rows are seeding torrents (no Delete Folder). */
+  source_mode?: string;
   /** origin_step quality_upgrade: same release group as a library album, higher-quality source. */
   duplicate_rule?: string;
   quality_upgrade?: {

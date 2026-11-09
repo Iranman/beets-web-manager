@@ -1282,8 +1282,15 @@ function needsOnlyReleaseGroup(item: ReviewItem): boolean {
   return item.missing_reason === 'missing_release_group';
 }
 
+/** Why Delete Folder is withheld on a qBittorrent row. The backend refuses it too. */
+export const TORRENT_DELETE_REASON = 'This folder belongs to a qBittorrent torrent; deleting it would break seeding.';
+
+function isTorrentSource(item: ReviewItem): boolean {
+  return item.evidence?.source_mode === 'qbittorrent' || isQualityUpgrade(item.evidence);
+}
+
 function canDeleteFolder(item: ReviewItem): boolean {
-  if (needsOnlyReleaseGroup(item)) return false;
+  if (needsOnlyReleaseGroup(item) || isTorrentSource(item)) return false;
   return Boolean(item.path) && (item.type === 'pending_ai' || item.type === 'library_no_mb');
 }
 
@@ -3222,6 +3229,8 @@ export function ReviewCard({
               </div>
             ) : needsOnlyReleaseGroup(item) ? (
               <span className="self-center text-xs text-zinc-600">Use Fix proven matches to add the release group.</span>
+            ) : isTorrentSource(item) ? (
+              <span className="self-center text-xs text-zinc-600">{TORRENT_DELETE_REASON}</span>
             ) : null}
 
             {isLibraryNoMb ? (
