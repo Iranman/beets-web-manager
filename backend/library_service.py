@@ -7,6 +7,7 @@ from backend.json_state import atomic_write_json
 import backend.provider_boundary as provider_boundary
 import json, os, re, sqlite3, stat, threading, time
 from collections import Counter, defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ALLOWED_ROOTS, DOWNLOADS_ROOT, EDITABLE_FIELDS, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, TORRENT_SOURCE_MOVE_ALLOWED, TORRENT_SOURCE_ROOTS, WEB_MANAGER_DATA_DIR, _ANSI_RE, _LITERAL_PLACEHOLDER_RE, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _s, _up, _ur
@@ -26,7 +27,7 @@ import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags, same_recording_proof
 from backend.artwork_service import _album_dir_for_art, _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
-from backend.slskd import APP_DOWNLOAD_MARKER, APP_DOWNLOAD_NAME_RE
+from backend.slskd import APP_DOWNLOAD_LEGACY_NAME_UNTIL, APP_DOWNLOAD_MARKER, APP_DOWNLOAD_NAME_RE, app_download_key_path, app_download_marker_valid
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _load_album_mb_suggestions, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
 from job_engine import DuplicateJobError
@@ -638,16 +639,25 @@ def _app_managed_download_path(path: Path) -> bool:
     root = next((r for r in DOWNLOADS_ALLOWED_ROOTS if _path_is_under(path_res, r)), None)
     if root is None:
         return False
-    # Ownership proof under a validated downloads root: APP_DOWNLOAD_MARKER (a
-    # regular file) in the folder or a folder above it, written when the app
-    # created it; or, for folders made before the marker, the exact generated
-    # name (#325 S-3: a bare name elsewhere is spoofable). Nothing counts through
-    # a symlinked folder. One or two lstats per level below the root.
+    # Ownership proof under a validated downloads root: a valid APP_DOWNLOAD_MARKER
+    # (keyed HMAC of that folder's path, slskd.app_download_marker_valid) in the
+    # folder or a folder above it, written when the app created it. A marker at
+    # or above a downloads/torrent root never counts (#325 F1), nor one checked
+    # with a key that downloads could have planted. Until
+    # APP_DOWNLOAD_LEGACY_NAME_UNTIL, a folder made before the marker is proven
+    # by its exact generated name, except under a torrent root other than this
+    # downloads root. Nothing counts through a symlinked folder.
+    root_res = root.resolve(strict=False)
     try:
-        depth = len(path_res.relative_to(root.resolve(strict=False)).parts)
+        depth = len(path_res.relative_to(root_res).parts)
     except ValueError:
         return False
+    torrent_roots = [r.resolve(strict=False) for r in TORRENT_SOURCE_ROOTS]
+    guard_roots = torrent_roots + [r.resolve(strict=False) for r in DOWNLOADS_ALLOWED_ROOTS]
+    legacy_ok = date.today() < APP_DOWNLOAD_LEGACY_NAME_UNTIL and not any(
+        t != root_res and _path_is_under(path_res, t) for t in torrent_roots)
     folder = Path(os.path.abspath(path))
+    folder_res = path_res  # lexical twin of folder: no resolve per level (8000-torrent scans)
     proven = False
     for level in range(depth):
         try:
@@ -655,14 +665,13 @@ def _app_managed_download_path(path: Path) -> bool:
                 return False
         except OSError:
             pass  # not there (yet): its name may still prove it
-        if not proven:
-            proven = level == 0 and bool(APP_DOWNLOAD_NAME_RE.search(folder.name.casefold()))
-        if not proven:
-            try:
-                proven = stat.S_ISREG(os.lstat(folder / APP_DOWNLOAD_MARKER).st_mode)
-            except OSError:
-                pass
-        folder = folder.parent
+        if not proven and level == 0 and legacy_ok:
+            proven = bool(APP_DOWNLOAD_NAME_RE.search(folder.name.casefold()))
+        if not proven and not any(g == folder_res or folder_res in g.parents for g in guard_roots):
+            proven = app_download_marker_valid(folder) and not any(
+                _path_is_under(app_download_key_path(), r)
+                for r in guard_roots + list(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS))
+        folder, folder_res = folder.parent, folder_res.parent
     return proven
 
 
@@ -757,7 +766,7 @@ def _source_proven_in_library(folder_path: str, album_id: int, target_releasegro
     audio = [p for p in files if p.suffix.lower() in AUDIO_EXT]
     unrecognised = [p for p in files
                     if p.suffix.lower() not in AUDIO_EXT and p.suffix.lower() not in _PROVEN_SOURCE_SIDECAR_EXTS
-                    and p.name != APP_DOWNLOAD_MARKER]
+                    and not (p.name == APP_DOWNLOAD_MARKER and app_download_marker_valid(p.parent))]
     if unrecognised:
         ev["reason"] = "unrecognised_file"
         ev["files"] = [{"path": str(p), "proof": ""} for p in unrecognised[:20]]

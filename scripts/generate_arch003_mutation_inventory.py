@@ -262,6 +262,11 @@ _REVIEWED_RULE_DETAILS = {
         "review_reason": "ARCH-030 Step 4 (library-transaction) owner classification: recovery_service.reconcile_orphan_staging_folders cleans up ORPHANED staging folders under the validated <downloads>/_beets_missing_import staging root. The target is pre-verified fail-closed (realpath + commonpath containment inside that root, symlinked children skipped) and then handed to composite_workflows.delete_file (LT-13), which independently re-enforces SEC-007/#325 containment: inside a staging root, never a staging root itself, never MUSIC_ROOT or protected data, no symlink component, fd-relative, lstat-rechecked. A folder still bound to (or whose deterministic rec-<16hex> prefix matches) a live carrier is ADOPTED, never deleted; the live music library is never touched. Staging-containment surface flagged for the Step 6 independent security review.",
         "reviewed_in_pr": ARCH030_RECOVERY_REDESIGN_PR,
     },
+    "reviewed-app-download-ownership-marker": {
+        "domain": "import_reconciliation",
+        "review_reason": "#325 F1/F5/F6/F7: slskd.make_app_download_dir creates a new download folder under the downloads root and mark_app_download_dir writes the .bwm_app_download ownership marker into it only when that call created the folder (no-follow fd-relative temp + rename; never written without the no-follow primitives). The per-install HMAC key is created once 0600 with O_CREAT|O_EXCL|O_NOFOLLOW under WEB_MANAGER_DATA_DIR. import_service._folder_import_clean_source deletes only a valid marker, lstat-checked as a regular file right before composite_workflows.delete_file (LT-13 staging containment). Never touches MUSIC_ROOT or library media.",
+        "reviewed_in_pr": None,
+    },
     "reviewed-issue548-kept-staging-marker": {
         "domain": "import_reconciliation",
         "review_reason": "#548 (security F1): recovery_service.mark_staging_folder_kept writes the .bwm_kept_for_retry marker in a staging folder directly under the validated <downloads>/_beets_missing_import root. It descends fd-relative with O_DIRECTORY|O_NOFOLLOW, creates a fresh O_CREAT|O_EXCL|O_NOFOLLOW temp there and renames it over the marker with dir_fd, so a planted symlink or hardlink is replaced, never written through; on error it unlinks only its own temp. Never touches MUSIC_ROOT or library media.",
@@ -512,6 +517,10 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
         if file == "backend/audio_preferences.py":
             return "CONFIG_STATE", "", "audio-preferences-config"
         if file == "backend/slskd.py":
+            if func in ("make_app_download_dir", "mark_app_download_dir"):
+                return "STAGING_ONLY", "", "reviewed-app-download-ownership-marker"
+            if func == "_app_download_key":
+                return "APP_STATE", "", "reviewed-app-download-ownership-marker"
             return "STAGING_ONLY", "", "slskd-staging-download"
         if file == "backend/beets_config.py":
             return "CONFIG_STATE", "", "beets-config-state"
@@ -646,6 +655,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
                 "_validate_wanted_download_identity_before_import",
             ):
                 return "STAGING_ONLY", "", "reviewed-wave26-staging-cleanup-move-delete"
+            if func == "_folder_import_clean_source" and "marker" in text:
+                return "STAGING_ONLY", "", "reviewed-app-download-ownership-marker"
             if func in ("reimport_disk._do", "start_reimport_disk._do") and any(k in text for k in ("beets_client.move_file", "composite_workflows.move_file")):
                 return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-pretracking-filename-repair"
         if "BEET_BIN" in text or re.search(r"\bbase(_import)?\s*\+", text) or "beet" in text:

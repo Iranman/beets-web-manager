@@ -111,12 +111,20 @@ class _Roots(unittest.TestCase):
             p = patch_app_family(APP, name, value)
             p.start()
             self.addCleanup(p.stop)
+        # The app-download marker key lives in WEB_MANAGER_DATA_DIR, outside the downloads root.
+        env = mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": str(self.tmp / "data")})
+        env.start()
+        self.addCleanup(env.stop)
         self.qbit = FakeQbit()
         for p in (mock.patch.object(acq, "_qbit_login_cookie", return_value="SID=test"),
                   mock.patch.object(acq, "_qbit_request_json", side_effect=self.qbit.request),
                   mock.patch.object(acq, "QBIT_PATH_ALIASES", "")):
             p.start()
             self.addCleanup(p.stop)
+
+    def require_marker(self):
+        if not slskd._staging_fd_supported():
+            self.skipTest("app-download markers need the no-follow fd primitives (POSIX)")
 
     def audio(self, rel, data=b"audio-bytes"):
         f = self.dl / rel
@@ -138,6 +146,7 @@ class _Roots(unittest.TestCase):
 
 class DiscoveryTests(_Roots):
     def test_app_managed_folder_is_excluded(self):
+        self.require_marker()
         self.torrent("User Album", ["01.flac"])
         slskd.make_app_download_dir(self.dl / "App Album (2021)")
         self.torrent("App Album (2021)", ["01.flac"])  # a torrent pointing into an app folder
@@ -425,6 +434,7 @@ class BatchTests(_Batch):
         self.assertTrue(extra.is_file() and app_file.is_file())
 
     def test_excluded_folders_get_no_folder_state_and_no_review_row(self):
+        self.require_marker()
         self.torrent("Good", ["01.flac"])
         slskd.make_app_download_dir(self.dl / "App")
         self.torrent("App", ["01.flac"])
@@ -801,6 +811,7 @@ class SourceRecheckTests(_Batch):
         self.reimport.assert_not_called()
 
     def test_folder_that_became_app_managed_is_refused(self):
+        self.require_marker()
         self.torrent("Album", ["01.flac"])
         with self.after_discovery(lambda: slskd.mark_app_download_dir(self.dl / "Album")):
             out, folders = self.run_batch()

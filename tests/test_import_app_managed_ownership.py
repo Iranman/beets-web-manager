@@ -66,6 +66,14 @@ class _Roots(unittest.TestCase):
             p = patch_app_family(APP, name, value)
             p.start()
             self.addCleanup(p.stop)
+        self.data = self.tmp / "data"  # WEB_MANAGER_DATA_DIR: holds the marker key
+        env = mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": str(self.data)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def require_fd(self):
+        if not slskd._staging_fd_supported():
+            self.skipTest("markers need the no-follow fd primitives (POSIX)")
 
     def audio(self, folder, name="01.flac"):
         folder.mkdir(parents=True, exist_ok=True)
@@ -73,6 +81,7 @@ class _Roots(unittest.TestCase):
         return folder
 
     def app_folder(self, rel):
+        self.require_fd()
         folder = self.dl / rel
         slskd.make_app_download_dir(folder)
         return self.audio(folder)
@@ -124,7 +133,8 @@ class OwnershipProofTests(_Roots):
             self.assertFalse(self.managed(self.audio(self.dl / "Artist" / name)), name)
 
     def test_name_or_marker_outside_downloads_root_is_no_proof(self):
-        name = "A - soundcloud missing 1793260626691__slot_deferred"
+        self.require_fd()
+        name ="A - soundcloud missing 1793260626691__slot_deferred"
         self.assertFalse(self.managed(self.audio(self.outside / name)))
         marked = self.outside / "marked"
         slskd.make_app_download_dir(marked)
@@ -182,6 +192,10 @@ class TorrentPreservationTests(_Roots):
 
 class CreationSiteTests(_Roots):
     """Each flow that creates a download folder writes the marker."""
+
+    def setUp(self):
+        super().setUp()
+        self.require_fd()
 
     def _stop_after_mkdir(self, module):
         made = []
@@ -270,9 +284,7 @@ class CreationSiteTests(_Roots):
 
 
 class CleanupIgnoresMarkerTests(_Roots):
-    def test_source_cleanup_removes_marker_then_empty_folder(self):
-        folder = self.dl / "Artist" / "Album (2021)"
-        slskd.make_app_download_dir(folder)
+    def _clean(self, folder):
         log = []
         with mock.patch.object(imp, "_move_artwork_to_target"), \
                 mock.patch.object(imp.composite_workflows, "delete_file",
@@ -282,9 +294,169 @@ class CleanupIgnoresMarkerTests(_Roots):
                 mock.patch.object(imp.composite_workflows, "apply_folder_cleanup",
                                   return_value={"ok": True}):
             imp._folder_import_clean_source(log, str(folder), [1], False, [])
+        return log, delete, plan
+
+    def test_source_cleanup_removes_marker_then_empty_folder(self):
+        self.require_fd()
+        folder = self.dl / "Artist" / "Album (2021)"
+        slskd.make_app_download_dir(folder)
+        log, delete, plan = self._clean(folder)
         delete.assert_called_once_with(str(folder / slskd.APP_DOWNLOAD_MARKER))
         plan.assert_called_once()
         self.assertIn("Source folder removed", "\n".join(log))
+
+    def test_forged_marker_is_content_and_keeps_the_folder(self):
+        folder = self.dl / "Torrents" / "Album"
+        folder.mkdir(parents=True)
+        (folder / slskd.APP_DOWNLOAD_MARKER).write_text("beets-web-manager\n")
+        log, delete, plan = self._clean(folder)
+        delete.assert_not_called()
+        plan.assert_not_called()
+        self.assertTrue((folder / slskd.APP_DOWNLOAD_MARKER).is_file())
+
+    def test_marker_that_is_no_longer_a_regular_file_is_never_deleted(self):
+        """F6: lstat right before the delete; a directory is never removed."""
+        folder = self.dl / "Artist" / "Album (2021)"
+        (folder / slskd.APP_DOWNLOAD_MARKER / "inner").mkdir(parents=True)
+        with mock.patch.object(imp, "app_download_marker_valid", return_value=True), \
+                mock.patch.object(Path, "rglob", lambda self, pat: iter([folder / slskd.APP_DOWNLOAD_MARKER])), \
+                mock.patch.object(Path, "is_file", lambda self: True):
+            log, delete, plan = self._clean(folder)
+        delete.assert_not_called()
+        self.assertTrue((folder / slskd.APP_DOWNLOAD_MARKER / "inner").is_dir())
+
+
+class MarkerForgeryTests(_Roots):
+    """#325 F1: a marker shipped by downloaded content proves nothing."""
+
+    FORGED = ("beets-web-manager\n", "0" * 64 + "\n", "")
+
+    def plant(self, folder, text):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / slskd.APP_DOWNLOAD_MARKER).write_text(text)
+
+    def assert_preserved(self, folder):
+        self.assertFalse(self.managed(folder))
+        self.assertTrue(lib._preserve_torrent_source_path(folder))
+        self.assertTrue(lib._preserve_torrent_source_file(folder / "01.flac"))
+
+    def test_forged_marker_in_torrent_folder(self):
+        for text in self.FORGED:
+            folder = self.audio(self.dl / "Torrents" / f"Album {len(text)}")
+            self.plant(folder, text)
+            self.assert_preserved(folder)
+
+    def test_forged_marker_in_category_folder(self):
+        for text in self.FORGED:
+            cat = self.dl / f"music-{len(text)}"
+            self.plant(cat, text)
+            self.assert_preserved(self.audio(cat / "Artist - Album"))
+
+    def test_forged_marker_at_torrent_source_root(self):
+        qbit = self.dl / "qbittorrent"
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", [qbit]):
+            for text in self.FORGED:
+                self.plant(qbit, text)
+                self.assert_preserved(self.audio(qbit / "Artist - Album"))
+                self.assert_preserved(self.audio(qbit / "music" / "Artist - Album"))
+
+    def test_valid_marker_at_or_above_a_torrent_root_is_no_proof(self):
+        self.require_fd()
+        qbit = self.dl / "qbittorrent"
+        qbit.mkdir()
+        self.plant(qbit, slskd.app_download_marker_text(qbit, create_key=True))
+        self.assertTrue(slskd.app_download_marker_valid(qbit))
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", [qbit / "complete"]):
+            torrent = self.audio(qbit / "complete" / "Artist - Album")
+            self.assert_preserved(torrent)
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", [qbit]):
+            self.assert_preserved(torrent)
+
+    def test_copied_marker_from_a_real_app_folder_is_no_proof(self):
+        app = self.app_folder("Artist/Album (2021)")
+        self.assertTrue(self.managed(app))
+        torrent = self.audio(self.dl / "Torrents" / "Album")
+        shutil.copy2(app / slskd.APP_DOWNLOAD_MARKER, torrent / slskd.APP_DOWNLOAD_MARKER)
+        self.assert_preserved(torrent)
+
+    def test_marker_without_the_install_key_is_no_proof(self):
+        self.require_fd()
+        app = self.app_folder("Artist/Album (2021)")
+        slskd.app_download_key_path().unlink()
+        self.assertFalse(self.managed(app))
+        # A fresh key does not revive markers written under the old one.
+        slskd.app_download_marker_text(self.outside, create_key=True)
+        self.assertFalse(self.managed(app))
+
+    def test_symlinked_key_file_is_never_used(self):
+        self.require_fd()
+        planted = self.dl / "planted-key"
+        planted.write_text("a" * 64 + "\n")
+        self.data.mkdir()
+        _symlink(planted, slskd.app_download_key_path(), False)
+        folder = self.audio(self.dl / "Torrents" / "Album")
+        import hashlib, hmac
+        forged = hmac.new(b"a" * 64, b"bwm-app-download\x00" + os.fsencode(os.path.realpath(folder)),
+                          hashlib.sha256).hexdigest()
+        self.plant(folder, forged)
+        self.assert_preserved(folder)
+        made = self.dl / "Artist" / "New"
+        slskd.make_app_download_dir(made)
+        self.assertFalse((made / slskd.APP_DOWNLOAD_MARKER).exists())
+
+    def test_oversized_marker_is_no_proof(self):
+        app = self.app_folder("Artist/Album (2021)")
+        marker = app / slskd.APP_DOWNLOAD_MARKER
+        marker.write_text(marker.read_text().strip() + " " * 200 + "\n")
+        self.assertFalse(self.managed(app))
+
+    def test_key_inside_a_downloads_root_is_never_trusted(self):
+        app = self.app_folder("Artist/Album (2021)")
+        with mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": str(self.dl / "data")}):
+            folder = self.dl / "Artist" / "Other"
+            slskd.make_app_download_dir(folder)  # writes a key under downloads
+            self.assertTrue(slskd.app_download_marker_valid(folder))
+            self.assertFalse(self.managed(folder))
+        self.assertTrue(self.managed(app))
+
+    def test_key_file_is_private_and_stable(self):
+        self.require_fd()
+        first = slskd.app_download_marker_text(self.outside, create_key=True)
+        self.assertEqual(slskd.app_download_marker_text(self.outside), first)
+        self.assertEqual(os.stat(slskd.app_download_key_path()).st_mode & 0o777, 0o600)
+
+    def test_real_app_folder_and_disc_subfolder_stay_managed(self):
+        app = self.app_folder("Artist/Album (2021)")
+        disc = self.audio(app / "CD1")
+        for folder in (app, disc):
+            self.assertTrue(self.managed(folder))
+            self.assertFalse(lib._preserve_torrent_source_path(folder))
+
+    def test_marker_write_fails_closed_without_nofollow_primitives(self):
+        """F5: no plain-write fallback; the folder stays unmarked (the user's)."""
+        folder = self.dl / "Artist" / "Album (2021)"
+        with mock.patch.object(slskd, "_staging_fd_supported", return_value=False):
+            slskd.make_app_download_dir(folder)
+        self.assertTrue(folder.is_dir())
+        self.assertFalse((folder / slskd.APP_DOWNLOAD_MARKER).exists())
+        self.assertFalse(self.managed(folder))
+
+
+class LegacyNameTests(_Roots):
+    NAME = "A - soundcloud missing 1793260626691__slot_deferred"
+
+    def test_legacy_name_proof_ends(self):
+        folder = self.audio(self.dl / "Artist" / self.NAME)
+        self.assertTrue(self.managed(folder))
+        with mock.patch.object(lib, "APP_DOWNLOAD_LEGACY_NAME_UNTIL", lib.date.today()):
+            self.assertFalse(self.managed(folder))
+
+    def test_legacy_name_under_a_separate_torrent_root_is_no_proof(self):
+        qbit = self.dl / "qbittorrent"
+        folder = self.audio(qbit / self.NAME)
+        with mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", [qbit]):
+            self.assertFalse(self.managed(folder))
+            self.assertTrue(lib._preserve_torrent_source_path(folder))
 
 
 if __name__ == "__main__":
