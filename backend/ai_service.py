@@ -2099,13 +2099,15 @@ def _qbit_source_dir_reason(d: str, roots: List[str]) -> tuple:
     root = next((r for r in roots if d == r or d.startswith(r.rstrip(os.sep) + os.sep)), "")
     if not root:
         return "", "outside_allowed_root"
-    if _path_is_under(Path(d), MUSIC_ROOT):
-        return root, "protected_location"
+    # Links first: _path_is_under resolves, so a link into the library would
+    # otherwise be reported as protected_location instead of symlink.
     p = Path(d)
     while str(p) != root and len(str(p)) > len(root):
         if p.is_symlink() or os.path.isjunction(p):
             return root, "symlink"
         p = p.parent
+    if _path_is_under(Path(d), MUSIC_ROOT):
+        return root, "protected_location"
     real, real_root = os.path.realpath(d), os.path.realpath(root)
     if real != real_root and not real.startswith(real_root.rstrip(os.sep) + os.sep):
         return root, "symlink"
