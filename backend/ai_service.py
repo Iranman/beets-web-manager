@@ -2323,7 +2323,7 @@ def _qbit_source_file_record(path: str, expected: Any, *, with_hash: bool) -> Di
     FileNotFoundError; anything else wrong raises _QbitSourceChanged."""
     name = os.path.basename(path)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    flags = os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0)
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
         before = None if nofollow else os.lstat(path)
         if before is not None and not stat.S_ISREG(before.st_mode):
@@ -2454,7 +2454,8 @@ def _ai_batch_qbit_unit_folder(folder_state: Dict[str, Any], fid: str, batch_id:
     prefix = hashlib.sha256(f"{batch_id}\0{fid}".encode("utf-8")).hexdigest()[:16]
     staged = _stage_selected_audio_files_impl(
         validated_downloads_root(), AUDIO_EXT, folder, list(wanted.values()), Path(folder).parent.name,
-        Path(folder).name, log, stage_prefix=prefix, force_stage=True)
+        Path(folder).name, log, stage_prefix=prefix, force_stage=True,
+        source_ids={str(p): ids[rel] for rel, p in wanted.items()})
     if os.path.normcase(os.path.abspath(staged)) == os.path.normcase(os.path.abspath(folder)) or \
             _ai_batch_tree_entries(staged) - {RECOVERY_ORIGINAL_NAMES_SIDECAR} != set(wanted):
         raise RuntimeError("the staged copy does not hold exactly the torrent's files "

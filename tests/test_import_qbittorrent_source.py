@@ -936,5 +936,93 @@ class RouteTests(_Roots):
         self.assertEqual(started.call_args.kwargs["source"], "qbittorrent")
 
 
+class SourceOpenHardeningTests(_Roots):
+    """Security re-review NEW-1 / NEW-4: the staging copy opens its source
+    once, without following a link, and copies the file discovery verified;
+    the identity check never blocks on a FIFO."""
+
+    def require_fd_copy(self):
+        if not slskd._staging_fd_supported():
+            self.skipTest("the fd-relative staging copy needs O_NOFOLLOW and dir_fd (POSIX)")
+
+    def stage(self, files, **kw):
+        return slskd.stage_selected_audio_files(self.dl, {".flac"}, str(self.dl / "Album"), files,
+                                                "Artist", "Album", [], stage_prefix="t", force_stage=True, **kw)
+
+    def staged_files(self):
+        root = self.dl / "_beets_missing_import"
+        return sorted(p.name for p in root.rglob("*") if p.is_file()
+                      and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR) if root.exists() else []
+
+    def test_symlinked_source_file_is_never_followed(self):  # NEW-1
+        self.require_fd_copy()
+        secret = self.outside / "secret.flac"
+        secret.write_bytes(b"not-the-torrent")
+        (self.dl / "Album").mkdir()
+        link = self.dl / "Album" / "01.flac"
+        _symlink(secret, link, False)
+        with self.assertRaisesRegex(RuntimeError, "symlinked source"):
+            self.stage([link])
+        self.assertEqual(self.staged_files(), [])
+
+    def test_source_replaced_after_verification_is_refused(self):  # NEW-1
+        self.require_fd_copy()
+        f = self.audio("Album/01.flac", b"verified")
+        st = os.stat(f)
+        verified = [st.st_dev, st.st_ino, st.st_size]
+        swap = self.dl / "swap.tmp"
+        swap.write_bytes(b"swapped!")
+        os.replace(swap, f)  # same name and size, another file
+        with self.assertRaisesRegex(RuntimeError, "not the one discovery verified"):
+            self.stage([f], source_ids={str(f): verified})
+        self.assertEqual(self.staged_files(), [])
+        st = os.stat(f)
+        self.stage([f], source_ids={str(f): [st.st_dev, st.st_ino, st.st_size]})
+        self.assertEqual(self.staged_files(), ["01.flac"])
+
+    def test_qbit_unit_staging_copies_only_the_discovered_file(self):  # NEW-1, wired from the batch
+        self.require_fd_copy()
+        f = self.audio("Album/01.flac", b"verified")
+        self.audio("Album/extra.nfo", b"forces a staged copy")
+        st = os.stat(f)
+        state = {"source_folder": str(self.dl / "Album"), "source_files": ["01.flac"],
+                 "source_file_ids": {"01.flac": [st.st_dev, st.st_ino, st.st_size]}}
+        real_record = ai._qbit_source_file_record
+
+        def record_then_swap(path, expected, **kw):
+            rec = real_record(path, expected, **kw)
+            swap = self.dl / "swap.tmp"
+            swap.write_bytes(b"swapped!")
+            os.replace(swap, path)  # swapped between the check and the copy
+            return rec
+
+        with mock.patch.object(ai, "_qbit_source_file_record", side_effect=record_then_swap),                 self.assertRaisesRegex(RuntimeError, "not the one discovery verified"):
+            ai._ai_batch_qbit_unit_folder(state, "fid", "bid", [])
+        self.assertEqual(self.staged_files(), [])
+
+    def test_identity_check_does_not_block_on_a_fifo(self):  # NEW-4
+        if not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"):
+            self.skipTest("FIFOs need POSIX")
+        fifo = self.dl / "01.flac"
+        os.mkfifo(fifo)
+        out = {}
+
+        def check():
+            try:
+                ai._qbit_source_file_record(str(fifo), [0, 0, 0], with_hash=False)
+            except Exception as ex:  # noqa: BLE001
+                out["error"] = ex
+
+        t = threading.Thread(target=check, daemon=True)
+        t.start()
+        t.join(5)
+        if t.is_alive():  # unblock the hung open so the worker thread can exit
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            t.join(5)
+            self.fail("opening a FIFO blocked the identity check")
+        self.assertIsInstance(out.get("error"), ai._QbitSourceChanged)
+        self.assertEqual(out["error"].code, "source_unsafe")
+
+
 if __name__ == "__main__":
     unittest.main()

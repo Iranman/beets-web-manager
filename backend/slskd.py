@@ -569,7 +569,7 @@ def _staging_fd_supported() -> bool:
 
 def _staged_copy_nofollow(downloads_root: Path, stage: Path,
                           rel_parts: Sequence[str], src: Path,
-                          overwrite: bool) -> None:
+                          overwrite: bool, expected_id: Optional[Sequence[int]] = None) -> None:
     """Copy ``src`` into ``stage``/``rel_parts`` fd-relative from the trusted
     ``downloads_root`` (SEC-007 / #325), mirroring the barrier discipline in
     ``composite_workflows`` (``_staging_dir_fd`` / ``_copy_file_across_fs``).
@@ -586,7 +586,11 @@ def _staged_copy_nofollow(downloads_root: Path, stage: Path,
     onto the final name: the rename replaces a dest planted on a deterministic
     REUSE -- symlink or file -- WITHOUT following it, so downloaded bytes can
     never land on the symlink's target (config, Beets DB, media). ``stage`` must
-    be ``downloads_root`` joined with one or more fixed staging components."""
+    be ``downloads_root`` joined with one or more fixed staging components.
+
+    The SOURCE is opened once with O_NOFOLLOW|O_NONBLOCK and must be a regular
+    file (and, when ``expected_id`` gives ``[dev, ino, ...]``, that very file);
+    its bytes and metadata come from that descriptor, never a re-stat by path."""
     parts = [p for p in rel_parts]
     if not parts or any(p in ("", ".", "..") for p in parts):
         raise RuntimeError("refusing to stage a file with an unsafe relative path")
@@ -632,15 +636,27 @@ def _staged_copy_nofollow(downloads_root: Path, stage: Path,
                     break
                 leaf = f"{base}.{n}{ext}"
                 n += 1
+        try:
+            sfd = os.open(str(src), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                          | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                raise RuntimeError("refusing to stage a symlinked source file") from exc
+            raise
+        fds.append(sfd)
+        sst = os.fstat(sfd)
+        if not stat.S_ISREG(sst.st_mode):
+            raise RuntimeError("refusing to stage a source that is not a regular file")
+        if expected_id is not None and [int(v) for v in list(expected_id)[:2]] != [sst.st_dev, sst.st_ino]:
+            raise RuntimeError("refusing to stage a source file that is not the one discovery verified")
         tmp = f".{uuid.uuid4().hex[:12]}.part"
         dfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                       0o600, dir_fd=parent_fd)
         try:
             try:
-                with open(src, "rb") as fin, open(dfd, "wb", closefd=False) as fout:
+                with open(sfd, "rb", closefd=False) as fin, open(dfd, "wb", closefd=False) as fout:
                     shutil.copyfileobj(fin, fout, 1 << 20)
-                try:  # best-effort copy2-style metadata preservation
-                    sst = os.stat(src)
+                try:  # best-effort copy2-style metadata preservation, from the same fd
                     os.fchmod(dfd, stat.S_IMODE(sst.st_mode))
                     os.utime(dfd, ns=(sst.st_atime_ns, sst.st_mtime_ns))
                 except OSError:
@@ -667,8 +683,10 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
                                artist: str, album: str, log: list,
                                stage_prefix: str | None = None,
                                force_stage: bool = False,
-                               target_tracks: Optional[Sequence[Dict[str, Any]]] = None) -> str:
-    """Copy a selected subset to a clean import folder when the source has extras."""
+                               target_tracks: Optional[Sequence[Dict[str, Any]]] = None,
+                               source_ids: Optional[Dict[str, Sequence[int]]] = None) -> str:
+    """Copy a selected subset to a clean import folder when the source has extras.
+    ``source_ids`` maps ``str(src)`` to the ``[dev, ino, ...]`` the copy must open."""
     selected = [Path(p) for p in audio_files]
     if not selected:
         return aldir
@@ -776,7 +794,8 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
         # name and must REPLACE the prior copy (``overwrite``) rather than
         # accumulate ``name.1``/``name.2`` siblings that would collide at import;
         # a fresh random-prefix pass keeps the de-dupe suffixing.
-        _staged_copy_nofollow(downloads_root, stage, rel.parts, src, overwrite=reuse)
+        _staged_copy_nofollow(downloads_root, stage, rel.parts, src, overwrite=reuse,
+                              expected_id=(source_ids or {}).get(str(src)))
         original_names[rel.as_posix()] = (
             prior_original_names.get(str(src))
             or prior_original_names.get(str(src.resolve(strict=False)))
