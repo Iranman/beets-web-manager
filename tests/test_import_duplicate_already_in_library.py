@@ -199,6 +199,19 @@ class AlreadyInLibraryGuardTests(q._Roots):  # 13: the folder lookup, un-mocked,
             self.assertFalse(q.ai._ai_batch_already_in_library(str(self.music / "Artist" / "Other")))
             self.assertFalse(q.ai._ai_batch_already_in_library(str(self.dl / "Album")))
 
+    def test_sibling_folder_sharing_a_name_prefix_is_not_in_library(self):  # QA finding 3
+        album = self.music / "Artist" / "Album"
+        album.mkdir(parents=True)
+        fake = mock.Mock()
+        fake.get_items.return_value = [{"path": str(self.music / "Artist" / "Album Deluxe" / "01.flac"),
+                                        "album_id": 9}]
+        with mock.patch.object(q.ai.composite_workflows, "beets_adapter", fake), \
+                mock.patch.object(q.ai.composite_workflows, "_music_root", return_value=self.music.resolve()):
+            self.assertFalse(q.ai._ai_batch_already_in_library(str(album)))
+            self.assertEqual(q.ai.composite_workflows.resolve_folder_to_albums(str(album) + os.sep), [])
+            self.assertEqual(q.ai.composite_workflows.resolve_folder_to_albums(
+                str(self.music / "Artist" / "Album Deluxe")), [9])
+
 
 if __name__ == "__main__":
     unittest.main()

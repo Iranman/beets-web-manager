@@ -5720,12 +5720,13 @@ def resolve_folder_to_albums(
     if not _is_within_music_root(folder_path):
         return []
     ad = adapter or beets_adapter
-    p_norm = _decode_path(folder_path).rstrip("/\\")
+    # Whole components only: <music>/A/Album must not match <music>/A/Album Deluxe.
+    p_norm = _decode_path(folder_path).replace("\\", "/").rstrip("/")
     items = ad.get_items()
     matched_aids: Set[int] = set()
     for it in items:
-        it_path = _decode_path(it.get("path"))
-        if it_path.startswith(p_norm):
+        it_path = _decode_path(it.get("path")).replace("\\", "/")
+        if it_path == p_norm or it_path.startswith(p_norm + "/"):
             aid = it.get("album_id")
             if aid is not None:
                 matched_aids.add(int(aid))
