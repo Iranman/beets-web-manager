@@ -313,6 +313,14 @@ export interface ReviewEvidence {
   unreadable_paths?: string[];
   /** beets_partial: paths Beets skipped while importing the rest. */
   skipped_paths?: string[];
+  /** origin_step quality_upgrade: same release group as a library album, higher-quality source. */
+  duplicate_rule?: string;
+  quality_upgrade?: {
+    release_group_id?: string;
+    library_album_ids?: number[];
+    library_format?: string;
+    source_format?: string;
+  };
   top_candidates?: ReviewCandidate[];
   current?: RecordingLocalEvidence;
   recording_candidates?: ReviewRecordingCandidate[];

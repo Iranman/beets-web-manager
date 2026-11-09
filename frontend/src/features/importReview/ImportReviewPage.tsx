@@ -1306,7 +1306,7 @@ const BATCH_STOP_TEXT: Record<string, string> = {
 /** Why a batch import stopped on this folder (#394), with the paths the server
  * named. Paths are plain text; the list is capped so a huge folder stays readable. */
 export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
-  if (!evidence?.origin_step) return null;
+  if (!evidence?.origin_step || isQualityUpgrade(evidence)) return null;
   const code = evidence.origin_step === 'pre_import' ? evidence.conflict || '' : evidence.origin_step;
   const text = BATCH_STOP_TEXT[code] || `Batch import stopped: ${code.replace(/_/g, ' ')}.`;
   const [title, paths] = evidence.symlinked_paths?.length
@@ -1329,6 +1329,28 @@ export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
           {more > 0 ? <div>and {more} more</div> : null}
         </>
       ) : null}
+    </div>
+  );
+}
+
+function isQualityUpgrade(evidence?: ReviewEvidence): boolean {
+  return Boolean(evidence?.quality_upgrade || evidence?.duplicate_rule === 'quality_upgrade');
+}
+
+/** Same release as a library album but a better-quality download. Informational only:
+ * nothing replaces the library copy from here. */
+export function QualityUpgradeNotice({ evidence }: { evidence?: ReviewEvidence }) {
+  if (!isQualityUpgrade(evidence)) return null;
+  const upgrade = evidence?.quality_upgrade;
+  return (
+    <div className="mt-2 space-y-1 text-sm text-zinc-700">
+      <Chip size="small" color="info" label="Upgrade available" />
+      {upgrade?.library_format && upgrade.source_format ? (
+        <div>Library: {upgrade.library_format} → This download: {upgrade.source_format}</div>
+      ) : null}
+      <div className="text-xs text-zinc-600">
+        The library copy is unchanged. Replacing it with this download is not available here yet.
+      </div>
     </div>
   );
 }
@@ -2912,6 +2934,7 @@ export function ReviewCard({
 
             <h2 className="mt-3 truncate text-lg font-semibold text-zinc-950">{itemTitle(item)}</h2>
             {meta.length ? <div className="mt-1 text-sm text-zinc-600">{meta.join(' / ')}</div> : null}
+            <QualityUpgradeNotice evidence={item.evidence} />
 
             <RecoveryReviewCard
               item={item}
