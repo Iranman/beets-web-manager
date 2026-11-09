@@ -202,7 +202,7 @@ class World:
             "_delete_source_if_proven_in_library": None,
             "_start_reimport_disk_job_internal": "child-1",
             "_wait_for_child_job": None,
-            "_filter_import_review_selected_audio_files": lambda files, _log: list(files),
+            "_filter_import_review_selected_audio_files": lambda files, _log, **_k: list(files),
             "_beet_import_timeout": 300,
             "_remaining_audio_files": [],
             "_move_artwork_to_target": None,

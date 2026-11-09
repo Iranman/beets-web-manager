@@ -51,7 +51,7 @@ class ReviewPartialImportSourceSafetyTests(unittest.TestCase):
             (isvc, "_folder_import_in_slot", {"side_effect": lambda do, log, ce, **k: do(log, ce)}),
             (isvc, "_resolve_import_review_source_path", {"return_value": (src, None)}),
             (isvc, "_folder_import_selected_sources", {"side_effect": lambda f, p: ([self.selected], None)}),
-            (isvc, "_filter_import_review_selected_audio_files", {"side_effect": lambda files, log: list(files)}),
+            (isvc, "_filter_import_review_selected_audio_files", {"side_effect": lambda files, log, **_k: list(files)}),
             # Worst case: staging returns the source folder itself (all audio selected).
             (isvc, "_stage_selected_audio_files", {"side_effect": lambda aldir, *a, **k: aldir}),
             (isvc, "_folder_import_settle_release_group",

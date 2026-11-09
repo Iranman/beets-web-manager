@@ -2338,8 +2338,10 @@ def _audio_validation_inspection_failed(row: Dict[str, Any]) -> bool:
     return bool(not row.get("ok") and row.get("inspection_incomplete"))
 
 
-def _filter_import_review_selected_audio_files(audio_files: List[Path], log: list) -> List[Path]:
-    """Keep partial imports moving while leaving uninspectable selected files in review."""
+def _filter_import_review_selected_audio_files(audio_files: List[Path], log: list, *,
+                                               preserve_source: Optional[bool] = None) -> List[Path]:
+    """Keep partial imports moving while leaving uninspectable selected files in review.
+    ``preserve_source=True`` keeps a rejected file in place (a copied torrent source)."""
     prefs = _music_format_preferences()
     accepted: List[Path] = []
     deferred: List[Path] = []
@@ -2368,7 +2370,8 @@ def _filter_import_review_selected_audio_files(audio_files: List[Path], log: lis
         except Exception:
             source_is_library = False
         if not source_is_library:
-            handled_results.append(_handle_rejected_audio_download(str(path), prefs, log=log))
+            handled_results.append(_handle_rejected_audio_download(str(path), prefs, log=log,
+                                                                   preserve_source=preserve_source))
     if not accepted:
         if deferred:
             # Retryable, also when some files were rejected: the uninspected
@@ -3939,7 +3942,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             ctx, mb_albumid, selected_releasegroupid)
         log.append(f"[import] Canonical MusicBrainz release-group ID: {selected_releasegroupid}")
         if selected_subset_import:
-            active_selected_source_files = _filter_import_review_selected_audio_files(selected_source_files, log)
+            active_selected_source_files = _filter_import_review_selected_audio_files(
+                selected_source_files, log, preserve_source=True if keep_selected_sources else None)
             log.append("  [audio] Selected partial-import files passed pre-stage audio validation.")
             import_folder_path = _stage_selected_audio_files(
                 folder_path,
