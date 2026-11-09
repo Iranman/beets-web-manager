@@ -1798,6 +1798,25 @@ def _ai_batch_promote_worker(batch_job_id: str, job_id: str) -> bool:
         return True
 
 
+#: The qBittorrent batch that last claimed the qBittorrent slot. It holds the
+#: slot exactly while its worker is registered, so no release is needed.
+_ai_batch_qbit_slot: Dict[str, str] = {}
+
+
+def _ai_batch_claim_qbit_slot(batch_job_id: str) -> str:
+    """Claim the one qBittorrent batch slot for an already-reserved
+    ``batch_job_id``; returns "" on success, else the batch holding it.
+    Every batch stages a unit into the same per-unit stage (and cleans it),
+    so two qBittorrent batches must never run at once. Atomic with
+    ``_ai_batch_reserve_worker``: both reserve first, so one claim sees the other."""
+    with _ai_batch_worker_lock:
+        owner = _ai_batch_qbit_slot.get("batch_job_id", "")
+        if owner and owner != batch_job_id and owner in _ai_batch_active_workers:
+            return owner
+        _ai_batch_qbit_slot["batch_job_id"] = batch_job_id
+        return ""
+
+
 def _ai_batch_release_worker(batch_job_id: str, expected: Optional[str]) -> None:
     """Release batch_job_id's registry entry, but only if it still equals
     `expected` -- an ownership check so a stale worker's cleanup (e.g. an old

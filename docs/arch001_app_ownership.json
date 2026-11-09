@@ -21323,6 +21323,27 @@
    ]
   },
   {
+   "name": "_pending_review_keys_overlap",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    791,
+    793
+   ],
+   "size": 3,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_pending_review_has_path_or_overlap",
+    "_pending_review_is_quality_upgrade"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
    "name": "_pending_review_path_key",
    "module": "backend/pending_review_store.py",
    "lines": [
@@ -24957,6 +24978,26 @@
    ],
    "size": 12,
    "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_start_ai_batch_job"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_ai_batch_claim_qbit_slot",
+   "module": "backend/ai_service.py",
+   "lines": [
+    1806,
+    1817
+   ],
+   "size": 12,
+   "body_lines": 6,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",

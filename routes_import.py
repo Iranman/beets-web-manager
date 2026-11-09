@@ -28,7 +28,7 @@ from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
 import backend.acquisition_service as _acquisition_service
-from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
+from backend.ai_service import _ai_batch_claim_qbit_slot, _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
 
 # ── ARCH-001 extracted code ──
 
@@ -1884,6 +1884,18 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
     # one jobs.start_python() call; every loser reconnects instead.
     if not _ai_batch_reserve_worker(batch_job_id):
         return _ai_batch_reconnect_response(batch_job_id)
+    # Every qBittorrent batch stages a unit into the same per-unit stage and
+    # cleans it, so a second one (a resumed older batch, or a new one) must
+    # not run alongside the first.
+    # ponytail: in-process slot (the app runs one process); add a durable
+    # job_contract key if batch workers ever run in several processes.
+    busy = _ai_batch_claim_qbit_slot(batch_job_id) if source == "qbittorrent" else ""
+    if busy:
+        _ai_batch_release_worker(batch_job_id, None)
+        return jsonify({"ok": False, "error_code": "qbittorrent_batch_active", "code": "qbittorrent_batch_active",
+                        "active_batch_job_id": busy,
+                        "error": "Another qBittorrent import batch is running. Wait for it to finish or "
+                                 "pause it, then try again."}), 409
 
     # Explicit startup handoff state, owned by this one _start_ai_batch_job
     # invocation and closed over by its worker thread below. Two separate
