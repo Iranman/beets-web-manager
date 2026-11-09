@@ -2099,15 +2099,14 @@ def _qbit_source_dir_reason(d: str, roots: List[str]) -> tuple:
     root = next((r for r in roots if d == r or d.startswith(r.rstrip(os.sep) + os.sep)), "")
     if not root:
         return "", "outside_allowed_root"
-    # Links first: _path_is_under resolves, so a link into the library would
-    # otherwise be reported as protected_location instead of symlink.
+    # Library first (resolved): a link into the library is protected_location.
+    if _path_is_under(Path(d), MUSIC_ROOT):
+        return root, "protected_location"
     p = Path(d)
     while str(p) != root and len(str(p)) > len(root):
         if p.is_symlink() or os.path.isjunction(p):
             return root, "symlink"
         p = p.parent
-    if _path_is_under(Path(d), MUSIC_ROOT):
-        return root, "protected_location"
     real, real_root = os.path.realpath(d), os.path.realpath(root)
     if real != real_root and not real.startswith(real_root.rstrip(os.sep) + os.sep):
         return root, "symlink"
@@ -2417,10 +2416,15 @@ def _ai_batch_qbit_unit_folder(folder_state: Dict[str, Any], fid: str, batch_id:
     listed = list(folder_state.get("source_files") or [])
     if not isinstance(ids, dict) or not listed:
         raise _QbitSourceChanged("source_changed", "no discovery record for this unit; start a new batch")
+    roots = _qbit_source_roots()
+    # The folder's own link/root/library check first: the generic refusal
+    # below reports every resolver error (a link included) as protected_location.
+    reason = _qbit_source_dir_reason(os.path.abspath(folder), roots)[1]
+    if reason:
+        raise _QbitSourceChanged("source_unsafe", f"the folder is no longer importable ({reason})")
     refusal = _ai_batch_unit_refusal(folder, log)
     if refusal:
         raise _QbitSourceChanged("source_unsafe", f"the folder is no longer importable ({refusal})")
-    roots = _qbit_source_roots()
     dir_reasons: Dict[str, str] = {}
     wanted: Dict[str, Path] = {}
     records: Dict[str, Dict[str, Any]] = {}
