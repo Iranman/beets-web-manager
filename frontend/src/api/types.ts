@@ -1257,6 +1257,8 @@ export interface AiBatchFolderState {
   warnings?: string[];
   auto_import?: { eligible: boolean; reasons: string[] };
   missing_release_group_album_ids?: number[];
+  /** Why a qBittorrent folder was refused at processing time (status source_missing). */
+  source_check?: { code: 'source_unsafe' | 'source_changed' | 'source_modified_during_import' | 'source_mode_mismatch' | string; detail: string };
 }
 
 export interface AiBatchEvidenceCapabilities {
@@ -1280,6 +1282,8 @@ export interface AiBatchSourceReport {
   /** Files left out, by reason code. */
   exclusions?: Record<string, number>;
   exclusion_samples?: Array<{ reason: string; path: string; torrent?: string }>;
+  /** Torrent filter applied; empty means all completed torrents. */
+  filter?: { category?: string; tag?: string };
 }
 
 export interface AiBatchState {

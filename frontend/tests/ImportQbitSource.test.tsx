@@ -18,7 +18,7 @@ vi.mock('../src/api/client', async (importOriginal) => {
 });
 
 import * as client from '../src/api/client';
-import { folderStatusLabel, IntakePanel } from '../src/features/intake/IntakePanel';
+import { folderStatusLabel, IntakePanel, sourceCheckLabel, sourceExclusionLabel, sourceFilterText } from '../src/features/intake/IntakePanel';
 
 const mocked = vi.mocked(client);
 const ROOT = '/srv/dl';
@@ -69,7 +69,7 @@ describe('source selector', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'qBittorrent' }));
     expect(screen.queryByLabelText('Import/source path')).toBeNull();
     expect(screen.queryByRole('button', { name: /Preview Import All/ })).toBeNull();
-    expect(screen.getByText(/copied, never moved/)).toBeTruthy();
+    expect(screen.getByText(/copied, never moved.*checked unchanged after import/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Import All' }));
     const dialog = await screen.findByRole('dialog');
@@ -133,6 +133,51 @@ describe('qBittorrent batch states', () => {
     // Not an error: no attention row, no retry, no review button for the missing folder.
     expect(screen.queryByText('Needs attention')).toBeNull();
     expect(screen.queryByRole('button', { name: /Review \d+ issue/ })).toBeNull();
-    expect(folderStatusLabel('source_missing')).toBe('Source missing');
+    expect(folderStatusLabel('source_missing')).toBe('Source missing or changed');
+    expect(within(summary).getByText('Filter: all completed torrents')).toBeTruthy();
+    expect(within(summary).getByText('Source missing or changed')).toBeTruthy();
+  });
+
+  it('names the category or tag filter', () => {
+    expect(sourceFilterText({ category: 'music' })).toBe('Category: music');
+    expect(sourceFilterText({ tag: 'lossless' })).toBe('Tag: lossless');
+    expect(sourceFilterText({})).toBe('Filter: all completed torrents');
+  });
+
+  it('shows source_check as a readable label plus detail, as plain text, with no Review or retry', async () => {
+    localStorage.setItem('beets:ai-batch-import-job-id', 'qb3');
+    const detail = '<img src=x onerror=alert(1)> 01.flac is not the file discovery saw (replaced or resized)';
+    mocked.getAiBatchStatus.mockResolvedValue({
+      state: {
+        status: 'completed', batch_job_id: 'qb3', job_id: 'qb3', source_path: ROOT, source_mode: 'qbittorrent',
+        source_report: { source: 'qbittorrent', torrents: 2, torrents_complete: 2, eligible_files: 10, filter: { category: 'music' } },
+        folders_source_missing: 2, total_folders_found: 2, folders_processed: 2, folders_queued: 0, folders_running: 0,
+        folders_completed: 0, folders_failed: 0, folders_skipped: 0, folders_attention: 0, folders_retryable: 0,
+        folders: [
+          { folder_id: 'f1', batch_job_id: 'qb3', source_folder: `${ROOT}/Changed`, status: 'source_missing',
+            failure_reason: `source_changed: ${detail}`, source_check: { code: 'source_changed', detail } },
+          { folder_id: 'f2', batch_job_id: 'qb3', source_folder: `${ROOT}/Gone`, status: 'source_missing',
+            failure_reason: 'source_missing: the folder no longer exists' },
+        ],
+      },
+    } as never);
+    const { container } = renderIntake();
+    const summary = await screen.findByRole('region', { name: 'qBittorrent source summary' });
+    expect(within(summary).getByText('Category: music')).toBeTruthy();
+    const list = within(summary).getByRole('list', { name: 'Source missing or changed' });
+    expect(within(list).getByText(/Changed since discovery: <img src=x onerror=alert\(1\)> 01\.flac is not the file/)).toBeTruthy();
+    expect(within(list).getByText(/source_missing: the folder no longer exists/)).toBeTruthy();
+    expect(container.querySelector('img[src="x"]')).toBeNull();
+    expect(screen.queryByText('Needs attention')).toBeNull();
+    expect(screen.queryByRole('button', { name: /review/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Retry eligible failures/ })).toBeNull();
+  });
+
+  it('labels the processing-time source check codes', () => {
+    expect(sourceCheckLabel('source_unsafe')).toBe('No longer safe to import');
+    expect(sourceCheckLabel('source_modified_during_import')).toBe('Changed during import');
+    expect(sourceCheckLabel('source_mode_mismatch')).toBe('Different import source');
+    expect(sourceCheckLabel('brand_new_code')).toBe('brand new code');
+    expect(sourceExclusionLabel('source_changed')).toBe('Changed since discovery');
   });
 });

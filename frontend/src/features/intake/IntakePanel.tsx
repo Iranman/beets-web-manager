@@ -179,14 +179,32 @@ export function folderStatusLabel(status?: string) {
     ai_failed: 'AI failed',
     timed_out: 'Timed out',
     skipped: 'Skipped',
-    source_missing: 'Source missing',
+    source_missing: 'Source missing or changed',
   };
   return labels[String(status || '')] || String(status || 'Unknown');
 }
 
 export const QBIT_SOURCE_EXPLANATION =
   'qBittorrent decides what is imported: only the audio files of completed torrents (seeding counts) that it reports. ' +
-  'Files are copied, never moved, so torrents keep seeding. The folder path is not used.';
+  'Files are copied, never moved, so torrents keep seeding, and each file is checked unchanged after import. ' +
+  'The folder path is not used.';
+
+const SOURCE_CHECK_LABELS: Record<string, string> = {
+  source_unsafe: 'No longer safe to import',
+  source_changed: 'Changed since discovery',
+  source_modified_during_import: 'Changed during import',
+  source_mode_mismatch: 'Different import source',
+};
+
+export function sourceCheckLabel(code: string) {
+  return SOURCE_CHECK_LABELS[code] || codeLabel(code) || code;
+}
+
+/** The torrent filter the backend applied (QBITTORRENT_IMPORT_CATEGORY / _TAG). */
+export function sourceFilterText(filter?: AiBatchSourceReport['filter']) {
+  const parts = [filter?.category && `Category: ${filter.category}`, filter?.tag && `Tag: ${filter.tag}`].filter(Boolean);
+  return parts.length ? parts.join(' · ') : 'Filter: all completed torrents';
+}
 
 const SOURCE_EXCLUSION_LABELS: Record<string, string> = {
   missing: 'Missing on disk',
@@ -204,26 +222,45 @@ const SOURCE_EXCLUSION_LABELS: Record<string, string> = {
 };
 
 export function sourceExclusionLabel(reason: string) {
-  return SOURCE_EXCLUSION_LABELS[reason] || codeLabel(reason) || reason;
+  return SOURCE_EXCLUSION_LABELS[reason] || SOURCE_CHECK_LABELS[reason] || codeLabel(reason) || reason;
 }
 
 /** The qBittorrent source summary: what qBittorrent offered and what was left out. */
-export function SourceReportSummary({ report, missing }: { report: AiBatchSourceReport; missing: number }) {
+export function SourceReportSummary({ report, missing, folders = [] }: { report: AiBatchSourceReport; missing: number; folders?: AiBatchFolderState[] }) {
   const exclusions = Object.entries(report.exclusions ?? {}).filter(([, count]) => count > 0);
+  // Neutral and final: no retry, no Review row. Pagination comes later; show the first few.
+  const missingFolders = folders.filter((folder) => folder.status === 'source_missing').slice(0, 8);
   return (
     <section aria-label="qBittorrent source summary" className="rounded border border-graphite-800 bg-graphite-950/50 p-3 text-sm">
       <div className="text-xs font-semibold uppercase tracking-wide text-zinc-500">qBittorrent source</div>
+      <div className="mt-1 text-xs text-zinc-400">{sourceFilterText(report.filter)}</div>
       <div className="mt-2 grid grid-cols-2 gap-2 lg:grid-cols-4">
         <BatchMetric label="Ownership verified" value={`${report.ownership_verified_pct ?? 0}%`} tone="text-sky-200" />
         <BatchMetric label="Eligible files" value={report.eligible_files ?? 0} tone="text-emerald-200" />
         <BatchMetric label="Completed torrents" value={`${report.torrents_complete ?? 0} / ${report.torrents ?? 0}`} tone="text-zinc-200" />
-        <BatchMetric label="Source missing" value={missing} tone="text-zinc-300" />
+        <BatchMetric label="Source missing or changed" value={missing} tone="text-zinc-300" />
       </div>
       {exclusions.length ? (
         <div className="mt-2 text-xs text-zinc-400">
           <span className="text-zinc-500">Left out: </span>
           {exclusions.map(([reason, count]) => `${sourceExclusionLabel(reason)} ${count}`).join(' · ')}
         </div>
+      ) : null}
+      {missingFolders.length ? (
+        <ul aria-label="Source missing or changed" className="mt-2 space-y-1 text-xs">
+          {missingFolders.map((folder) => (
+            <li key={folder.folder_id} className="min-w-0">
+              <span className="text-zinc-200">{folderName(folder.source_folder)}</span>
+              <span className="text-zinc-500">
+                {' — '}
+                {folder.source_check
+                  ? `${sourceCheckLabel(folder.source_check.code)}: ${folder.source_check.detail}`
+                  : codeLabel(folder.failure_reason) || 'Source missing'}
+                . Not retried; start a new import once the torrent is settled.
+              </span>
+            </li>
+          ))}
+        </ul>
       ) : null}
     </section>
   );
@@ -750,7 +787,7 @@ function JobLog({
         ) : null}
 
         {batchState?.source_mode === 'qbittorrent' && batchState.source_report ? (
-          <SourceReportSummary report={batchState.source_report} missing={batchState.folders_source_missing ?? 0} />
+          <SourceReportSummary report={batchState.source_report} missing={batchState.folders_source_missing ?? 0} folders={batchState.folders} />
         ) : null}
 
         {missing ? (
@@ -786,7 +823,7 @@ function JobLog({
               <BatchMetric label="Failed" value={failedCount} tone="text-rose-200" />
               <BatchMetric label="Skipped" value={skippedCount} tone="text-zinc-300" />
               {batchState?.folders_source_missing ? (
-                <BatchMetric label="Source missing" value={batchState.folders_source_missing} tone="text-zinc-300" />
+                <BatchMetric label="Source missing or changed" value={batchState.folders_source_missing} tone="text-zinc-300" />
               ) : null}
             </>
           ) : (
