@@ -16,6 +16,7 @@ import backend.ai_service as ai_service
 import backend.import_review_service as irs
 import backend.import_service as isvc
 import backend.pending_review_store as prs
+import routes_import
 
 REL = "11111111-1111-1111-1111-111111111111"
 RG = "22222222-2222-2222-2222-222222222222"
@@ -132,6 +133,33 @@ class QualityUpgradeRowRefusedTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not available yet"):
             ai_service._ai_import_folder(str(self.torrent), REL, {}, [])
         self._assert_untouched()
+
+    def test_overlapping_paths_refused_but_not_a_sibling(self):
+        is_upgrade = prs._pending_review_is_quality_upgrade
+        self.assertTrue(is_upgrade(str(self.torrent / "CD 01")))
+        self.assertTrue(is_upgrade(str(self.torrent.parent)))
+        self.assertFalse(is_upgrade(str(self.torrent) + "-2"))
+        self.assertFalse(is_upgrade(str(self.normal)))
+
+    def _generic_import(self, path):
+        with mock.patch.object(routes_import, "_resolve_import_source_path",
+                               side_effect=lambda p: (Path(p), None)),                 mock.patch.object(routes_import.composite_workflows, "reimport_source") as beets:
+            resp = self.client.post("/api/import", headers=_CSRF, json={"path": str(path)})
+        beets.assert_not_called()
+        return resp
+
+    def test_generic_import_refused_for_disc_folder_and_parent(self):
+        for path in (self.torrent / "CD 01", self.torrent, self.torrent.parent):
+            resp = self._generic_import(path)
+            self.assertEqual(resp.status_code, 409, (path, resp.get_json()))
+            self.assertEqual(resp.get_json()["error_code"], CODE)
+        self.assertFalse((self.torrent / "CD 01").exists())
+        self._assert_untouched()
+
+    def test_generic_import_of_unrelated_folder_still_starts(self):
+        resp = self._generic_import(self.normal)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.start.assert_called_once()
 
     def test_dismiss_still_removes_the_row(self):
         resp = self.client.delete("/api/ai-pending-review", headers=_CSRF, json={"path": str(self.torrent)})

@@ -747,9 +747,11 @@ QUALITY_UPGRADE_INFORMATIONAL = {
 
 
 def _pending_review_is_quality_upgrade(folder_path: str) -> bool:
-    """True when a Review row at ``folder_path`` is an informational quality
-    upgrade (ai_service ``upgrade_review``). Every import path refuses it.
-    Read-only: a raw snapshot read, so the check never prunes or rewrites the queue."""
+    """True when an informational quality-upgrade Review row (ai_service
+    ``upgrade_review``) is at, inside or above ``folder_path``: importing
+    ``<folder>/CD 01`` or a parent imports the upgrade's files too, so every
+    import path refuses it. Read-only: a raw snapshot read, so the check
+    never prunes or rewrites the queue."""
     key = _pending_review_path_key(folder_path)
     if not key:
         return False
@@ -757,7 +759,7 @@ def _pending_review_is_quality_upgrade(folder_path: str) -> bool:
         evidence = row.get("evidence") if isinstance(row, dict) else None
         if (isinstance(evidence, dict)
                 and "quality_upgrade" in (evidence.get("origin_step"), evidence.get("duplicate_rule"))
-                and _pending_review_path_key(_s(row.get("path"))) == key):
+                and _pending_review_keys_overlap(_pending_review_path_key(_s(row.get("path"))), key)):
             return True
     return False
 
@@ -783,10 +785,12 @@ def _pending_review_has_path_or_overlap(folder_path: str, *, unknown: bool = Fal
     # Keys are resolved, forward-slashed and rstripped of "/", so a path
     # boundary is exactly a "/" separator -- no false prefix match between
     # sibling names like ".../album" and ".../album-2".
-    return any(
-        row == key or row.startswith(key + "/") or key.startswith(row + "/")
-        for row in rows
-    )
+    return any(_pending_review_keys_overlap(row, key) for row in rows)
+
+
+def _pending_review_keys_overlap(row: str, key: str) -> bool:
+    """Same folder, or one inside the other (keys from ``_pending_review_path_key``)."""
+    return bool(row) and (row == key or row.startswith(key + "/") or key.startswith(row + "/"))
 
 
 def _pending_review_path_key(folder_path: str) -> str:

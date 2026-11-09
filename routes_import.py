@@ -23,7 +23,7 @@ from backend.import_service import _cached_import_target_preview, _delete_staged
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError,_add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
+from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_is_quality_upgrade, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
 from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
@@ -1597,6 +1597,10 @@ def start_import():
     search_id     = _extract_mb_uuid(raw_search_id)   # Beets --search-id (a Release ID)
     if raw_search_id and not search_id:
         return jsonify({"ok": False, "error": "search_id must be a MusicBrainz Release ID or URL"}), 400
+    # A quality-upgrade row at, inside or above the path: Beets would import
+    # the upgrade's files too.
+    if _pending_review_is_quality_upgrade(path):
+        return jsonify(dict(QUALITY_UPGRADE_INFORMATIONAL)), 409
     # Auto-create directory so import always starts
     try:
         Path(path).mkdir(parents=True, exist_ok=True)
