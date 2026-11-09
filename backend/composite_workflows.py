@@ -5400,10 +5400,16 @@ def reimport_source(
     else:
         # ponytail: plugin 1.6.x does not report per-folder outcome; ARCH-024 adds skipped_paths.
         not_matched, known = [], False
-    # Plugin 1.10.0 adds why Beets skipped each folder.
-    reasons = {_s(r.get("path")): _s(r.get("reason")) for r in (res.get("skipped") or [])
-               if isinstance(r, dict)} if isinstance(res, dict) and isinstance(res.get("skipped"), list) else {}
-    skipped = [{"path": p, "reason": reasons.get(p) or "not_matched"} for p in not_matched]
+    # Plugin 1.10.0 adds why Beets skipped each folder; 1.20.0 adds duplicate_evidence (B1).
+    rows = {_s(r.get("path")): r for r in (res.get("skipped") or [])
+            if isinstance(r, dict)} if isinstance(res, dict) and isinstance(res.get("skipped"), list) else {}
+    skipped = []
+    for p in not_matched:
+        row = rows.get(p) or {}
+        out = {"path": p, "reason": _s(row.get("reason")) or "not_matched"}
+        if "duplicate_evidence" in row:
+            out["duplicate_evidence"] = row["duplicate_evidence"]
+        skipped.append(out)
     return {"ok": True, "copy": not move, "move": move, "quiet_fallback": fallback,
             "albums_imported": added, "not_matched": not_matched, "skipped": skipped,
             "imported_album_ids": ids if isinstance(ids, list) else None,

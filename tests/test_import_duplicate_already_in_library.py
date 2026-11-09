@@ -76,6 +76,9 @@ def setUpModule():
     q.setUpModule()
 
 
+from backend.composite_workflows import reimport_source as REAL_REIMPORT  # noqa: E402  (before any patch)
+
+
 class BatchTests(q._Batch):
     def setUp(self):
         super().setUp()
@@ -155,6 +158,29 @@ class BatchTests(q._Batch):
                        "skipped": [self.skipped(folder, evidence())],
                        "not_matched": [str(folder)], "not_matched_known": True}
         out, folders = self.run_batch()
+        state = folders[str(folder)]
+        self.assertEqual(state["status"], "skipped", self.log)
+        self.assertEqual(state["failure_reason"], "already in library")
+        self.queued.assert_not_called()
+
+    def test_real_reimport_source_carries_plugin_duplicate_evidence_to_b1(self):
+        """NEW-3: the real result shaping in ``reimport_source`` (only the
+        adapter is faked, with the plugin's own result shape) must keep
+        ``duplicate_evidence`` so the B1 rule sees it."""
+        from backend import composite_workflows as cw
+        fake = mock.Mock()
+        fake.get_stats.return_value = {"albums": 1}
+        fake.run_import.side_effect = lambda paths, **kw: {
+            "success": True, "imported_album_ids": [], "skipped_paths": [paths],
+            "skipped": [{"path": paths, "reason": "duplicate", "duplicate_evidence": evidence()}]}
+        self.reimport.side_effect = lambda f, opts, timeout: REAL_REIMPORT(f, opts, timeout=timeout)
+        with mock.patch.object(cw, "beets_adapter", fake):
+            self.audio("Real/01.flac")
+            self.audio("Real/02.flac")
+            folder = self.dl / "Real"
+            self.local_walk.side_effect = lambda root, log=None, unreadable=None: [str(folder)]
+            out, folders = self.run_batch(source="local", qbit_inventory=None)
+        fake.run_import.assert_called_once()
         state = folders[str(folder)]
         self.assertEqual(state["status"], "skipped", self.log)
         self.assertEqual(state["failure_reason"], "already in library")
