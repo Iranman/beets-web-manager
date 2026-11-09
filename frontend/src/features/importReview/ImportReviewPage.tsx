@@ -1284,6 +1284,8 @@ function needsOnlyReleaseGroup(item: ReviewItem): boolean {
 
 /** Why Delete Folder is withheld on a qBittorrent row. The backend refuses it too. */
 export const TORRENT_DELETE_REASON = 'This folder belongs to a qBittorrent torrent; deleting it would break seeding.';
+/** Why rejected-file cleanup is withheld on a qBittorrent row. The backend refuses it too (409). */
+export const TORRENT_CLEANUP_REASON = 'These files belong to a qBittorrent torrent; removing them would break seeding.';
 
 function isTorrentSource(item: ReviewItem): boolean {
   return item.evidence?.source_mode === 'qbittorrent' || isQualityUpgrade(item.evidence);
@@ -2873,7 +2875,8 @@ export function ReviewCard({
     ? ''
     : selectedMatch?.preflight_reason || '';
   const cleanupFiles = selectedCleanupSourceFiles(selectedMatch, targetPreviewState?.preview);
-  const cleanupReady = cleanupFiles.length > 0 && !needsOnlyReleaseGroup(item);
+  const cleanupReady = cleanupFiles.length > 0 && !needsOnlyReleaseGroup(item) && !isTorrentSource(item);
+  const cleanupWithheld = cleanupFiles.length > 0 && isTorrentSource(item);
   const openSubmissionPage = () => {
     const params = new URLSearchParams();
     params.set('review_item_id', item.id);
@@ -3174,6 +3177,8 @@ export function ReviewCard({
                       Remove {cleanupFiles.length} rejected file{cleanupFiles.length === 1 ? '' : 's'}…
                     </Button>
                   </div>
+                ) : cleanupWithheld ? (
+                  <div className="mt-2">{TORRENT_CLEANUP_REASON}</div>
                 ) : null}
               </div>
             ) : null}
