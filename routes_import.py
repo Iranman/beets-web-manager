@@ -23,7 +23,7 @@ from backend.import_service import _cached_import_target_preview, _delete_staged
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_is_quality_upgrade, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
+from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_is_quality_upgrade, _pending_review_is_torrent_source, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
 from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
@@ -158,6 +158,14 @@ def delete_import_review_folder():
 
     if not missing_mbid_album_match and not _pending_review_matches(src_path, ""):
         return jsonify({"ok": False, "error": _REVIEW_FOLDER_NOT_PENDING}), 400
+    # A qBittorrent (or quality-upgrade) row's folder may still be seeding:
+    # refuse unless it is one the app made (a staged copy) or the operator
+    # allowed torrent-source moves. Dismissing the row still works.
+    if _pending_review_is_torrent_source(str(resolved)) and _preserve_torrent_source_path(resolved):
+        return jsonify({"ok": False, "error_code": "torrent_source_protected", "code": "torrent_source_protected",
+                        "error": "This folder holds a torrent's files, which qBittorrent may still be seeding. "
+                                 "Nothing was deleted; dismiss the row instead, or remove the torrent "
+                                 "in qBittorrent."}), 409
 
     # CodeQL #1388: the ValueError and the log carry executor and exception
     # text (paths, raw errors). Both stay in the server log; the client gets

@@ -21273,6 +21273,53 @@
    ]
   },
   {
+   "name": "_pending_review_evidence_is_upgrade",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    749,
+    750
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_pending_review_is_quality_upgrade",
+    "_pending_review_is_torrent_source"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_pending_review_row_overlaps",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    753,
+    765
+   ],
+   "size": 13,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_pending_review_is_quality_upgrade",
+    "_pending_review_is_torrent_source"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_pending_review_keys_overlap",
+    "_pending_review_path_key",
+    "_read_pending_snapshot",
+    "_s"
+   ]
+  },
+  {
    "name": "_pending_review_is_quality_upgrade",
    "module": "backend/pending_review_store.py",
    "lines": [
@@ -21296,6 +21343,29 @@
     "_pending_review_path_key",
     "_read_pending_snapshot",
     "_s"
+   ]
+  },
+  {
+   "name": "_pending_review_is_torrent_source",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    776,
+    781
+   ],
+   "size": 6,
+   "body_lines": 3,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "delete_import_review_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_pending_review_evidence_is_upgrade",
+    "_pending_review_row_overlaps"
    ]
   },
   {

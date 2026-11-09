@@ -746,22 +746,39 @@ QUALITY_UPGRADE_INFORMATIONAL = {
 }
 
 
-def _pending_review_is_quality_upgrade(folder_path: str) -> bool:
-    """True when an informational quality-upgrade Review row (ai_service
-    ``upgrade_review``) is at, inside or above ``folder_path``: importing
-    ``<folder>/CD 01`` or a parent imports the upgrade's files too, so every
-    import path refuses it. Read-only: a raw snapshot read, so the check
-    never prunes or rewrites the queue."""
+def _pending_review_evidence_is_upgrade(evidence: Dict[str, Any]) -> bool:
+    return "quality_upgrade" in (evidence.get("origin_step"), evidence.get("duplicate_rule"))
+
+
+def _pending_review_row_overlaps(folder_path: str, wanted) -> bool:
+    """True when a Review row whose evidence satisfies ``wanted`` is at,
+    inside or above ``folder_path``. Read-only: a raw snapshot read, so the
+    check never prunes or rewrites the queue."""
     key = _pending_review_path_key(folder_path)
     if not key:
         return False
     for row in _read_pending_snapshot():
         evidence = row.get("evidence") if isinstance(row, dict) else None
-        if (isinstance(evidence, dict)
-                and "quality_upgrade" in (evidence.get("origin_step"), evidence.get("duplicate_rule"))
+        if (isinstance(evidence, dict) and wanted(evidence)
                 and _pending_review_keys_overlap(_pending_review_path_key(_s(row.get("path"))), key)):
             return True
     return False
+
+
+def _pending_review_is_quality_upgrade(folder_path: str) -> bool:
+    """An informational quality-upgrade Review row (ai_service
+    ``upgrade_review``) is at, inside or above ``folder_path``: importing
+    ``<folder>/CD 01`` or a parent imports the upgrade's files too, so every
+    import path refuses it."""
+    return _pending_review_row_overlaps(folder_path, _pending_review_evidence_is_upgrade)
+
+
+def _pending_review_is_torrent_source(folder_path: str) -> bool:
+    """A qBittorrent-batch or quality-upgrade Review row is at, inside or
+    above ``folder_path``: its folder may hold a seeding torrent's files."""
+    return _pending_review_row_overlaps(
+        folder_path,
+        lambda e: e.get("source_mode") == "qbittorrent" or _pending_review_evidence_is_upgrade(e))
 
 
 def _pending_review_has_path_or_overlap(folder_path: str, *, unknown: bool = False) -> bool:
