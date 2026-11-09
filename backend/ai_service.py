@@ -2413,6 +2413,10 @@ def _ai_batch_qbit_stage_dirs(fid: str) -> List[str]:
     prefix = _ai_batch_qbit_stage_prefix(fid) + "-"
     try:
         root = validated_downloads_root() / "_beets_missing_import"
+        # A linked stage root would list (and let cleanup remove) folders
+        # outside the downloads root: none are ours then.
+        if root.is_symlink() or os.path.isjunction(root):
+            return []
         with os.scandir(root) as entries:
             return sorted(e.path for e in entries
                           if e.name.startswith(prefix) and e.is_dir(follow_symlinks=False))
