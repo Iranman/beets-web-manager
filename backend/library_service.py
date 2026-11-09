@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ALLOWED_ROOTS, DOWNLOADS_ROOT, EDITABLE_FIELDS, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, TORRENT_SOURCE_MOVE_ALLOWED, TORRENT_SOURCE_ROOTS, WEB_MANAGER_DATA_DIR, _ANSI_RE, _LITERAL_PLACEHOLDER_RE, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _s, _up, _ur
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE, _ai_evidence_clean_artist_guess, _ai_evidence_clean_segment, _ai_evidence_extract_year, _ai_evidence_scene_guess, _ai_evidence_weak_album_guess, _ai_evidence_weak_artist_guess, _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
-from backend.pending_review_store import _apply_review_origin, _is_music_root_path, _load_pending_reviews, _queue_folder_for_manual_review, _remove_pending_review_for_path
+from backend.pending_review_store import _apply_review_origin, _is_music_root_path, _load_pending_reviews, _pending_review_torrent_rows, _queue_folder_for_manual_review, _remove_pending_review_for_path
 from backend.playlist_service import _artist_folder_merge_key, _safe_artist_folder_name
 from backend.import_reconciliation_service import _apply_artist_folder_reconcile_resilient
 from backend.cleanup_service import _album_cleanup_file_info, _album_cleanup_quality_tuple, _album_cleanup_remove_empty_tree, _album_cleanup_verified_same_file, _artist_alias_key, _unique_dest
@@ -700,6 +700,25 @@ def _preserve_torrent_source_file(path_value: str | Path) -> bool:
     folder = Path(path_value).parent
     return _preserve_torrent_source_path(folder) or any(
         _preserve_torrent_source_path(a) for a in folder.parents if a.resolve(strict=False) not in roots)
+
+
+def _review_torrent_files_protected(path_value: str | Path) -> bool:
+    """True when deleting or quarantining files at ``path_value`` could take
+    a seeding torrent's files: a Review row at, inside or above it is
+    qBittorrent-origin (always torrent data, whatever TORRENT_SOURCE_ROOTS or
+    ALLOW_TORRENT_SOURCE_MOVE say) and not a copy the app made, or is a
+    quality upgrade whose own folder is a preserved torrent source. Judges
+    each row's own path, not ``path_value``, so a parent folder cannot carry
+    a protected row out. Raises when the queue cannot be read; callers fail
+    closed."""
+    for row_path, evidence in _pending_review_torrent_rows(str(path_value)):
+        row = Path(row_path)
+        if evidence.get("source_mode") == "qbittorrent":
+            if not _app_managed_download_path(row):
+                return True
+        elif _preserve_torrent_source_path(row):
+            return True
+    return False
 
 
 _MUSIC_LIBRARY_ROOT = str(MUSIC_ROOT)

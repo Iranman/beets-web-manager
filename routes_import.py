@@ -20,10 +20,10 @@ from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
 from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _import_review_suggestion_is_stale, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _compact_revalidation_summary, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
 from backend.import_service import _cached_import_target_preview, _delete_staged_import_folder, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _read_log_tail, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
-from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
+from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _review_torrent_files_protected, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_is_quality_upgrade, _pending_review_is_torrent_source, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
+from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_is_quality_upgrade, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
 from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
@@ -114,6 +114,21 @@ def import_folder_stats():
 
 
 _REVIEW_FOLDER_NOT_PENDING = "Folder is not in Pending Review, or a Needs MB ID album row match."
+_TORRENT_SOURCE_PROTECTED = {
+    "ok": False, "error_code": "torrent_source_protected", "code": "torrent_source_protected",
+    "error": "These files belong to a torrent that qBittorrent may still be seeding. Nothing was moved or "
+             "deleted; dismiss the row instead, or remove the torrent in qBittorrent.",
+}
+
+
+def _torrent_rows_protect(path: str) -> bool:
+    """The Review torrent-row rule for a destructive route; an unreadable
+    queue or rule fails closed."""
+    try:
+        return _review_torrent_files_protected(path)
+    except Exception:
+        _app_logger.warning("Could not evaluate the Review torrent rule for %r; refusing", path)
+        return True
 
 
 @app.post("/api/import/review-folder/delete")
@@ -158,14 +173,11 @@ def delete_import_review_folder():
 
     if not missing_mbid_album_match and not _pending_review_matches(src_path, ""):
         return jsonify({"ok": False, "error": _REVIEW_FOLDER_NOT_PENDING}), 400
-    # A qBittorrent (or quality-upgrade) row's folder may still be seeding:
-    # refuse unless it is one the app made (a staged copy) or the operator
-    # allowed torrent-source moves. Dismissing the row still works.
-    if _pending_review_is_torrent_source(str(resolved)) and _preserve_torrent_source_path(resolved):
-        return jsonify({"ok": False, "error_code": "torrent_source_protected", "code": "torrent_source_protected",
-                        "error": "This folder holds a torrent's files, which qBittorrent may still be seeding. "
-                                 "Nothing was deleted; dismiss the row instead, or remove the torrent "
-                                 "in qBittorrent."}), 409
+    # A qBittorrent (or preserved quality-upgrade) row at, inside or above
+    # the folder may still be seeding: refuse unless the row is a copy the
+    # app made. Dismissing the row still works. The planner re-checks.
+    if _torrent_rows_protect(str(resolved)):
+        return jsonify(_TORRENT_SOURCE_PROTECTED), 409
 
     # CodeQL #1388: the ValueError and the log carry executor and exception
     # text (paths, raw errors). Both stay in the server log; the client gets
@@ -254,6 +266,10 @@ def cleanup_import_review_files():
     if not _pending_review_matches(folder_path, review_item_id):
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
+    # Same torrent rule as Delete Folder: nothing is planned or applied.
+    if _torrent_rows_protect(folder_path):
+        return jsonify({**_TORRENT_SOURCE_PROTECTED, "log": log}), 409
+
     allow_delete = bool(payload.get("allow_delete"))
     # #380 F3: "rejected"/"duplicate" is the client's claim; the backend
     # holds no per-file proof that a file is rejected and not in the
@@ -274,6 +290,8 @@ def cleanup_import_review_files():
         plan_res = composite_workflows.plan_import_review_cleanup(plan_req)
         if not plan_res.get("ok"):
             _app_logger.warning("cleanup_import_review_files plan refused for %r: %s", folder_path, plan_res.get("error"))
+            if plan_res.get("code") == "torrent_source_protected":
+                return jsonify({**_TORRENT_SOURCE_PROTECTED, "log": log}), 409
             return jsonify({"ok": False, "error": _import_review_cleanup_plan_error(plan_res),
                             "code": plan_res.get("code"),
                             "log": log}), 400

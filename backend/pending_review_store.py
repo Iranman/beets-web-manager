@@ -781,6 +781,32 @@ def _pending_review_is_torrent_source(folder_path: str) -> bool:
         lambda e: e.get("source_mode") == "qbittorrent" or _pending_review_evidence_is_upgrade(e))
 
 
+def _pending_review_torrent_rows(folder_path: str) -> List[tuple]:
+    """``(path, evidence)`` of every qBittorrent-batch or quality-upgrade
+    Review row at, inside or above ``folder_path``. Read-only. Unlike
+    ``_pending_review_is_torrent_source`` an unreadable queue raises
+    PendingReviewLoadError, so a destructive caller can fail closed."""
+    key = _pending_review_path_key(folder_path)
+    if not key:
+        return []
+    try:
+        items = json.loads(_AI_PENDING_FILE.read_text())
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as ex:
+        raise PendingReviewLoadError("Review Queue file could not be read.") from ex
+    if not isinstance(items, list):
+        raise PendingReviewLoadError("Review Queue file is not a list.")
+    rows = []
+    for row in items:
+        evidence = row.get("evidence") if isinstance(row, dict) else None
+        if (isinstance(evidence, dict)
+                and (evidence.get("source_mode") == "qbittorrent" or _pending_review_evidence_is_upgrade(evidence))
+                and _pending_review_keys_overlap(_pending_review_path_key(_s(row.get("path"))), key)):
+            rows.append((_s(row.get("path")), evidence))
+    return rows
+
+
 def _pending_review_has_path_or_overlap(folder_path: str, *, unknown: bool = False) -> bool:
     """Like ``_pending_review_has_path`` but also True when a Review row points
     at an ANCESTOR or DESCENDANT of ``folder_path``, not only an exact match.

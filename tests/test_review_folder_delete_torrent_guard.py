@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import app as app_module
+import backend.library_service as ls
 import backend.pending_review_store as prs
 import routes_import as ri
 
@@ -45,7 +46,8 @@ class ReviewFolderDeleteTorrentGuardTests(unittest.TestCase):
             (ri, "_delete_review_source_folder", {"new": self.delete}),
             # The preserve rule as configured with a downloads root: app-made
             # staging folders are not preserved, everything else is.
-            (ri, "_preserve_torrent_source_path", {"side_effect": lambda p: "_beets_missing_import" not in str(p)}),
+            (ls, "_preserve_torrent_source_path", {"side_effect": lambda p: "_beets_missing_import" not in str(p)}),
+            (ls, "_app_managed_download_path", {"side_effect": lambda p: "_beets_missing_import" in str(p)}),
             (prs, "_record_ai_review_decision", {}),
         ):
             p = mock.patch.object(target, name, **kw)

@@ -21369,6 +21369,32 @@
    ]
   },
   {
+   "name": "_pending_review_torrent_rows",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    784,
+    807
+   ],
+   "size": 24,
+   "body_lines": 19,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_review_torrent_files_protected"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_pending_review_evidence_is_upgrade",
+    "_pending_review_keys_overlap",
+    "_pending_review_path_key",
+    "_s",
+    "items"
+   ]
+  },
+  {
    "name": "_pending_review_has_path_or_overlap",
    "module": "backend/pending_review_store.py",
    "lines": [
@@ -22207,6 +22233,28 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
+    "_preserve_torrent_source_path"
+   ]
+  },
+  {
+   "name": "_review_torrent_files_protected",
+   "module": "backend/library_service.py",
+   "lines": [
+    705,
+    721
+   ],
+   "size": 17,
+   "body_lines": 8,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_app_managed_download_path",
+    "_pending_review_torrent_rows",
     "_preserve_torrent_source_path"
    ]
   },
@@ -38926,6 +38974,29 @@
    ],
    "caller_count": 2,
    "dependencies": []
+  },
+  {
+   "name": "_torrent_rows_protect",
+   "module": "routes_import.py",
+   "lines": [
+    124,
+    131
+   ],
+   "size": 8,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "cleanup_import_review_files",
+    "delete_import_review_folder"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_review_torrent_files_protected"
+   ]
   },
   {
    "name": "cleanup_import_review_files",

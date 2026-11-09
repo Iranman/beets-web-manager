@@ -4311,6 +4311,18 @@ def _preserved_torrent_file(path: str) -> bool:
         return True
 
 
+def _review_torrent_protected(path: str) -> bool:
+    """The Review torrent-row rule (library_service) for a cleanup target;
+    fails closed: an unreadable queue or rule counts as protected."""
+    try:
+        # Lazy: library_service sits above this module and imports it.
+        from backend.library_service import _review_torrent_files_protected
+        return bool(_review_torrent_files_protected(path))
+    except Exception:
+        log.warning("Could not evaluate the Review torrent rule for %s; refusing the cleanup", path)
+        return True
+
+
 def plan_album_relocation(
     payload: Optional[Dict[str, Any]] = None,
     *,
@@ -4868,6 +4880,11 @@ def plan_import_review_cleanup(
         # (RECOVERABLE, rollback available) even when a delete was requested.
         data["action"] = "quarantine_rejected"
         library_quarantined = True
+    # A qBittorrent/upgrade Review row at, inside or above the target may
+    # still be seeding: no file of it is ever planned for a move or delete.
+    if _review_torrent_protected(str(data["path"])):
+        return {"ok": False, "mutated": False, "code": "torrent_source_protected",
+                "error": "Refusing to move or delete files of a torrent qBittorrent may still be seeding."}
     try:
         res = execute_import_review_cleanup_plan(
             st, data, _import_review_allowed_roots(allow_music), music_root=str(_music_root()))
