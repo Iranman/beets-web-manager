@@ -918,6 +918,20 @@ def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: st
 _FORCED_OFF_IMPORT_MODES = ("link", "hardlink", "reflink", "delete")
 
 
+def _symlink_free_below(path: str, roots: List[str]) -> bool:
+    """Whether ``path`` lies lexically inside one of ``roots`` with no symlink
+    component below it. A move import must not follow a link out of an
+    app-managed folder into, say, a seeding torrent folder."""
+    from . import folder_ops  # it imports this module
+    for root in roots:
+        try:
+            folder_ops.contained_path(path, os.path.abspath(root))
+            return True
+        except folder_ops._Refused:
+            continue
+    return False
+
+
 @webmanager_bp.route("/import", methods=["POST"])
 def run_import():
     """Confirmed non-interactive import execution inside Beets."""
@@ -1029,6 +1043,11 @@ def run_import():
                 ),
                 400,
             )
+        if move and not _symlink_free_below(p, import_roots):
+            return jsonify({
+                "error": "A move import source must not have a symlink component",
+                "error_code": "PATH_NOT_ALLOWED",
+            }), 400
         safe_paths.append(safe_p)
 
     write = bool(data.get("write", True))
@@ -1117,6 +1136,11 @@ def run_import():
             # ImportSession forces the link modes off when move is on, and the
             # change outlives the request; an import must never link or delete.
             orig_links = {k: beets_config["import"][k].get() for k in _FORCED_OFF_IMPORT_MODES}
+            # convert's early auto_convert stage runs while item.path is still
+            # the source and removes it when delete_originals is set. The key
+            # exists only when the convert plugin is loaded.
+            convert_delete = beets_config["convert"]["delete_originals"]
+            orig_convert_delete = convert_delete.get() if convert_delete.exists() else None
 
             try:
                 beets_config["import"]["pretend"] = pretend
@@ -1134,6 +1158,8 @@ def run_import():
                 beets_config["import"]["singletons"] = singletons
                 for k in _FORCED_OFF_IMPORT_MODES:
                     beets_config["import"][k] = False
+                if orig_convert_delete is not None:
+                    beets_config["convert"]["delete_originals"] = False
                 if set_fields:
                     beets_config["import"]["set_fields"] = set_fields
 
@@ -1218,6 +1244,8 @@ def run_import():
                 beets_config["import"]["set_fields"] = orig_set_fields
                 for k, v in orig_links.items():
                     beets_config["import"][k] = v
+                if orig_convert_delete is not None:
+                    beets_config["convert"]["delete_originals"] = orig_convert_delete
 
     if is_async:
         lib = g.lib

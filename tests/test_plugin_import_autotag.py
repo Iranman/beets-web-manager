@@ -504,6 +504,57 @@ class PluginImportAutotagTests(unittest.TestCase):
         finally:
             beets_config["import"]["delete"] = before
 
+    def test_import_forces_convert_delete_originals_off_and_restores_it(self):
+        """B-1: convert's early auto_convert stage removes item.path (still the
+        source) when `convert.delete_originals` is set; every webmanager import
+        must run with it off and restore it afterwards, also on failure."""
+        src = os.path.join(self.downloads, "Some Artist - Seeding")
+        _album(src, "Some Artist", "Seeding")
+        view = beets_config["convert"]["delete_originals"]
+        before = view.get() if view.exists() else False
+        beets_config["convert"]["delete_originals"] = True
+        seen = []
+        from unittest import mock
+        from beets.importer import ImportSession
+        real_run = ImportSession.run
+
+        def spy(session):
+            seen.append(beets_config["convert"]["delete_originals"].get())
+            return real_run(session)
+
+        def boom(session):
+            seen.append(beets_config["convert"]["delete_originals"].get())
+            raise RuntimeError("run failed")
+
+        try:
+            with mock.patch.object(ImportSession, "run", spy):
+                res = self._import(paths=[src], copy=True, move=False)
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.assertEqual(sorted(os.listdir(src)), ["01.wav", "02.wav"])
+            self.assertIs(beets_config["convert"]["delete_originals"].get(), True)
+            with mock.patch.object(ImportSession, "run", boom):
+                res = self._import(paths=[src], copy=True, move=False)
+            self.assertEqual(res.status_code, 500)
+            self.assertEqual(seen, [False, False])
+            self.assertIs(beets_config["convert"]["delete_originals"].get(), True)
+        finally:
+            beets_config["convert"]["delete_originals"] = before
+
+    def test_move_refused_for_symlinked_source(self):
+        """N-2: a move import through a symlink (e.g. the staged folder swapped
+        for a link to a seeding torrent folder) is refused before Beets runs."""
+        real = os.path.join(self.downloads, "Torrent")
+        _album(real, "Some Artist", "Seeding")
+        link = os.path.join(self.downloads, "_stage")
+        try:
+            os.symlink(real, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        res = self._import(paths=[link], copy=False, move=True)
+        self.assertEqual((res.status_code, res.get_json()["error_code"]), (400, "PATH_NOT_ALLOWED"))
+        self.assertEqual(sorted(os.listdir(real)), ["01.wav", "02.wav"])
+        self.assertEqual(len(self.lib.albums()), 0)
+
     def test_in_place_refused_when_library_dir_covers_config_dir(self):
         """L2: the same _covers_config_dir guard as _derived_allowed_roots."""
         beets_config["directory"] = str(beets_config.config_dir())
