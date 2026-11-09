@@ -477,6 +477,33 @@ class PluginImportAutotagTests(unittest.TestCase):
             for k, v in before.items():
                 beets_config["import"][k] = v
 
+    def test_copy_import_never_deletes_source_and_restores_delete(self):
+        """QA-2: a user's `import: delete: yes` must not remove the (seeding)
+        source after a copy import; the setting is restored afterwards."""
+        src = os.path.join(self.downloads, "Some Artist - Seeding")
+        _album(src, "Some Artist", "Seeding")
+        before = beets_config["import"]["delete"].get()
+        beets_config["import"]["delete"] = True
+        seen = []
+        from unittest import mock
+        from beets.importer import ImportSession
+        real_run = ImportSession.run
+
+        def spy(session):
+            seen.append(beets_config["import"]["delete"].get())
+            return real_run(session)
+
+        try:
+            with mock.patch.object(ImportSession, "run", spy):
+                res = self._import(paths=[src], copy=True, move=False)
+            self.assertEqual(res.status_code, 200, res.get_json())
+            self.assertEqual(seen, [False])
+            self.assertEqual(len(self.lib.albums()), 1)
+            self.assertEqual(sorted(os.listdir(src)), ["01.wav", "02.wav"])
+            self.assertIs(beets_config["import"]["delete"].get(), True)
+        finally:
+            beets_config["import"]["delete"] = before
+
     def test_in_place_refused_when_library_dir_covers_config_dir(self):
         """L2: the same _covers_config_dir guard as _derived_allowed_roots."""
         beets_config["directory"] = str(beets_config.config_dir())

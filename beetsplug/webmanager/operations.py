@@ -905,7 +905,10 @@ def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: st
     return _RecordingSession
 
 
-_LINK_MODES = ("link", "hardlink", "reflink")
+# Forced off for every import and restored afterwards. `delete` removes the
+# source after a copy (beets importer/tasks.py `if copy and delete`), which
+# would destroy seeding torrent files; Web Manager moves only via `move`.
+_FORCED_OFF_IMPORT_MODES = ("link", "hardlink", "reflink", "delete")
 
 
 @webmanager_bp.route("/import", methods=["POST"])
@@ -1104,9 +1107,9 @@ def run_import():
             orig_resume = beets_config["import"]["resume"].get()
             orig_search_ids = beets_config["import"]["search_ids"].get()
             orig_quiet_fallback = beets_config["import"]["quiet_fallback"].get()
-            # ImportSession forces these off when move is on, and the change
-            # outlives the request; an in-place import must never link.
-            orig_links = {k: beets_config["import"][k].get() for k in _LINK_MODES}
+            # ImportSession forces the link modes off when move is on, and the
+            # change outlives the request; an import must never link or delete.
+            orig_links = {k: beets_config["import"][k].get() for k in _FORCED_OFF_IMPORT_MODES}
 
             try:
                 beets_config["import"]["pretend"] = pretend
@@ -1122,7 +1125,7 @@ def run_import():
                 beets_config["import"]["resume"] = False
                 beets_config["import"]["incremental"] = incremental
                 beets_config["import"]["singletons"] = singletons
-                for k in _LINK_MODES:
+                for k in _FORCED_OFF_IMPORT_MODES:
                     beets_config["import"][k] = False
                 if set_fields:
                     beets_config["import"]["set_fields"] = set_fields
