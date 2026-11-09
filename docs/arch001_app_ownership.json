@@ -25387,6 +25387,51 @@
    ]
   },
   {
+   "name": "_qbit_source_roots",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2084,
+    2091
+   ],
+   "size": 8,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder",
+    "_ai_batch_qbit_units"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_qbit_source_dir_reason",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2094,
+    2115
+   ],
+   "size": 22,
+   "body_lines": 17,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder",
+    "_ai_batch_qbit_units"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_app_managed_download_path",
+    "_path_is_under"
+   ]
+  },
+  {
    "name": "_ai_batch_qbit_units",
    "module": "backend/ai_service.py",
    "lines": [
@@ -25468,6 +25513,69 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_qbit_source_file_record",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2316,
+    2358
+   ],
+   "size": 43,
+   "body_lines": 35,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder",
+    "_qbit_source_changes"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_qbit_source_changes",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2361,
+    2374
+   ],
+   "size": 14,
+   "body_lines": 11,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_qbit_source_file_record"
+   ]
+  },
+  {
+   "name": "_sha256_file",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2377,
+    2382
+   ],
+   "size": 6,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder"
    ],
    "caller_count": 1,
    "dependencies": []
@@ -27647,6 +27755,26 @@
    ]
   },
   {
+   "name": "_selected_sources_need_copy",
+   "module": "backend/import_service.py",
+   "lines": [
+    3459,
+    3474
+   ],
+   "size": 16,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "start_folder_import_with_id"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_folder_import_selected_sources",
    "module": "backend/import_service.py",
    "lines": [
@@ -29700,6 +29828,26 @@
     "_qbit_map_path",
     "_s"
    ]
+  },
+  {
+   "name": "qbit_import_filter",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    3097,
+    3101
+   ],
+   "size": 5,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "qbit_import_inventory"
+   ],
+   "caller_count": 1,
+   "dependencies": []
   },
   {
    "name": "qbit_import_inventory",
