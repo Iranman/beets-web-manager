@@ -769,7 +769,19 @@ def _pending_review_is_quality_upgrade(folder_path: str) -> bool:
     """An informational quality-upgrade Review row (ai_service
     ``upgrade_review``) is at, inside or above ``folder_path``: importing
     ``<folder>/CD 01`` or a parent imports the upgrade's files too, so every
-    import path refuses it."""
+    import path refuses it. Fails closed: an unreadable or malformed queue
+    counts as an upgrade row, so no import runs blind (a missing queue file
+    is an empty queue)."""
+    if not _pending_review_path_key(folder_path):
+        return False
+    try:
+        items = json.loads(_AI_PENDING_FILE.read_text())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    if not isinstance(items, list):
+        return True
     return _pending_review_row_overlaps(folder_path, _pending_review_evidence_is_upgrade)
 
 

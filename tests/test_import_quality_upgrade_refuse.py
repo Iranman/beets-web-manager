@@ -161,6 +161,18 @@ class QualityUpgradeRowRefusedTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.get_json())
         self.start.assert_called_once()
 
+    def test_unreadable_queue_fails_closed_for_imports(self):
+        self.store.write_text("{not json")
+        self.assertTrue(prs._pending_review_is_quality_upgrade(str(self.normal)))
+        resp = self._generic_import(self.normal)
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        body, code = isvc.start_folder_import_with_id(
+            {"path": str(self.normal), "mb_albumid": REL, "mb_releasegroupid": RG})
+        self.assertEqual(code, 409, body)
+        self.start.assert_not_called()
+        self.store.unlink()  # a missing queue is an empty queue, not an error
+        self.assertFalse(prs._pending_review_is_quality_upgrade(str(self.normal)))
+
     def test_dismiss_still_removes_the_row(self):
         resp = self.client.delete("/api/ai-pending-review", headers=_CSRF, json={"path": str(self.torrent)})
         self.assertEqual(resp.status_code, 200, resp.get_json())
