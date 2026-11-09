@@ -26,7 +26,8 @@ class DuplicateEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.mkdtemp()
         self.lib = Library(os.path.join(self.td, "lib.blb"), directory=self.td)
-        old = [Item(title=f"T{i}", artist="A", album="B", mb_trackid=REC[i], path=f"/x/{i}.flac".encode())
+        old = [Item(title=f"T{i}", artist="A", album="B", albumartist="A", mb_trackid=REC[i],
+                    path=f"/x/{i}.mp3".encode(), format="MP3", bitrate=320000, samplerate=44100, bitdepth=0)
                for i in range(2)]
         self.album = self.lib.add_album(old)
         self.album.mb_releasegroupid, self.album.mb_albumid = RG, REL
@@ -62,7 +63,9 @@ class DuplicateEvidenceTests(unittest.TestCase):
         self.assertEqual(ev["recording_ids"], REC)
         self.assertEqual(ev["duplicates"], [{
             "album_id": self.album.id, "item_id": None, "mb_releasegroupid": RG, "mb_albumid": REL,
-            "item_count": 2, "recording_ids": REC}])
+            "item_count": 2, "recording_ids": REC, "albumartist": "A", "album": "B",
+            # Beets' stored quality per item; a lossy file's bitdepth 0 reads as None.
+            "items_quality": [{"format": "MP3", "bitrate": 320000, "samplerate": 44100, "bitdepth": None}] * 2}])
 
     def test_no_match_yields_null_fields(self):
         ev = ops_mod.duplicate_evidence(self._task(with_match=False), [self.album])

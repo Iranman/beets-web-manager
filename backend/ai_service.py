@@ -9,6 +9,7 @@ import functools, hashlib, json, os, re, shutil, stat, threading, time, uuid
 import urllib.error
 from backend.matching import similarity as _canonical_similarity
 from backend.matching.duplicate_identity import duplicate_is_already_in_library
+from backend.matching.quality_upgrade import quality_upgrade
 from backend.matching import (
     DETERMINISTIC_SLOT_ARTIST_TEXT_FLOOR as _SLOT_ARTIST_TEXT_FLOOR,
     candidate_is_unrelated as _candidate_is_unrelated,
@@ -2552,6 +2553,7 @@ def _ai_batch_duplicate_verdict(res: Dict[str, Any]) -> Dict[str, Any]:
         return {"proven": False, "reason": "not_only_duplicates" if rows else ""}
     album_ids: List[int] = []
     groups: List[str] = []
+    library: List[Dict[str, Any]] = []  # same-Release-Group library objects
     why = ""
     for row in rows:
         ok, why = duplicate_is_already_in_library(row.get("duplicate_evidence"))
@@ -2560,11 +2562,35 @@ def _ai_batch_duplicate_verdict(res: Dict[str, Any]) -> Dict[str, Any]:
         ev = row["duplicate_evidence"]
         rg = _s(ev.get("release_group_id")).strip().lower()
         groups.append(rg)
-        album_ids += [d["album_id"] for d in ev.get("duplicates") or [] if isinstance(d, dict)
-                      and _s(d.get("mb_releasegroupid")).strip().lower() == rg
-                      and isinstance(d.get("album_id"), int) and d["album_id"] not in album_ids]
+        for d in ev.get("duplicates") or []:
+            if isinstance(d, dict) and _s(d.get("mb_releasegroupid")).strip().lower() == rg and d not in library:
+                library.append(d)
+        album_ids += [d["album_id"] for d in library
+                      if isinstance(d.get("album_id"), int) and d["album_id"] not in album_ids]
     return {"proven": True, "reason": why, "release_group_id": groups[0] if len(set(groups)) == 1 else "",
-            "album_ids": album_ids}
+            "album_ids": album_ids, "library": library}
+
+
+def _ai_batch_quality_upgrade(dup: Dict[str, Any], res: Dict[str, Any], audio_report: Any) -> Optional[Dict[str, Any]]:
+    """The ``quality_upgrade`` evidence when a proven duplicate's incoming files
+    are a format upgrade over the library album(s) (user decision: show the
+    upgrade instead of skipping it), else None. Needs the B1 proof, one Release
+    Group, the Stage 1 audio report with every file inspected and accepted, and
+    Beets' stored quality for every library item; anything missing is "no"."""
+    rg = _s(dup.get("release_group_id"))
+    if not dup.get("proven") or not rg or not isinstance(audio_report, dict)             or audio_report.get("rejected") or audio_report.get("deferred"):
+        return None
+    roots = [Path(_s(r.get("path"))) for r in res.get("skipped") or [] if isinstance(r, dict) and _s(r.get("path"))]
+    props = [row.get("properties") for row in audio_report.get("accepted") or []
+             if isinstance(row, dict) and any(_path_is_under(Path(_s(row.get("path"))), root) for root in roots)]
+    items: List[Any] = []
+    for d in dup.get("library") or []:
+        quality = d.get("items_quality")
+        if not isinstance(quality, list) or len(quality) != d.get("item_count"):
+            return None  # an older plugin, or a capped list: Beets' quality is not known for every file
+        items += quality
+    found = quality_upgrade(props, items, _music_format_preferences())
+    return found and {"release_group_id": rg, "library_album_ids": list(dup.get("album_ids") or []), **found}
 
 
 def _ai_batch_albums_missing_release_group(album_ids: List[Any]) -> List[int]:
@@ -2729,6 +2755,25 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         folder_state.pop("pending_review", None)  # row now exists; drop the stash
         mark(status=status, current_step=current_step, review_item_id=review_id, **fields)
 
+    def upgrade_review(dup: Dict[str, Any], upgrade: Dict[str, Any], **fields) -> None:
+        # Informational only: nothing is imported, moved or replaced (the
+        # replace action is a later change); torrent files stay untouched.
+        first = next(iter(dup.get("library") or []), {})
+        artist = _s(first.get("albumartist")) or Path(folder).name
+        album = _s(first.get("album")) or Path(folder).name
+        ids = ", ".join(str(a) for a in upgrade["library_album_ids"])
+        why = (f"Quality upgrade available: {artist} - {album} (Release Group {upgrade['release_group_id']}) "
+               f"is already in the library{f' as album_id {ids}' if ids else ''} in {upgrade['library_format']}; "
+               f"this copy is {upgrade['source_format']}. Nothing was imported or replaced.")
+        log.append(f"  {why}")
+        review({"artist": artist, "albumartist": artist, "album": album, "mb_albumid": "",
+                "mb_releasegroupid": upgrade["release_group_id"], "confidence": "low", "reason": why},
+               {"origin_step": "quality_upgrade", "duplicate_rule": "quality_upgrade", "identity_rule": dup["reason"],
+                "quality_upgrade": upgrade, "ai_rank": None, "batch_job_id": batch_id},
+               status="review_required", current_step="upgrade available",
+               already_in_library_evidence={k: dup[k] for k in ("reason", "release_group_id", "album_ids")},
+               **fields)
+
     def plain_suggestion(reason: str) -> Dict[str, Any]:
         # No candidates: folder name only, empty IDs.
         return dict(_ai_batch_review_suggestion(folder, "", {}), reason=reason)
@@ -2860,7 +2905,7 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             preserve = True
             log.append("  Hardlinked source (another copy shares these files): copying instead of moving.")
         log.append(f"  Stage 1: Beets import ({'copy' if preserve else 'move'})")
-        _validate_import_source_audio(folder, log, reject_downloads=True, preserve_source=preserve)
+        audio_report = _validate_import_source_audio(folder, log, reject_downloads=True, preserve_source=preserve)
         audio = len(audio_files)
         # Same scale as import_service._beet_import_timeout_for_count (a higher layer).
         res = composite_workflows.reimport_source(
@@ -2901,7 +2946,10 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
             log.append(f"  {reason}")
             mark(status="review_required", current_step="imported; Release Group missing",
                  failure_reason=reason, missing_release_group_album_ids=missing, **fields)
-        elif partial and (dup := _ai_batch_duplicate_verdict(res))["proven"]:
+        elif partial and (dup := _ai_batch_duplicate_verdict(res))["proven"] and (
+                upgrade := _ai_batch_quality_upgrade(dup, res, audio_report)):
+            upgrade_review(dup, upgrade, **fields)
+        elif partial and dup["proven"]:
             note = (f"Imported; {len(partial)} skipped path(s) are already in the library "
                     f"(same Release Group, every recording present): {', '.join(partial)}")
             log.append(f"  {note}")
@@ -2926,9 +2974,13 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
     dup = _ai_batch_duplicate_verdict(res)
     if dup["proven"]:
         # Beets' duplicate check is name-only; this is the identity proof that
-        # the library already holds every recording (B1). A lossless torrent
-        # of a lossy library copy also lands here: skipped, no Review row
-        # (product question pending; change this branch to route it to Review).
+        # the library already holds every recording (B1). A better-format copy
+        # (Music Format Preferences) gets one informational Review row; same
+        # or lower quality, or quality unknown, is skipped with no Review row.
+        upgrade = _ai_batch_quality_upgrade(dup, res, audio_report)
+        if upgrade:
+            upgrade_review(dup, upgrade, stage="done")
+            return
         log.append("  Already in library (same Release Group, every recording present) - skipped; "
                    "no Review row")
         mark(status="skipped", current_step="already in library", failure_reason="already in library",

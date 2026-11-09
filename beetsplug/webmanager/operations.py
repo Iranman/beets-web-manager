@@ -816,6 +816,13 @@ def _duplicate_entry(obj) -> Dict[str, Any]:
         "item_count": len(items) if items is not None else None,
         "recording_ids": [_attr(lambda it=it: it.get("mb_trackid") or None)
                           for it in (items or [])[:_EVIDENCE_MAX_IDS]],
+        "albumartist": _attr(lambda: obj.get("albumartist") or None),
+        "album": _attr(lambda: obj.get("album") or None),
+        # What Beets stores about each file's audio, so Web Manager can tell
+        # a quality upgrade from a plain re-import without reading the files.
+        "items_quality": [{k: _attr(lambda it=it, k=k: it.get(k) or None)
+                           for k in ("format", "bitrate", "samplerate", "bitdepth")}
+                          for it in (items or [])[:_EVIDENCE_MAX_IDS]],
     }
 
 

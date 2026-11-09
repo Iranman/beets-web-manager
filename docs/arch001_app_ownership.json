@@ -25339,6 +25339,31 @@
    ]
   },
   {
+   "name": "_ai_batch_quality_upgrade",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2574,
+    2593
+   ],
+   "size": 20,
+   "body_lines": 18,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_music_format_preferences",
+    "_path_is_under",
+    "_s",
+    "quality_upgrade"
+   ]
+  },
+  {
    "name": "_ai_batch_unit_refusal",
    "module": "backend/ai_service.py",
    "lines": [
