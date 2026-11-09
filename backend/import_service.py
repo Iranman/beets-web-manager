@@ -1922,6 +1922,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # Only the engine's own canonical path is ever used from here on --
     # the raw client-supplied aldir is never reused after this point.
     aldir = str(import_source_evidence["path"])
+    # The Review page imports a row with an existing album here: an
+    # informational quality-upgrade row is refused like every import path.
+    if _pending_review_is_quality_upgrade(aldir):
+        return dict(QUALITY_UPGRADE_INFORMATIONAL), 409
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(aldir)

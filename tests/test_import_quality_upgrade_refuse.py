@@ -119,6 +119,15 @@ class QualityUpgradeRowRefusedTests(unittest.TestCase):
         self.assertNotIn(str(self.torrent), queued_paths, out)
         self._assert_untouched()
 
+    def test_reimport_disk_refused(self):
+        with mock.patch.object(isvc.composite_workflows, "inspect_import_source",
+                               side_effect=lambda p, **k: {"ok": True, "path": p}):
+            resp = self.client.post("/api/albums/reimport-disk", headers=_CSRF, json={
+                "aldir": str(self.torrent), "mb_albumid": REL, "existing_album_id": 5})
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        self.assertEqual(resp.get_json()["error_code"], CODE)
+        self._assert_untouched()
+
     def test_ai_import_folder_refused(self):
         with self.assertRaisesRegex(RuntimeError, "not available yet"):
             ai_service._ai_import_folder(str(self.torrent), REL, {}, [])
