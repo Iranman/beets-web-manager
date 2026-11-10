@@ -15,9 +15,9 @@ from backend.matching import (
     candidate_is_unrelated as _candidate_is_unrelated,
 )
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _env_int, _s
-from backend.library_service import _app_managed_download_path, _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
+from backend.library_service import _app_managed_download_path, _in_app_private_root, _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _remove_pending_review_for_path
 from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, _pending_review_is_quality_upgrade
 from backend.playlist_service import _music_format_preferences
@@ -25,7 +25,7 @@ from backend.ai_batch_state_service import _AI_BATCH_FAILED_FOLDER_STATUSES, _AI
 from backend.import_reconciliation_service import _ai_batch_reconcile_state
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE
 from backend.app_runtime import _MB_UUID_RE, _extract_mb_uuid, _path_is_under, _redact_security_text, DOWNLOADS_ALLOWED_ROOTS, TORRENT_SOURCE_ROOTS, validated_downloads_root
-from backend.slskd import RECOVERY_ORIGINAL_NAMES_SIDECAR, stage_selected_audio_files as _stage_selected_audio_files_impl
+from backend.slskd import APP_DOWNLOAD_MARKER, RECOVERY_ORIGINAL_NAMES_SIDECAR, app_download_marker_valid, stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_tree as _validate_audio_tree_preferences, handle_rejected_download as _handle_rejected_audio_download
 from helpers_mb import _mb_release_search, _fetch_mb_release_candidate, acoustid_api_key
 from backend.beets_adapter import lib, beets_adapter, BeetsError, BeetsUnavailableError, BeetsAuthError
@@ -487,6 +487,19 @@ def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artis
     )
 
 
+def _ai_artist_identity_verdict(candidate: Optional[Dict[str, Any]],
+                                source_artist: str) -> Tuple[Optional[bool], str]:
+    """``(identity_validated, rejection)`` from the AI artist gate. A missing
+    artist on either side proves nothing (#579): ``None`` = unresolved, so
+    the batch cache and Missing IDs (which need ``is True``) don't trust it."""
+    reason = _ai_artist_mismatch_reason(candidate, source_artist)
+    if reason:
+        return False, reason
+    if not (_s(source_artist).strip() and _s((candidate or {}).get("artist", "")).strip()):
+        return None, ""
+    return True, ""
+
+
 def _classify_openai_error(exc: Exception) -> str:
     """Classify an OpenAI request failure into a short, human-readable reason.
 
@@ -833,8 +846,8 @@ def _ai_suggest_album_internal(
                 + urllib.parse.urlencode({"query": _aa, "type": "artist"}))
         # Same artist gate as the folder path. Album consumers (Missing IDs,
         # batch cache) read confidence, so a rejection also drops it to low.
-        identity_rejection_reason = _ai_artist_mismatch_reason(selected_candidate, album.albumartist)
-        sug["identity_validated"] = not identity_rejection_reason
+        sug["identity_validated"], identity_rejection_reason = _ai_artist_identity_verdict(
+            selected_candidate, album.albumartist)
         sug["candidate_identity_error"] = identity_rejection_reason
         if identity_rejection_reason:
             sug["confidence"] = "low"
@@ -1673,8 +1686,8 @@ def _ai_suggest_folder_internal(folder_path: str, existing_album_id: int = 0,
         # a matching album title must never rescue a wrong-artist candidate
         # (2026-07-16, Voyager/Vitalic fix: "same title, different artist"
         # was slipping through an earlier AND-based version of this check).
-        identity_rejection_reason = _ai_artist_mismatch_reason(selected_candidate, guessed_artist)
-        sug["identity_validated"] = not bool(identity_rejection_reason)
+        sug["identity_validated"], identity_rejection_reason = _ai_artist_identity_verdict(
+            selected_candidate, guessed_artist)
         sug["candidate_identity_error"] = identity_rejection_reason
         sug["ai_available"] = ai_available
         sug["ai_unavailable_reason"] = ai_unavailable_reason
@@ -2095,14 +2108,16 @@ def _ai_batch_find_audio_dirs(root: str, log: Optional[List[str]] = None,
         if log is not None:
             log.append(f"folder not readable, skipped: {exc.filename} ({type(exc).__name__})")
 
-    # Scanning inside an app-managed root on purpose walks it normally.
-    skip_managed = not _app_managed_download_path(base)
+    # Scanning inside an app-managed root on purpose walks it normally. The
+    # app's private roots stay out of a user scan even without ownership proof
+    # (#566): skipping moves nothing.
+    skip_managed = not (_app_managed_download_path(base) or _in_app_private_root(base))
     found = set()
     for dirpath, dirnames, filenames in os.walk(base, onerror=_on_walk_error):
         here = Path(dirpath)
         kept = []
         for d in sorted(d for d in dirnames if not d.startswith(".")):
-            if skip_managed and _app_managed_download_path(here / d):
+            if skip_managed and (_app_managed_download_path(here / d) or _in_app_private_root(here / d)):
                 if log is not None:
                     log.append(f"app-managed download folder skipped: {here / d}")
                 continue
@@ -2204,7 +2219,7 @@ def _qbit_source_dir_reason(d: str, roots: List[str]) -> tuple:
     real, real_root = os.path.realpath(d), os.path.realpath(root)
     if real != real_root and not real.startswith(real_root.rstrip(os.sep) + os.sep):
         return root, "symlink"
-    if _app_managed_download_path(Path(d)):
+    if _app_managed_download_path(Path(d)) or _in_app_private_root(Path(d)):
         return root, "app_managed"
     return root, ""
 
@@ -2589,8 +2604,10 @@ def _ai_batch_qbit_unit_folder(folder_state: Dict[str, Any], fid: str, batch_id:
         validated_downloads_root(), AUDIO_EXT, folder, list(wanted.values()), Path(folder).parent.name,
         Path(folder).name, log, stage_prefix=prefix, force_stage=True,
         source_ids={str(p): ids[rel] for rel, p in wanted.items()})
+    # The stage's own ownership marker (#566) is the app's, not stale content.
+    own = {RECOVERY_ORIGINAL_NAMES_SIDECAR} | ({APP_DOWNLOAD_MARKER} if app_download_marker_valid(staged) else set())
     if os.path.normcase(os.path.abspath(staged)) == os.path.normcase(os.path.abspath(folder)) or \
-            _ai_batch_tree_entries(staged) - {RECOVERY_ORIGINAL_NAMES_SIDECAR} != set(wanted):
+            _ai_batch_tree_entries(staged) - own != set(wanted):
         raise RuntimeError("the staged copy does not hold exactly the torrent's files "
                            "(left over from an earlier attempt?); import refused")
     staged_files = [Path(staged, *rel.split("/")) for rel in wanted]

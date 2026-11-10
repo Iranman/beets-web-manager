@@ -19,6 +19,7 @@ from backend.audio_preferences import load_music_format_preferences as _load_mus
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release
 from backend.beets_adapter import beets_adapter, lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
+from backend.slskd import make_app_download_dir
 from backend.title_normalize import dash_suffix_group, split_ws_led, trailing_bracket_group
 from backend.library_cache import library_cache
 from backend.acoustid_service import _acoustid_hits_or_none, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _playlist_token_score, _read_file_media_tags
@@ -6630,7 +6631,7 @@ def _playlist_copy_source_files(files: Iterable[Path], dest_dir: Path,
         except Exception:
             pass
         try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            make_app_download_dir(dest_dir)  # #566: marked when this makes it
             shutil.copy2(str(source), str(dest))
             copied.append(str(dest))
         except Exception as ex:
