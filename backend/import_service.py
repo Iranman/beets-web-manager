@@ -11,7 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_inspection_incomplete_error, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_inspection_incomplete_error, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio, _has_hardlinked_file
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _pending_review_has_path_or_overlap, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
@@ -37,7 +37,7 @@ from backend.matching_service import BEETS_SKIP_REASON_CODES, EXISTING_ALBUM_MER
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
-from backend.serializers import _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
+from backend.serializers import _review_path_text, _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_matches, _pending_review_path_key
 from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, _pending_review_is_quality_upgrade
 from backend.app_runtime import PLEX_SYNC_AUTO_REFRESH
@@ -252,6 +252,20 @@ def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
     )
 
 
+def _wanted_track_matches(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
+    """True when ``row`` is the wanted track ``t``. When both sides carry a
+    recording id it decides (#447): with album-wide numbering a matching
+    disc/track slot can hold a different recording. The slot is only the
+    fallback when either side has no recording id."""
+    rid = _s(t.get("mb_trackid")).strip().lower()
+    row_rid = _s(row.get("mb_trackid")).strip().lower()
+    if rid and row_rid:
+        return row_rid == rid
+    return bool(int(t.get("track") or 0)
+                and (int(row.get("disc") or 1), int(row.get("track") or 0))
+                == (int(t.get("disc") or 1), int(t.get("track") or 0)))
+
+
 def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: str,
                                            wanted_tracks: List[Dict[str, Any]],
                                            log: list) -> int:
@@ -270,14 +284,15 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
     if not wanted_pairs and not wanted_mbids:
         return 0
 
-    def _row_matches_wanted(row: sqlite3.Row) -> bool:
+    def _row_matches_wanted(row: Dict[str, Any]) -> bool:
         pair = (int(row["disc"] or 1), int(row["track"] or 0))
         row_mbid = _s(row["mb_trackid"]) if "mb_trackid" in row.keys() else ""
         row_mbid = row_mbid.strip().lower()
-        if pair[1] and pair in wanted_pairs:
+        if any(_wanted_track_matches(row, t) for t in wanted):
             return True
-        if row_mbid and row_mbid in wanted_mbids:
-            return True
+        # The fuzzy fallback never overrides a recording-id conflict (#447):
+        # a row whose recording id differs from a wanted track's is not it.
+        fuzzy_targets = [t for t in wanted if not (row_mbid and t.get("mb_trackid"))]
         item = {
             "title": _s(row["title"]) if "title" in row.keys() else "",
             "path": "",
@@ -288,7 +303,7 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
         }
         return any(
             _album_track_score(item, target) >= _MB_TRACK_REPAIR_MATCH_THRESHOLD
-            for target in wanted
+            for target in fuzzy_targets
         )
 
     try:
@@ -1760,19 +1775,24 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
     verify_fill = bool(wanted_tracks) and not replace_existing
     fill_item_ids: List[int] = []
     if verify_fill:
-        def _is_wanted(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
-            rid = _s(t.get("mb_trackid")).strip().lower()
-            return bool(
-                (int(t.get("track") or 0)
-                 and (int(row.get("disc") or 1), int(row.get("track") or 0))
-                 == (int(t.get("disc") or 1), int(t.get("track") or 0)))
-                or (rid and _s(row.get("mb_trackid")).strip().lower() == rid))
         try:
             imported_rows = composite_workflows.find_all_items_by_album_id(int(aid))
         except Exception as ex:
             _merge_failed(f"could not read the imported items ({ex})")
         fill_item_ids = [int(r["id"]) for r in imported_rows
-                         if any(_is_wanted(r, t) for t in wanted_tracks)]
+                         if any(_wanted_track_matches(r, t) for t in wanted_tracks)]
+        # A row in a requested slot that is not the requested recording is
+        # a conflict, not an extra track: refuse before merging it (#447
+        # QA N1). No requested track at all means nothing to merge (N2).
+        conflicts = [int(r["id"]) for r in imported_rows
+                     if int(r["id"]) not in fill_item_ids
+                     and (int(r.get("disc") or 1), int(r.get("track") or 0)) in {
+                         (int(t.get("disc") or 1), int(t.get("track") or 0))
+                         for t in wanted_tracks if int(t.get("track") or 0)}]
+        if conflicts or not fill_item_ids:
+            _merge_failed("the imported file(s) are not the requested recording(s)"
+                          + (f" (item_id(s) {', '.join(map(str, conflicts))} sit in a requested "
+                             "slot with another recording)" if conflicts else ""))
     try:
         aid = _merge_imported_album_into_existing(
             aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
@@ -1795,7 +1815,7 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
         # requested tracks still absent from the album are reported,
         # not failed (QA N1); the source scan narrows wanted_tracks.
         undelivered_tracks = [t for t in requested_tracks
-                              if not any(_is_wanted(r, t) for r in existing_rows)]
+                              if not any(_wanted_track_matches(r, t) for r in existing_rows)]
         if undelivered_tracks:
             log.append(f"  [merge] The source did not deliver {len(undelivered_tracks)} requested "
                        f"track(s), still missing from album_id {existing_album_id}: "
@@ -2015,7 +2035,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
         # Web Manager mounts the downloads root and (read-only) the library
         # in the documented compose, so the audio policy reads the files here.
-        _validate_import_source_audio(aldir, log, reject_downloads=True)
+        # #567: a hardlinked download is copied and its rejected files kept.
+        keep_hardlinked_source = not source_is_music_library and _has_hardlinked_file(aldir)
+        _validate_import_source_audio(aldir, log, reject_downloads=True,
+                                      preserve_source=True if keep_hardlinked_source else None)
         log.append(f"[1/3] Importing '{Path(aldir).name}' with Beets as MB release {mb_albumid}…")
         import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_file_count", 0))
         # Beets' own importer does the work (beet import -q --search-id
@@ -2038,7 +2061,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "existing_album_id": existing_album_id,
             "mb_albumid": mb_albumid,
             "mb_releasegroupid": planned_rg,
-            "use_move": not source_is_music_library and not _preserve_torrent_source_path(aldir),
+            "use_move": (not source_is_music_library and not _preserve_torrent_source_path(aldir)
+                         and not keep_hardlinked_source),
             "in_place": source_is_music_library,
             "duplicate_action": "keep" if existing_album_id else "skip",
             # A missing-track fill holds only the missing tracks; Beets would
@@ -2162,33 +2186,10 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         return _refuse("the MusicBrainz release could not be loaded, so the downloaded files were not "
                        f"verified ({mb.get('error') or 'lookup failed'}).")
     mb_tracks = mb.get("tracks") or []
-    wanted_pairs = {
-        (int(t.get("disc") or 1), int(t.get("track") or 0))
-        for t in wanted
-        if int(t.get("track") or 0)
-    }
-    wanted_mbids = {
-        _s(t.get("mb_trackid", "")).strip().lower()
-        for t in wanted
-        if t.get("mb_trackid")
-    }
-    target_tracks = [
-        t for t in mb_tracks
-        if (
-            (int(t.get("disc") or 1), int(t.get("track") or 0)) in wanted_pairs
-            or _s(t.get("mb_trackid", "")).strip().lower() in wanted_mbids
-        )
-    ]
-    target_by_pair = {
-        (int(t.get("disc") or 1), int(t.get("track") or 0)): t
-        for t in target_tracks
-        if int(t.get("track") or 0)
-    }
-    target_by_mbid = {
-        _s(t.get("mb_trackid", "")).strip().lower(): t
-        for t in target_tracks
-        if t.get("mb_trackid")
-    }
+    # The recording id decides when both sides carry one (#447); the
+    # disc/track slot is only the fallback, for targets and for items.
+    target_tracks = [t for t in mb_tracks
+                     if any(_wanted_track_matches(t, w) for w in wanted)]
     if not target_tracks:
         return _refuse("none of the requested tracks is on the selected MusicBrainz release.")
 
@@ -2221,12 +2222,15 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             "length": float(row["length"] or 0),
         }
         item_mbid = _s(item.get("mb_trackid", "")).strip().lower()
-        pair = (int(item.get("disc") or 1), int(item.get("track") or 0))
-        target = target_by_mbid.get(item_mbid) or target_by_pair.get(pair)
-        if not target:
-            best = _best_album_track_match(item, target_tracks)
+        target = next((t for t in target_tracks if _wanted_track_matches(item, t)), None)
+        # A fuzzy title/length match never overrides a recording-id conflict.
+        fuzzy_targets = [t for t in target_tracks if not (item_mbid and t.get("mb_trackid"))]
+        fuzzy_only = False
+        if not target and fuzzy_targets:
+            best = _best_album_track_match(item, fuzzy_targets)
             if float(best.get("score") or 0) >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD:
                 target = best.get("track") or {}
+                fuzzy_only = True
         if not target:
             # A downloaded file that maps to no requested track is not proven
             # to belong in this album.
@@ -2242,6 +2246,14 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             continue
         cands = list(lookup.data or [])
         if not cands:
+            if fuzzy_only:
+                # #447 mixed fill: a title/length match alone is textual
+                # evidence. Without a fingerprint result nothing proves the
+                # file, and the slot authorization covers requested slots
+                # only, so it must not ride along with the proven tracks.
+                unverified.append({"item_id": int(row["id"]), "title": item.get("title", ""),
+                                   "reason": "only a title/length match, no AcoustID result"})
+                continue
             no_result += 1
             continue
         checked += 1
@@ -2601,7 +2613,7 @@ def _import_review_selected_source_files(
             row = raw_row if isinstance(raw_row, dict) else {}
             status = _s(row.get("status")).strip().lower()
             if status in _IMPORT_REVIEW_IMPORTABLE_STATUSES:
-                raw_source = _s(row.get("source_path")).strip()
+                raw_source = _review_path_text(row.get("source_path"))
                 if raw_source:
                     raw_files.append(raw_source)
 
@@ -2628,11 +2640,11 @@ def _import_target_preview_cache_key(payload: Dict[str, Any]) -> str:
                 continue
             tracks.append({
                 "status": _s(row.get("status")).strip().lower(),
-                "source_path": _s(row.get("source_path")).strip(),
+                "source_path": _review_path_text(row.get("source_path")),
                 "title": _s(row.get("title") or row.get("mb_title") or row.get("local_title")).strip(),
                 "num": _s(row.get("num") or row.get("track")).strip(),
             })
-    source_path = _s(payload.get("path")).strip()
+    source_path = _review_path_text(payload.get("path"))
     source_marker: Dict[str, Any] = {"path": source_path}
     source_for_stat, _source_error = _resolve_import_review_source_path(
         source_path,
@@ -2698,7 +2710,7 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
     Artist Folder/Album (Year) {mb_releasegroupid}/Artist - Album - 00 - Title.ext
     It performs no filesystem writes and never calls beets.
     """
-    folder_path = _s(payload.get("path")).strip()
+    folder_path = _review_path_text(payload.get("path"))
     release_group_id = _extract_mb_uuid(
         _s(payload.get("release_group_id") or payload.get("mb_releasegroupid"))
     )
@@ -2815,7 +2827,7 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
             tracks.append({
                 "track": track_num,
                 "status": status,
-                "source_path": _s(row.get("source_path")).strip(),
+                "source_path": _review_path_text(row.get("source_path")),
                 "target_filename": "",
                 "target_path": "",
                 "target_exists": False,
@@ -2830,7 +2842,7 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         source_file: Optional[Path] = None
-        row_source_str = _s(row.get("source_path")).strip()
+        row_source_str = _review_path_text(row.get("source_path"))
         if row_source_str and trusted_source_path is not None:
             # SEC-002 CodeQL repository-wide closure finding: this preview
             # endpoint took row["source_path"] straight from the request
@@ -3035,8 +3047,8 @@ def _import_review_auto_key(payload: Dict[str, Any], selected_files: List[Path],
                             release_group_id: str, representative_release_id: str) -> str:
     basis = {
         "version": 1,
-        "review_item_id": _s(payload.get("review_item_id")).strip(),
-        "path": _s(payload.get("path")).strip(),
+        "review_item_id": _review_path_text(payload.get("review_item_id")),
+        "path": _review_path_text(payload.get("path")),
         "release_group_id": release_group_id,
         "representative_release_id": representative_release_id,
         "selected_files": sorted(str(path.resolve(strict=False)) for path in selected_files),
@@ -3049,8 +3061,10 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Single backend gate for Import Review auto-enqueue decisions."""
     payload = payload or {}
     selected_match = payload.get("selected_match") if isinstance(payload.get("selected_match"), dict) else {}
-    folder_path = _s(payload.get("path")).strip()
-    review_item_id = _s(payload.get("review_item_id")).strip()
+    folder_path = _s(payload.get("path"))  # literal paths (#565)
+    if not folder_path.strip():
+        folder_path = ""
+    review_item_id = _s(payload.get("review_item_id"))
     release_group_id = _extract_mb_uuid(
         _s(payload.get("mb_releasegroupid") or payload.get("release_group_id") or selected_match.get("release_group_id"))
     )
@@ -3747,7 +3761,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     }
     """
     payload    = payload_in if isinstance(payload_in, dict) else {}
-    folder_path   = _s(payload.get("path")).strip()
+    folder_path   = _review_path_text(payload.get("path"))
     raw_mb_albumid = _s(payload.get("mb_albumid") or payload.get("mbid")).strip()
     raw_mb_releasegroupid = _s(
         payload.get("mb_releasegroupid")
@@ -3935,6 +3949,13 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "[torrent] Move requested, but source is under a protected "
                 "torrent root; using --copy so qBittorrent source files remain."
             )
+        # #567: a moved hardlinked file shares its inode with the other link
+        # (e.g. a seeding torrent), so tag writes would rewrite that copy too.
+        keep_hardlinked_folder = (use_move and not selected_subset_import and not preserve_torrent_source
+                                  and _has_hardlinked_file(folder_path))
+        if keep_hardlinked_folder:
+            log.append("[import] A source file is hardlinked; using --copy and keeping the source folder.")
+        keep_whole_source = preserve_torrent_source or keep_hardlinked_folder
         # F8: a selected torrent source or hardlinked file is copied and kept.
         keep_selected_sources = selected_subset_import and (
             preserve_torrent_source or _selected_sources_need_copy(selected_source_files))
@@ -3944,7 +3965,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         if selected_subset_import:
             import_mode = "--copy" if keep_selected_sources else "--move"
         else:
-            import_mode = "--copy" if preserve_torrent_source or not use_move else "--move"
+            import_mode = "--copy" if keep_whole_source or not use_move else "--move"
         # The confirmed Release is imported as confirmed: never swapped for
         # another Release (or Release Group) here.
         mb_identity, resolved_releasegroupid, selected_releasegroupid = _folder_import_settle_release_group(
@@ -3964,7 +3985,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
         else:
             _validate_import_source_audio(folder_path, log, reject_downloads=True,
-                                          preserve_source=preserve_torrent_source)
+                                          preserve_source=keep_whole_source)
         log.append(f"[1/2] Importing '{Path(folder_path).name}' with MB ID {mb_albumid}…")
         import_timeout = _beet_import_timeout(import_folder_path)
 
@@ -4049,7 +4070,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 )
             else:
                 log.append(f"Partial import complete. Removed {removed_selected} imported source file(s).")
-        if keep_selected_sources or (preserve_torrent_source and not selected_subset_import):
+        if keep_selected_sources or (keep_whole_source and not selected_subset_import):
             # A copied torrent source keeps every file, its artwork included.
             log.append("  [cleanup] Source folder kept: it holds protected torrent or hardlinked files.")
         else:

@@ -186,5 +186,41 @@ class QbitReviewRowWholeFolderImportTests(ReviewPartialImportSourceSafetyTests):
     test_rule_unit = None
 
 
+class WholeFolderHardlinkImportTests(QbitReviewRowWholeFolderImportTests):
+    """#567: a whole-folder Review import with move:true, outside the torrent
+    roots, copies a folder holding a hardlinked file and keeps every source."""
+
+    def setUp(self):
+        super().setUp()
+        self.rows = [{"path": str(self.src), "evidence": {}}]  # not a torrent row
+        patcher = mock.patch.object(isvc, "_validate_import_source_audio")
+        self.validate = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_hardlinked_file_forces_copy_and_keeps_sources(self):
+        link = self.src.parent / "seeding-copy.flac"
+        try:
+            os.link(self.selected, link)
+        except OSError as ex:  # pragma: no cover - filesystem without hardlinks
+            self.skipTest(f"hardlinks unsupported: {ex}")
+        before = self._run()
+        self._assert_copied_and_untouched(before)
+        self.assertEqual(os.stat(self.selected).st_nlink, before.st_nlink)
+        self.assertEqual(link.read_bytes(), b"torrent-bytes-1")
+        self.assertEqual((self.src / "02 - Two.flac").read_bytes(), b"torrent-bytes-2")
+        # Rejected files are kept, never quarantined or deleted.
+        self.assertIs(self.validate.call_args.kwargs.get("preserve_source"), True)
+        self.assertTrue(any("hardlinked" in line for line in self.result["log"]), self.result["log"])
+
+    def test_single_link_folder_still_moves(self):
+        self._run()
+        self.assertEqual([p["use_move"] for p in self.plan_payloads], [True])
+        self.assertIs(self.validate.call_args.kwargs.get("preserve_source"), False)
+
+    test_qbittorrent_row_is_copied_and_kept_with_move_allowed = None
+    test_row_without_qbittorrent_origin_still_moves = None
+    test_unreadable_queue_copies = None
+
+
 if __name__ == "__main__":
     unittest.main()

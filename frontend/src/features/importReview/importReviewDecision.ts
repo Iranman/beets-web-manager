@@ -165,10 +165,10 @@ export function selectedImportSourceFiles(
 }
 
 export function actionLabel(item: ReviewItem, selectedMatch?: SelectedMatch, preview?: ImportTargetPreviewResponse): string {
+  if (selectedMatch?.identity_validated === false) return 'Import blocked';
   if (item.type === 'library_no_mb') return item.target_kind === 'item' ? 'Attach recording ID' : 'Match album';
   const selectedCount = selectedMatch ? selectedImportSourceFiles(selectedMatch, preview).length : 0;
   const previewCount = preview?.tracks_to_import_count ?? selectedCount;
-  if (selectedMatch?.identity_validated === false) return 'Import blocked';
   if (selectedMatch?.is_partial_import) {
     const n = Math.max(0, Math.min(selectedCount || previewCount, previewCount));
     return existingAlbumId(item)
@@ -215,6 +215,34 @@ export function targetPreviewBlockReason(
   return '';
 }
 
+export const IDENTITY_REJECTED_REASON = 'Import blocked: representative release does not belong to selected Release Group.';
+
+/** The identity fields of a suggestion that may have rejected a candidate. */
+export type IdentityRejectionSource = {
+  identity_validated?: boolean;
+  candidate_identity_error?: string;
+  mb_releasegroupid?: string;
+  representative_mb_albumid?: string;
+  mb_albumid?: string;
+};
+
+/**
+ * The backend's identity rejection that still applies to a candidate, or null.
+ * The candidate track comparison only checks Release Group membership, so a
+ * rejection the suggestion recorded for the same Release Group (or release)
+ * must survive when a match is rebuilt from that comparison.
+ */
+export function identityRejectionFor(
+  releaseGroupId: string,
+  releaseId: string,
+  source?: IdentityRejectionSource,
+): string | null {
+  if (source?.identity_validated !== false) return null;
+  const sameCandidate = sameMbid(releaseGroupId, source.mb_releasegroupid)
+    || sameMbid(releaseId, source.representative_mb_albumid || source.mb_albumid);
+  return sameCandidate ? (source.candidate_identity_error || '').trim() || IDENTITY_REJECTED_REASON : null;
+}
+
 export function applyBlockReason(
   item: ReviewItem,
   mbid: string,
@@ -229,6 +257,10 @@ export function applyBlockReason(
   }
   const importLike = item.type === 'pending_ai' && !existingAlbumId(item);
   if (!importLike) {
+    // A repair retags an existing album, so a rejected identity blocks it too.
+    if (selectedMatch?.identity_validated === false) {
+      return selectedMatch.candidate_identity_error || IDENTITY_REJECTED_REASON;
+    }
     if (selectedMatch?.preflight_status === 'failed') {
       return 'Import blocked because this candidate failed tracklist preflight.';
     }
@@ -247,7 +279,7 @@ export function applyBlockReason(
     return 'Import blocked because this candidate does not include a representative release for tracklist comparison.';
   }
   if (selectedMatch.identity_validated === false) {
-    return selectedMatch.candidate_identity_error || 'Import blocked: representative release does not belong to selected Release Group.';
+    return selectedMatch.candidate_identity_error || IDENTITY_REJECTED_REASON;
   }
   if (!selectedMatch.track_mapping.length) {
     return 'Import blocked until the visible candidate track comparison finishes.';
