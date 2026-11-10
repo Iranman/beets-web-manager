@@ -252,6 +252,20 @@ def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
     )
 
 
+def _wanted_track_matches(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
+    """True when ``row`` is the wanted track ``t``. When both sides carry a
+    recording id it decides (#447): with album-wide numbering a matching
+    disc/track slot can hold a different recording. The slot is only the
+    fallback when either side has no recording id."""
+    rid = _s(t.get("mb_trackid")).strip().lower()
+    row_rid = _s(row.get("mb_trackid")).strip().lower()
+    if rid and row_rid:
+        return row_rid == rid
+    return bool(int(t.get("track") or 0)
+                and (int(row.get("disc") or 1), int(row.get("track") or 0))
+                == (int(t.get("disc") or 1), int(t.get("track") or 0)))
+
+
 def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: str,
                                            wanted_tracks: List[Dict[str, Any]],
                                            log: list) -> int:
@@ -270,14 +284,15 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
     if not wanted_pairs and not wanted_mbids:
         return 0
 
-    def _row_matches_wanted(row: sqlite3.Row) -> bool:
+    def _row_matches_wanted(row: Dict[str, Any]) -> bool:
         pair = (int(row["disc"] or 1), int(row["track"] or 0))
         row_mbid = _s(row["mb_trackid"]) if "mb_trackid" in row.keys() else ""
         row_mbid = row_mbid.strip().lower()
-        if pair[1] and pair in wanted_pairs:
+        if any(_wanted_track_matches(row, t) for t in wanted):
             return True
-        if row_mbid and row_mbid in wanted_mbids:
-            return True
+        # The fuzzy fallback never overrides a recording-id conflict (#447):
+        # a row whose recording id differs from a wanted track's is not it.
+        fuzzy_targets = [t for t in wanted if not (row_mbid and t.get("mb_trackid"))]
         item = {
             "title": _s(row["title"]) if "title" in row.keys() else "",
             "path": "",
@@ -288,7 +303,7 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
         }
         return any(
             _album_track_score(item, target) >= _MB_TRACK_REPAIR_MATCH_THRESHOLD
-            for target in wanted
+            for target in fuzzy_targets
         )
 
     try:
@@ -1760,19 +1775,24 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
     verify_fill = bool(wanted_tracks) and not replace_existing
     fill_item_ids: List[int] = []
     if verify_fill:
-        def _is_wanted(row: Dict[str, Any], t: Dict[str, Any]) -> bool:
-            rid = _s(t.get("mb_trackid")).strip().lower()
-            return bool(
-                (int(t.get("track") or 0)
-                 and (int(row.get("disc") or 1), int(row.get("track") or 0))
-                 == (int(t.get("disc") or 1), int(t.get("track") or 0)))
-                or (rid and _s(row.get("mb_trackid")).strip().lower() == rid))
         try:
             imported_rows = composite_workflows.find_all_items_by_album_id(int(aid))
         except Exception as ex:
             _merge_failed(f"could not read the imported items ({ex})")
         fill_item_ids = [int(r["id"]) for r in imported_rows
-                         if any(_is_wanted(r, t) for t in wanted_tracks)]
+                         if any(_wanted_track_matches(r, t) for t in wanted_tracks)]
+        # A row in a requested slot that is not the requested recording is
+        # a conflict, not an extra track: refuse before merging it (#447
+        # QA N1). No requested track at all means nothing to merge (N2).
+        conflicts = [int(r["id"]) for r in imported_rows
+                     if int(r["id"]) not in fill_item_ids
+                     and (int(r.get("disc") or 1), int(r.get("track") or 0)) in {
+                         (int(t.get("disc") or 1), int(t.get("track") or 0))
+                         for t in wanted_tracks if int(t.get("track") or 0)}]
+        if conflicts or not fill_item_ids:
+            _merge_failed("the imported file(s) are not the requested recording(s)"
+                          + (f" (item_id(s) {', '.join(map(str, conflicts))} sit in a requested "
+                             "slot with another recording)" if conflicts else ""))
     try:
         aid = _merge_imported_album_into_existing(
             aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,
@@ -1795,7 +1815,7 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
         # requested tracks still absent from the album are reported,
         # not failed (QA N1); the source scan narrows wanted_tracks.
         undelivered_tracks = [t for t in requested_tracks
-                              if not any(_is_wanted(r, t) for r in existing_rows)]
+                              if not any(_wanted_track_matches(r, t) for r in existing_rows)]
         if undelivered_tracks:
             log.append(f"  [merge] The source did not deliver {len(undelivered_tracks)} requested "
                        f"track(s), still missing from album_id {existing_album_id}: "
@@ -2162,33 +2182,10 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         return _refuse("the MusicBrainz release could not be loaded, so the downloaded files were not "
                        f"verified ({mb.get('error') or 'lookup failed'}).")
     mb_tracks = mb.get("tracks") or []
-    wanted_pairs = {
-        (int(t.get("disc") or 1), int(t.get("track") or 0))
-        for t in wanted
-        if int(t.get("track") or 0)
-    }
-    wanted_mbids = {
-        _s(t.get("mb_trackid", "")).strip().lower()
-        for t in wanted
-        if t.get("mb_trackid")
-    }
-    target_tracks = [
-        t for t in mb_tracks
-        if (
-            (int(t.get("disc") or 1), int(t.get("track") or 0)) in wanted_pairs
-            or _s(t.get("mb_trackid", "")).strip().lower() in wanted_mbids
-        )
-    ]
-    target_by_pair = {
-        (int(t.get("disc") or 1), int(t.get("track") or 0)): t
-        for t in target_tracks
-        if int(t.get("track") or 0)
-    }
-    target_by_mbid = {
-        _s(t.get("mb_trackid", "")).strip().lower(): t
-        for t in target_tracks
-        if t.get("mb_trackid")
-    }
+    # The recording id decides when both sides carry one (#447); the
+    # disc/track slot is only the fallback, for targets and for items.
+    target_tracks = [t for t in mb_tracks
+                     if any(_wanted_track_matches(t, w) for w in wanted)]
     if not target_tracks:
         return _refuse("none of the requested tracks is on the selected MusicBrainz release.")
 
@@ -2221,12 +2218,15 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             "length": float(row["length"] or 0),
         }
         item_mbid = _s(item.get("mb_trackid", "")).strip().lower()
-        pair = (int(item.get("disc") or 1), int(item.get("track") or 0))
-        target = target_by_mbid.get(item_mbid) or target_by_pair.get(pair)
-        if not target:
-            best = _best_album_track_match(item, target_tracks)
+        target = next((t for t in target_tracks if _wanted_track_matches(item, t)), None)
+        # A fuzzy title/length match never overrides a recording-id conflict.
+        fuzzy_targets = [t for t in target_tracks if not (item_mbid and t.get("mb_trackid"))]
+        fuzzy_only = False
+        if not target and fuzzy_targets:
+            best = _best_album_track_match(item, fuzzy_targets)
             if float(best.get("score") or 0) >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD:
                 target = best.get("track") or {}
+                fuzzy_only = True
         if not target:
             # A downloaded file that maps to no requested track is not proven
             # to belong in this album.
@@ -2242,6 +2242,14 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             continue
         cands = list(lookup.data or [])
         if not cands:
+            if fuzzy_only:
+                # #447 mixed fill: a title/length match alone is textual
+                # evidence. Without a fingerprint result nothing proves the
+                # file, and the slot authorization covers requested slots
+                # only, so it must not ride along with the proven tracks.
+                unverified.append({"item_id": int(row["id"]), "title": item.get("title", ""),
+                                   "reason": "only a title/length match, no AcoustID result"})
+                continue
             no_result += 1
             continue
         checked += 1
