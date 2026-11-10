@@ -453,6 +453,34 @@ class ConfirmedImportJobTests(unittest.TestCase):
         # #567: a moved hardlink would have tag writes reach the seeding copy.
         self.assertEqual(self._reimport_download(link=True), (True, False))
 
+    def test_reimport_disk_keeps_a_rejected_hardlinked_download(self):
+        # #586: the real audio policy with "delete" handling leaves it in place.
+        import backend.ai_service as ai
+        import backend.library_service as libsvc
+        isvc = self.isvc
+        self.ad = _adapter({"id": 9, "mb_albumid": REL, "mb_releasegroupid": RG})
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name) / "Artist - Album"
+        folder.mkdir()
+        track = folder / "01.flac"
+        track.write_bytes(b"x")
+        try:
+            os.link(track, Path(tmp.name) / "seed.flac")
+        except OSError as ex:  # pragma: no cover - filesystem without hardlinks
+            self.skipTest(f"hardlinks unsupported: {ex}")
+        report = {"rejected": [{"path": str(track), "message": "Rejected download", "reasons": ["format"]}]}
+        aldir = str(folder)
+        with mock.patch.object(isvc, "_validate_import_source_audio", ai._validate_import_source_audio),                 mock.patch.object(ai, "_music_format_preferences",
+                                  return_value={"rejected_download_handling": "delete"}),                 mock.patch.object(ai, "_validate_audio_tree_preferences", return_value=report),                 mock.patch.object(isvc.composite_workflows, "inspect_import_source",
+                                  return_value={"ok": True, "path": aldir, "audio_file_count": 1}),                 mock.patch.object(isvc, "_resolve_album_release_for_import", return_value=REL),                 mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=False),                 mock.patch.object(libsvc, "_preserve_torrent_source_file", return_value=False):
+            body, code = isvc.start_reimport_disk({"aldir": aldir, "mb_albumid": REL, "skip_import_lock": True})
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.result["status"], "failed", self.result)
+        self.assertEqual((track.read_bytes(), os.stat(track).st_nlink), (b"x", 2))
+        self.assertTrue(any("left in place" in line for line in self.result["log"]), self.result["log"])
+        self.ad.run_import.assert_not_called()
+
     def test_reimport_disk_still_moves_a_single_link_download(self):
         self.assertEqual(self._reimport_download(link=False), (False, True))
 
