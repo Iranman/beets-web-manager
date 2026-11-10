@@ -181,6 +181,11 @@ _AI_BATCH_FAILED_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "tim
 _AI_BATCH_SKIPPED_FOLDER_STATUSES = {"skipped", "canceled"}
 
 
+# The source folder (or every torrent-owned file in it) is gone: permanent.
+# Never retried and never given a Review row; a new batch rediscovers moved content.
+_AI_BATCH_SOURCE_MISSING_FOLDER_STATUSES = {"source_missing"}
+
+
 _AI_BATCH_TERMINAL_FOLDER_STATUSES = (
     _AI_BATCH_IMPORTED_FOLDER_STATUSES
     | _AI_BATCH_REVIEW_FOLDER_STATUSES
@@ -188,6 +193,7 @@ _AI_BATCH_TERMINAL_FOLDER_STATUSES = (
     | _AI_BATCH_REPLACEMENT_FOLDER_STATUSES
     | _AI_BATCH_FAILED_FOLDER_STATUSES
     | _AI_BATCH_SKIPPED_FOLDER_STATUSES
+    | _AI_BATCH_SOURCE_MISSING_FOLDER_STATUSES
 )
 
 
@@ -258,6 +264,7 @@ def _ai_batch_recompute_counts(state: Dict[str, Any]) -> None:
     state["folders_replacement_unavailable"] = status_counts.get("replacement_unavailable", 0)
     state["folders_failed"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_FAILED_FOLDER_STATUSES)
     state["folders_skipped"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_SKIPPED_FOLDER_STATUSES)
+    state["folders_source_missing"] = sum(status_counts.get(s, 0) for s in _AI_BATCH_SOURCE_MISSING_FOLDER_STATUSES)
     state["folders_unfinished"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_UNFINISHED_FOLDER_STATUSES)
     # Counted per-folder rather than via status_counts: a folder that has
     # exhausted _AI_BATCH_MAX_FOLDER_RETRIES keeps its original status
@@ -284,10 +291,12 @@ def _ai_batch_recompute_counts(state: Dict[str, Any]) -> None:
 
 def _ai_batch_terminal_summary(state: Dict[str, Any]) -> str:
     unreadable = int(state.get("folders_unreadable") or 0)
+    missing = int(state.get("folders_source_missing") or 0)
     return (
         f"{int(state.get('folders_processed') or 0)} folder(s) processed; "
         f"{int(state.get('folders_attention') or 0)} need attention."
         + (f" {unreadable} unreadable folder(s) skipped." if unreadable else "")
+        + (f" {missing} source folder(s) missing." if missing else "")
     )
 
 
@@ -322,7 +331,8 @@ def _ai_batch_recalculate_batch_state(state: Dict[str, Any], log: Optional[list]
         return False
     if total <= 0 or processed < total:
         return False
-    attention = int(state.get("folders_attention") or 0) + int(state.get("folders_skipped") or 0)
+    attention = (int(state.get("folders_attention") or 0) + int(state.get("folders_skipped") or 0)
+                 + int(state.get("folders_source_missing") or 0))
     next_status = "completed_with_warnings" if attention else "completed"
     changed = (
         previous_status != next_status

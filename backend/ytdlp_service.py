@@ -11,6 +11,7 @@ import logging
 import urllib.error
 from backend.security import OutboundPolicyError, implicit_rule_for_url, parse_spotiflac_services, redact_url_for_log, validate_outbound_url
 from backend.ytdlp_guard import ytdlp_guarded_options
+from backend.slskd import make_app_download_dir
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, YTDLP_ALLOW_BROWSER_COOKIES, YTDLP_COOKIES_FROM_BROWSER, YTDLP_COOKIES_FROM_BROWSER_FALLBACK, YTDLP_COOKIE_FALLBACKS, YTDLP_COOKIE_FILE, YTDLP_NETRC_FILE, YTDLP_PO_PROVIDER_URL, YTDLP_REQUIRE_YOUTUBE_AUTH, _YTDLP_AUTH_SMOKE_TTL, _YTDLP_BGUTIL_PIP_PACKAGE, _YTDLP_COOKIE_REJECTED_FILE, _YTDLP_PIP_FALLBACK_PACKAGE, _YTDLP_PIP_PACKAGE, _YTDLP_RUNTIME_BIN_DIR, _plugin_install_log, _s, _ur, _ytdlp_auth_smoke_cache, _ytdlp_auth_smoke_lock, _ytdlp_ready
@@ -877,7 +878,7 @@ def _spotiflac_download_url(url: str, dest_dir: str, log: list, label: str = "")
         services = _spotiflac_services()
     except ValueError as ex:
         raise RuntimeError(str(ex)) from None
-    os.makedirs(dest_dir, exist_ok=True)
+    make_app_download_dir(dest_dir)
     before = _audio_files_in_dir(dest_dir)
     links_before = _symlinks_in_dir(dest_dir)
     cmd = _spotiflac_command(log) + [url, dest_dir]
@@ -1059,7 +1060,7 @@ def _ytdlp_album_download(artist: str, album: str, year: str,
     js_runtime = _require_ytdlp_js_runtime() if _ytdlp_source_requires_js(source) else {}
 
     outtmpl = _ytdlp_outtmpl(dest_dir, '%(title)s.%(ext)s')
-    os.makedirs(dest_dir, exist_ok=True)
+    make_app_download_dir(dest_dir)
     if track_count:
         max_tracks = max(track_count + 2, 3)
     else:
@@ -1179,7 +1180,7 @@ def _ytdlp_missing_tracks_download(artist: str, album: str, year: str,
     js_runtime = _require_ytdlp_js_runtime() if _ytdlp_source_requires_js(source) else {}
 
     _ytdlp_outtmpl(dest_dir, "")  # refuse an unusable folder before creating it
-    os.makedirs(dest_dir, exist_ok=True)
+    make_app_download_dir(dest_dir)
     bot_check_seen = {"count": 0}
 
     def _audio_files() -> set[str]:

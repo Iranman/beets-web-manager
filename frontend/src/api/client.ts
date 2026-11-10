@@ -26,6 +26,7 @@ import type {
   ImportReviewRevalidateResponse,
   AiSuggestResponse,
   ArtRepairReportResponse,
+  AiBatchSource,
   AiBatchStatusResponse,
   ApiOkResponse,
   ArtistIdGroupsResponse,
@@ -579,10 +580,11 @@ export function runPreflight(path: string): Promise<PreflightResponse> {
   return apiJson<PreflightResponse>('/api/import/preflight', jsonRequest('POST', { path }));
 }
 
-export function startAiBatchImport(path: string, recoverBatchJobId?: string): Promise<JobStartResponse> {
+/** ``source`` "qbittorrent" lets qBittorrent decide what is imported; the backend ignores ``path`` then. */
+export function startAiBatchImport(path: string, recoverBatchJobId?: string, source: AiBatchSource = 'local'): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(
     '/api/ai-batch-import',
-    jsonRequest('POST', { path, recover_batch_job_id: recoverBatchJobId || undefined }),
+    jsonRequest('POST', { source, path: source === 'local' ? path : undefined, recover_batch_job_id: recoverBatchJobId || undefined }),
   );
 }
 

@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import backend.job_contract as job_contract
-from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
+from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_IMPORT_CATEGORY, QBIT_IMPORT_TAG, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
 from backend.ytdlp_service import _audio_files_in_dir, _direct_source_unavailable_reason, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
-from backend.ai_service import _ai_match_evidence_packet, _validate_import_source_audio
+from backend.ai_service import _ai_match_evidence_packet, _qbit_rel_name_unsafe, _validate_import_source_audio
 from backend.import_service import _delete_staged_import_folder, _recovery_plex_sync_leg, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
 from backend.library_service import _album_folder_for_album_id, _build_folder_evidence, _representative_tracktotal, _resolve_album_release_for_import, get_library_payload
 from backend.pending_review_store import _queue_folder_for_manual_review
@@ -25,6 +25,7 @@ from helpers_mb import _resolve_release_group_to_release
 import backend.composite_workflows as composite_workflows
 from backend.audio_preferences import AUDIO_INSPECTION_INCOMPLETE, AudioInspectionIncomplete
 from backend.acoustid_service import _album_track_norm
+from backend.slskd import SLOT_DEFERRED_SUFFIX, direct_download_folder_name, mark_app_download_dir
 from backend.slskd_service import SLSKD_NOT_CONFIGURED, slskd_configured, _find_slskd_downloaded_files, _normalise_download_method, _normalise_wanted_tracks, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_fallback_methods, _slskd_file_wanted_match_score, _slskd_search_and_queue, _slskd_wait_downloads, _wanted_track_key, _wanted_track_label
 from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED, IMPORT_REFUSAL_REASONS, import_refusal_reason_code, _album_key, _album_mb_completeness, _artist_folder_name_without_mbid, _fetch_mb_release_tracklist, _folder_release_preflight, _normalize_album
 from backend.app_runtime import jobs, WEB_MANAGER_DATA_DIR
@@ -1179,7 +1180,7 @@ class _AlbumDownloadRun:
             source_slug = re.sub(r"[^a-z0-9]+", "", source_method) or "download"
             return str(_download_dest_under(
                 req.downloads_root, req.safe_artist,
-                f"{req.safe_album}{req.yr_sfx} - {source_slug} missing {suffix}",
+                direct_download_folder_name(f"{req.safe_album}{req.yr_sfx}", source_slug, suffix),
             ))
         return req.dest_dir
 
@@ -1902,7 +1903,10 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
     creates the destination parents safely) -- never a raw ``os.replace``, so it
     introduces no new unhardened filesystem mutation sink."""
     base = Path(import_dir)
-    slot_dir = base.parent / f"{base.name}__slot_deferred"
+    slot_dir = base.parent / f"{base.name}{SLOT_DEFERRED_SUFFIX}"
+    # Ownership proof only for a folder this call creates (an existing one may
+    # be the user's); move_staging_file validated it before it is marked.
+    slot_dir_is_new = not os.path.lexists(slot_dir)
     base_resolved = base.resolve(strict=False)
     moved: List[Tuple[Path, Path]] = []
     failures = 0
@@ -1925,6 +1929,8 @@ def _separate_deferred_slot_files(import_dir: str, deferred_paths: List[str],
     complete = failures == 0
     if not moved:
         return "", complete
+    if slot_dir_is_new:
+        mark_app_download_dir(slot_dir)
     # Carry the moved files' ORIGINAL pre-rename names (ARCH-030 B1) into the
     # slot folder so the slot gate still has the genuine download name there and
     # does not fall back to the laundered ``{track:02d} {title}`` staged name.
@@ -3026,8 +3032,9 @@ def _qbit_map_path(path_value: str) -> Optional[Path]:
     the process's current working directory in any downstream containment
     check or filesystem call.
     """
-    text = _s(path_value).strip().replace("\\", "/")
-    if not text or "\x00" in text:
+    # Never strip: a torrent named " Album " lives in a folder named exactly that.
+    text = _s(path_value).replace("\\", "/")
+    if not text.strip() or "\x00" in text:
         return None
     for src, dst in _qbit_path_alias_pairs():
         if text == src or text.startswith(src + "/"):
@@ -3048,14 +3055,12 @@ def _qbit_allowed_repair_path(path: Path) -> bool:
 
 def _qbit_candidate_target_paths(torrent: Dict[str, Any],
                                  file_row: Dict[str, Any]) -> List[Path]:
-    rel_name = _s(file_row.get("name")).strip().replace("\\", "/").lstrip("/")
-    if not rel_name:
+    rel_name = _s(file_row.get("name")).replace("\\", "/").lstrip("/")
+    if not rel_name.strip():
         return []
     rel = Path(rel_name)
-    content_raw = _s(torrent.get("content_path")).strip()
-    save_raw = _s(torrent.get("save_path")).strip()
-    content = _qbit_map_path(content_raw) if content_raw else None
-    save = _qbit_map_path(save_raw) if save_raw else None
+    content = _qbit_map_path(torrent.get("content_path"))
+    save = _qbit_map_path(torrent.get("save_path"))
     candidates: List[Path] = []
 
     if content:
@@ -3081,6 +3086,61 @@ def _qbit_candidate_target_paths(torrent: Dict[str, Any],
         seen.add(text)
         out.append(candidate)
     return out
+
+
+# Completed states, seeding included (progress can trail 1.0 briefly after a recheck).
+_QBIT_COMPLETED_STATES = frozenset({
+    "uploading", "stalledUP", "pausedUP", "stoppedUP", "queuedUP", "forcedUP", "checkingUP"})
+
+
+def qbit_import_filter() -> Dict[str, str]:
+    """The optional category/tag an Import batch's qBittorrent inventory is
+    limited to (``QBITTORRENT_IMPORT_CATEGORY`` / ``QBITTORRENT_IMPORT_TAG``),
+    as qBittorrent ``torrents/info`` parameters; empty means every torrent."""
+    return {k: v for k, v in (("category", QBIT_IMPORT_CATEGORY), ("tag", QBIT_IMPORT_TAG)) if v}
+
+
+def qbit_import_inventory(cancel_event=None, qbit_filter: Optional[Dict[str, str]] = None):
+    """Read-only qBittorrent inventory for an Import batch (qBittorrent source).
+
+    ``qbit_filter`` (default ``qbit_import_filter()``) is passed to
+    qBittorrent's own ``torrents/info`` so only matching torrents are listed.
+    Yields ``(torrent, files)`` per torrent, sorted by hash so a rerun sees
+    the same order. ``files`` is None for an incomplete torrent (no files call
+    is made for it); otherwise one dict per file row with ``name``, ``size``,
+    ``progress``, ``priority`` and ``paths`` (the alias-mapped candidate
+    paths, empty when the torrent-relative name is unsafe). Login, transport
+    or a malformed response raises: the caller fails closed and never falls
+    back to walking the filesystem. Never writes to qBittorrent."""
+    cookie = _qbit_login_cookie()
+    params = dict(qbit_import_filter() if qbit_filter is None else qbit_filter)
+    torrents = _qbit_request_json("/api/v2/torrents/info", params, cookie)
+    if not isinstance(torrents, list) or not all(isinstance(t, dict) for t in torrents):
+        raise ValueError("qBittorrent returned a malformed torrent list")
+    keep = ("hash", "name", "progress", "state", "save_path", "content_path")
+    slim = sorted(({k: t.get(k) for k in keep} for t in torrents), key=lambda t: _s(t.get("hash")))
+    del torrents
+    for torrent in slim:
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        thash = _s(torrent.get("hash")).strip()
+        try:
+            progress = float(torrent.get("progress") or 0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        if not thash or not (progress >= 1 or _s(torrent.get("state")) in _QBIT_COMPLETED_STATES):
+            yield torrent, None
+            continue
+        rows = _qbit_request_json("/api/v2/torrents/files", {"hash": thash}, cookie)
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise ValueError(f"qBittorrent returned a malformed file list for torrent {thash}")
+        files = []
+        for row in rows:
+            name = _s(row.get("name"))
+            paths = [] if _qbit_rel_name_unsafe(name) else [str(p) for p in _qbit_candidate_target_paths(torrent, row)]
+            files.append({"name": name, "size": row.get("size"), "progress": row.get("progress"),
+                          "priority": row.get("priority"), "paths": paths})
+        yield torrent, files
 
 
 def _library_file_candidates_for_qbit(file_name: str, size: int) -> List[Dict[str, Any]]:
