@@ -40,7 +40,7 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         # source, and Tag+Import disk keeps a hardlinked download.
         self.assertIn('preserve_source=keep_whole_source)', APP_SOURCE)
         self.assertIn('keep_whole_source = preserve_torrent_source or keep_hardlinked_folder', APP_SOURCE)
-        self.assertIn('preserve_source=True if keep_hardlinked_source else None)', APP_SOURCE)
+        self.assertIn('preserve_source=True if (keep_hardlinked_source or review_torrent_source) else None)', APP_SOURCE)
         self.assertIn('_playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)', APP_SOURCE)
         self.assertNotIn('_validate_import_source_audio(str(round_dl_dir), state["log"], reject_downloads=True)', APP_SOURCE)
 
