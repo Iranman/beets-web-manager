@@ -184,8 +184,10 @@ class TorrentSourceRelocationTests(_Engine):
         self.assert_originals_untouched()
 
     def test_app_created_download_and_library_albums_still_move(self):
-        self.assertFalse(cw._preserved_torrent_file(os.path.join(self.downloads, "_beets_missing_import", "x",
-                                                                 "t.flac")))
+        staged = os.path.join(self.downloads, "_beets_missing_import", "x", "t.flac")
+        self.assertTrue(cw._preserved_torrent_file(staged))  # location alone proves nothing (#566)
+        with mock.patch.object(ls, "app_download_marker_valid", return_value=True):  # the app's marker
+            self.assertFalse(cw._preserved_torrent_file(staged))
         self.assertFalse(cw._preserved_torrent_file(os.path.join(self.music, "x", "t.flac")))
         self.assertTrue(cw._preserved_torrent_file(os.path.join(self.downloads, "torrentA", "CD1", "t.flac")))
         with mock.patch.object(ls, "TORRENT_SOURCE_MOVE_ALLOWED", True):

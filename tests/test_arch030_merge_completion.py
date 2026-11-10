@@ -166,6 +166,16 @@ class B4ValidatorSubsetBoundaryTests(unittest.TestCase):
         self.assertFalse(res["ok"], res)
         self.assertTrue(res["unverified"])
 
+    def test_authorized_fuzzy_only_extra_without_result_refuses(self):
+        # #447 mixed fill: next to a proven requested track, an untagged file in
+        # a slot nobody requested maps to the target only by title/length. With
+        # no AcoustID result nothing proves it, and the slot authorization does
+        # not cover a slot that was never requested -> Review, never merged.
+        extra = self._row(id=93, track=9, mb_trackid="")
+        res = self._validate([self._row(), extra], authorized=True)
+        self.assertFalse(res["ok"], res)
+        self.assertEqual([u["item_id"] for u in res["unverified"]], [93])
+
 
 class RecoverySlotAuthorizedTests(unittest.TestCase):
     """``_recovery_slot_authorized`` only READS the folder-bound carrier's

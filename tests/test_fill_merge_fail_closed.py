@@ -216,6 +216,69 @@ class FillMergeFailClosedTests(_JobHarness):
         self.assertEqual([t["track"] for t in res["result"]["undelivered_tracks"]], [3])
         self.assertTrue(any("did not deliver 1 requested track(s)" in line for line in res["log"]), res["log"])
 
+    def test_slot_match_with_a_conflicting_recording_is_not_the_wanted_track(self):
+        """#447: the imported row sits in the wanted slot but carries another
+        recording id, so it is not the requested track and the fill fails
+        closed instead of being verified on the slot alone."""
+        self.items[IMPORTED] = [{"id": 92, "disc": 1, "track": 2, "mb_trackid": "rec-other"}]
+        res = self._run({"side_effect": self._move_items})
+        self.assertEqual(res["status"], "failed", res)
+        self.assertIn(CODE, res["error"])
+        self.assertFalse(any("Verified" in line for line in res["log"]), res["log"])
+
+    def test_conflicting_slot_row_is_refused_before_any_merge(self):
+        """#447 QA N1/N2: a wrong recording in a requested slot never reaches
+        the merge, alone or next to a correctly delivered track."""
+        for rows in ([{"id": 92, "disc": 1, "track": 2, "mb_trackid": "rec-other"}],
+                     [{"id": 92, "disc": 1, "track": 2, "mb_trackid": "rec-2"},
+                      {"id": 94, "disc": 1, "track": 3, "mb_trackid": "rec-other"}]):
+            with self.subTest(rows=[r["id"] for r in rows]):
+                self.setUp()
+                self.items[IMPORTED] = rows
+                merge = mock.MagicMock(side_effect=self._move_items)
+                with mock.patch.object(isvc, "_merge_imported_album_into_existing", merge):
+                    res = self._run(wanted_tracks=WANTED + [
+                        {"disc": 1, "track": 3, "title": "Three", "mb_trackid": "rec-3"}])
+                self._assert_failed_to_review(res)
+                merge.assert_not_called()
+                self.assertEqual([r["id"] for r in self.items[EXISTING]], [51])
+                if len(rows) == 2:
+                    self.assertIn("item_id(s) 94", res["error"])
+
+    def test_extra_row_outside_the_requested_slots_still_merges(self):
+        """An extra delivered track in a slot nobody requested is not a conflict."""
+        self.items[IMPORTED].append({"id": 95, "disc": 1, "track": 7, "mb_trackid": "rec-7"})
+        res = self._run({"side_effect": self._move_items})
+        self.assertEqual(res["status"], "completed", res)
+
+    def test_recording_ids_are_compared_trimmed_and_case_insensitive(self):
+        """#447 QA N3: whitespace and case on the row's id do not hide a match."""
+        self.items[IMPORTED] = [{"id": 92, "disc": 1, "track": 2, "mb_trackid": "  REC-2 \t"}]
+        res = self._run({"side_effect": self._move_items})
+        self.assertEqual(res["status"], "completed", res)
+        self.assertTrue(any("Verified 1 requested track(s)" in line for line in res["log"]), res["log"])
+
+    def test_slot_is_the_fallback_when_either_side_has_no_recording_id(self):
+        """#447: without a recording id on the row (or on the request) the
+        disc/track slot still identifies the requested track."""
+        for row_id, want_id in (("", "rec-2"), ("rec-2", "")):
+            with self.subTest(row_id=row_id, want_id=want_id):
+                self.setUp()
+                self.items[IMPORTED] = [{"id": 92, "disc": 1, "track": 2, "mb_trackid": row_id}]
+                res = self._run({"side_effect": self._move_items},
+                                wanted_tracks=[{"disc": 1, "track": 2, "mb_trackid": want_id}])
+                self.assertEqual(res["status"], "completed", res)
+                self.assertTrue(any("Verified 1 requested track(s)" in line for line in res["log"]), res["log"])
+
+    def test_existing_row_in_the_slot_with_another_recording_is_still_undelivered(self):
+        """#447: an existing row in the requested slot with a different
+        recording id does not count as delivering that request."""
+        self.items[EXISTING].append({"id": 52, "disc": 1, "track": 3, "mb_trackid": "rec-elsewhere"})
+        res = self._run({"side_effect": self._move_items}, wanted_tracks=WANTED + [
+            {"disc": 1, "track": 3, "title": "Three", "mb_trackid": "rec-3"}])
+        self.assertEqual(res["status"], "completed", res)
+        self.assertEqual([t["track"] for t in res["result"]["undelivered_tracks"]], [3])
+
     def test_no_review_entry_is_logged_truthfully(self):
         """Integration C: when Review could not be written, the log says so."""
         with mock.patch.object(isvc, "_queue_folder_for_manual_review", return_value=False):
@@ -331,6 +394,75 @@ class RealMergeJobTests(_JobHarness):
         self.assertEqual([p.get("code") for p in self.reconcile_plans], ["file_missing"])
         self._assert_failed_to_review(res)
 
+
+
+class RecordingIdDecidesSiblingTests(unittest.TestCase):
+    """#447 follow-up: the stale-row prune and the AcoustID target selection
+    use the same rule as the read-back -- when both sides carry a recording
+    id it decides; the disc/track slot (and a fuzzy title/length match) is
+    only the fallback."""
+
+    def _prune(self, rows, wanted):
+        log = []
+        with mock.patch.object(cw, "find_all_items_by_album_id", return_value=rows), \
+                mock.patch.object(cw, "item_file_missing", return_value=True), \
+                mock.patch.object(cw, "remove_item_rows_keep_files",
+                                  side_effect=lambda ids, **kw: {"ok": True, "deleted_items": ids}) as rm:
+            isvc._prune_stale_wanted_rows_before_import(EXISTING, REL, wanted, log)
+        return rm.call_args[0][0] if rm.called else []
+
+    def test_prune_keeps_a_missing_row_of_another_recording_in_the_wanted_slot(self):
+        rows = [{"id": 31, "disc": 1, "track": 2, "title": "Two", "mb_trackid": "rec-other",
+                 "length": 200, "path": "/music/a/02.flac"}]
+        self.assertEqual(self._prune(rows, WANTED), [])
+
+    def test_prune_still_removes_the_wanted_recording_and_slot_only_rows(self):
+        rows = [{"id": 32, "disc": 1, "track": 7, "title": "x", "mb_trackid": "REC-2 ",
+                 "length": 1, "path": "/music/a/07.flac"},
+                {"id": 33, "disc": 1, "track": 2, "title": "y", "mb_trackid": "",
+                 "length": 1, "path": "/music/a/02.flac"}]
+        self.assertEqual(sorted(self._prune(rows, WANTED)), [32, 33])
+
+    def _validate(self, rows, mb_tracks, cands):
+        from backend.provider_boundary import ProviderOutcome, ProviderResult
+        answer = ProviderResult("acoustid", ProviderOutcome.CONFIRMED, data=cands)
+        with mock.patch.object(isvc, "_fetch_mb_release_tracklist",
+                               return_value={"ok": True, "tracks": mb_tracks}), \
+                mock.patch.object(cw, "find_all_items_by_album_id", return_value=rows), \
+                mock.patch.object(isvc, "_album_item_abs_path", side_effect=lambda p: p), \
+                mock.patch.object(isvc, "_acoustid_lookup_cached_outcome", return_value=answer):
+            return isvc._validate_wanted_album_items_with_acoustid(IMPORTED, REL, WANTED, [])
+
+    def test_acoustid_gate_does_not_verify_a_file_tagged_as_another_recording(self):
+        # Slot 1/2 matches, but Beets tagged the file as rec-other: it is not
+        # the requested track, even when its audio fingerprints as rec-2.
+        rows = [{"id": 41, "disc": 1, "track": 2, "title": "Two", "mb_trackid": "rec-other",
+                 "length": 200, "path": "/music/a/02.flac"}]
+        mb = [{"disc": 1, "track": 2, "mb_trackid": "rec-2", "title": "Two", "length": 200}]
+        cands = [{"mb_trackid": "rec-2", "score": 98, "title": "Two", "artist": "A"}]
+        res = self._validate(rows, mb, cands)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["confirmed"], 0)
+        self.assertEqual([u["item_id"] for u in res["unverified"]], [41])
+
+    def test_acoustid_gate_skips_a_release_track_in_the_slot_with_another_recording(self):
+        # The release's 1/2 is another recording: it is not a target, so
+        # none of the requested tracks is on the release.
+        rows = [{"id": 42, "disc": 1, "track": 2, "title": "Two", "mb_trackid": "rec-2",
+                 "length": 200, "path": "/music/a/02.flac"}]
+        mb = [{"disc": 1, "track": 2, "mb_trackid": "rec-other", "title": "Two", "length": 200}]
+        res = self._validate(rows, mb, [])
+        self.assertFalse(res["ok"])
+        self.assertIn("none of the requested tracks", res["reason"])
+
+    def test_acoustid_gate_confirms_the_matching_recording(self):
+        rows = [{"id": 43, "disc": 1, "track": 9, "title": "Two", "mb_trackid": "rec-2",
+                 "length": 200, "path": "/music/a/09.flac"}]
+        mb = [{"disc": 1, "track": 2, "mb_trackid": "rec-2", "title": "Two", "length": 200}]
+        cands = [{"mb_trackid": "rec-2", "score": 98, "title": "Two", "artist": "A"}]
+        res = self._validate(rows, mb, cands)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["confirmed"], 1)
 
 
 class QueueReviewLookupFailureTests(unittest.TestCase):

@@ -494,5 +494,136 @@ class LegacyNameTests(_Roots):
             self.assertTrue(lib._preserve_torrent_source_path(folder))
 
 
+
+class PrivateRootOwnershipTests(_Roots):
+    """#566: ``_beets_missing_import`` and playlist roots are locations, not
+    ownership proof. A folder there is the app's only with a valid marker and
+    no link on the walked path; otherwise it is the user's (copied, kept)."""
+
+    def setUp(self):
+        super().setUp()
+        self.stage_root = self.dl / "_beets_missing_import"
+        self.pl_in = self.dl / "Playlist Downloads"   # the default: under downloads
+        self.pl_out = self.tmp / "playlists"          # configured outside downloads
+        self.pl_in.mkdir()
+        self.pl_out.mkdir()
+        p = patch_app_family(APP, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", [self.pl_in, self.pl_out])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_unmarked_folder_under_staging_root_is_not_app_managed(self):
+        folder = self.audio(self.stage_root / "planted-Album")
+        self.assertFalse(self.managed(folder))
+        self.assertFalse(self.managed(self.audio(folder / "CD 02")))
+        self.assertTrue(lib._preserve_torrent_source_path(folder))
+        self.assertTrue(lib._preserve_torrent_source_file(folder / "01.flac"))
+        log = []
+        self.assertFalse(imp._delete_staged_import_folder(str(folder), log))
+        self.assertTrue((folder / "01.flac").is_file(), log)
+
+    def test_unmarked_folder_under_a_playlist_root_is_not_app_managed(self):
+        for root in (self.pl_in, self.pl_out):
+            folder = self.audio(root / "key" / "downloads")
+            self.assertFalse(self.managed(folder), root)
+            self.assertFalse(self.managed(root / "key"), root)
+        self.assertTrue(lib._preserve_torrent_source_path(self.pl_in / "key" / "downloads"))
+
+    def test_private_roots_still_stay_out_of_a_user_scan(self):
+        """Skipping moves nothing, so the location alone still excludes."""
+        user = self.audio(self.dl / "Artist" / "User Album")
+        self.audio(self.stage_root / "planted-Album")
+        self.audio(self.pl_in / "key" / "downloads")
+        self.assertTrue(lib._in_app_private_root(self.stage_root / "planted-Album"))
+        self.assertTrue(lib._in_app_private_root(self.pl_out / "key"))
+        self.assertFalse(lib._in_app_private_root(user))
+        self.assertEqual(ai._ai_batch_find_audio_dirs(str(self.dl), []), [str(user)])
+        roots = ai._qbit_source_roots()
+        self.assertEqual(ai._qbit_source_dir_reason(str(self.stage_root / "planted-Album"), roots)[1],
+                         "app_managed")
+
+    def test_staging_root_linked_to_downloads_root_proves_nothing(self):
+        user = self.audio(self.dl / "Artist" / "User Album")
+        _symlink(self.dl, self.stage_root, True)
+        via_link = self.stage_root / "Artist" / "User Album"
+        self.assertFalse(self.managed(via_link))
+        self.assertFalse(self.managed(user))
+        self.assertTrue(lib._preserve_torrent_source_path(via_link))
+        self.assertFalse(imp._delete_staged_import_folder(str(via_link), []))
+        self.assertTrue((user / "01.flac").is_file())
+
+    def test_staging_root_linked_to_a_marked_app_folder_proves_nothing(self):
+        app = self.app_folder("Artist/Album (2021)")
+        _symlink(app.parent, self.stage_root, True)
+        self.assertFalse(self.managed(self.stage_root / "Album (2021)"))
+        self.assertTrue(self.managed(app))
+
+    def test_linked_component_under_a_playlist_root_proves_nothing(self):
+        for root in (self.pl_in, self.pl_out):
+            user = self.audio(self.dl / "Artist" / f"User {root.name}")
+            _symlink(user.parent, root / "key", True)
+            self.assertFalse(self.managed(root / "key" / user.name), root)
+            self.assertFalse(self.managed(root / "key"), root)
+        # Even a marked folder reached through the link proves nothing.
+        app = self.app_folder("Owned/Album")
+        _symlink(app.parent, self.pl_out / "owned", True)
+        self.assertFalse(self.managed(self.pl_out / "owned" / "Album"))
+
+    def test_app_staging_and_playlist_folders_are_marked_and_managed(self):
+        self.require_fd()
+        src = self.audio(self.outside / "src")
+        staged = Path(slskd.stage_selected_audio_files(
+            self.dl, {".flac"}, str(src), [src / "01.flac"], "Artist", "Album", [], force_stage=True))
+        self.assertEqual(staged.parent, self.stage_root)
+        self.assertTrue((staged / slskd.APP_DOWNLOAD_MARKER).is_file())
+        self.assertTrue(self.managed(staged))
+        self.assertFalse(lib._preserve_torrent_source_path(staged))
+        for root in (self.pl_in, self.pl_out):
+            dl_dir = root / "key" / "downloads"
+            from backend import playlist_service
+            copied = playlist_service._playlist_copy_source_files(
+                [src / "01.flac"], dl_dir, "Artist", "Title", lambda *_: None)
+            self.assertEqual(len(copied), 1, root)
+            self.assertTrue(self.managed(dl_dir), root)
+            self.assertTrue(self.managed(Path(copied[0]).parent), root)
+
+    def test_preexisting_stage_folder_is_reused_but_never_marked(self):
+        self.require_fd()
+        src = self.audio(self.outside / "src")
+        planted = self.audio(self.stage_root / "fixedprefix-Artist - Album", "user.flac")
+        staged = Path(slskd.stage_selected_audio_files(
+            self.dl, {".flac"}, str(src), [src / "01.flac"], "Artist", "Album", [],
+            stage_prefix="fixedprefix", force_stage=True))
+        self.assertEqual(staged, planted)
+        self.assertFalse((planted / slskd.APP_DOWNLOAD_MARKER).exists())
+        self.assertFalse(self.managed(planted))
+
+    def test_legacy_generated_name_proves_nothing_under_private_roots(self):
+        name = slskd.direct_download_folder_name("A", "ytdlp", "1793260626691")
+        self.assertTrue(self.managed(self.dl / "Artist" / name))  # the bridge still holds elsewhere
+        for root in (self.stage_root, self.pl_in, self.pl_out):
+            self.assertFalse(self.managed(self.audio(root / name)), root)
+
+    def test_cleanup_never_follows_a_link_to_a_marked_stage(self):
+        self.require_fd()
+        stage = self.stage_root / "real-stage"
+        self.stage_root.mkdir()
+        slskd.make_app_download_dir(stage)
+        self.audio(stage)
+        _symlink(stage, self.stage_root / "link", True)
+        with mock.patch.object(imp, "_pending_review_has_path_or_overlap", return_value=False):
+            self.assertFalse(imp._delete_staged_import_folder(str(self.stage_root / "link"), []))
+        self.assertTrue((stage / "01.flac").is_file())
+
+    def test_linked_staging_root_is_refused_before_creating_the_stage(self):
+        target = self.dl / "elsewhere"
+        target.mkdir()
+        _symlink(target, self.stage_root, True)
+        src = self.audio(self.outside / "src")
+        with self.assertRaises(RuntimeError):
+            slskd.stage_selected_audio_files(
+                self.dl, {".flac"}, str(src), [src / "01.flac"], "Artist", "Album", [], force_stage=True)
+        self.assertEqual(list(target.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

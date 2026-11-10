@@ -297,6 +297,14 @@ class DiscoveryTests(_Roots):
         self.assertLess(elapsed, 180)
 
 
+def _own_marker(p):
+    """The stage's own valid ownership marker (#566), written by real staging."""
+    return p.name == slskd.APP_DOWNLOAD_MARKER and slskd.app_download_marker_valid(p.parent)
+
+
+_FAKE_MARKED: set = set()  # stages fake_stage made (Windows stand-in for markers)
+
+
 class _Batch(_Roots):
     """The real batch worker over a qBittorrent source; only Beets and the
     providers are stubbed."""
@@ -347,6 +355,13 @@ class _Batch(_Roots):
         if not slskd._staging_fd_supported():  # Windows: the real fd-relative copy cannot run
             patches.append(mock.patch.object(ai, "_stage_selected_audio_files_impl", side_effect=self.fake_stage,
                                              create=True))
+            # The real staging marks the folder it makes (#566); markers need
+            # POSIX, so the fake's folders count as marked here instead.
+            import backend.library_service as lib
+            _FAKE_MARKED.clear()
+            patches.append(mock.patch.object(
+                lib, "app_download_marker_valid",
+                side_effect=lambda f: os.path.abspath(f) in _FAKE_MARKED))
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -360,6 +375,12 @@ class _Batch(_Roots):
         if not _kw.get("force_stage") and present == {Path(f).resolve() for f in files}:
             return aldir
         stage = Path(root) / "_beets_missing_import" / f"{stage_prefix}-{artist} - {album}"
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            stage.mkdir()
+            _FAKE_MARKED.add(os.path.abspath(stage))
+        except FileExistsError:
+            pass
         for f in files:
             dst = stage / Path(f).relative_to(aldir)
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -536,7 +557,8 @@ class QaFindingsTests(_Batch):
 
     def staged_names(self, staged):
         return sorted(p.relative_to(staged).as_posix() for p in Path(staged).rglob("*")
-                      if p.is_file() and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR)
+                      if p.is_file() and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR
+                      and not _own_marker(p))
 
     def mixed_album(self):
         self.torrent("Album", ["01.flac", "02.flac"])
@@ -968,7 +990,8 @@ class SourceOpenHardeningTests(_Roots):
     def staged_files(self):
         root = self.dl / "_beets_missing_import"
         return sorted(p.name for p in root.rglob("*") if p.is_file()
-                      and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR) if root.exists() else []
+                      and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR
+                      and not _own_marker(p)) if root.exists() else []
 
     def test_symlinked_source_file_is_never_followed(self):  # NEW-1
         self.require_fd_copy()
