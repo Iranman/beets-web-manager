@@ -3067,6 +3067,51 @@
    "dependencies": []
   },
   {
+   "name": "_review_path_text",
+   "module": "backend/serializers.py",
+   "lines": [
+    51,
+    56
+   ],
+   "size": 6,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "delete_import_review_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_review_path_has_traversal",
+   "module": "backend/serializers.py",
+   "lines": [
+    59,
+    64
+   ],
+   "size": 6,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "cleanup_import_review_files",
+    "delete_import_review_folder"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
    "name": "_import_review_path_text_error",
    "module": "backend/serializers.py",
    "lines": [
