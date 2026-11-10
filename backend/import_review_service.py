@@ -8,8 +8,8 @@ from backend.matching import AcoustIDStatus
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, EDITABLE_FIELDS, MUSIC_ROOT, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_UUID_RE, _extract_mb_uuid, _s
-from backend.ai_service import _compact_track_ai_candidate, _run_ai_release_preflight
-from backend.import_service import IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD, _IMPORT_REVIEW_IMPORTABLE_STATUSES, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_review_confidence_score, evaluate_import_eligibility, start_folder_import_with_id
+from backend.ai_service import _ai_artist_mismatch_reason, _compact_track_ai_candidate, _run_ai_release_preflight
+from backend.import_service import IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD, _IMPORT_REVIEW_IMPORTABLE_STATUSES, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import _album_folder_for_album_id, _folder_import_track_count, _target_preview_year
 from backend.ai_evidence_service import _enrich_track_ai_candidate
 from backend.pending_review_store import _AI_PENDING_FILE, _ai_pending_lock, _load_pending_reviews, _save_pending_reviews, _trusted_stored_review_path
@@ -1049,15 +1049,19 @@ def _import_review_revalidation_confidence_score(
     comparison: Dict[str, Any],
     preflight: Optional[Dict[str, Any]],
 ) -> float:
-    explicit = _import_review_confidence_score(
-        suggestion.get("confidence_score") or suggestion.get("match_total") or suggestion.get("score")
-    )
-    label = _s(suggestion.get("confidence")).strip().casefold()
-    label_score = {"high": 0.91, "medium": 0.75, "low": 0.40}.get(label)
+    """Evidence-only score (#521): track-match ratios from this revalidation.
+
+    The suggestion's AI confidence label and its stored ``confidence_score`` /
+    ``match_total`` / ``score`` keys are deliberately ignored: they come from
+    AI ranking, text-metadata scoring, or an earlier run of this function, so
+    none is deterministic evidence for this folder. ``suggestion`` stays in
+    the signature for callers only.
+    """
+    del suggestion
     preflight_ratio = _preflight_match_ratio(preflight) if preflight else 0.0
     source_ratio = float((comparison.get("preflight") or {}).get("source_match_ratio") or 0.0)
     release_ratio = float((comparison.get("preflight") or {}).get("match_ratio") or 0.0)
-    return max(v for v in (explicit, label_score, preflight_ratio, source_ratio, release_ratio, 0.0) if v is not None)
+    return min(1.0, max(preflight_ratio, source_ratio, release_ratio, 0.0))
 
 
 def _import_review_confidence_level(score: float, importable: bool, preflight_status: str) -> str:
@@ -1099,6 +1103,28 @@ def _import_review_revalidation_preflight(
     return base
 
 
+_AI_ARTIST_REJECTION_PREFIX = "Rejected: artist mismatch."
+
+
+def _revalidated_artist_rejection(item: Dict[str, Any], suggestion: Dict[str, Any],
+                                  comparison: Dict[str, Any]) -> str:
+    """The AI artist gate's verdict for a revalidated match ("" = passes).
+
+    Release Group membership never clears it (#521 P1): with both artists
+    known the gate re-runs on the revalidated release, otherwise a stored
+    artist rejection stands."""
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    folder = evidence.get("folder") if isinstance(evidence.get("folder"), dict) else {}
+    source_artist = _s(folder.get("guessed_artist")).strip()
+    release_artist = _s(comparison.get("release_artist")).strip()
+    if source_artist and release_artist:
+        return _ai_artist_mismatch_reason({"artist": release_artist}, source_artist)
+    stored = _s(suggestion.get("candidate_identity_error")).strip()
+    if suggestion.get("identity_validated") is False and stored.startswith(_AI_ARTIST_REJECTION_PREFIX):
+        return stored
+    return ""
+
+
 def _import_review_build_revalidated_match(
     item: Dict[str, Any],
     comparison: Dict[str, Any],
@@ -1113,6 +1139,14 @@ def _import_review_build_revalidated_match(
     )
     identity_validated = comparison.get("identity_validated") is not False
     candidate_identity_error = _s(comparison.get("candidate_identity_error")).strip()
+    # Run the gate even when membership already fails: the artist verdict must
+    # lead the stored error, or the next revalidation can no longer see it.
+    artist_rejection = _revalidated_artist_rejection(item, suggestion, comparison)
+    if artist_rejection:
+        if not identity_validated and candidate_identity_error and candidate_identity_error not in artist_rejection:
+            artist_rejection = f"{artist_rejection} {candidate_identity_error}"
+        identity_validated = False
+        candidate_identity_error = artist_rejection
     mapping = comparison.get("comparison") if isinstance(comparison.get("comparison"), list) else []
     importable_count = sum(
         1 for row in mapping
