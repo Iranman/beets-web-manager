@@ -664,7 +664,8 @@ def _app_managed_download_path(path: Path) -> bool:
         return False
     torrent_roots = [r.resolve(strict=False) for r in TORRENT_SOURCE_ROOTS]
     guard_roots = torrent_roots + [r.resolve(strict=False) for r in DOWNLOADS_ALLOWED_ROOTS]
-    legacy_ok = date.today() < APP_DOWNLOAD_LEGACY_NAME_UNTIL and not any(
+    # The app never made a legacy-named folder under its private roots (#566).
+    legacy_ok = date.today() < APP_DOWNLOAD_LEGACY_NAME_UNTIL and not _in_app_private_root(path) and not any(
         t != root_res and _path_is_under(path_res, t) for t in torrent_roots)
     # Walk the path as given, every level below the root (written or real
     # spelling): one reaching it through an outside symlink, or with "..",

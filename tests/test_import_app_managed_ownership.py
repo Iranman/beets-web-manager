@@ -597,6 +597,23 @@ class PrivateRootOwnershipTests(_Roots):
         self.assertFalse((planted / slskd.APP_DOWNLOAD_MARKER).exists())
         self.assertFalse(self.managed(planted))
 
+    def test_legacy_generated_name_proves_nothing_under_private_roots(self):
+        name = slskd.direct_download_folder_name("A", "ytdlp", "1793260626691")
+        self.assertTrue(self.managed(self.dl / "Artist" / name))  # the bridge still holds elsewhere
+        for root in (self.stage_root, self.pl_in, self.pl_out):
+            self.assertFalse(self.managed(self.audio(root / name)), root)
+
+    def test_cleanup_never_follows_a_link_to_a_marked_stage(self):
+        self.require_fd()
+        stage = self.stage_root / "real-stage"
+        self.stage_root.mkdir()
+        slskd.make_app_download_dir(stage)
+        self.audio(stage)
+        _symlink(stage, self.stage_root / "link", True)
+        with mock.patch.object(imp, "_pending_review_has_path_or_overlap", return_value=False):
+            self.assertFalse(imp._delete_staged_import_folder(str(self.stage_root / "link"), []))
+        self.assertTrue((stage / "01.flac").is_file())
+
     def test_linked_staging_root_is_refused_before_creating_the_stage(self):
         target = self.dl / "elsewhere"
         target.mkdir()

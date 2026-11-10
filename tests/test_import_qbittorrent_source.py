@@ -297,6 +297,11 @@ class DiscoveryTests(_Roots):
         self.assertLess(elapsed, 180)
 
 
+def _own_marker(p):
+    """The stage's own valid ownership marker (#566), written by real staging."""
+    return p.name == slskd.APP_DOWNLOAD_MARKER and slskd.app_download_marker_valid(p.parent)
+
+
 _FAKE_MARKED: set = set()  # stages fake_stage made (Windows stand-in for markers)
 
 
@@ -552,7 +557,8 @@ class QaFindingsTests(_Batch):
 
     def staged_names(self, staged):
         return sorted(p.relative_to(staged).as_posix() for p in Path(staged).rglob("*")
-                      if p.is_file() and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR)
+                      if p.is_file() and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR
+                      and not _own_marker(p))
 
     def mixed_album(self):
         self.torrent("Album", ["01.flac", "02.flac"])
@@ -968,7 +974,8 @@ class SourceOpenHardeningTests(_Roots):
     def staged_files(self):
         root = self.dl / "_beets_missing_import"
         return sorted(p.name for p in root.rglob("*") if p.is_file()
-                      and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR) if root.exists() else []
+                      and p.name != slskd.RECOVERY_ORIGINAL_NAMES_SIDECAR
+                      and not _own_marker(p)) if root.exists() else []
 
     def test_symlinked_source_file_is_never_followed(self):  # NEW-1
         self.require_fd_copy()
