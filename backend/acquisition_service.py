@@ -1288,11 +1288,19 @@ class _AlbumDownloadRun:
                     _delete_staged_import_folder(
                         fallback_result.get("aldir", ""), log
                     )
-                if import_refusal_reason_code(direct_ex) == EXISTING_ALBUM_MERGE_FAILED:
+                reason_code = import_refusal_reason_code(direct_ex)
+                if reason_code == EXISTING_ALBUM_MERGE_FAILED:
                     # #432 B2: imported but not merged; another source
                     # would leave another partial album row.
                     raise RuntimeError(
                         f"Direct-source import stopped: {direct_ex}") from direct_ex
+                # #571: as the peer loop (#406), a refusal not about this
+                # copy fails every other source the same way.
+                if reason_code and not IMPORT_REFUSAL_REASONS.get(reason_code, False):
+                    log.append(
+                        f"[fallback] Not trying other direct sources: import refused "
+                        f"for a reason that is not specific to this copy ({reason_code}).")
+                    break
         raise RuntimeError(
             f"SLSKD failed: {slskd_reason}; direct-source fallback also failed: "
             + "; ".join(failures)
