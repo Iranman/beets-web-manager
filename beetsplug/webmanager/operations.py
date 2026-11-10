@@ -446,7 +446,7 @@ def get_upstream_web_readonly() -> bool:
         return True
 
 
-_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_art_fetch", "album_row_remove", "import_rollback", "item_path_restore", "album_relocation", "album_relocation_link", "operations", "status", "library_fields"]
+_CORE_CAPABILITIES = ["import", "modify", "remove", "move", "replace_item_file", "quarantine_remove_items", "album_row_merge", "untracked_quarantine", "untracked_attach", "untracked_attach_album", "folder_op", "album_art", "album_art_fetch", "album_row_remove", "import_rollback", "item_path_restore", "album_relocation", "album_relocation_link", "import_duplicate_evidence", "operations", "status", "library_fields"]
 _PLUGIN_GATED_CAPABILITIES = ["mbsync", "mbsync_library", "fetchart", "embedart", "lastgenre", "mbsubmit"]
 
 
@@ -792,6 +792,64 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     return None
 
 
+_EVIDENCE_MAX_IDS = 200
+_EVIDENCE_MAX_DUPLICATES = 10
+
+
+def _attr(fn):
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _duplicate_entry(obj) -> Dict[str, Any]:
+    """One library object Beets' duplicate check matched (an Album, or an Item
+    for a singleton import)."""
+    is_album = callable(getattr(obj, "items", None))
+    items = _attr(lambda: list(obj.items())) if is_album else [obj]
+    return {
+        "album_id": _attr(lambda: obj.id) if is_album else None,
+        "item_id": None if is_album else _attr(lambda: obj.id),
+        "mb_releasegroupid": _attr(lambda: obj.get("mb_releasegroupid") or None),
+        "mb_albumid": _attr(lambda: obj.get("mb_albumid") or None),
+        "item_count": len(items) if items is not None else None,
+        "recording_ids": [_attr(lambda it=it: it.get("mb_trackid") or None)
+                          for it in (items or [])[:_EVIDENCE_MAX_IDS]],
+        "albumartist": _attr(lambda: obj.get("albumartist") or None),
+        "album": _attr(lambda: obj.get("album") or None),
+        # What Beets stores about each file's audio, so Web Manager can tell
+        # a quality upgrade from a plain re-import without reading the files.
+        "items_quality": [{k: _attr(lambda it=it, k=k: it.get(k) or None)
+                           for k in ("format", "bitrate", "samplerate", "bitdepth")}
+                          for it in (items or [])[:_EVIDENCE_MAX_IDS]],
+    }
+
+
+def duplicate_evidence(task, found_duplicates) -> Dict[str, Any]:
+    """Identity evidence for a task Beets' (name-only) duplicate check flagged:
+    what the task matched and what the matched library albums hold, so Web
+    Manager can tell a true re-import from a same-named different release.
+    Each field is None when Beets did not provide it (e.g. no match, as-is)."""
+    m = getattr(task, "match", None)
+    info = getattr(m, "info", None)
+    mapping = getattr(m, "mapping", None)  # AlbumMatch only
+    return {
+        "choice": _attr(lambda: task.choice_flag.name),
+        "data_source": _attr(lambda: info.data_source),
+        "distance": _attr(lambda: float(m.distance)) if m is not None else None,
+        "release_id": _attr(lambda: info.album_id),
+        "release_group_id": _attr(lambda: info.releasegroup_id),
+        "release_track_count": _attr(lambda: len(info.tracks)),
+        "task_item_count": _attr(lambda: len(task.items)),
+        "mapped_count": _attr(lambda: len(mapping)),
+        "extra_items": _attr(lambda: len(m.extra_items)),
+        "extra_tracks": _attr(lambda: len(m.extra_tracks)),
+        "recording_ids": _attr(lambda: [ti.track_id for ti in list(mapping.values())[:_EVIDENCE_MAX_IDS]]),
+        "duplicates": [_duplicate_entry(d) for d in list(found_duplicates or [])[:_EVIDENCE_MAX_DUPLICATES]],
+    }
+
+
 def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: str = "",
                           allow_missing_tracks: bool = False, existing_album_id: int = 0):
     """Beets' own import session: the quiet terminal session (what
@@ -843,6 +901,10 @@ def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: st
 
         def get_duplicate_action(self, task, found_duplicates):
             task.webmanager_duplicate = True
+            try:
+                task.webmanager_duplicate_evidence = duplicate_evidence(task, found_duplicates)
+            except Exception:  # evidence is advisory; never break Beets' import
+                task.webmanager_duplicate_evidence = None
             if task not in tasks:
                 tasks.append(task)
             return super().get_duplicate_action(task, found_duplicates)
@@ -850,7 +912,50 @@ def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: st
     return _RecordingSession
 
 
-_LINK_MODES = ("link", "hardlink", "reflink")
+# Forced off for every import and restored afterwards. `delete` removes the
+# source after a copy (beets importer/tasks.py `if copy and delete`), which
+# would destroy seeding torrent files; Web Manager moves only via `move`.
+_FORCED_OFF_IMPORT_MODES = ("link", "hardlink", "reflink", "delete")
+
+
+def _symlink_free_below(path: str, roots: List[str]) -> bool:
+    """Whether ``path`` lies lexically inside one of ``roots`` with no symlink
+    component below it. A move import must not follow a link out of an
+    app-managed folder into, say, a seeding torrent folder. A root that is
+    itself a symlink is accepted as configured and as its real path (the
+    backend sends resolved paths); only components below it are checked."""
+    from . import folder_ops  # it imports this module
+    for root in roots:
+        for candidate in {os.path.abspath(root), os.path.realpath(root)}:
+            try:
+                folder_ops.contained_path(path, candidate)
+                return True
+            except folder_ops._Refused:
+                continue
+    return False
+
+
+def _is_link(path: str) -> bool:
+    return os.path.islink(path) or os.path.isjunction(path)
+
+
+def _tree_has_link(path: str) -> bool:
+    """Whether ``path`` or anything below it is a symlink or junction. Beets'
+    sorted_walk follows symlinked subfolders, so a move import of a folder
+    holding ``Disc 1 -> <seeding folder>`` would move the seeding files."""
+    if _is_link(path):
+        return True
+    for top, dirs, files in os.walk(path, followlinks=False):
+        if any(_is_link(os.path.join(top, n)) for n in dirs + files):
+            return True
+    return False
+
+
+_MOVE_LINK_ERROR = "A move import source must not be or contain a symlink"
+
+
+class _MoveSourceRefused(Exception):
+    """A move import source gained a symlink after the request check."""
 
 
 @webmanager_bp.route("/import", methods=["POST"])
@@ -964,6 +1069,11 @@ def run_import():
                 ),
                 400,
             )
+        if move and not _symlink_free_below(p, import_roots):
+            return jsonify({
+                "error": _MOVE_LINK_ERROR,
+                "error_code": "PATH_NOT_ALLOWED",
+            }), 400
         safe_paths.append(safe_p)
 
     write = bool(data.get("write", True))
@@ -1034,6 +1144,13 @@ def run_import():
 
     def _execute_import(lib, op_id_arg: Optional[str] = None):
         with mutation_lock:
+            # Re-checked under the lock right before Beets runs, so a swap
+            # after the request check is narrowed (N-2).
+            if move and any(not _symlink_free_below(sp, import_roots) or _tree_has_link(sp)
+                            for sp in safe_paths):
+                if op_id_arg:
+                    update_operation(op_id_arg, "failed", error=_MOVE_LINK_ERROR, error_code="PATH_NOT_ALLOWED")
+                raise _MoveSourceRefused()
             # Snapshot importer config
             orig_pretend = beets_config["import"]["pretend"].get()
             orig_copy = beets_config["import"]["copy"].get()
@@ -1049,9 +1166,14 @@ def run_import():
             orig_resume = beets_config["import"]["resume"].get()
             orig_search_ids = beets_config["import"]["search_ids"].get()
             orig_quiet_fallback = beets_config["import"]["quiet_fallback"].get()
-            # ImportSession forces these off when move is on, and the change
-            # outlives the request; an in-place import must never link.
-            orig_links = {k: beets_config["import"][k].get() for k in _LINK_MODES}
+            # ImportSession forces the link modes off when move is on, and the
+            # change outlives the request; an import must never link or delete.
+            orig_links = {k: beets_config["import"][k].get() for k in _FORCED_OFF_IMPORT_MODES}
+            # convert's early auto_convert stage runs while item.path is still
+            # the source and removes it when delete_originals is set. The key
+            # exists only when the convert plugin is loaded.
+            convert_delete = beets_config["convert"]["delete_originals"]
+            orig_convert_delete = convert_delete.get() if convert_delete.exists() else None
 
             try:
                 beets_config["import"]["pretend"] = pretend
@@ -1067,8 +1189,10 @@ def run_import():
                 beets_config["import"]["resume"] = False
                 beets_config["import"]["incremental"] = incremental
                 beets_config["import"]["singletons"] = singletons
-                for k in _LINK_MODES:
+                for k in _FORCED_OFF_IMPORT_MODES:
                     beets_config["import"][k] = False
+                if orig_convert_delete is not None:
+                    beets_config["convert"]["delete_originals"] = False
                 if set_fields:
                     beets_config["import"]["set_fields"] = set_fields
 
@@ -1088,7 +1212,7 @@ def run_import():
                     _IMPORTED_ALBUM_IDS = None
 
                 skipped: List[str] = []
-                skipped_reasons: List[Dict[str, str]] = []
+                skipped_reasons: List[Dict[str, Any]] = []
                 for task in tasks:
                     if getattr(task, "skip", False):
                         if getattr(task, "webmanager_blank_identity", False):
@@ -1103,7 +1227,10 @@ def run_import():
                             shown = util.displayable_path(tp)
                             if shown not in skipped:
                                 skipped.append(shown)
-                                skipped_reasons.append({"path": shown, "reason": reason})
+                                row = {"path": shown, "reason": reason}
+                                if reason == "duplicate":
+                                    row["duplicate_evidence"] = getattr(task, "webmanager_duplicate_evidence", None)
+                                skipped_reasons.append(row)
                 result = {
                     "success": True,
                     "imported_paths": safe_paths,
@@ -1150,6 +1277,8 @@ def run_import():
                 beets_config["import"]["set_fields"] = orig_set_fields
                 for k, v in orig_links.items():
                     beets_config["import"][k] = v
+                if orig_convert_delete is not None:
+                    beets_config["convert"]["delete_originals"] = orig_convert_delete
 
     if is_async:
         lib = g.lib
@@ -1167,6 +1296,8 @@ def run_import():
     try:
         res = _execute_import(g.lib, op_id)
         return jsonify(res)
+    except _MoveSourceRefused:
+        return jsonify({"error": _MOVE_LINK_ERROR, "error_code": "PATH_NOT_ALLOWED"}), 400
     except Exception:
         return jsonify({"error": "Import failed", "error_code": "IMPORT_FAILED"}), 500
 

@@ -36485,7 +36485,9 @@
      ],
      "<log>"
     ],
-    {}
+    {
+     "preserve_source": null
+    }
    ],
    [
     "log",
@@ -42638,7 +42640,9 @@
      ],
      "<log>"
     ],
-    {}
+    {
+     "preserve_source": null
+    }
    ],
    [
     "log",
@@ -42960,7 +42964,9 @@
      ],
      "<log>"
     ],
-    {}
+    {
+     "preserve_source": null
+    }
    ],
    [
     "held-exit",
@@ -43092,7 +43098,9 @@
      ],
      "<log>"
     ],
-    {}
+    {
+     "preserve_source": null
+    }
    ],
    [
     "log",
@@ -43410,7 +43418,9 @@
      ],
      "<log>"
     ],
-    {}
+    {
+     "preserve_source": null
+    }
    ],
    [
     "log",
@@ -43716,7 +43726,9 @@
      ],
      "<log>"
     ],
-    {}
+    {
+     "preserve_source": null
+    }
    ],
    [
     "log",
@@ -43999,7 +44011,9 @@
      ],
      "<log>"
     ],
-    {}
+    {
+     "preserve_source": null
+    }
    ],
    [
     "log",
@@ -44310,7 +44324,9 @@
      ],
      "<log>"
     ],
-    {}
+    {
+     "preserve_source": null
+    }
    ],
    [
     "log",
@@ -44705,39 +44721,8 @@
     }
    ],
    [
-    "call",
-    "_move_artwork_to_target",
-    [
-     "<TMP>/downloads/Artist/Album (2001)",
-     [
-      9
-     ],
-     "<log>"
-    ],
-    {}
-   ],
-   [
-    "call",
-    "cw.plan_folder_cleanup",
-    [
-     {
-      "action": "remove_empty",
-      "source": "<TMP>/downloads/Artist/Album (2001)"
-     }
-    ],
-    {}
-   ],
-   [
-    "call",
-    "cw.apply_folder_cleanup",
-    [
-     "clean-1"
-    ],
-    {}
-   ],
-   [
     "log",
-    "  [cleanup] Source folder removed: Album (2001)"
+    "  [cleanup] Source folder kept: it holds protected torrent or hardlinked files."
    ],
    [
     "call",

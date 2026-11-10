@@ -4,7 +4,7 @@
 from __future__ import annotations
 from backend.json_state import atomic_write_json
 
-import copy, hashlib, json, math, os, re, sqlite3, threading, time
+import copy, hashlib, json, math, os, re, sqlite3, stat, threading, time
 import backend.job_contract as job_contract
 from backend.matching import verify_audio_against_request
 from pathlib import Path
@@ -20,7 +20,7 @@ from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
 from backend.app_runtime import _path_is_under, _safe_path_component, validated_downloads_root
-from backend.slskd import stage_selected_audio_files as _stage_selected_audio_files_impl
+from backend.slskd import APP_DOWNLOAD_MARKER, app_download_marker_valid, stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing
 from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
@@ -38,7 +38,8 @@ from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
 from backend.serializers import _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
-from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status, _pending_review_matches
+from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_matches, _pending_review_path_key
+from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, _pending_review_is_quality_upgrade
 from backend.app_runtime import PLEX_SYNC_AUTO_REFRESH
 from backend.plex_service import _plex_configured, _trigger_plex_refresh
 
@@ -882,6 +883,23 @@ def _start_reimport_disk_job_internal(aldir: str, mb_albumid: str,
     if not data.get("ok") or not data.get("job_id"):
         raise RuntimeError(data.get("error") or "failed to start import job")
     return data["job_id"]
+
+
+def _review_row_is_torrent_source(folder_path: str) -> bool:
+    """True when a Review row from a qBittorrent batch points at this folder
+    itself (not at our staged copy): its files are a torrent's and are
+    always copied, whatever ALLOW_TORRENT_SOURCE_MOVE says. An unreadable
+    queue reads as True (copying is the safe side)."""
+    if _app_managed_download_path(Path(folder_path)):
+        return False
+    key = _pending_review_path_key(folder_path)
+    try:
+        rows = _load_pending_reviews(prune_resolved=False, strict=True)
+    except Exception:
+        return True
+    return any(_pending_review_path_key(_s(r.get("path"))) == key
+               and _s((r.get("evidence") or {}).get("source_mode")) == "qbittorrent"
+               for r in rows if isinstance(r, dict))
 
 
 def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
@@ -1908,6 +1926,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     # Only the engine's own canonical path is ever used from here on --
     # the raw client-supplied aldir is never reused after this point.
     aldir = str(import_source_evidence["path"])
+    # The Review page imports a row with an existing album here: an
+    # informational quality-upgrade row is refused like every import path.
+    if _pending_review_is_quality_upgrade(aldir):
+        return dict(QUALITY_UPGRADE_INFORMATIONAL), 409
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(aldir)
@@ -2324,8 +2346,10 @@ def _audio_validation_inspection_failed(row: Dict[str, Any]) -> bool:
     return bool(not row.get("ok") and row.get("inspection_incomplete"))
 
 
-def _filter_import_review_selected_audio_files(audio_files: List[Path], log: list) -> List[Path]:
-    """Keep partial imports moving while leaving uninspectable selected files in review."""
+def _filter_import_review_selected_audio_files(audio_files: List[Path], log: list, *,
+                                               preserve_source: Optional[bool] = None) -> List[Path]:
+    """Keep partial imports moving while leaving uninspectable selected files in review.
+    ``preserve_source=True`` keeps a rejected file in place (a copied torrent source)."""
     prefs = _music_format_preferences()
     accepted: List[Path] = []
     deferred: List[Path] = []
@@ -2354,7 +2378,8 @@ def _filter_import_review_selected_audio_files(audio_files: List[Path], log: lis
         except Exception:
             source_is_library = False
         if not source_is_library:
-            handled_results.append(_handle_rejected_audio_download(str(path), prefs, log=log))
+            handled_results.append(_handle_rejected_audio_download(str(path), prefs, log=log,
+                                                                   preserve_source=preserve_source))
     if not accepted:
         if deferred:
             # Retryable, also when some files were rejected: the uninspected
@@ -3052,6 +3077,8 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = []
     if not folder_path:
         blockers.append("source path missing")
+    elif _pending_review_is_quality_upgrade(folder_path):
+        blockers.append(QUALITY_UPGRADE_INFORMATIONAL["error"])
     elif not Path(folder_path).exists():
         blockers.append("source path not found")
     if review_item_id and not _pending_review_matches(folder_path, review_item_id):
@@ -3460,6 +3487,24 @@ def _folder_import_recovery_handoff(ctx: _FolderImportContext, mb_albumid: str, 
     return False
 
 
+def _selected_sources_need_copy(paths: Iterable[Path]) -> bool:
+    """F8: True when any selected Review file must stay where it is: a
+    preserved torrent source (the shared rule, which fails closed) or a file
+    that is not a single-link regular file (a hardlink shares its bytes with a
+    seeding torrent; a symlink or an unreadable file is unproven). The partial
+    import then copies and never moves or deletes the selected sources."""
+    for p in paths:
+        if composite_workflows._preserved_torrent_file(str(p)):
+            return True
+        try:
+            st = os.lstat(p)
+        except OSError:
+            return True
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return True
+    return False
+
+
 def _folder_import_selected_sources(folder_path: str, payload: Dict[str, Any]) -> Tuple[Any, Any]:
     """(selected source files, None), or (None, the HTTP refusal)."""
     raw_track_mapping = payload.get("track_mapping") if isinstance(payload.get("track_mapping"), list) else []
@@ -3567,7 +3612,8 @@ def _folder_import_clean_source(log: list, source_folder_path: str, album_ids: L
                 _move_artwork_to_target(src_dir, list(album_ids), log)
                 # Walk remaining files; skip directories (already handled above)
                 remaining_files = [f for f in src_dir.rglob("*") if f.is_file()]
-                unknown = [f for f in remaining_files if f.suffix.lower() not in _ART_EXTS]
+                markers = [f for f in remaining_files if f.name == APP_DOWNLOAD_MARKER and app_download_marker_valid(f.parent)]
+                unknown = [f for f in remaining_files if f.suffix.lower() not in _ART_EXTS and f not in markers]
                 if unknown:
                     log.append(
                         f"  [cleanup] {len(unknown)} unknown file(s) in source — not removing: "
@@ -3588,6 +3634,11 @@ def _folder_import_clean_source(log: list, source_folder_path: str, album_ids: L
                     # remove_empty is the correct action: Apply only
                     # rmdir()s if the directory is verified truly empty,
                     # failing closed (not raising) otherwise.
+                    for marker in markers:  # the app's own ownership proof, not content
+                        # F6: a regular file only, re-checked right before the
+                        # delete; anything else stays and keeps the folder.
+                        if stat.S_ISREG(os.lstat(marker).st_mode):
+                            composite_workflows.delete_file(str(marker))
                     p_cl = composite_workflows.plan_folder_cleanup({"source": str(src_dir), "action": "remove_empty"})
                     if not p_cl.get("ok") or not p_cl.get("operation_id"):
                         raise RuntimeError(p_cl.get("error") or f"Engine plan_folder_cleanup failed for {src_dir}")
@@ -3758,6 +3809,10 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if folder_error or trusted_folder is None:
         return {"ok": False, "error": folder_error or "Source path is not allowed."}, 400
     folder_path = str(trusted_folder)
+    # A quality-upgrade Review row is informational: replacing the library
+    # album is not available yet, so no import may start from its folder.
+    if _pending_review_is_quality_upgrade(folder_path):
+        return dict(QUALITY_UPGRADE_INFORMATIONAL), 409
     # ARCH-030 Step 4: an UNATTENDED recovery auto-insert is marked by
     # recovery_carrier_id (set by the advancer; a human Review confirm never
     # sends it). The ONLY authorization to auto-insert the staged files is the
@@ -3801,7 +3856,8 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if selection_refusal:
         return selection_refusal
     selected_subset_import = bool(selected_source_files)
-    preserve_torrent_source = _preserve_torrent_source_path(folder_path)
+    preserve_torrent_source = (_preserve_torrent_source_path(folder_path)
+                               or _review_row_is_torrent_source(folder_path))
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(folder_path)
@@ -3878,14 +3934,24 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "[torrent] Move requested, but source is under a protected "
                 "torrent root; using --copy so qBittorrent source files remain."
             )
-        import_mode = "--move" if selected_subset_import else ("--copy" if preserve_torrent_source or not use_move else "--move")
+        # F8: a selected torrent source or hardlinked file is copied and kept.
+        keep_selected_sources = selected_subset_import and (
+            preserve_torrent_source or _selected_sources_need_copy(selected_source_files))
+        if keep_selected_sources:
+            log.append("[torrent] A selected file is a protected torrent source or hardlinked; "
+                       "using --copy and keeping the source files.")
+        if selected_subset_import:
+            import_mode = "--copy" if keep_selected_sources else "--move"
+        else:
+            import_mode = "--copy" if preserve_torrent_source or not use_move else "--move"
         # The confirmed Release is imported as confirmed: never swapped for
         # another Release (or Release Group) here.
         mb_identity, resolved_releasegroupid, selected_releasegroupid = _folder_import_settle_release_group(
             ctx, mb_albumid, selected_releasegroupid)
         log.append(f"[import] Canonical MusicBrainz release-group ID: {selected_releasegroupid}")
         if selected_subset_import:
-            active_selected_source_files = _filter_import_review_selected_audio_files(selected_source_files, log)
+            active_selected_source_files = _filter_import_review_selected_audio_files(
+                selected_source_files, log, preserve_source=True if keep_selected_sources else None)
             log.append("  [audio] Selected partial-import files passed pre-stage audio validation.")
             import_folder_path = _stage_selected_audio_files(
                 folder_path,
@@ -3956,6 +4022,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             removed_selected = 0
             music_root_path = Path(music_root).resolve(strict=False)
             for src in active_selected_source_files:
+                if keep_selected_sources:
+                    log.append(f"  [cleanup] Kept protected source file: {Path(src).name}")
+                    continue
                 try:
                     resolved_src = Path(src).resolve(strict=False)
                     try:
@@ -3969,13 +4038,22 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 except Exception as ex:
                     log.append(f"  [cleanup] WARN could not remove imported source file {src}: {ex}")
             partial_remaining_audio = _remaining_audio_files(source_folder_path)
+            if keep_selected_sources:  # the kept, imported files are not unmatched
+                imported = {Path(p).resolve(strict=False) for p in active_selected_source_files}
+                partial_remaining_audio = [p for p in partial_remaining_audio
+                                           if Path(p).resolve(strict=False) not in imported]
             if partial_remaining_audio:
                 log.append(
                     f"Partial import complete. {len(partial_remaining_audio)} unmatched file(s) remain in review."
                 )
             else:
                 log.append(f"Partial import complete. Removed {removed_selected} imported source file(s).")
-        _folder_import_clean_source(log, source_folder_path, album_ids, selected_subset_import, partial_remaining_audio)
+        if keep_selected_sources or (preserve_torrent_source and not selected_subset_import):
+            # A copied torrent source keeps every file, its artwork included.
+            log.append("  [cleanup] Source folder kept: it holds protected torrent or hardlinked files.")
+        else:
+            _folder_import_clean_source(log, source_folder_path, album_ids, selected_subset_import,
+                                        partial_remaining_audio)
 
         if selected_subset_import and import_folder_path != source_folder_path:
             try:

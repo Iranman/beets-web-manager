@@ -1,7 +1,11 @@
+import datetime
 import errno
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import uuid
@@ -14,6 +18,132 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 #: audio-extension scans and by Beets import; keys are POSIX paths relative to
 #: the staged folder, values the original basenames.
 RECOVERY_ORIGINAL_NAMES_SIDECAR = ".bwm_recovery_original_names.json"
+
+#: Ownership proof: written into each download folder the app creates outside
+#: its private roots (``_beets_missing_import``, playlist roots), so a user
+#: Import never picks it up and ``library_service._app_managed_download_path``
+#: need not trust a folder name. Dot-prefixed: scans and Beets skip it. Its
+#: content is an HMAC of the folder's real path under APP_DOWNLOAD_KEY_FILE, a
+#: per-install secret downloads cannot read: a marker shipped by a torrent, or
+#: copied from another folder, proves nothing (#325 F1).
+APP_DOWNLOAD_MARKER = ".bwm_app_download"
+#: The per-install key, created 0600 once under WEB_MANAGER_DATA_DIR.
+APP_DOWNLOAD_KEY_FILE = ".bwm_app_download_key"
+_APP_DOWNLOAD_KEY_LEN = 64  # hex chars
+_APP_DOWNLOAD_MARKER_MAX = 128  # bytes; a marker is 64 hex chars + newline
+#: Sibling folder the slot gate moves deferred files into (ARCH-030 B2).
+SLOT_DEFERRED_SUFFIX = "__slot_deferred"
+
+
+def direct_download_folder_name(album: str, source_slug: str, suffix: str) -> str:
+    """The folder name a direct-source (yt-dlp/SoundCloud/SpotiFLAC) download
+    of missing tracks gets; ``suffix`` is an epoch-ms or recovery ``rec-`` prefix."""
+    return f"{album} - {source_slug} missing {suffix}"
+
+
+#: Legacy proof for folders made before APP_DOWNLOAD_MARKER existed: exactly the
+#: names direct_download_folder_name and the slot gate generate (#325 S-3).
+APP_DOWNLOAD_NAME_RE = re.compile(
+    r" - (?:yt|ytdlp|soundcloud|spotiflac) missing (?:\d{13}|rec-[0-9a-f]{16})"
+    "(?:" + SLOT_DEFERRED_SUFFIX + ")?$")
+#: The name proof ends on this date (docs/TECHNICAL_DEBT.md): a torrent folder
+#: can carry such a name, so it is a migration bridge, not ownership proof.
+APP_DOWNLOAD_LEGACY_NAME_UNTIL = datetime.date(2027, 5, 1)
+
+
+def make_app_download_dir(path: Any) -> None:
+    """``os.makedirs(path, exist_ok=True)`` that marks the folder as an app
+    download only when this call created it: a folder that already existed may
+    be the user's, and a marked folder may be moved or deleted by the app."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        if path.is_dir():
+            return
+        raise
+    mark_app_download_dir(path)
+
+
+def mark_app_download_dir(path: Any) -> None:
+    """Write APP_DOWNLOAD_MARKER into a folder the app just created, never
+    through a symlink (SEC-007/#325). Fails closed: without the no-follow
+    primitives or the key, the folder stays unmarked, which only means it is
+    treated as the user's (kept, never moved)."""
+    if not _staging_fd_supported():
+        return
+    try:
+        expected = app_download_marker_text(path, create_key=True)
+        if expected:
+            _write_text_nofollow(Path(path) / APP_DOWNLOAD_MARKER, expected + "\n")
+    except OSError:
+        pass
+
+
+def app_download_key_path() -> Path:
+    return Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")) / APP_DOWNLOAD_KEY_FILE
+
+
+def _read_regular_nofollow(path: Path, cap: int) -> Optional[bytes]:
+    """A regular file's bytes, read without following a symlink at the leaf,
+    or None when it is missing, not a regular file or larger than ``cap``."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = os.read(fd, cap + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return data if len(data) <= cap else None
+
+
+def _app_download_key(create: bool) -> Optional[bytes]:
+    if not _staging_fd_supported():
+        return None
+    path = app_download_key_path()
+    data = _read_regular_nofollow(path, _APP_DOWNLOAD_KEY_LEN + 1)
+    if data is None and create:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="ascii") as fh:
+                fh.write(secrets.token_hex(_APP_DOWNLOAD_KEY_LEN // 2) + "\n")
+        except OSError:
+            pass  # another writer won the O_EXCL race, or the data dir is unusable
+        data = _read_regular_nofollow(path, _APP_DOWNLOAD_KEY_LEN + 1)
+    key = (data or b"").strip()
+    if len(key) != _APP_DOWNLOAD_KEY_LEN or not re.fullmatch(rb"[0-9a-f]+", key):
+        return None
+    return key
+
+
+def app_download_marker_text(folder: Any, create_key: bool = False) -> str:
+    """The marker content that proves ``folder``: bound to its real path, so a
+    marker copied into another folder proves nothing. "" without a key."""
+    key = _app_download_key(create_key)
+    if not key:
+        return ""
+    real = os.path.realpath(os.fspath(folder))
+    return hmac.new(key, b"bwm-app-download\x00" + os.fsencode(real), hashlib.sha256).hexdigest()
+
+
+def app_download_marker_valid(folder: Any) -> bool:
+    """Whether ``folder`` holds a genuine APP_DOWNLOAD_MARKER for itself: a
+    regular file (never a symlink, at most _APP_DOWNLOAD_MARKER_MAX bytes) whose
+    content matches app_download_marker_text in constant time."""
+    if not _staging_fd_supported():
+        return False
+    data = _read_regular_nofollow(Path(folder) / APP_DOWNLOAD_MARKER, _APP_DOWNLOAD_MARKER_MAX)
+    if data is None:
+        return False
+    expected = app_download_marker_text(folder)
+    return bool(expected) and hmac.compare_digest(data.strip(), expected.encode("ascii"))
 
 
 def _s(value) -> str:
@@ -439,7 +569,7 @@ def _staging_fd_supported() -> bool:
 
 def _staged_copy_nofollow(downloads_root: Path, stage: Path,
                           rel_parts: Sequence[str], src: Path,
-                          overwrite: bool) -> None:
+                          overwrite: bool, expected_id: Optional[Sequence[int]] = None) -> None:
     """Copy ``src`` into ``stage``/``rel_parts`` fd-relative from the trusted
     ``downloads_root`` (SEC-007 / #325), mirroring the barrier discipline in
     ``composite_workflows`` (``_staging_dir_fd`` / ``_copy_file_across_fs``).
@@ -456,7 +586,11 @@ def _staged_copy_nofollow(downloads_root: Path, stage: Path,
     onto the final name: the rename replaces a dest planted on a deterministic
     REUSE -- symlink or file -- WITHOUT following it, so downloaded bytes can
     never land on the symlink's target (config, Beets DB, media). ``stage`` must
-    be ``downloads_root`` joined with one or more fixed staging components."""
+    be ``downloads_root`` joined with one or more fixed staging components.
+
+    The SOURCE is opened once with O_NOFOLLOW|O_NONBLOCK and must be a regular
+    file (and, when ``expected_id`` gives ``[dev, ino, ...]``, that very file);
+    its bytes and metadata come from that descriptor, never a re-stat by path."""
     parts = [p for p in rel_parts]
     if not parts or any(p in ("", ".", "..") for p in parts):
         raise RuntimeError("refusing to stage a file with an unsafe relative path")
@@ -502,15 +636,27 @@ def _staged_copy_nofollow(downloads_root: Path, stage: Path,
                     break
                 leaf = f"{base}.{n}{ext}"
                 n += 1
+        try:
+            sfd = os.open(str(src), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                          | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                raise RuntimeError("refusing to stage a symlinked source file") from exc
+            raise
+        fds.append(sfd)
+        sst = os.fstat(sfd)
+        if not stat.S_ISREG(sst.st_mode):
+            raise RuntimeError("refusing to stage a source that is not a regular file")
+        if expected_id is not None and [int(v) for v in list(expected_id)[:2]] != [sst.st_dev, sst.st_ino]:
+            raise RuntimeError("refusing to stage a source file that is not the one discovery verified")
         tmp = f".{uuid.uuid4().hex[:12]}.part"
         dfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                       0o600, dir_fd=parent_fd)
         try:
             try:
-                with open(src, "rb") as fin, open(dfd, "wb", closefd=False) as fout:
+                with open(sfd, "rb", closefd=False) as fin, open(dfd, "wb", closefd=False) as fout:
                     shutil.copyfileobj(fin, fout, 1 << 20)
-                try:  # best-effort copy2-style metadata preservation
-                    sst = os.stat(src)
+                try:  # best-effort copy2-style metadata preservation, from the same fd
                     os.fchmod(dfd, stat.S_IMODE(sst.st_mode))
                     os.utime(dfd, ns=(sst.st_atime_ns, sst.st_mtime_ns))
                 except OSError:
@@ -537,8 +683,10 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
                                artist: str, album: str, log: list,
                                stage_prefix: str | None = None,
                                force_stage: bool = False,
-                               target_tracks: Optional[Sequence[Dict[str, Any]]] = None) -> str:
-    """Copy a selected subset to a clean import folder when the source has extras."""
+                               target_tracks: Optional[Sequence[Dict[str, Any]]] = None,
+                               source_ids: Optional[Dict[str, Sequence[int]]] = None) -> str:
+    """Copy a selected subset to a clean import folder when the source has extras.
+    ``source_ids`` maps ``str(src)`` to the ``[dev, ino, ...]`` the copy must open."""
     selected = [Path(p) for p in audio_files]
     if not selected:
         return aldir
@@ -646,7 +794,8 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
         # name and must REPLACE the prior copy (``overwrite``) rather than
         # accumulate ``name.1``/``name.2`` siblings that would collide at import;
         # a fresh random-prefix pass keeps the de-dupe suffixing.
-        _staged_copy_nofollow(downloads_root, stage, rel.parts, src, overwrite=reuse)
+        _staged_copy_nofollow(downloads_root, stage, rel.parts, src, overwrite=reuse,
+                              expected_id=(source_ids or {}).get(str(src)))
         original_names[rel.as_posix()] = (
             prior_original_names.get(str(src))
             or prior_original_names.get(str(src.resolve(strict=False)))

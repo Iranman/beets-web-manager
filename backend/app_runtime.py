@@ -402,6 +402,15 @@ QBIT_FILTER = (
 )
 
 
+# Optional limit for Import batches with the qBittorrent source; empty reads
+# every completed torrent. Separate from QBITTORRENT_CATEGORY (repair tools,
+# defaults to "music") so that default never filters an import.
+QBIT_IMPORT_CATEGORY = os.environ.get("QBITTORRENT_IMPORT_CATEGORY", "").strip()
+
+
+QBIT_IMPORT_TAG = os.environ.get("QBITTORRENT_IMPORT_TAG", "").strip()
+
+
 QBIT_PATH_ALIASES = os.environ.get("QBIT_PATH_ALIASES", "")
 
 
