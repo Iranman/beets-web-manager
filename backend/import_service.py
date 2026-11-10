@@ -11,7 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, TORRENT_SOURCE_ROOTS, _DEFAULT_ALBUM_PATH_TEMPLATE, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _env_int, _extract_mb_uuid, _s
-from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_inspection_incomplete_error, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio
+from backend.ai_service import _record_recent_import_for_album, _ai_match_evidence_packet, _ai_suggestion_names_import, _auto_merge_case_duplicate_artist_folder, _music_format_inspection_incomplete_error, _music_format_policy_rejection_error, _record_ai_match, _validate_import_source_audio, _has_hardlinked_file
 from backend.library_service import _app_managed_download_path, _build_folder_evidence, _delete_source_if_proven_in_library, _preserve_torrent_source_path, _resolve_album_release_for_import, _source_audio_missing_track_scan, _strip_year_from_album_name, _target_preview_artist_folder, _target_preview_year
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _pending_review_has_path_or_overlap, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
@@ -2035,7 +2035,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
         # Web Manager mounts the downloads root and (read-only) the library
         # in the documented compose, so the audio policy reads the files here.
-        _validate_import_source_audio(aldir, log, reject_downloads=True)
+        # #567: a hardlinked download is copied and its rejected files kept.
+        keep_hardlinked_source = not source_is_music_library and _has_hardlinked_file(aldir)
+        _validate_import_source_audio(aldir, log, reject_downloads=True,
+                                      preserve_source=True if keep_hardlinked_source else None)
         log.append(f"[1/3] Importing '{Path(aldir).name}' with Beets as MB release {mb_albumid}…")
         import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_file_count", 0))
         # Beets' own importer does the work (beet import -q --search-id
@@ -2058,7 +2061,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "existing_album_id": existing_album_id,
             "mb_albumid": mb_albumid,
             "mb_releasegroupid": planned_rg,
-            "use_move": not source_is_music_library and not _preserve_torrent_source_path(aldir),
+            "use_move": (not source_is_music_library and not _preserve_torrent_source_path(aldir)
+                         and not keep_hardlinked_source),
             "in_place": source_is_music_library,
             "duplicate_action": "keep" if existing_album_id else "skip",
             # A missing-track fill holds only the missing tracks; Beets would
@@ -3945,6 +3949,13 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 "[torrent] Move requested, but source is under a protected "
                 "torrent root; using --copy so qBittorrent source files remain."
             )
+        # #567: a moved hardlinked file shares its inode with the other link
+        # (e.g. a seeding torrent), so tag writes would rewrite that copy too.
+        keep_hardlinked_folder = (use_move and not selected_subset_import and not preserve_torrent_source
+                                  and _has_hardlinked_file(folder_path))
+        if keep_hardlinked_folder:
+            log.append("[import] A source file is hardlinked; using --copy and keeping the source folder.")
+        keep_whole_source = preserve_torrent_source or keep_hardlinked_folder
         # F8: a selected torrent source or hardlinked file is copied and kept.
         keep_selected_sources = selected_subset_import and (
             preserve_torrent_source or _selected_sources_need_copy(selected_source_files))
@@ -3954,7 +3965,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         if selected_subset_import:
             import_mode = "--copy" if keep_selected_sources else "--move"
         else:
-            import_mode = "--copy" if preserve_torrent_source or not use_move else "--move"
+            import_mode = "--copy" if keep_whole_source or not use_move else "--move"
         # The confirmed Release is imported as confirmed: never swapped for
         # another Release (or Release Group) here.
         mb_identity, resolved_releasegroupid, selected_releasegroupid = _folder_import_settle_release_group(
@@ -3974,7 +3985,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
         else:
             _validate_import_source_audio(folder_path, log, reject_downloads=True,
-                                          preserve_source=preserve_torrent_source)
+                                          preserve_source=keep_whole_source)
         log.append(f"[1/2] Importing '{Path(folder_path).name}' with MB ID {mb_albumid}…")
         import_timeout = _beet_import_timeout(import_folder_path)
 
@@ -4059,7 +4070,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
                 )
             else:
                 log.append(f"Partial import complete. Removed {removed_selected} imported source file(s).")
-        if keep_selected_sources or (preserve_torrent_source and not selected_subset_import):
+        if keep_selected_sources or (keep_whole_source and not selected_subset_import):
             # A copied torrent source keeps every file, its artwork included.
             log.append("  [cleanup] Source folder kept: it holds protected torrent or hardlinked files.")
         else:
