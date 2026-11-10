@@ -40,7 +40,7 @@ class StartAiBatchJobRaceTests(unittest.TestCase):
         )
         self.fn = _function_source(
             APP_SOURCE,
-            "def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = \"\", *, retry_failed: bool = False):",
+            "def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = \"\", *, retry_failed: bool = False,",
             "\n\n@app.post(\"/api/ai-batch-skip\")",
         )
 
@@ -188,7 +188,7 @@ class RunAiBatchImportReconciliationCommitOrderTests(unittest.TestCase):
     def setUp(self):
         self.fn = _function_source(
             APP_SOURCE,
-            "def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_event=None, update_state=None, *, recover: bool = False, retry_failed: bool = False, job_id: str = \"\") -> Dict[str, Any]:",
+            "def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_event=None, update_state=None, *, recover: bool = False, retry_failed: bool = False, job_id: str = \"\",",
             "\n\ndef _start_ai_batch_job(",
         )
 

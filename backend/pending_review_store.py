@@ -737,6 +737,90 @@ def _pending_review_has_path(folder_path: str, *, unknown: bool = False) -> bool
         return unknown
 
 
+QUALITY_UPGRADE_INFORMATIONAL = {
+    "ok": False,
+    "error_code": "quality_upgrade_informational",
+    "code": "quality_upgrade_informational",
+    "error": ("This folder is a quality upgrade of an album already in the library. "
+              "Replacing a library album with an upgrade is not available yet; nothing was imported."),
+}
+
+
+def _pending_review_evidence_is_upgrade(evidence: Dict[str, Any]) -> bool:
+    return "quality_upgrade" in (evidence.get("origin_step"), evidence.get("duplicate_rule"))
+
+
+def _pending_review_row_overlaps(folder_path: str, wanted, items: Optional[list] = None) -> bool:
+    """True when a Review row whose evidence satisfies ``wanted`` is at,
+    inside or above ``folder_path``. Read-only: checks ``items`` when given,
+    else a raw snapshot read, so the check never prunes or rewrites the queue."""
+    key = _pending_review_path_key(folder_path)
+    if not key:
+        return False
+    for row in (items if items is not None else _read_pending_snapshot()):
+        evidence = row.get("evidence") if isinstance(row, dict) else None
+        if (isinstance(evidence, dict) and wanted(evidence)
+                and _pending_review_keys_overlap(_pending_review_path_key(_s(row.get("path"))), key)):
+            return True
+    return False
+
+
+def _pending_review_is_quality_upgrade(folder_path: str) -> bool:
+    """An informational quality-upgrade Review row (ai_service
+    ``upgrade_review``) is at, inside or above ``folder_path``: importing
+    ``<folder>/CD 01`` or a parent imports the upgrade's files too, so every
+    import path refuses it. Fails closed: an unreadable or malformed queue
+    counts as an upgrade row, so no import runs blind (a missing queue file
+    is an empty queue)."""
+    if not _pending_review_path_key(folder_path):
+        return False
+    try:
+        items = json.loads(_AI_PENDING_FILE.read_text())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    if not isinstance(items, list):
+        return True
+    # Check the rows just read strictly: a second, lenient read would turn a
+    # read failure into "no upgrade row" (fail open).
+    return _pending_review_row_overlaps(folder_path, _pending_review_evidence_is_upgrade, items)
+
+
+def _pending_review_is_torrent_source(folder_path: str) -> bool:
+    """A qBittorrent-batch or quality-upgrade Review row is at, inside or
+    above ``folder_path``: its folder may hold a seeding torrent's files."""
+    return _pending_review_row_overlaps(
+        folder_path,
+        lambda e: e.get("source_mode") == "qbittorrent" or _pending_review_evidence_is_upgrade(e))
+
+
+def _pending_review_torrent_rows(folder_path: str) -> List[tuple]:
+    """``(path, evidence)`` of every qBittorrent-batch or quality-upgrade
+    Review row at, inside or above ``folder_path``. Read-only. Unlike
+    ``_pending_review_is_torrent_source`` an unreadable queue raises
+    PendingReviewLoadError, so a destructive caller can fail closed."""
+    key = _pending_review_path_key(folder_path)
+    if not key:
+        return []
+    try:
+        items = json.loads(_AI_PENDING_FILE.read_text())
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as ex:
+        raise PendingReviewLoadError("Review Queue file could not be read.") from ex
+    if not isinstance(items, list):
+        raise PendingReviewLoadError("Review Queue file is not a list.")
+    rows = []
+    for row in items:
+        evidence = row.get("evidence") if isinstance(row, dict) else None
+        if (isinstance(evidence, dict)
+                and (evidence.get("source_mode") == "qbittorrent" or _pending_review_evidence_is_upgrade(evidence))
+                and _pending_review_keys_overlap(_pending_review_path_key(_s(row.get("path"))), key)):
+            rows.append((_s(row.get("path")), evidence))
+    return rows
+
+
 def _pending_review_has_path_or_overlap(folder_path: str, *, unknown: bool = False) -> bool:
     """Like ``_pending_review_has_path`` but also True when a Review row points
     at an ANCESTOR or DESCENDANT of ``folder_path``, not only an exact match.
@@ -758,15 +842,20 @@ def _pending_review_has_path_or_overlap(folder_path: str, *, unknown: bool = Fal
     # Keys are resolved, forward-slashed and rstripped of "/", so a path
     # boundary is exactly a "/" separator -- no false prefix match between
     # sibling names like ".../album" and ".../album-2".
-    return any(
-        row == key or row.startswith(key + "/") or key.startswith(row + "/")
-        for row in rows
-    )
+    return any(_pending_review_keys_overlap(row, key) for row in rows)
+
+
+def _pending_review_keys_overlap(row: str, key: str) -> bool:
+    """Same folder, or one inside the other (keys from ``_pending_review_path_key``)."""
+    return bool(row) and (row == key or row.startswith(key + "/") or key.startswith(row + "/"))
 
 
 def _pending_review_path_key(folder_path: str) -> str:
-    raw = _s(folder_path).strip()
-    if not raw:
+    # Whitespace only decides emptiness: "Torrent " and "Torrent" are
+    # different folders, so stripping would split a row from its own disc
+    # folders (and merge it with a sibling).
+    raw = _s(folder_path)
+    if not raw.strip():
         return ""
     try:
         return str(Path(raw).resolve(strict=False)).replace("\\", "/").rstrip("/").casefold()

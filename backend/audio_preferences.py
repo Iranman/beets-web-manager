@@ -307,6 +307,7 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
         "atmos_filename_hint": bool(re.search(r"\batmos\b", path.name, re.I)),
         "sample_rate": None,
         "bitrate": None,
+        "bit_depth": None,
     }
     full_timeout = _audio_probe_timeout("AUDIO_FFPROBE_TIMEOUT", 20)
     fast_timeout = _audio_probe_timeout("AUDIO_FFPROBE_FAST_TIMEOUT", 20)
@@ -336,7 +337,7 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
                     "-analyzeduration", "1000000",
                     "-select_streams", "a:0",
                     "-show_entries",
-                    "stream=codec_type,codec_name,codec_long_name,profile,channels,channel_layout,sample_rate,bit_rate,side_data_list,tags:format=duration,bit_rate,tags",
+                    "stream=codec_type,codec_name,codec_long_name,profile,channels,channel_layout,sample_rate,bit_rate,bits_per_raw_sample,bits_per_sample,side_data_list,tags:format=duration,bit_rate,tags",
                     "-of", "json",
                     ffmpeg_file_input(path),
                 ],
@@ -384,6 +385,9 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
     layout = str(stream.get("channel_layout") or "").strip()
     sample_rate = stream.get("sample_rate")
     bitrate = stream.get("bit_rate") or (probe.get("format") or {}).get("bit_rate")
+    # FLAC reports its depth in bits_per_raw_sample; PCM in bits_per_sample. 0 = lossy.
+    bit_depth = next((int(v) for v in (stream.get("bits_per_raw_sample"), stream.get("bits_per_sample"))
+                      if str(v or "").isdigit() and int(v) > 0), None)
     result.update({
         "ok": True,
         "codec": str(stream.get("codec_name") or "unknown").lower(),
@@ -394,6 +398,7 @@ def inspect_audio_file(path_value: str, *, ffprobe_bin: Optional[str] = None) ->
         "is_atmos": is_atmos,
         "sample_rate": int(sample_rate) if str(sample_rate or "").isdigit() else None,
         "bitrate": int(bitrate) if str(bitrate or "").isdigit() else None,
+        "bit_depth": bit_depth,
     })
     return result
 

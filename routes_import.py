@@ -19,15 +19,16 @@ from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT,
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
 from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _import_review_suggestion_is_stale, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _compact_revalidation_summary, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
-from backend.import_service import _cached_import_target_preview, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _read_log_tail, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
-from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _scan_artist_folder_groups
+from backend.import_service import _cached_import_target_preview, _delete_staged_import_folder, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _read_log_tail, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
+from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _review_torrent_files_protected, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
-from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
+from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_is_quality_upgrade, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
 from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
-from backend.ai_service import _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
+import backend.acquisition_service as _acquisition_service
+from backend.ai_service import _ai_batch_claim_qbit_slot, _ai_batch_control_lock, _ai_batch_controls, _ai_batch_initial_state, _ai_batch_load_state, _ai_batch_persist_job_association, _ai_batch_promote_worker, _ai_batch_release_worker, _ai_batch_release_worker_any, _ai_batch_reserve_worker, _ai_batch_validate_worker_handoff, _run_ai_batch_import
 
 # ── ARCH-001 extracted code ──
 
@@ -113,6 +114,21 @@ def import_folder_stats():
 
 
 _REVIEW_FOLDER_NOT_PENDING = "Folder is not in Pending Review, or a Needs MB ID album row match."
+_TORRENT_SOURCE_PROTECTED = {
+    "ok": False, "error_code": "torrent_source_protected", "code": "torrent_source_protected",
+    "error": "These files belong to a torrent that qBittorrent may still be seeding. Nothing was moved or "
+             "deleted; dismiss the row instead, or remove the torrent in qBittorrent.",
+}
+
+
+def _torrent_rows_protect(path: str) -> bool:
+    """The Review torrent-row rule for a destructive route; an unreadable
+    queue or rule fails closed."""
+    try:
+        return _review_torrent_files_protected(path)
+    except Exception:
+        _app_logger.warning("Could not evaluate the Review torrent rule for %r; refusing", path)
+        return True
 
 
 @app.post("/api/import/review-folder/delete")
@@ -157,6 +173,11 @@ def delete_import_review_folder():
 
     if not missing_mbid_album_match and not _pending_review_matches(src_path, ""):
         return jsonify({"ok": False, "error": _REVIEW_FOLDER_NOT_PENDING}), 400
+    # A qBittorrent (or preserved quality-upgrade) row at, inside or above
+    # the folder may still be seeding: refuse unless the row is a copy the
+    # app made. Dismissing the row still works. The planner re-checks.
+    if _torrent_rows_protect(str(resolved)):
+        return jsonify(_TORRENT_SOURCE_PROTECTED), 409
 
     # CodeQL #1388: the ValueError and the log carry executor and exception
     # text (paths, raw errors). Both stay in the server log; the client gets
@@ -245,6 +266,10 @@ def cleanup_import_review_files():
     if not _pending_review_matches(folder_path, review_item_id):
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
+    # Same torrent rule as Delete Folder: nothing is planned or applied.
+    if _torrent_rows_protect(folder_path):
+        return jsonify({**_TORRENT_SOURCE_PROTECTED, "log": log}), 409
+
     allow_delete = bool(payload.get("allow_delete"))
     # #380 F3: "rejected"/"duplicate" is the client's claim; the backend
     # holds no per-file proof that a file is rejected and not in the
@@ -265,6 +290,8 @@ def cleanup_import_review_files():
         plan_res = composite_workflows.plan_import_review_cleanup(plan_req)
         if not plan_res.get("ok"):
             _app_logger.warning("cleanup_import_review_files plan refused for %r: %s", folder_path, plan_res.get("error"))
+            if plan_res.get("code") == "torrent_source_protected":
+                return jsonify({**_TORRENT_SOURCE_PROTECTED, "log": log}), 409
             return jsonify({"ok": False, "error": _import_review_cleanup_plan_error(plan_res),
                             "code": plan_res.get("code"),
                             "log": log}), 400
@@ -878,6 +905,8 @@ def import_reconciliation_resolve(review_id: str):
 def import_review_auto_enqueue():
     payload = request.get_json(silent=True) or {}
     eligibility = evaluate_import_eligibility(payload)
+    if QUALITY_UPGRADE_INFORMATIONAL["error"] in (eligibility.get("blocking_reasons") or []):
+        return jsonify({**QUALITY_UPGRADE_INFORMATIONAL, "queued": False, "eligibility": eligibility}), 409
     if not eligibility.get("eligible"):
         reason = "; ".join(eligibility.get("blocking_reasons") or []) or "Import is not eligible to queue."
         return jsonify({"ok": False, "queued": False, "error": reason, "eligibility": eligibility}), 400
@@ -1503,7 +1532,12 @@ def ai_batch_import_recover():
         return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
     if state.get("status") in _AI_BATCH_TERMINAL_STATUSES and not retry_failed:
         return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
-    return _start_ai_batch_job(source_path, recover_batch_job_id=batch_job_id, retry_failed=retry_failed)
+    # The batch keeps its own source: a qBittorrent batch never re-walks the folder.
+    return _start_ai_batch_job(source_path, recover_batch_job_id=batch_job_id, retry_failed=retry_failed,
+                               source=_s(state.get("source_mode") or "local"))
+
+
+_AI_BATCH_SOURCES = ("local", "qbittorrent")
 
 
 @app.post("/api/ai-batch-import")
@@ -1511,18 +1545,30 @@ def start_ai_batch_import():
     """Start or reconnect the durable AI batch import worker."""
     payload = request.get_json(silent=True) or {}
     recover_batch_job_id = _s(payload.get("recover_batch_job_id") or payload.get("batch_job_id")).strip()
+    source = _s(payload.get("source") or "local").strip().lower()
+    if source not in _AI_BATCH_SOURCES:
+        return jsonify({"ok": False, "code": "invalid_source",
+                        "error": "source must be 'local' or 'qbittorrent'"}), 400
     if recover_batch_job_id:
         state = _ai_batch_find_state(recover_batch_job_id)
         if not state:
             return jsonify({"ok": False, "error": "AI batch state not found"}), 404
+        source = _s(state.get("source_mode") or "local")  # a stored batch keeps its source
         # Stored job state is untrusted at execution time (it can be old,
         # or a recover/retry call can race a state file edited between
         # requests) -- revalidate exactly like a fresh caller-supplied path,
         # not "already validated when queued".
         scan_path = _s(state.get("source_path") or payload.get("path") or str(DOWNLOADS_ROOT)).strip()
+    elif source == "qbittorrent":
+        # qBittorrent decides what is imported; the path only labels the batch.
+        scan_path = str(DOWNLOADS_ROOT)
     else:
         scan_path = _s(payload.get("path") or str(DOWNLOADS_ROOT)).strip()
 
+    if source == "qbittorrent" and not _acquisition_service.QBIT_URL:
+        return jsonify({"ok": False, "code": "source_verification_required",
+                        "error": "qBittorrent is not configured. Set QBITTORRENT_URL (and its username "
+                                 "and password) to import from qBittorrent."}), 400
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
     # Deterministic import (#288): no AI key needed. The scan root may be a
@@ -1534,7 +1580,8 @@ def start_ai_batch_import():
 
     if not recover_batch_job_id:
         latest = _ai_batch_latest_state()
-        if latest and _s(latest.get("source_path")) == scan_path:
+        if (latest and _s(latest.get("source_path")) == scan_path
+                and _s(latest.get("source_mode") or "local") == source):
             latest = _ai_batch_reconcile_state(latest)
             status = _s(latest.get("status"))
             if status not in _AI_BATCH_TERMINAL_STATUSES:
@@ -1547,7 +1594,7 @@ def start_ai_batch_import():
                     "reconnected": True,
                 })
 
-    return _start_ai_batch_job(scan_path, recover_batch_job_id=recover_batch_job_id)
+    return _start_ai_batch_job(scan_path, recover_batch_job_id=recover_batch_job_id, source=source)
 
 
 IMPORT_NOT_MATCHED_STATUS = "not matched; left in place for review"
@@ -1576,6 +1623,10 @@ def start_import():
     search_id     = _extract_mb_uuid(raw_search_id)   # Beets --search-id (a Release ID)
     if raw_search_id and not search_id:
         return jsonify({"ok": False, "error": "search_id must be a MusicBrainz Release ID or URL"}), 400
+    # A quality-upgrade row at, inside or above the path: Beets would import
+    # the upgrade's files too.
+    if _pending_review_is_quality_upgrade(path):
+        return jsonify(dict(QUALITY_UPGRADE_INFORMATIONAL)), 409
     # Auto-create directory so import always starts
     try:
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -1830,7 +1881,8 @@ def _ai_batch_reconnect_response(batch_job_id: str):
     }), 409
 
 
-def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False):
+def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False,
+                        source: str = "local"):
     # Authoritative gate, not merely a route-level convenience: scan_path
     # reaches _ai_batch_find_audio_dirs(), which queues every folder the
     # engine discovers for AI-driven import review. Both callers of this
@@ -1858,6 +1910,18 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
     # one jobs.start_python() call; every loser reconnects instead.
     if not _ai_batch_reserve_worker(batch_job_id):
         return _ai_batch_reconnect_response(batch_job_id)
+    # Every qBittorrent batch stages a unit into the same per-unit stage and
+    # cleans it, so a second one (a resumed older batch, or a new one) must
+    # not run alongside the first.
+    # ponytail: in-process slot (the app runs one process); add a durable
+    # job_contract key if batch workers ever run in several processes.
+    busy = _ai_batch_claim_qbit_slot(batch_job_id) if source == "qbittorrent" else ""
+    if busy:
+        _ai_batch_release_worker(batch_job_id, None)
+        return jsonify({"ok": False, "error_code": "qbittorrent_batch_active", "code": "qbittorrent_batch_active",
+                        "active_batch_job_id": busy,
+                        "error": "Another qBittorrent import batch is running. Wait for it to finish or "
+                                 "pause it, then try again."}), 409
 
     # Explicit startup handoff state, owned by this one _start_ai_batch_job
     # invocation and closed over by its worker thread below. Two separate
@@ -1874,6 +1938,9 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
     job_id_holder: Dict[str, str] = {}
     handoff_ready = threading.Event()
     startup_aborted = threading.Event()
+    # Optional QBITTORRENT_IMPORT_CATEGORY/_TAG: read once, sent to
+    # qBittorrent and recorded in the batch's source report.
+    qbit_filter = _acquisition_service.qbit_import_filter() if source == "qbittorrent" else None
 
     def _do(log, cancel_event=None, update_state=None):
         signaled = handoff_ready.wait(timeout=10)
@@ -1890,6 +1957,8 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
                 return _run_ai_batch_import(
                     batch_job_id, scan_path, log, cancel_event, update_state,
                     recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=owned_job_id,
+                    source=source, qbit_inventory=lambda ce: _acquisition_service.qbit_import_inventory(ce, qbit_filter),
+                    qbit_filter=qbit_filter, stage_cleanup=_delete_staged_import_folder,
                 )
         finally:
             # Ownership-safe regardless of which startup outcome applies:
@@ -1905,6 +1974,7 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
             _ai_batch_controls[batch_job_id] = {"pause": False, "skip_current": False, "skip_folder_ids": set()}
         if not recover_batch_job_id:
             state = _ai_batch_initial_state(batch_job_id, scan_path)
+            state["source_mode"] = source
             _ai_batch_commit(state, None)
 
         # jobs.start_python() spawns its worker thread before returning, and
@@ -1918,9 +1988,10 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
         # job_id for longer than necessary.
         job = jobs.start_python(
             _do,
-            label=f"Import: {Path(scan_path).name or scan_path}" + (" retry" if retry_failed else ""),
+            label=("Import: qBittorrent" if source == "qbittorrent" else f"Import: {Path(scan_path).name or scan_path}")
+            + (" retry" if retry_failed else ""),
             metadata={"type": "ai-batch-import", "workflow": "import-batch",
-                      "batch_job_id": batch_job_id, "source_path": scan_path},
+                      "batch_job_id": batch_job_id, "source_path": scan_path, "source": source},
         )
         # From this point on, a worker thread exists and is blocked waiting
         # for handoff_ready. Cleanup responsibility transfers to it

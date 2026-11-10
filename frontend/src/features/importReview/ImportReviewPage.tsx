@@ -1282,8 +1282,17 @@ function needsOnlyReleaseGroup(item: ReviewItem): boolean {
   return item.missing_reason === 'missing_release_group';
 }
 
+/** Why Delete Folder is withheld on a qBittorrent row. The backend refuses it too. */
+export const TORRENT_DELETE_REASON = 'This folder belongs to a qBittorrent torrent; deleting it would break seeding.';
+/** Why rejected-file cleanup is withheld on a qBittorrent row. The backend refuses it too (409). */
+export const TORRENT_CLEANUP_REASON = 'These files belong to a qBittorrent torrent; removing them would break seeding.';
+
+function isTorrentSource(item: ReviewItem): boolean {
+  return item.evidence?.source_mode === 'qbittorrent' || isQualityUpgrade(item.evidence);
+}
+
 function canDeleteFolder(item: ReviewItem): boolean {
-  if (needsOnlyReleaseGroup(item)) return false;
+  if (needsOnlyReleaseGroup(item) || isTorrentSource(item)) return false;
   return Boolean(item.path) && (item.type === 'pending_ai' || item.type === 'library_no_mb');
 }
 
@@ -1306,7 +1315,7 @@ const BATCH_STOP_TEXT: Record<string, string> = {
 /** Why a batch import stopped on this folder (#394), with the paths the server
  * named. Paths are plain text; the list is capped so a huge folder stays readable. */
 export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
-  if (!evidence?.origin_step) return null;
+  if (!evidence?.origin_step || isQualityUpgrade(evidence)) return null;
   const code = evidence.origin_step === 'pre_import' ? evidence.conflict || '' : evidence.origin_step;
   const text = BATCH_STOP_TEXT[code] || `Batch import stopped: ${code.replace(/_/g, ' ')}.`;
   const [title, paths] = evidence.symlinked_paths?.length
@@ -1329,6 +1338,36 @@ export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
           {more > 0 ? <div>and {more} more</div> : null}
         </>
       ) : null}
+    </div>
+  );
+}
+
+export function isQualityUpgrade(evidence?: ReviewEvidence): boolean {
+  return Boolean(
+    evidence?.quality_upgrade
+    || evidence?.duplicate_rule === 'quality_upgrade'
+    || evidence?.origin_step === 'quality_upgrade',
+  );
+}
+
+/** Why Import is off on a quality-upgrade row. The backend refuses it too
+ * (error_code quality_upgrade_informational); this only keeps the button honest. */
+export const QUALITY_UPGRADE_IMPORT_REASON = 'Replacing a library album with an upgrade is not available yet.';
+
+/** Same release as a library album but a better-quality download. Informational only:
+ * nothing replaces the library copy from here. */
+export function QualityUpgradeNotice({ evidence }: { evidence?: ReviewEvidence }) {
+  if (!isQualityUpgrade(evidence)) return null;
+  const upgrade = evidence?.quality_upgrade;
+  return (
+    <div className="mt-2 space-y-1 text-sm text-zinc-700">
+      <Chip size="small" color="info" label="Upgrade available" />
+      {upgrade?.library_format && upgrade.source_format ? (
+        <div>Library: {upgrade.library_format} → This download: {upgrade.source_format}</div>
+      ) : null}
+      <div className="text-xs text-zinc-600">
+        The library copy is unchanged. Replacing it with this download is not available here yet.
+      </div>
     </div>
   );
 }
@@ -2771,6 +2810,8 @@ export function ReviewCard({
   const selectedMatchActive = Boolean(selectedMatch);
   const audioMismatchActive = hasAudioMismatchEvidence(item);
   const applyBlockedReason = applyBlockReason(item, mbid, selectedMatch, targetPreviewState);
+  const upgradeRow = isQualityUpgrade(item.evidence);
+  const upgradeReasonId = `quality-upgrade-reason-${item.id}`;
   const blockedActive = shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState);
   const visibleMatchBucket: MatchBucket = audioMismatchActive
     ? 'audio_mismatch'
@@ -2834,7 +2875,8 @@ export function ReviewCard({
     ? ''
     : selectedMatch?.preflight_reason || '';
   const cleanupFiles = selectedCleanupSourceFiles(selectedMatch, targetPreviewState?.preview);
-  const cleanupReady = cleanupFiles.length > 0 && !needsOnlyReleaseGroup(item);
+  const cleanupReady = cleanupFiles.length > 0 && !needsOnlyReleaseGroup(item) && !isTorrentSource(item);
+  const cleanupWithheld = cleanupFiles.length > 0 && isTorrentSource(item);
   const openSubmissionPage = () => {
     const params = new URLSearchParams();
     params.set('review_item_id', item.id);
@@ -2912,6 +2954,7 @@ export function ReviewCard({
 
             <h2 className="mt-3 truncate text-lg font-semibold text-zinc-950">{itemTitle(item)}</h2>
             {meta.length ? <div className="mt-1 text-sm text-zinc-600">{meta.join(' / ')}</div> : null}
+            <QualityUpgradeNotice evidence={item.evidence} />
 
             <RecoveryReviewCard
               item={item}
@@ -2921,7 +2964,7 @@ export function ReviewCard({
               // ARCH-030 C8: the carrier identity is pinned & valid, so the
               // page-level "enter/select an MBID" block never gates a recovery
               // apply; the backend re-validates in runApply.
-              primaryActionDisabled={busy || (!recoveryIdentity && Boolean(applyBlockedReason))}
+              primaryActionDisabled={busy || upgradeRow || (!recoveryIdentity && Boolean(applyBlockedReason))}
             />
 
             {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
@@ -3134,6 +3177,8 @@ export function ReviewCard({
                       Remove {cleanupFiles.length} rejected file{cleanupFiles.length === 1 ? '' : 's'}…
                     </Button>
                   </div>
+                ) : cleanupWithheld ? (
+                  <div className="mt-2">{TORRENT_CLEANUP_REASON}</div>
                 ) : null}
               </div>
             ) : null}
@@ -3150,12 +3195,14 @@ export function ReviewCard({
                   size="small"
                   variant="contained"
                   onClick={onApply}
-                  disabled={busy || Boolean(applyBlockedReason)}
+                  disabled={busy || upgradeRow || Boolean(applyBlockedReason)}
+                  aria-describedby={upgradeRow ? upgradeReasonId : undefined}
                 >
                   {actionLabel(item, selectedMatch, targetPreviewState?.preview)}
                 </Button>
               )}
             </div>
+            {upgradeRow ? <p id={upgradeReasonId} className="text-xs text-zinc-600">{QUALITY_UPGRADE_IMPORT_REASON}</p> : null}
 
             <Button size="small" variant="text" color="inherit" onClick={onDismiss} disabled={busy}>
               {item.type === 'pending_ai' || item.type === 'skipped' ? 'Remove from Review' : 'Hide'}
@@ -3187,6 +3234,8 @@ export function ReviewCard({
               </div>
             ) : needsOnlyReleaseGroup(item) ? (
               <span className="self-center text-xs text-zinc-600">Use Fix proven matches to add the release group.</span>
+            ) : isTorrentSource(item) ? (
+              <span className="self-center text-xs text-zinc-600">{TORRENT_DELETE_REASON}</span>
             ) : null}
 
             {isLibraryNoMb ? (
@@ -4401,6 +4450,7 @@ export function ImportReviewPage({
   }, [setAction]);
 
   const startApply = useCallback((item: ReviewItem) => {
+    if (isQualityUpgrade(item.evidence)) { setAction(item.id, { status: 'error', message: QUALITY_UPGRADE_IMPORT_REASON }); return; }
     // ARCH-030 C8: a carrier-backed recovery item imports into the pinned
     // destination album the card displays. Confirm + submit the carrier's
     // canonical Release Group, never the editable page-level mbid/selectedMatch

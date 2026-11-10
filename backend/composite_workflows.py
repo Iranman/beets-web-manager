@@ -4311,6 +4311,18 @@ def _preserved_torrent_file(path: str) -> bool:
         return True
 
 
+def _review_torrent_protected(path: str) -> bool:
+    """The Review torrent-row rule (library_service) for a cleanup target;
+    fails closed: an unreadable queue or rule counts as protected."""
+    try:
+        # Lazy: library_service sits above this module and imports it.
+        from backend.library_service import _review_torrent_files_protected
+        return bool(_review_torrent_files_protected(path))
+    except Exception:
+        log.warning("Could not evaluate the Review torrent rule for %s; refusing the cleanup", path)
+        return True
+
+
 def plan_album_relocation(
     payload: Optional[Dict[str, Any]] = None,
     *,
@@ -4868,6 +4880,11 @@ def plan_import_review_cleanup(
         # (RECOVERABLE, rollback available) even when a delete was requested.
         data["action"] = "quarantine_rejected"
         library_quarantined = True
+    # A qBittorrent/upgrade Review row at, inside or above the target may
+    # still be seeding: no file of it is ever planned for a move or delete.
+    if _review_torrent_protected(str(data["path"])):
+        return {"ok": False, "mutated": False, "code": "torrent_source_protected",
+                "error": "Refusing to move or delete files of a torrent qBittorrent may still be seeding."}
     try:
         res = execute_import_review_cleanup_plan(
             st, data, _import_review_allowed_roots(allow_music), music_root=str(_music_root()))
@@ -5408,10 +5425,16 @@ def reimport_source(
     else:
         # ponytail: plugin 1.6.x does not report per-folder outcome; ARCH-024 adds skipped_paths.
         not_matched, known = [], False
-    # Plugin 1.10.0 adds why Beets skipped each folder.
-    reasons = {_s(r.get("path")): _s(r.get("reason")) for r in (res.get("skipped") or [])
-               if isinstance(r, dict)} if isinstance(res, dict) and isinstance(res.get("skipped"), list) else {}
-    skipped = [{"path": p, "reason": reasons.get(p) or "not_matched"} for p in not_matched]
+    # Plugin 1.10.0 adds why Beets skipped each folder; 1.20.0 adds duplicate_evidence (B1).
+    rows = {_s(r.get("path")): r for r in (res.get("skipped") or [])
+            if isinstance(r, dict)} if isinstance(res, dict) and isinstance(res.get("skipped"), list) else {}
+    skipped = []
+    for p in not_matched:
+        row = rows.get(p) or {}
+        out = {"path": p, "reason": _s(row.get("reason")) or "not_matched"}
+        if "duplicate_evidence" in row:
+            out["duplicate_evidence"] = row["duplicate_evidence"]
+        skipped.append(out)
     return {"ok": True, "copy": not move, "move": move, "quiet_fallback": fallback,
             "albums_imported": added, "not_matched": not_matched, "skipped": skipped,
             "imported_album_ids": ids if isinstance(ids, list) else None,
@@ -5722,12 +5745,13 @@ def resolve_folder_to_albums(
     if not _is_within_music_root(folder_path):
         return []
     ad = adapter or beets_adapter
-    p_norm = _decode_path(folder_path).rstrip("/\\")
+    # Whole components only: <music>/A/Album must not match <music>/A/Album Deluxe.
+    p_norm = _decode_path(folder_path).replace("\\", "/").rstrip("/")
     items = ad.get_items()
     matched_aids: Set[int] = set()
     for it in items:
-        it_path = _decode_path(it.get("path"))
-        if it_path.startswith(p_norm):
+        it_path = _decode_path(it.get("path")).replace("\\", "/")
+        if it_path == p_norm or it_path.startswith(p_norm + "/"):
             aid = it.get("album_id")
             if aid is not None:
                 matched_aids.add(int(aid))
