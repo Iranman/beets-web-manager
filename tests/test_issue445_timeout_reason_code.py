@@ -1,0 +1,265 @@
+"""#445: a child import that outlives the parent's wait and then settles with a
+terminal refusal (existing_album_merge_failed) must still stop acquisition:
+the wait error keeps the child's error line, so the refusal code survives."""
+
+import threading
+import time
+import unittest
+from unittest import mock
+
+import backend.acquisition_service as acq
+from job_engine import PythonJob
+import backend.job_service as jobsvc
+from backend.matching_service import (EXISTING_ALBUM_MERGE_FAILED, EXISTING_ALBUM_MERGE_FAILED_MESSAGE,
+                                      import_refusal_reason_code)
+import tests.test_slskd_noncandidate_refusal as peer_loop
+
+
+class _MergeFailsWhenStopped:
+    """Still running at the wall timeout; settles as failed with the merge
+    error once asked to stop, as job_engine records a raised import error."""
+
+    def __init__(self):
+        self.status = "running"
+        self.log = ["importing"]
+        self.state = {}
+        self.metadata = {}
+        self.result = None
+
+    def kill(self):
+        self.status = "failed"
+        self.log.append(f"ERROR: {EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: existing album_id 5, boom.")
+
+
+def _timed_out_wait_error(child=None):
+    child = child or _MergeFailsWhenStopped()
+    with mock.patch.object(jobsvc, "jobs", mock.Mock(get=lambda _j: child)), \
+            mock.patch.object(jobsvc, "is_read_only_job", return_value=False):
+        try:
+            jobsvc._wait_for_child_job("c1", [], prefix="import", timeout=1)
+        except RuntimeError as ex:
+            return ex
+    raise AssertionError("_wait_for_child_job did not raise")
+
+
+class TimeoutKeepsTheSettledRefusal(unittest.TestCase):
+    def test_wait_error_carries_the_merge_refusal_code(self):
+        ex = _timed_out_wait_error()
+        self.assertEqual(import_refusal_reason_code(ex), EXISTING_ALBUM_MERGE_FAILED, str(ex))
+        self.assertIn("timed out", str(ex))
+
+    def test_settled_failure_without_error_line_keeps_the_plain_reason(self):
+        child = _MergeFailsWhenStopped()
+        child.kill = lambda: setattr(child, "status", "failed")
+        ex = _timed_out_wait_error(child)
+        self.assertEqual(str(ex), "import job timed out")
+
+    def test_timed_out_merge_failure_stops_peers_and_fallback(self):
+        ex = _timed_out_wait_error()
+        m, _log = peer_loop.NonCandidateRefusalStopsPeerLoop._run(
+            self, "", wait=mock.Mock(side_effect=ex), raises="SLSKD import stopped after one candidate")
+        self.assertEqual(m["_slskd_search_and_queue"].call_count, 1)
+        self.assertEqual(m["_start_reimport_disk_job_internal"].call_count, 1)
+        m["_ytdlp_album_download"].assert_not_called()
+
+    def test_idle_stall_keeps_the_merge_refusal_code(self):
+        clock = _Clock()
+        child = _MergeFailsWhenStopped()
+        with mock.patch.object(jobsvc, "jobs", mock.Mock(get=lambda _j: child)), \
+                mock.patch.object(jobsvc, "is_read_only_job", return_value=False), \
+                mock.patch.object(jobsvc, "time", clock):
+            with self.assertRaises(jobsvc.ChildJobFailed) as caught:
+                jobsvc._wait_for_child_job("c1", [], prefix="import", timeout=0, idle_timeout=10)
+        self.assertEqual(import_refusal_reason_code(caught.exception), EXISTING_ALBUM_MERGE_FAILED)
+        self.assertIn("stalled with no progress", str(caught.exception))
+
+    def test_child_that_ends_just_before_the_settle_keeps_its_error(self):
+        """QA race probe: the child fails after the loop's last log read, so
+        its ERROR line is first seen when the wait gives up."""
+        child = _FinishesUnseen()
+        clock = mock.Mock(time=mock.Mock(side_effect=[0] + [5] * 20), sleep=mock.Mock())
+        with mock.patch.object(jobsvc, "jobs", mock.Mock(get=lambda _j: child)), \
+                mock.patch.object(jobsvc, "is_read_only_job", return_value=False), \
+                mock.patch.object(jobsvc, "time", clock):
+            with self.assertRaises(RuntimeError) as caught:
+                jobsvc._wait_for_child_job("c1", [], prefix="import", timeout=1)
+        self.assertEqual(import_refusal_reason_code(caught.exception), EXISTING_ALBUM_MERGE_FAILED,
+                         str(caught.exception))
+
+    def test_timed_out_merge_failure_stops_the_direct_source_loop(self):
+        waits = mock.Mock(side_effect=[
+            RuntimeError("import job failed: ERROR: Could not resolve a MusicBrainz release "
+                         "ID for import [reason_code=acoustid_unavailable]"),
+            _timed_out_wait_error()])
+        with mock.patch.object(acq, "_slskd_fallback_methods", return_value=["soundcloud", "youtube"]), \
+                mock.patch.object(acq, "_ytdlp_album_download", return_value=1) as ytdlp:
+            m, _log = peer_loop.NonCandidateRefusalStopsPeerLoop._run(
+                self, "", raises="Direct-source import stopped", wait=waits,
+                keep=("_slskd_fallback_methods", "_ytdlp_album_download"))
+        self.assertEqual(ytdlp.call_count, 1)
+        self.assertEqual(m["_start_reimport_disk_job_internal"].call_count, 2)
+
+
+class _FinishesDuringLogRead:
+    """job_engine's order: append the ERROR line, then turn terminal. Here
+    both happen while the parent is reading the log (after the slice it got),
+    so a parent that reads the log before the status loses the line."""
+
+    class _Log(list):
+        def __init__(self, owner):
+            super().__init__(["importing"])
+            self.owner = owner
+
+        def __getitem__(self, index):
+            got = super().__getitem__(index)
+            if isinstance(index, slice) and self.owner.armed and self.owner.status == "running":
+                self.append(f"ERROR: {EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: boom")
+                self.owner.status = "failed"
+            return got
+
+    def __init__(self, armed):
+        self.status = "running"
+        self.armed = armed
+        self.log = self._Log(self)
+        self.state, self.metadata, self.result = {}, {}, None
+
+    def kill(self):
+        self.armed = True
+
+
+class StatusIsReadBeforeTheLog(unittest.TestCase):
+    def _wait(self, child, **kw):
+        with mock.patch.object(jobsvc, "jobs", mock.Mock(get=lambda _j: child)), \
+                mock.patch.object(jobsvc, "is_read_only_job", return_value=False), \
+                mock.patch.object(jobsvc, "time", _Clock()):
+            with self.assertRaises(RuntimeError) as caught:
+                jobsvc._wait_for_child_job("c1", [], prefix="import", **kw)
+        return caught.exception
+
+    def test_child_ending_during_the_settle_log_read_keeps_its_error(self):
+        ex = self._wait(_FinishesDuringLogRead(armed=False), timeout=1)
+        self.assertEqual(import_refusal_reason_code(ex), EXISTING_ALBUM_MERGE_FAILED, str(ex))
+
+    def test_child_ending_during_the_wait_log_read_keeps_its_error(self):
+        ex = self._wait(_FinishesDuringLogRead(armed=True), timeout=600)
+        self.assertEqual(import_refusal_reason_code(ex), EXISTING_ALBUM_MERGE_FAILED, str(ex))
+
+    def test_cancel_mirrors_an_already_ended_childs_error_once(self):
+        child = _MergeFailsWhenStopped()
+        child.kill()  # already failed before the parent looks
+        log = []
+        with mock.patch.object(jobsvc, "jobs", mock.Mock(get=lambda _j: child)), \
+                mock.patch.object(jobsvc, "is_read_only_job", return_value=False):
+            with self.assertRaises(RuntimeError):
+                jobsvc._wait_for_child_job("c1", log, mock.Mock(is_set=lambda: True), prefix="import")
+        errors = [line for line in log if "ERROR:" in line]
+        self.assertEqual(len(errors), 1, log)
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def time(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += seconds
+
+
+class _TerminalOrderSpy(PythonJob):
+    """Records whether an ERROR line is in the log at the moment the job turns
+    terminal (finished_at set), which is what the wait loops rely on."""
+
+    error_logged_when_terminal = None
+
+    def __setattr__(self, name, value):
+        if name == "finished_at" and value is not None and self.error_logged_when_terminal is None:
+            self.error_logged_when_terminal = any(str(line).startswith("ERROR:") for line in self.log)
+        super().__setattr__(name, value)
+
+
+def _merge_error():
+    return RuntimeError(f"{EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: existing album_id 5, boom.")
+
+
+class RealJobEngineOrder(unittest.TestCase):
+    """QA N3: pin the job_engine order (ERROR line, then terminal) with real
+    PythonJobs, so a job_engine change cannot silently undo the #445 fix."""
+
+    def _ran(self, fn):
+        job = _TerminalOrderSpy("j445", fn, "import", start=False)
+        job._run()
+        return job
+
+    def test_raised_error_is_logged_before_the_job_turns_terminal(self):
+        def fn(log):
+            raise _merge_error()
+        job = self._ran(fn)
+        self.assertEqual(job.status, "failed")
+        self.assertTrue(job.error_logged_when_terminal, job.log)
+
+    def test_failed_result_is_logged_before_the_job_turns_terminal(self):
+        job = self._ran(lambda log: {"ok": False, "error": str(_merge_error())})
+        self.assertEqual(job.status, "failed")
+        self.assertTrue(job.error_logged_when_terminal, job.log)
+
+    def test_real_child_failing_after_the_wait_keeps_the_merge_code(self):
+        release = threading.Event()
+
+        def fn(log, _cancel):  # never polls the cancel, like a Beets operation
+            log.append("importing")
+            release.wait(10)
+            raise _merge_error()
+
+        child = PythonJob("j445", fn, "import")
+        kill = child.kill
+
+        def kill_and_release():
+            kill()
+            release.set()
+
+        class _YieldingClock(_Clock):
+            def sleep(self, seconds):
+                time.sleep(0.01)  # let the child thread run
+                super().sleep(seconds)
+
+        child.kill = kill_and_release
+        try:
+            with mock.patch.object(jobsvc, "jobs", mock.Mock(get=lambda _j: child)), \
+                    mock.patch.object(jobsvc, "time", _YieldingClock()):
+                with self.assertRaises(jobsvc.ChildJobFailed) as caught:
+                    jobsvc._wait_for_child_job("j445", [], prefix="import", timeout=1)
+        finally:
+            release.set()
+            if child._thread is not None:
+                child._thread.join(5)
+        self.assertEqual(child.status, "failed")
+        self.assertEqual(import_refusal_reason_code(caught.exception), EXISTING_ALBUM_MERGE_FAILED,
+                         str(caught.exception))
+        self.assertIn("timed out", str(caught.exception))
+
+
+class _FinishesUnseen:
+    """Reads as running through the loop's checks, then as failed with the
+    merge error, appended only once _settle looks at it."""
+
+    def __init__(self):
+        self.log, self.state, self.metadata, self.result = ["importing"], {}, {}, None
+        self.reads = 0
+
+    @property
+    def status(self):
+        self.reads += 1
+        if self.reads <= 2:
+            return "running"
+        if len(self.log) == 1:
+            self.log.append(f"ERROR: {EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: boom")
+        return "failed"
+
+    def kill(self):
+        pass
+
+
+if __name__ == "__main__":
+    unittest.main()
