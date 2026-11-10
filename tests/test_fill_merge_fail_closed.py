@@ -396,6 +396,75 @@ class RealMergeJobTests(_JobHarness):
 
 
 
+class RecordingIdDecidesSiblingTests(unittest.TestCase):
+    """#447 follow-up: the stale-row prune and the AcoustID target selection
+    use the same rule as the read-back -- when both sides carry a recording
+    id it decides; the disc/track slot (and a fuzzy title/length match) is
+    only the fallback."""
+
+    def _prune(self, rows, wanted):
+        log = []
+        with mock.patch.object(cw, "find_all_items_by_album_id", return_value=rows), \
+                mock.patch.object(cw, "item_file_missing", return_value=True), \
+                mock.patch.object(cw, "remove_item_rows_keep_files",
+                                  side_effect=lambda ids, **kw: {"ok": True, "deleted_items": ids}) as rm:
+            isvc._prune_stale_wanted_rows_before_import(EXISTING, REL, wanted, log)
+        return rm.call_args[0][0] if rm.called else []
+
+    def test_prune_keeps_a_missing_row_of_another_recording_in_the_wanted_slot(self):
+        rows = [{"id": 31, "disc": 1, "track": 2, "title": "Two", "mb_trackid": "rec-other",
+                 "length": 200, "path": "/music/a/02.flac"}]
+        self.assertEqual(self._prune(rows, WANTED), [])
+
+    def test_prune_still_removes_the_wanted_recording_and_slot_only_rows(self):
+        rows = [{"id": 32, "disc": 1, "track": 7, "title": "x", "mb_trackid": "REC-2 ",
+                 "length": 1, "path": "/music/a/07.flac"},
+                {"id": 33, "disc": 1, "track": 2, "title": "y", "mb_trackid": "",
+                 "length": 1, "path": "/music/a/02.flac"}]
+        self.assertEqual(sorted(self._prune(rows, WANTED)), [32, 33])
+
+    def _validate(self, rows, mb_tracks, cands):
+        from backend.provider_boundary import ProviderOutcome, ProviderResult
+        answer = ProviderResult("acoustid", ProviderOutcome.CONFIRMED, data=cands)
+        with mock.patch.object(isvc, "_fetch_mb_release_tracklist",
+                               return_value={"ok": True, "tracks": mb_tracks}), \
+                mock.patch.object(cw, "find_all_items_by_album_id", return_value=rows), \
+                mock.patch.object(isvc, "_album_item_abs_path", side_effect=lambda p: p), \
+                mock.patch.object(isvc, "_acoustid_lookup_cached_outcome", return_value=answer):
+            return isvc._validate_wanted_album_items_with_acoustid(IMPORTED, REL, WANTED, [])
+
+    def test_acoustid_gate_does_not_verify_a_file_tagged_as_another_recording(self):
+        # Slot 1/2 matches, but Beets tagged the file as rec-other: it is not
+        # the requested track, even when its audio fingerprints as rec-2.
+        rows = [{"id": 41, "disc": 1, "track": 2, "title": "Two", "mb_trackid": "rec-other",
+                 "length": 200, "path": "/music/a/02.flac"}]
+        mb = [{"disc": 1, "track": 2, "mb_trackid": "rec-2", "title": "Two", "length": 200}]
+        cands = [{"mb_trackid": "rec-2", "score": 98, "title": "Two", "artist": "A"}]
+        res = self._validate(rows, mb, cands)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["confirmed"], 0)
+        self.assertEqual([u["item_id"] for u in res["unverified"]], [41])
+
+    def test_acoustid_gate_skips_a_release_track_in_the_slot_with_another_recording(self):
+        # The release's 1/2 is another recording: it is not a target, so
+        # none of the requested tracks is on the release.
+        rows = [{"id": 42, "disc": 1, "track": 2, "title": "Two", "mb_trackid": "rec-2",
+                 "length": 200, "path": "/music/a/02.flac"}]
+        mb = [{"disc": 1, "track": 2, "mb_trackid": "rec-other", "title": "Two", "length": 200}]
+        res = self._validate(rows, mb, [])
+        self.assertFalse(res["ok"])
+        self.assertIn("none of the requested tracks", res["reason"])
+
+    def test_acoustid_gate_confirms_the_matching_recording(self):
+        rows = [{"id": 43, "disc": 1, "track": 9, "title": "Two", "mb_trackid": "rec-2",
+                 "length": 200, "path": "/music/a/09.flac"}]
+        mb = [{"disc": 1, "track": 2, "mb_trackid": "rec-2", "title": "Two", "length": 200}]
+        cands = [{"mb_trackid": "rec-2", "score": 98, "title": "Two", "artist": "A"}]
+        res = self._validate(rows, mb, cands)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["confirmed"], 1)
+
+
 class QueueReviewLookupFailureTests(unittest.TestCase):
     def test_engine_lookup_failure_does_not_replace_the_callers_error(self):
         """N5: the album-id lookup raising (engine unavailable) returns False
