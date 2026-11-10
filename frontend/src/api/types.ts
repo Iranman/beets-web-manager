@@ -835,7 +835,6 @@ export interface SetupStatusResponse {
   }>;
   plugins?: BeetsPluginsReport;
   plugins_ready?: boolean;
-  settings: Record<string, unknown>;
 }
 
 export interface PluginHealthStatus {
