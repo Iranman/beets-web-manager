@@ -2221,10 +2221,12 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         target = next((t for t in target_tracks if _wanted_track_matches(item, t)), None)
         # A fuzzy title/length match never overrides a recording-id conflict.
         fuzzy_targets = [t for t in target_tracks if not (item_mbid and t.get("mb_trackid"))]
+        fuzzy_only = False
         if not target and fuzzy_targets:
             best = _best_album_track_match(item, fuzzy_targets)
             if float(best.get("score") or 0) >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD:
                 target = best.get("track") or {}
+                fuzzy_only = True
         if not target:
             # A downloaded file that maps to no requested track is not proven
             # to belong in this album.
@@ -2240,6 +2242,14 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
             continue
         cands = list(lookup.data or [])
         if not cands:
+            if fuzzy_only:
+                # #447 mixed fill: a title/length match alone is textual
+                # evidence. Without a fingerprint result nothing proves the
+                # file, and the slot authorization covers requested slots
+                # only, so it must not ride along with the proven tracks.
+                unverified.append({"item_id": int(row["id"]), "title": item.get("title", ""),
+                                   "reason": "only a title/length match, no AcoustID result"})
+                continue
             no_result += 1
             continue
         checked += 1
