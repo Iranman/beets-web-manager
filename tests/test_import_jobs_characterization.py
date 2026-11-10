@@ -224,6 +224,9 @@ class World:
             # The selected files here are not on disk; F8 is covered by
             # test_review_partial_import_torrent_preserve.
             mock.patch.object(isvc, "_selected_sources_need_copy", return_value=False),
+            # Nor are the staged folders, which would fail closed to copy;
+            # #567 hardlink copies are covered by the same module.
+            mock.patch.object(isvc, "_has_hardlinked_file", return_value=False),
             mock.patch.object(isvc.jobs, "start_python", self.start_python),
             mock.patch.object(isvc.job_contract, "held", self.held),
             mock.patch.object(isvc.recovery_carrier, "load_for_folder", self.spy("carrier.load_for_folder")),
