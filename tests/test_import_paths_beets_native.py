@@ -424,6 +424,38 @@ class ConfirmedImportJobTests(unittest.TestCase):
         self.assertEqual((kw["copy"], kw["move"]), (False, False))  # library folder: in place
         self._assert_kept_and_not_retagged()
 
+    def _reimport_download(self, link: bool):
+        """A download-folder reimport-disk; ``link`` hardlinks one audio file."""
+        isvc = self.isvc
+        self.ad = _adapter({"id": 9, "mb_albumid": REL, "mb_releasegroupid": RG})
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name) / "Artist - Album"
+        folder.mkdir()
+        (folder / "01.flac").write_bytes(b"x")
+        if link:
+            try:
+                os.link(folder / "01.flac", Path(tmp.name) / "seed.flac")
+            except OSError as ex:  # pragma: no cover - filesystem without hardlinks
+                self.skipTest(f"hardlinks unsupported: {ex}")
+        aldir = str(folder)
+        with mock.patch.object(isvc.composite_workflows, "inspect_import_source",
+                               return_value={"ok": True, "path": aldir, "audio_file_count": 1}), \
+                mock.patch.object(isvc, "_resolve_album_release_for_import", return_value=REL), \
+                mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=False):
+            body, code = isvc.start_reimport_disk({"aldir": aldir, "mb_albumid": REL, "skip_import_lock": True})
+        self.assertEqual(code, 200, body)
+        self.assertEqual(self.result["status"], "completed", self.result)
+        kw = self.ad.run_import.call_args.kwargs
+        return kw["copy"], kw["move"]
+
+    def test_reimport_disk_copies_a_hardlinked_download(self):
+        # #567: a moved hardlink would have tag writes reach the seeding copy.
+        self.assertEqual(self._reimport_download(link=True), (True, False))
+
+    def test_reimport_disk_still_moves_a_single_link_download(self):
+        self.assertEqual(self._reimport_download(link=False), (False, True))
+
     def test_reimport_disk_verification_mismatch_keeps_rows_and_fails(self):
         res = self._reimport_disk(self.RG_OTHER)
         self.assertEqual(res["status"], "failed")

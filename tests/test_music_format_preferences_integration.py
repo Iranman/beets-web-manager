@@ -35,8 +35,12 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertIn('_validate_import_source_audio(import_dir, log, reject_downloads=True)', APP_SOURCE)
         # Callers that already decided the folder's torrent-source status pass it on.
         self.assertEqual(APP_SOURCE.count('_validate_import_source_audio(folder_path, log, reject_downloads=True,'), 2)
-        self.assertEqual(APP_SOURCE.count('preserve_source=preserve_torrent_source)'), 3)
-        self.assertIn('_validate_import_source_audio(aldir, log, reject_downloads=True)', APP_SOURCE)
+        self.assertEqual(APP_SOURCE.count('preserve_source=preserve_torrent_source)'), 2)
+        # #567: the whole-folder Review import keeps a torrent or hardlinked
+        # source, and Tag+Import disk keeps a hardlinked download.
+        self.assertIn('preserve_source=keep_whole_source)', APP_SOURCE)
+        self.assertIn('keep_whole_source = preserve_torrent_source or keep_hardlinked_folder', APP_SOURCE)
+        self.assertIn('preserve_source=True if keep_hardlinked_source else None)', APP_SOURCE)
         self.assertIn('_playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)', APP_SOURCE)
         self.assertNotIn('_validate_import_source_audio(str(round_dl_dir), state["log"], reject_downloads=True)', APP_SOURCE)
 

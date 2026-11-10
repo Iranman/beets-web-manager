@@ -48,9 +48,25 @@ def _json_from_flask_response(resp) -> Dict[str, Any]:
 _DOWNLOADS_ROOTS = [str(root) for root in DOWNLOADS_ALLOWED_ROOTS]
 
 
+def _review_path_text(raw: Any) -> str:
+    """A Review folder path taken literally (#565): "Album ", "Album<NBSP>" and
+    "Album" are different folders, so whitespace is never trimmed. A
+    whitespace-only value is no path: ""."""
+    text = _s(raw)
+    return text if text.strip() else ""
+
+
+def _review_path_has_traversal(path: str) -> bool:
+    """A "." or ".." segment: the lexical form a Review row is matched on and
+    the folder the filesystem resolves can differ ("root/link/../Album"
+    names a third folder when link is a symlink), so such a path is refused
+    before authorisation (#572 F3)."""
+    return any(part in (".", "..") for part in _s(path).replace("\\", "/").split("/"))
+
+
 def _import_review_path_text_error(raw: Any, *, allow_relative: bool = False) -> Optional[str]:
-    text = _s(raw).strip()
-    if not text:
+    text = _s(raw)  # literal: whitespace is significant (#565)
+    if not text.strip():
         return "Path is required."
     raw_path = Path(text)
     raw_is_absolute = raw_path.is_absolute()
@@ -134,7 +150,7 @@ def _resolve_import_review_source_path(
     error = _import_review_path_text_error(raw, allow_relative=False)
     if error:
         return None, error
-    candidate = Path(_s(raw).strip())
+    candidate = Path(_s(raw))
     matched_root: Optional[Path] = None
     for root in _import_review_cleanup_roots(allow_music=allow_music):
         if candidate == root:
