@@ -22,7 +22,7 @@ from backend.acoustid_service import ACOUSTID_FAILURE_MESSAGES, _album_track_fin
 from backend.slskd_service import _slskd_title_guess_from_name
 from backend.matching_service import _audio_position_from_path, _best_album_track_match, _compact_preflight, _fetch_mb_release_tracklist, _preflight_match_ratio
 from backend.app_runtime import jobs
-from backend.serializers import _import_review_cleanup_roots, _import_review_path_text_error, _json_from_flask_response, _normalize_review_origin_type, _resolve_import_review_source_path
+from backend.serializers import _review_path_text, _import_review_cleanup_roots, _import_review_path_text_error, _json_from_flask_response, _normalize_review_origin_type, _resolve_import_review_source_path
 from backend.pending_review_store import _import_review_folder_signature
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _mark_pending_review_status
 
@@ -51,7 +51,7 @@ def _resolve_import_review_folder_path(raw: Any, *, allow_music: bool = False) -
     error = _import_review_path_text_error(raw, allow_relative=False)
     if error:
         return None, error
-    folder = Path(_s(raw).strip())
+    folder = Path(_review_path_text(raw))
     try:
         music_root = MUSIC_ROOT.resolve(strict=False)
     except Exception:
@@ -421,7 +421,7 @@ def _candidate_track_comparison_payload(
 ) -> Dict[str, Any]:
     """Build Import Review track mapping with Release Group-scoped validation."""
     log: list = []
-    trusted_folder = _s(folder).strip()
+    trusted_folder = _review_path_text(folder)
     if trusted_folder:
         resolved_folder, folder_error = _resolve_import_review_source_path(
             trusted_folder,
@@ -551,7 +551,7 @@ def _candidate_track_comparison_payload(
 
 
 def _manual_review_album_folder(payload: Dict[str, Any]) -> str:
-    folder = _s(payload.get("path") or "").strip()
+    folder = _review_path_text(payload.get("path") or "")
     if folder:
         return folder
     existing_album_id = int(payload.get("existing_album_id") or payload.get("album_id") or 0)
@@ -787,14 +787,14 @@ def _import_review_auto_job_for_submission(payload: Dict[str, Any], key: str = "
     direct = _import_review_auto_job_for_key(key)
     if direct:
         return direct
-    review_item_id = _s(payload.get("review_item_id")).strip()
-    folder_path = _s(payload.get("path")).strip()
+    review_item_id = _review_path_text(payload.get("review_item_id"))
+    folder_path = _review_path_text(payload.get("path"))
     selected = _normalised_submission_files(payload.get("selected_source_files") or [])
     for job in jobs.all():
         meta = getattr(job, "metadata", {}) or {}
         if meta.get("type") != "import-folder" or not meta.get("auto_import"):
             continue
-        if review_item_id and _s(meta.get("review_item_id")).strip() == review_item_id:
+        if review_item_id and _s(meta.get("review_item_id")) == review_item_id:
             return job
         if folder_path and _review_paths_equal(_s(meta.get("path")), folder_path):
             job_files = _normalised_submission_files(meta.get("selected_source_files") or [])
@@ -805,8 +805,8 @@ def _import_review_auto_job_for_submission(payload: Dict[str, Any], key: str = "
 
 def _import_review_start_auto_import(payload: Dict[str, Any], eligibility: Dict[str, Any]) -> Dict[str, Any]:
     key = _s(eligibility.get("idempotency_key")).strip()
-    folder_path = _s(payload.get("path")).strip()
-    review_item_id = _s(payload.get("review_item_id")).strip()
+    folder_path = _review_path_text(payload.get("path"))
+    review_item_id = _review_path_text(payload.get("review_item_id"))
     existing_job = _import_review_auto_job_for_submission(payload, key)
     state = _import_review_auto_state()
     existing_state = state.get(key) or {}
@@ -902,7 +902,7 @@ def _import_review_start_auto_import(payload: Dict[str, Any], eligibility: Dict[
 def _import_review_payload_from_pending_item(item: Dict[str, Any]) -> Dict[str, Any]:
     item = item or {}
     suggestion = item.get("suggestion") if isinstance(item.get("suggestion"), dict) else {}
-    path = _s(item.get("path")).strip()
+    path = _review_path_text(item.get("path"))
     existing_ids = suggestion.get("existing_album_ids") or []
     try:
         existing_album_id = int(existing_ids[0] or 0) if existing_ids else 0
@@ -963,7 +963,7 @@ def _run_import_review_auto_enqueue_ready_batch(limit: int = 5,
                 break
             if queued >= limit:
                 break
-            path = _s((item or {}).get("path")).strip()
+            path = _review_path_text((item or {}).get("path"))
             if path and _trusted_stored_review_path(path) is None:
                 skipped += 1
                 results.append({"path": path, "queued": False, "reason": _UNTRUSTED_STORED_REVIEW_PATH})
@@ -1200,7 +1200,7 @@ def _update_pending_review_revalidation(
     preflight: Dict[str, Any],
     note: str,
 ) -> bool:
-    raw = _s(folder_path).strip()
+    raw = _review_path_text(folder_path)
     if not raw:
         return False
     try:
@@ -1315,7 +1315,7 @@ def _run_import_review_revalidation(review_ids: Iterable[str], *, auto_enqueue: 
                 log.append("[cancelled]")
             break
         item = item if isinstance(item, dict) else {}
-        path = _s(item.get("path")).strip()
+        path = _review_path_text(item.get("path"))
         review_item_id = f"pending:{path}" if path else ""
         if review_ids and review_item_id not in review_ids and path not in review_ids:
             continue

@@ -37,7 +37,7 @@ from backend.matching_service import BEETS_SKIP_REASON_CODES, EXISTING_ALBUM_MER
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
-from backend.serializers import _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
+from backend.serializers import _review_path_text, _client_review_origin, _client_review_suggestion, _import_review_path_text_error, _json_from_flask_response, _resolve_import_review_source_path
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_matches, _pending_review_path_key
 from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, _pending_review_is_quality_upgrade
 from backend.app_runtime import PLEX_SYNC_AUTO_REFRESH
@@ -2601,7 +2601,7 @@ def _import_review_selected_source_files(
             row = raw_row if isinstance(raw_row, dict) else {}
             status = _s(row.get("status")).strip().lower()
             if status in _IMPORT_REVIEW_IMPORTABLE_STATUSES:
-                raw_source = _s(row.get("source_path")).strip()
+                raw_source = _review_path_text(row.get("source_path"))
                 if raw_source:
                     raw_files.append(raw_source)
 
@@ -2628,11 +2628,11 @@ def _import_target_preview_cache_key(payload: Dict[str, Any]) -> str:
                 continue
             tracks.append({
                 "status": _s(row.get("status")).strip().lower(),
-                "source_path": _s(row.get("source_path")).strip(),
+                "source_path": _review_path_text(row.get("source_path")),
                 "title": _s(row.get("title") or row.get("mb_title") or row.get("local_title")).strip(),
                 "num": _s(row.get("num") or row.get("track")).strip(),
             })
-    source_path = _s(payload.get("path")).strip()
+    source_path = _review_path_text(payload.get("path"))
     source_marker: Dict[str, Any] = {"path": source_path}
     source_for_stat, _source_error = _resolve_import_review_source_path(
         source_path,
@@ -2698,7 +2698,7 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
     Artist Folder/Album (Year) {mb_releasegroupid}/Artist - Album - 00 - Title.ext
     It performs no filesystem writes and never calls beets.
     """
-    folder_path = _s(payload.get("path")).strip()
+    folder_path = _review_path_text(payload.get("path"))
     release_group_id = _extract_mb_uuid(
         _s(payload.get("release_group_id") or payload.get("mb_releasegroupid"))
     )
@@ -2815,7 +2815,7 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
             tracks.append({
                 "track": track_num,
                 "status": status,
-                "source_path": _s(row.get("source_path")).strip(),
+                "source_path": _review_path_text(row.get("source_path")),
                 "target_filename": "",
                 "target_path": "",
                 "target_exists": False,
@@ -2830,7 +2830,7 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         source_file: Optional[Path] = None
-        row_source_str = _s(row.get("source_path")).strip()
+        row_source_str = _review_path_text(row.get("source_path"))
         if row_source_str and trusted_source_path is not None:
             # SEC-002 CodeQL repository-wide closure finding: this preview
             # endpoint took row["source_path"] straight from the request
@@ -3035,8 +3035,8 @@ def _import_review_auto_key(payload: Dict[str, Any], selected_files: List[Path],
                             release_group_id: str, representative_release_id: str) -> str:
     basis = {
         "version": 1,
-        "review_item_id": _s(payload.get("review_item_id")).strip(),
-        "path": _s(payload.get("path")).strip(),
+        "review_item_id": _review_path_text(payload.get("review_item_id")),
+        "path": _review_path_text(payload.get("path")),
         "release_group_id": release_group_id,
         "representative_release_id": representative_release_id,
         "selected_files": sorted(str(path.resolve(strict=False)) for path in selected_files),
@@ -3749,7 +3749,7 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     }
     """
     payload    = payload_in if isinstance(payload_in, dict) else {}
-    folder_path   = _s(payload.get("path")).strip()
+    folder_path   = _review_path_text(payload.get("path"))
     raw_mb_albumid = _s(payload.get("mb_albumid") or payload.get("mbid")).strip()
     raw_mb_releasegroupid = _s(
         payload.get("mb_releasegroupid")

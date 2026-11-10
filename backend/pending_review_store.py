@@ -18,7 +18,7 @@ from backend.beets_plugins import _atomic_write_text
 import backend.composite_workflows as composite_workflows
 from backend.serializers import REVIEW_ORIGIN_FIELDS, REVIEW_ORIGIN_LABELS, _normalize_review_origin_type, _review_origin_payload
 import hashlib
-from backend.serializers import _resolve_import_review_source_path
+from backend.serializers import _resolve_import_review_source_path, _review_path_text
 import backend.serializers as _serializers
 from backend.ai_batch_state_service import _music_format_policy_review_note
 from backend.import_reconciliation_service import _MUSIC_FORMAT_POLICY_REVIEW_STATUS, _remaining_audio_files, _review_paths_equal, _review_status_key
@@ -166,7 +166,7 @@ def _is_music_root_path(path_value: str) -> bool:
 
 def _library_album_ids_for_folder(folder_path: str) -> List[int]:
     """Return Beets album IDs that already have items under a music-root folder."""
-    raw = _s(folder_path).strip()
+    raw = _review_path_text(folder_path)
     if not raw or "\x00" in raw or "\\" in raw:
         return []
     try:
@@ -217,7 +217,7 @@ _NO_AUDIO_NOT_RESOLVED = frozenset({"symlinked_audio", "unverifiable_folder"})
 
 
 def _review_folder_has_audio(folder_path: str) -> bool:
-    raw = _s(folder_path).strip()
+    raw = _review_path_text(folder_path)
     if not raw:
         return False
     try:
@@ -237,7 +237,7 @@ def _review_folder_has_audio(folder_path: str) -> bool:
 def _review_path_is_resolved(folder_path: str,
                              existing_album_ids: Optional[Iterable[Any]] = None,
                              *, no_audio_resolves: bool = True) -> bool:
-    raw = _s(folder_path).strip()
+    raw = _review_path_text(folder_path)
     album_ids = []
     for value in existing_album_ids or []:
         try:
@@ -266,7 +266,7 @@ def _pending_review_item_is_resolved(item: Dict[str, Any]) -> bool:
     # can see (links are never followed); while it exists, "no audio" does
     # not resolve its row (QA401-F1).
     refused = _s(((item or {}).get("evidence") or {}).get("conflict")) in _NO_AUDIO_NOT_RESOLVED
-    keep = refused and bool(path.strip()) and os.path.lexists(path.strip())
+    keep = refused and bool(_review_path_text(path)) and os.path.lexists(path)
     return _review_path_is_resolved(path, existing_ids, no_audio_resolves=not keep)
 
 
@@ -278,7 +278,7 @@ def _review_download_folder_is_gone(folder_path: str) -> bool:
     path exists), but local and cheap, so the lightweight queue listing also
     drops it. Limited to DOWNLOADS_ROOT, which this process can see; a missing
     downloads mount never prunes anything."""
-    raw = _s(folder_path).strip()
+    raw = _review_path_text(folder_path)
     try:
         # Path.is_dir() re-raises EACCES/EIO/ESTALE (stale mount); the caller
         # would turn that into an empty queue and the next save would write it.
@@ -650,7 +650,7 @@ def _forget_import_skip(folder_path: str) -> bool:
     """Drop ``folder_path`` (and anything under it) from the skip ledger once
     the folder is imported or resolved (QA #391 N1). File-only, no Beets
     read; never raises, so it cannot fail the import that called it."""
-    raw = _s(folder_path).strip()
+    raw = _review_path_text(folder_path)
     if not raw:
         return False
     target = Path(os.path.normpath(raw))
@@ -670,7 +670,7 @@ def _forget_import_skip(folder_path: str) -> bool:
 def _remove_pending_review_for_path(folder_path: str, log: Optional[List[str]] = None,
                                     *, decision_note: str = "removed after import or repair",
                                     log_note: str = "repaired/imported folder") -> bool:
-    raw = _s(folder_path).strip()
+    raw = _review_path_text(folder_path)
     if not raw:
         return False
     _forget_import_skip(raw)
@@ -996,7 +996,7 @@ def _finalize_pending_review_format_policy_rejection(folder_path: str, note: Any
 
 def _mark_pending_review_status(folder_path: str, status: str, note: str = "",
                                 *, job_id: str = "", idempotency_key: str = "") -> bool:
-    raw = _s(folder_path).strip()
+    raw = _review_path_text(folder_path)
     if not raw:
         return False
 
