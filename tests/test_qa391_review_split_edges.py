@@ -201,6 +201,14 @@ class ReviewQueueEdgeTests(_ClientCase):
         self.assertEqual(body["total"], 1)
         self.assertEqual(body["counts"], {"all": 1, "pending_ai": 0, "skipped": 1})
 
+    def test_pending_mb_url_outside_musicbrainz_is_dropped(self):
+        # #580: an older row can hold an AI-written mb_url; the UI renders it as a link.
+        self.pending[0]["suggestion"]["mb_url"] = "https://evil.example/release/x"
+        self.pending[1]["suggestion"]["mb_url"] = "https://musicbrainz.org/release/x"
+        _, body = self.get("?status=pending_ai")
+        urls = {r["folder_name"]: r["mb_url"] for r in body["items"]}
+        self.assertEqual(urls, {"A": "", "B": "https://musicbrainz.org/release/x"})
+
     def test_moved_stub_keeps_paging_fields(self):
         _, body = self.get("?status=library_no_mb&limit=7&offset=3")
         self.assertEqual((body["ok"], body["limit"], body["offset"]), (True, 7, 3))
