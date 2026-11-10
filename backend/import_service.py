@@ -1772,6 +1772,18 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
             _merge_failed(f"could not read the imported items ({ex})")
         fill_item_ids = [int(r["id"]) for r in imported_rows
                          if any(_is_wanted(r, t) for t in wanted_tracks)]
+        # A row in a requested slot that is not the requested recording is
+        # a conflict, not an extra track: refuse before merging it (#447
+        # QA N1). No requested track at all means nothing to merge (N2).
+        conflicts = [int(r["id"]) for r in imported_rows
+                     if int(r["id"]) not in fill_item_ids
+                     and (int(r.get("disc") or 1), int(r.get("track") or 0)) in {
+                         (int(t.get("disc") or 1), int(t.get("track") or 0))
+                         for t in wanted_tracks if int(t.get("track") or 0)}]
+        if conflicts or not fill_item_ids:
+            _merge_failed("the imported file(s) are not the requested recording(s)"
+                          + (f" (item_id(s) {', '.join(map(str, conflicts))} sit in a requested "
+                             "slot with another recording)" if conflicts else ""))
     try:
         aid = _merge_imported_album_into_existing(
             aid, existing_album_id, aldir, log, mb_albumid=mb_albumid,

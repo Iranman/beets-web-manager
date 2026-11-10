@@ -226,6 +226,38 @@ class FillMergeFailClosedTests(_JobHarness):
         self.assertIn(CODE, res["error"])
         self.assertFalse(any("Verified" in line for line in res["log"]), res["log"])
 
+    def test_conflicting_slot_row_is_refused_before_any_merge(self):
+        """#447 QA N1/N2: a wrong recording in a requested slot never reaches
+        the merge, alone or next to a correctly delivered track."""
+        for rows in ([{"id": 92, "disc": 1, "track": 2, "mb_trackid": "rec-other"}],
+                     [{"id": 92, "disc": 1, "track": 2, "mb_trackid": "rec-2"},
+                      {"id": 94, "disc": 1, "track": 3, "mb_trackid": "rec-other"}]):
+            with self.subTest(rows=[r["id"] for r in rows]):
+                self.setUp()
+                self.items[IMPORTED] = rows
+                merge = mock.MagicMock(side_effect=self._move_items)
+                with mock.patch.object(isvc, "_merge_imported_album_into_existing", merge):
+                    res = self._run(wanted_tracks=WANTED + [
+                        {"disc": 1, "track": 3, "title": "Three", "mb_trackid": "rec-3"}])
+                self._assert_failed_to_review(res)
+                merge.assert_not_called()
+                self.assertEqual([r["id"] for r in self.items[EXISTING]], [51])
+                if len(rows) == 2:
+                    self.assertIn("item_id(s) 94", res["error"])
+
+    def test_extra_row_outside_the_requested_slots_still_merges(self):
+        """An extra delivered track in a slot nobody requested is not a conflict."""
+        self.items[IMPORTED].append({"id": 95, "disc": 1, "track": 7, "mb_trackid": "rec-7"})
+        res = self._run({"side_effect": self._move_items})
+        self.assertEqual(res["status"], "completed", res)
+
+    def test_recording_ids_are_compared_trimmed_and_case_insensitive(self):
+        """#447 QA N3: whitespace and case on the row's id do not hide a match."""
+        self.items[IMPORTED] = [{"id": 92, "disc": 1, "track": 2, "mb_trackid": "  REC-2 \t"}]
+        res = self._run({"side_effect": self._move_items})
+        self.assertEqual(res["status"], "completed", res)
+        self.assertTrue(any("Verified 1 requested track(s)" in line for line in res["log"]), res["log"])
+
     def test_slot_is_the_fallback_when_either_side_has_no_recording_id(self):
         """#447: without a recording id on the row (or on the request) the
         disc/track slot still identifies the requested track."""
