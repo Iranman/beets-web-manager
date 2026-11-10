@@ -613,6 +613,8 @@ def import_review_queue():
             # live matching_decision contract, never the stale coarse suggestion.
             refreshed_evidence = _refresh_recovery_stage(item.get("evidence") or {})
             blocked = _review_blocked_metadata(item_status, s.get("reason", ""), s, item.get("evidence") or {})
+            # Same allowlist as Missing IDs: an older row can hold an AI-written URL (#580).
+            mb_url = _s(s.get("mb_url"))
             rows.append({
                 "id": "pending:" + item.get("path", ""),
                 "type": "pending_ai",
@@ -632,7 +634,7 @@ def import_review_queue():
                 "mb_albumid": s.get("mb_albumid", ""),
                 "mb_releasegroupid": s.get("mb_releasegroupid", ""),
                 "mb_releasegroupurl": s.get("mb_releasegroupurl", ""),
-                "mb_url": s.get("mb_url", ""),
+                "mb_url": mb_url if mb_url.startswith("https://musicbrainz.org/") else "",
                 "mb_valid": bool(s.get("mb_valid")),
                 # ARCH-034: surface the same staleness the unattended import
                 # computes, so the Review page can mark a stored suggestion

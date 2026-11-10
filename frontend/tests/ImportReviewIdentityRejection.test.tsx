@@ -22,7 +22,8 @@ afterEach(cleanup);
 
 const RG = '11111111-2222-3333-4444-555555555555';
 const REL = '66666666-7777-8888-9999-aaaaaaaaaaaa';
-const ARTIST_ERROR = 'AI candidate artist Other does not match album artist Right.';
+// The backend artist gate's text (_ai_artist_mismatch_reason).
+const ARTIST_ERROR = 'Rejected: artist mismatch. Album title matched, but candidate artist Other does not match Right.';
 const libraryAlbum = { id: 'library:7', type: 'library_no_mb', target_kind: 'album', album_id: 7 } as unknown as ReviewItem;
 
 const tracks = {
@@ -74,6 +75,23 @@ describe('Candidate carousel keeps the artist identity rejection (#521)', () => 
     expect(match.identity_validated).toBe(true);
     expect(applyBlockReason(libraryAlbum, RG, match)).toBe('');
     expect(actionLabel(libraryAlbum, match)).toBe('Match album');
+  });
+
+  it('a stored membership rejection does not block the whole Release Group (#580)', async () => {
+    // The track comparison recomputes membership, so only the artist gate's
+    // rejection survives the rebuild.
+    const match = await lastSelectedMatch({
+      identity_validated: false,
+      candidate_identity_error: 'Representative Release ID rejected: it does not belong to selected Release Group.',
+      mb_releasegroupid: RG,
+    });
+    expect(match.identity_validated).toBe(true);
+    expect(applyBlockReason(libraryAlbum, RG, match)).toBe('');
+  });
+
+  it('a stored rejection with no reason does not block the whole Release Group (#580)', async () => {
+    const match = await lastSelectedMatch({ identity_validated: false, mb_releasegroupid: RG });
+    expect(match.identity_validated).toBe(true);
   });
 
   it('a rejection of another Release Group does not block this candidate', async () => {

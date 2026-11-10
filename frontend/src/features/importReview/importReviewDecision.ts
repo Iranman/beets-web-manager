@@ -217,6 +217,9 @@ export function targetPreviewBlockReason(
 
 export const IDENTITY_REJECTED_REASON = 'Import blocked: representative release does not belong to selected Release Group.';
 
+// Backend _AI_ARTIST_REJECTION_PREFIX: the artist gate's rejection text.
+const AI_ARTIST_REJECTION_PREFIX = 'Rejected: artist mismatch.';
+
 /** The identity fields of a suggestion that may have rejected a candidate. */
 export type IdentityRejectionSource = {
   identity_validated?: boolean;
@@ -228,9 +231,11 @@ export type IdentityRejectionSource = {
 
 /**
  * The backend's identity rejection that still applies to a candidate, or null.
- * The candidate track comparison only checks Release Group membership, so a
- * rejection the suggestion recorded for the same Release Group (or release)
- * must survive when a match is rebuilt from that comparison.
+ * The candidate track comparison only checks Release Group membership, so an
+ * artist-gate rejection the suggestion recorded for the same Release Group (or
+ * release) must survive when a match is rebuilt from that comparison. Any other
+ * stored rejection (membership) is recomputed by that comparison, so it is not
+ * kept (#580).
  */
 export function identityRejectionFor(
   releaseGroupId: string,
@@ -238,9 +243,11 @@ export function identityRejectionFor(
   source?: IdentityRejectionSource,
 ): string | null {
   if (source?.identity_validated !== false) return null;
+  const error = (source.candidate_identity_error || '').trim();
+  if (!error.startsWith(AI_ARTIST_REJECTION_PREFIX)) return null;
   const sameCandidate = sameMbid(releaseGroupId, source.mb_releasegroupid)
     || sameMbid(releaseId, source.representative_mb_albumid || source.mb_albumid);
-  return sameCandidate ? (source.candidate_identity_error || '').trim() || IDENTITY_REJECTED_REASON : null;
+  return sameCandidate ? error : null;
 }
 
 export function applyBlockReason(

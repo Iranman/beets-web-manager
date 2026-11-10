@@ -1246,6 +1246,17 @@ function selectedReleaseGroupId(item: ReviewItem, mbid: string, response?: AiSug
 }
 
 
+// POST /api/albums/<id>/match reads a bare UUID as a Release (#580). A known
+// Release Group id goes as its cached paired Release, else as a release-group
+// URL the backend resolves; any other id (typed Release, URL) is sent as is.
+export function matchAlbumInput(item: ReviewItem, id: string, sm?: SelectedMatch): string {
+  if (sameMbid(id, item.mb_releasegroupid) && item.mb_albumid) return item.mb_albumid;
+  if (sameMbid(id, item.mb_releasegroupid) || sameMbid(id, sm?.release_group_id)) {
+    return musicBrainzReleaseGroupUrl(id) || id;
+  }
+  return id;
+}
+
 function targetPreviewKey(item: ReviewItem, selectedMatch?: SelectedMatch): string {
   if (!selectedMatch) return '';
   const mapped = selectedMatch.track_mapping
@@ -4549,7 +4560,7 @@ export function ImportReviewPage({
           return;
         }
       } else if (item.type === 'library_no_mb' && item.album_id) {
-        started = await matchAlbum(item.album_id, representativeId);
+        started = await matchAlbum(item.album_id, matchAlbumInput(item, representativeId, sm));
       } else if (existingId) {
         started = await reimportDisk({
           aldir: item.path || '',
