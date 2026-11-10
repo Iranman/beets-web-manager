@@ -135,8 +135,8 @@ def _torrent_rows_protect(path: str) -> bool:
 def delete_import_review_folder():
     payload = request.get_json(silent=True)
     payload = payload if isinstance(payload, dict) else {}
-    src_path = _s(payload.get("path")).strip()
-    if not src_path:
+    src_path = _s(payload.get("path"))  # literal: "Album " is not "Album" (#565)
+    if not src_path.strip():
         return jsonify({"ok": False, "error": "Review path is required."}), 400
     # REV-04: the client's confirmed_wrong_library_folder / allow_library_delete
     # flags are still accepted for back-compat but never authorize anything.
@@ -250,15 +250,15 @@ def _import_review_cleanup_plan_error(plan_res: Dict[str, Any],
 @app.post("/api/import/review-files/cleanup")
 def cleanup_import_review_files():
     payload = request.get_json(silent=True) or {}
-    folder_path = _s(payload.get("path")).strip()
-    review_item_id = _s(payload.get("review_item_id")).strip()
+    folder_path = _s(payload.get("path"))  # literal paths (#565)
+    review_item_id = _s(payload.get("review_item_id"))
     action = _s(payload.get("action") or "quarantine_rejected").strip().lower()
     raw_files = payload.get("files") if isinstance(payload.get("files"), list) else []
     log: List[str] = []
 
     if action not in {"quarantine_rejected", "quarantine_duplicate", "delete_rejected", "delete_duplicate"}:
         return jsonify({"ok": False, "error": "Unsupported cleanup action.", "log": log}), 400
-    if not folder_path:
+    if not folder_path.strip():
         return jsonify({"ok": False, "error": "Review folder path is required.", "log": log}), 400
     if not raw_files:
         return jsonify({"ok": False, "error": "At least one cleanup file is required.", "log": log}), 400
@@ -1051,8 +1051,10 @@ def import_review_auto_enqueue_reconcile():
 def import_reconcile_job():
     payload = request.get_json(silent=True) or {}
     job_id = _s(payload.get("job_id")).strip()
-    source_path = _s(payload.get("source_path")).strip()
-    review_item_id = _s(payload.get("review_item_id")).strip()
+    source_path = _s(payload.get("source_path"))  # literal paths (#565)
+    review_item_id = _s(payload.get("review_item_id"))
+    if not source_path.strip():
+        source_path = ""
     idempotency_key = _s(payload.get("idempotency_key") or payload.get("auto_import_idempotency_key")).strip()
     if not source_path and review_item_id.startswith("pending:"):
         source_path = review_item_id[len("pending:"):]

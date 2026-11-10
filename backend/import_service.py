@@ -3044,8 +3044,10 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Single backend gate for Import Review auto-enqueue decisions."""
     payload = payload or {}
     selected_match = payload.get("selected_match") if isinstance(payload.get("selected_match"), dict) else {}
-    folder_path = _s(payload.get("path")).strip()
-    review_item_id = _s(payload.get("review_item_id")).strip()
+    folder_path = _s(payload.get("path"))  # literal paths (#565)
+    if not folder_path.strip():
+        folder_path = ""
+    review_item_id = _s(payload.get("review_item_id"))
     release_group_id = _extract_mb_uuid(
         _s(payload.get("mb_releasegroupid") or payload.get("release_group_id") or selected_match.get("release_group_id"))
     )

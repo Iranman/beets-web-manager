@@ -894,10 +894,11 @@ def _import_review_folder_signature(folder_path: str) -> str:
 
 
 def _review_id_matches_path(review_item_id: str, folder_path: str) -> bool:
-    review_item_id = _s(review_item_id).strip()
-    if not review_item_id:
+    # Literal paths (#565): "Album " and "Album" are different folders.
+    review_item_id = _s(review_item_id)
+    if not review_item_id.strip():
         return True
-    expected = "pending:" + _s(folder_path).strip()
+    expected = "pending:" + _s(folder_path)
     if review_item_id == expected:
         return True
     if review_item_id.startswith("pending:"):
@@ -914,8 +915,8 @@ def _trusted_stored_review_path(raw: Any) -> Optional[str]:
     or backslashes keep working. Entries stored before POST /api/ai-pending-review
     validated paths are re-checked here wherever an entry authorizes an
     action, with no raw-text shortcut (security LOW-4)."""
-    text = _s(raw).strip()
-    if not text or chr(0) in text or not os.path.isabs(text):
+    text = _s(raw)  # literal: whitespace is significant (#565)
+    if not text.strip() or chr(0) in text or not os.path.isabs(text):
         return None
     lexical = os.path.normpath(text)
     try:
@@ -941,8 +942,8 @@ def _trusted_stored_review_path(raw: Any) -> Optional[str]:
 
 
 def _pending_review_matches(folder_path: str, review_item_id: str = "") -> bool:
-    folder_path = _s(folder_path).strip()
-    if not folder_path or not _review_id_matches_path(review_item_id, folder_path):
+    folder_path = _s(folder_path)
+    if not folder_path.strip() or not _review_id_matches_path(review_item_id, folder_path):
         return False
     try:
         if not _AI_PENDING_FILE.exists():

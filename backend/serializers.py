@@ -49,8 +49,8 @@ _DOWNLOADS_ROOTS = [str(root) for root in DOWNLOADS_ALLOWED_ROOTS]
 
 
 def _import_review_path_text_error(raw: Any, *, allow_relative: bool = False) -> Optional[str]:
-    text = _s(raw).strip()
-    if not text:
+    text = _s(raw)  # literal: whitespace is significant (#565)
+    if not text.strip():
         return "Path is required."
     raw_path = Path(text)
     raw_is_absolute = raw_path.is_absolute()
@@ -134,7 +134,7 @@ def _resolve_import_review_source_path(
     error = _import_review_path_text_error(raw, allow_relative=False)
     if error:
         return None, error
-    candidate = Path(_s(raw).strip())
+    candidate = Path(_s(raw))
     matched_root: Optional[Path] = None
     for root in _import_review_cleanup_roots(allow_music=allow_music):
         if candidate == root:
