@@ -21275,6 +21275,128 @@
    ]
   },
   {
+   "name": "_pending_review_evidence_is_upgrade",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    749,
+    750
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_pending_review_is_quality_upgrade",
+    "_pending_review_is_torrent_source"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_pending_review_row_overlaps",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    753,
+    765
+   ],
+   "size": 13,
+   "body_lines": 9,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_pending_review_is_quality_upgrade",
+    "_pending_review_is_torrent_source"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_pending_review_keys_overlap",
+    "_pending_review_path_key",
+    "_read_pending_snapshot",
+    "_s"
+   ]
+  },
+  {
+   "name": "_pending_review_is_quality_upgrade",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    749,
+    762
+   ],
+   "size": 14,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_import_folder",
+    "evaluate_import_eligibility",
+    "start_folder_import_with_id"
+   ],
+   "caller_count": 3,
+   "dependencies": [
+    "_pending_review_path_key",
+    "_read_pending_snapshot",
+    "_s"
+   ]
+  },
+  {
+   "name": "_pending_review_is_torrent_source",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    776,
+    781
+   ],
+   "size": 6,
+   "body_lines": 3,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "delete_import_review_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_pending_review_evidence_is_upgrade",
+    "_pending_review_row_overlaps"
+   ]
+  },
+  {
+   "name": "_pending_review_torrent_rows",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    784,
+    807
+   ],
+   "size": 24,
+   "body_lines": 19,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_review_torrent_files_protected"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_pending_review_evidence_is_upgrade",
+    "_pending_review_keys_overlap",
+    "_pending_review_path_key",
+    "_s",
+    "items"
+   ]
+  },
+  {
    "name": "_pending_review_has_path_or_overlap",
    "module": "backend/pending_review_store.py",
    "lines": [
@@ -21297,6 +21419,27 @@
     "_pending_review_path_key",
     "_pending_review_path_set"
    ]
+  },
+  {
+   "name": "_pending_review_keys_overlap",
+   "module": "backend/pending_review_store.py",
+   "lines": [
+    791,
+    793
+   ],
+   "size": 3,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_REVIEW",
+   "desired_owner": "backend/import_review_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_pending_review_has_path_or_overlap",
+    "_pending_review_is_quality_upgrade"
+   ],
+   "caller_count": 2,
+   "dependencies": []
   },
   {
    "name": "_pending_review_path_key",
@@ -22092,6 +22235,28 @@
    "callers": [],
    "caller_count": 0,
    "dependencies": [
+    "_preserve_torrent_source_path"
+   ]
+  },
+  {
+   "name": "_review_torrent_files_protected",
+   "module": "backend/library_service.py",
+   "lines": [
+    705,
+    721
+   ],
+   "size": 17,
+   "body_lines": 8,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_app_managed_download_path",
+    "_pending_review_torrent_rows",
     "_preserve_torrent_source_path"
    ]
   },
@@ -24991,6 +25156,26 @@
    "dependencies": []
   },
   {
+   "name": "_ai_batch_claim_qbit_slot",
+   "module": "backend/ai_service.py",
+   "lines": [
+    1806,
+    1817
+   ],
+   "size": 12,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_start_ai_batch_job"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_ai_batch_release_worker",
    "module": "backend/ai_service.py",
    "lines": [
@@ -25319,6 +25504,330 @@
    ]
   },
   {
+   "name": "_ai_batch_tree_entries",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2279,
+    2293
+   ],
+   "size": 15,
+   "body_lines": 11,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_ai_batch_qbit_stage_prefix",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2403,
+    2406
+   ],
+   "size": 4,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_qbit_stage_dirs",
+    "_ai_batch_qbit_unit_folder"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_ai_batch_qbit_stage_dirs",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2409,
+    2419
+   ],
+   "size": 11,
+   "body_lines": 8,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_qbit_stage_cleanup",
+    "_ai_batch_qbit_stage_in_review"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_ai_batch_qbit_stage_prefix",
+    "validated_downloads_root"
+   ]
+  },
+  {
+   "name": "_ai_batch_qbit_stage_in_review",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2422,
+    2423
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_process_decisions",
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_ai_batch_qbit_stage_dirs",
+    "_pending_review_has_path"
+   ]
+  },
+  {
+   "name": "_ai_batch_qbit_stage_cleanup",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2426,
+    2434
+   ],
+   "size": 9,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_process_decisions",
+    "_ai_batch_run_folders"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_ai_batch_qbit_stage_dirs"
+   ]
+  },
+  {
+   "name": "_ai_batch_qbit_unit_folder",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2296,
+    2336
+   ],
+   "size": 41,
+   "body_lines": 33,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_process_decisions",
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_ai_batch_tree_entries",
+    "_qbit_rel_name_unsafe",
+    "_s",
+    "validated_downloads_root"
+   ]
+  },
+  {
+   "name": "_ai_batch_duplicate_verdict",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2412,
+    2435
+   ],
+   "size": 24,
+   "body_lines": 18,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "DEDUP",
+   "desired_owner": "backend/dedup_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_ai_batch_quality_upgrade",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2574,
+    2593
+   ],
+   "size": 20,
+   "body_lines": 18,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_music_format_preferences",
+    "_path_is_under",
+    "_s",
+    "quality_upgrade"
+   ]
+  },
+  {
+   "name": "_ai_batch_unit_refusal",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2032,
+    2064
+   ],
+   "size": 33,
+   "body_lines": 30,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_ai_batch_find_audio_dirs",
+    "_ai_batch_qbit_units"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_resolve_import_review_source_path",
+    "_s"
+   ]
+  },
+  {
+   "name": "_qbit_rel_name_unsafe",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2075,
+    2080
+   ],
+   "size": 6,
+   "body_lines": 3,
+   "route": null,
+   "mutation_capable": true,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_process_folder",
+    "_ai_batch_qbit_units",
+    "qbit_import_inventory"
+   ],
+   "caller_count": 3,
+   "dependencies": [
+    "_s"
+   ]
+  },
+  {
+   "name": "_qbit_source_roots",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2084,
+    2091
+   ],
+   "size": 8,
+   "body_lines": 6,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder",
+    "_ai_batch_qbit_units"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_qbit_source_dir_reason",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2094,
+    2115
+   ],
+   "size": 22,
+   "body_lines": 17,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder",
+    "_ai_batch_qbit_units"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_app_managed_download_path",
+    "_path_is_under"
+   ]
+  },
+  {
+   "name": "_ai_batch_qbit_units",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2083,
+    2230
+   ],
+   "size": 148,
+   "body_lines": 137,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_run_ai_batch_import"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_ai_batch_unit_refusal",
+    "_app_managed_download_path",
+    "_path_is_under",
+    "_qbit_rel_name_unsafe",
+    "_s"
+   ]
+  },
+  {
+   "name": "_ai_batch_source_summary_line",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2233,
+    2245
+   ],
+   "size": 13,
+   "body_lines": 12,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_run_ai_batch_import"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
    "name": "_ai_batch_already_in_library",
    "module": "backend/ai_service.py",
    "lines": [
@@ -25354,6 +25863,69 @@
    "migration_status": "EXTRACTED",
    "callers": [
     "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "_qbit_source_file_record",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2316,
+    2358
+   ],
+   "size": 43,
+   "body_lines": 35,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder",
+    "_qbit_source_changes"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
+   "name": "_qbit_source_changes",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2361,
+    2374
+   ],
+   "size": 14,
+   "body_lines": 11,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_process_folder"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_qbit_source_file_record"
+   ]
+  },
+  {
+   "name": "_sha256_file",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2377,
+    2382
+   ],
+   "size": 6,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ai_batch_qbit_unit_folder"
    ],
    "caller_count": 1,
    "dependencies": []
@@ -25671,6 +26243,30 @@
     "_ai_batch_queue_pending_review",
     "_pending_review_has_path",
     "_s"
+   ]
+  },
+  {
+   "name": "_ai_batch_source_unverified",
+   "module": "backend/ai_service.py",
+   "lines": [
+    2877,
+    2893
+   ],
+   "size": 17,
+   "body_lines": 13,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AI",
+   "desired_owner": "backend/ai_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_run_ai_batch_import"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_ai_batch_commit",
+    "_ai_batch_public_state",
+    "_redact_security_text"
    ]
   },
   {
@@ -26261,6 +26857,31 @@
     "_json_from_flask_response",
     "_normalise_wanted_tracks",
     "start_reimport_disk"
+   ]
+  },
+  {
+   "name": "_review_row_is_torrent_source",
+   "module": "backend/import_service.py",
+   "lines": [
+    887,
+    901
+   ],
+   "size": 15,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "start_folder_import_with_id"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_app_managed_download_path",
+    "_load_pending_reviews",
+    "_pending_review_path_key",
+    "_s"
    ]
   },
   {
@@ -27506,6 +28127,26 @@
    "dependencies": [
     "_folder_import_handoff"
    ]
+  },
+  {
+   "name": "_selected_sources_need_copy",
+   "module": "backend/import_service.py",
+   "lines": [
+    3459,
+    3474
+   ],
+   "size": 16,
+   "body_lines": 10,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "CORE",
+   "desired_owner": "backend/app_runtime.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "start_folder_import_with_id"
+   ],
+   "caller_count": 1,
+   "dependencies": []
   },
   {
    "name": "_folder_import_selected_sources",
@@ -29559,6 +30200,50 @@
    "caller_count": 1,
    "dependencies": [
     "_qbit_map_path",
+    "_s"
+   ]
+  },
+  {
+   "name": "qbit_import_filter",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    3097,
+    3101
+   ],
+   "size": 5,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "qbit_import_inventory"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "qbit_import_inventory",
+   "module": "backend/acquisition_service.py",
+   "lines": [
+    3097,
+    3134
+   ],
+   "size": 38,
+   "body_lines": 28,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_qbit_candidate_target_paths",
+    "_qbit_login_cookie",
+    "_qbit_rel_name_unsafe",
+    "_qbit_request_json",
     "_s"
    ]
   },
@@ -38358,6 +39043,29 @@
    ],
    "caller_count": 2,
    "dependencies": []
+  },
+  {
+   "name": "_torrent_rows_protect",
+   "module": "routes_import.py",
+   "lines": [
+    124,
+    131
+   ],
+   "size": 8,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACQUISITION",
+   "desired_owner": "backend/acquisition_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "cleanup_import_review_files",
+    "delete_import_review_folder"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_review_torrent_files_protected"
+   ]
   },
   {
    "name": "cleanup_import_review_files",
