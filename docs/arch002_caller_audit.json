@@ -713,6 +713,10 @@
       "CANDIDATE_GENERATION_ONLY",
       "Binds the AI's candidate_index to that candidate's Release and Release Group; an out-of-range index selects nothing and is downgraded. Decides nothing automatic."
     ],
+    "backend/ai_service.py::_ai_reply_object": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Allowlists and type-checks the album/folder AI reply keys, including the confidence label; it only narrows an untrusted reply and decides nothing."
+    ],
     "backend/item_ai_suggest_service.py::<module>": [
       "CANDIDATE_GENERATION_ONLY",
       "The allowlist of AI reply keys and confidence values; it only narrows an untrusted reply and decides nothing."
