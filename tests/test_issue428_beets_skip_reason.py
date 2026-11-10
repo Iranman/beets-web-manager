@@ -8,6 +8,7 @@ import types
 import unittest
 from unittest import mock
 
+import backend.acquisition_service as acq
 import backend.composite_workflows as cw
 import backend.import_service as imp
 from backend.matching_service import IMPORT_REFUSAL_REASONS, import_refusal_reason_code
@@ -103,6 +104,40 @@ class SlskdLoopHonorsBeetsSkipCode(unittest.TestCase):
         m, log = self._run("", error=_beets_skip_error("beets_no_strong_match"))
         self.assertEqual(m["_slskd_search_and_queue"].call_count, 12)
         self.assertFalse([line for line in log if "Not trying other" in line])
+
+
+class DirectSourceFallbackHonorsBeetsSkipCode(unittest.TestCase):
+    """#571: the direct-source fallback stops on a non-copy Beets refusal, as
+    the peer loop does; a copy-specific one still tries the next source."""
+
+    def _run_direct(self, code):
+        # Peer import refused for a non-copy reason, then each direct source's
+        # import is refused with ``code``.
+        peer_error = RuntimeError("import job failed: ERROR: Could not resolve a MusicBrainz "
+                                  "release ID for import [reason_code=acoustid_unavailable]")
+        waits = mock.Mock(side_effect=[peer_error,
+                                       RuntimeError(_beets_skip_error(code)),
+                                       RuntimeError(_beets_skip_error(code))])
+        with mock.patch.object(acq, "_slskd_fallback_methods", return_value=["soundcloud", "youtube"]), \
+                mock.patch.object(acq, "_ytdlp_album_download", return_value=1) as ytdlp:
+            m, log = t406.NonCandidateRefusalStopsPeerLoop._run(
+                self, "", wait=waits, keep=("_slskd_fallback_methods", "_ytdlp_album_download"))
+        return ytdlp, m, log
+
+    def test_non_copy_skip_tries_no_further_direct_source(self):
+        for code in ("beets_no_candidates", "beets_duplicate"):
+            ytdlp, m, log = self._run_direct(code)
+            self.assertEqual(ytdlp.call_count, 1, code)
+            self.assertEqual(m["_start_reimport_disk_job_internal"].call_count, 2, code)
+            stop = [line for line in log if "Not trying other direct sources" in line]
+            self.assertEqual(len(stop), 1, log)
+            self.assertIn(code, stop[0])
+
+    def test_copy_specific_skip_tries_next_direct_source(self):
+        ytdlp, m, log = self._run_direct("beets_no_strong_match")
+        self.assertEqual(ytdlp.call_count, 2)
+        self.assertEqual(m["_start_reimport_disk_job_internal"].call_count, 3)
+        self.assertFalse([line for line in log if "Not trying other direct sources" in line])
 
 
 if __name__ == "__main__":
