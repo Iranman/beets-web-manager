@@ -267,7 +267,9 @@ def _mask(value: str) -> str:
     """A fixed placeholder for any configured secret (FE-16). It reveals
     neither characters nor length; the plaintext is only available through
     the re-authenticated reveal endpoint."""
-    return _SECRET_MASK if str(value or "") else ""
+    # Any present value is masked, falsy ones (0, False) too (#570): an
+    # empty mask would let a posted-back echo erase the stored secret.
+    return "" if value is None or value == "" else _SECRET_MASK
 
 
 def _is_secret_env(name: str) -> bool:
@@ -275,9 +277,69 @@ def _is_secret_env(name: str) -> bool:
     return config_layers.is_secret_name(upper) or any(part in upper for part in _SECRET_ENV_PARTS)
 
 
+def _is_secret_setting_key(name: str) -> bool:
+    """settings.json keys use the env secret rule plus the config.yaml one
+    (which also catches ``passwd``, ``*pwd``, ``auth*``, ``credential``)."""
+    return _is_secret_env(name) or config_layers.is_secret_config_key(name)
+
+
+def _redact_setting_url(value: str) -> str:
+    redacted = config_layers.redact_url_userinfo_in_text(value, _SECRET_MASK)
+    if redacted == value and "://" in value and config_layers.url_has_userinfo(value):
+        # Encoded or lookalike "@" (%40, U+FF20) that the span scan misses: fail closed.
+        return _SECRET_MASK
+    return redacted
+
+
+def _mask_setting_value(value: Any, secret: bool = False) -> Any:
+    """GET form of one settings.json value (#570): any value under a secret
+    key at any depth becomes the mask, and URL userinfo in every string is
+    replaced by it."""
+    if secret and value is not None:
+        return _mask(value)
+    if isinstance(value, dict):
+        return {k: _mask_setting_value(v, _is_secret_setting_key(str(k))) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_setting_value(v) for v in value]
+    if isinstance(value, str):
+        return _redact_setting_url(value)
+    return value
+
+
 def _mask_secret_settings(settings: dict) -> dict:
-    """Mask settings.json values by the env secret rule, not just key/token."""
-    return {k: (_mask(v) if _is_secret_env(str(k)) else v) for k, v in settings.items()}
+    """Mask settings.json values by the secret-name rule, recursively."""
+    return _mask_setting_value(settings)
+
+
+_MISSING = object()
+
+
+def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> Any:
+    """POST inverse of _mask_setting_value: wherever ``posted`` is exactly
+    what GET returned for ``stored``, keep ``stored`` (#522, #570). A mask
+    with nothing stored behind it resolves to _MISSING (the key is dropped)."""
+    if secret and posted == _SECRET_MASK:
+        return stored
+    if isinstance(posted, dict):
+        base = stored if isinstance(stored, dict) else {}
+        out = {}
+        for k, v in posted.items():
+            restored = _restore_masked_setting(v, base.get(k, _MISSING), _is_secret_setting_key(str(k)))
+            if restored is not _MISSING:
+                out[k] = restored
+        return out
+    if isinstance(posted, list):
+        base = stored if isinstance(stored, list) else []
+        out_list = []
+        for i, v in enumerate(posted):
+            restored = _restore_masked_setting(v, base[i] if i < len(base) else _MISSING)
+            if restored is not _MISSING:
+                out_list.append(restored)
+        return out_list
+    if (isinstance(posted, str) and isinstance(stored, str) and posted != stored
+            and posted == _redact_setting_url(stored)):
+        return stored
+    return posted
 
 
 def _decode_env_value(raw: str) -> str:
@@ -3391,8 +3453,7 @@ def setup_save_settings():
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "settings_missing_revision"}), 428
     settings = dict(json.loads(record.get("content") or "{}"))
     # GET masks secret fields; a round-tripped mask keeps the stored value (#522).
-    settings.update({k: v for k, v in payload.items()
-                     if not (v == _SECRET_MASK and _is_secret_env(str(k)))})
+    settings.update(_restore_masked_setting(payload, settings))
     try:
         result = store.save_json(relative_name, settings, is_secret=False, expected_revision=expected_revision)
     except WebManagerConfigStoreConflictError:
