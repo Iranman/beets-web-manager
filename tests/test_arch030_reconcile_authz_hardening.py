@@ -145,6 +145,7 @@ class ReconcilePendingReviewTests(_CarrierStateMixin):
             return {"ok": True, "deleted": True, "path": path}
 
         with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                mock.patch("backend.slskd.app_download_marker_valid", return_value=True), \
                 mock.patch("backend.composite_workflows.delete_file", side_effect=_rm):
             summary = recovery_service.reconcile_orphan_staging_folders(log=[])
         self.assertEqual(summary["removed"], 1, summary)
@@ -237,7 +238,8 @@ class LiveCarrierCapFailClosedTests(_CarrierStateMixin):
 
         # cap=1: one delete is allowed. The adopted folder must NOT consume it,
         # so the single orphan behind it is still deleted this run.
-        with mock.patch("backend.composite_workflows.delete_file", side_effect=_rm):
+        with mock.patch("backend.slskd.app_download_marker_valid", return_value=True), \
+                mock.patch("backend.composite_workflows.delete_file", side_effect=_rm):
             summary = recovery_service.reconcile_orphan_staging_folders(limit=1, log=[])
         self.assertEqual(summary["adopted"], 1, summary)
         self.assertEqual(summary["removed"], 1, summary)
