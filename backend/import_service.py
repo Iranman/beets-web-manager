@@ -932,7 +932,8 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
         music_root = MUSIC_ROOT.resolve(strict=False)
         if _path_is_under(folder, music_root):
             raise ValueError(f"Refusing to delete a folder inside the music library: {folder}")
-        if not _app_managed_download_path(folder):
+        # The path as given, too: resolving first would erase a link the walk refuses (#566).
+        if not (_app_managed_download_path(Path(folder_path)) and _app_managed_download_path(folder)):
             raise ValueError(f"'{folder}' is not a recognised app-managed download path")
         downloads_root = DOWNLOADS_ROOT.resolve(strict=False)
         if folder == downloads_root:

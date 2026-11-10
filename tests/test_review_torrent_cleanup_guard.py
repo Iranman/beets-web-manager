@@ -147,6 +147,11 @@ class ReviewTorrentCleanupGuardTests(unittest.TestCase):
 
     # Unchanged ---------------------------------------------------------------
     def test_staged_copy_cleanup_and_delete_still_allowed(self):
+        # The app marks the stage it makes (#566); markers need POSIX, so stand in for one.
+        marked = mock.patch.object(ls, "app_download_marker_valid",
+                                   side_effect=lambda folder: Path(folder) == self.stage)
+        marked.start()
+        self.addCleanup(marked.stop)
         resp = self.cleanup(self.stage)
         self.assertEqual(resp.status_code, 200, resp.get_json())
         self.assertFalse((self.stage / "02.flac").exists())
@@ -154,6 +159,12 @@ class ReviewTorrentCleanupGuardTests(unittest.TestCase):
         resp = self.delete(self.stage)
         self.assertEqual(resp.status_code, 200, resp.get_json())
         self.assertFalse((self.stage / "01.flac").exists())
+
+    def test_unmarked_staged_copy_of_a_torrent_row_is_protected(self):
+        """#566: the staging location alone is no proof the app made the folder."""
+        resp = self.cleanup(self.stage)
+        self.assertNotEqual(resp.status_code, 200, resp.get_json())
+        self.assertTrue((self.stage / "02.flac").is_file())
 
     def test_local_row_cleanup_and_delete_unchanged(self):
         resp = self.cleanup(self.local)

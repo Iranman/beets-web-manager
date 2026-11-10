@@ -189,8 +189,11 @@ class LibraryServiceDownloadRoots(unittest.TestCase):
     def test_managed_staging_needs_a_validated_root(self):
         import backend.library_service as lib
         staged = self.downloads / "_beets_missing_import" / "slskd-x"
-        self.assertTrue(self._run(lib._app_managed_download_path, staged, (self.downloads,)))
-        self.assertFalse(self._run(lib._app_managed_download_path, staged, ()))
+        # The location alone proves nothing (#566): a marker is also needed.
+        self.assertFalse(self._run(lib._app_managed_download_path, staged, (self.downloads,)))
+        with mock.patch.object(lib, "app_download_marker_valid", return_value=True):
+            self.assertTrue(self._run(lib._app_managed_download_path, staged, (self.downloads,)))
+            self.assertFalse(self._run(lib._app_managed_download_path, staged, ()))
 
     def test_no_safe_root_preserves_the_source(self):
         import backend.library_service as lib
