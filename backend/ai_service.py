@@ -1009,7 +1009,8 @@ def _ai_preflight_note(preflight: Optional[Dict[str, Any]]) -> str:
 
 
 def _run_ai_release_preflight(folder_path: str, mb_albumid: str,
-                              existing_album_id: int = 0) -> Optional[Dict[str, Any]]:
+                              existing_album_id: int = 0,
+                              wanted_tracks: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     folder_path = _s(folder_path).strip()
     mb_albumid = _s(mb_albumid).strip()
     if not folder_path or not mb_albumid:
@@ -1020,6 +1021,7 @@ def _run_ai_release_preflight(folder_path: str, mb_albumid: str,
             mb_albumid,
             existing_album_id=existing_album_id,
             log=None,
+            wanted_tracks=wanted_tracks or None,
         )
     except Exception as ex:
         _app_logger.warning("Preflight failed to run: %s", type(ex).__name__)
@@ -1109,9 +1111,16 @@ def find_match_slot(view):
     return wrapped
 
 
-def _ai_suggest_folder_internal(folder_path: str) -> dict:
+def _ai_suggest_folder_internal(folder_path: str, existing_album_id: int = 0,
+                                wanted_tracks: Optional[List[Dict[str, Any]]] = None) -> dict:
     """Identify an unimported folder using AI + MusicBrainz.
     Returns: { ok, suggestion: { mb_albumid, album, albumartist, year, label, country, confidence, reason, mb_valid, mb_url }, mb_candidates }
+
+    `existing_album_id` / `wanted_tracks` (Import All repairing a library
+    album): the release preflight judges the folder against that album, and
+    a missing-track fill against its per-recording proof, the same way the
+    repair job's own preflight does, so a partial repair folder is not
+    refused here for lacking tracks the album already has.
 
     AI is an enhancement, not a requirement: a missing/invalid OpenAI key or
     any provider failure (401/403/timeout/rate limit/refusal/etc.) must not
@@ -1326,10 +1335,19 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                         r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
                         _aid_id, re.I,
                     )),
+                    # #520: 2+ fingerprint hits on this release outrank the
+                    # folder-name artist guess, so the AI path's name-based
+                    # artist gate is not applied here. The release preflight
+                    # below still runs its tracklist and folder-artist checks,
+                    # and Import All refuses a failed preflight.
+                    # ponytail: hits count recordings, not distinct files, so
+                    # one file can contribute 2 hits; count per file if that bites.
+                    "identity_validated": True,
+                    "candidate_identity_error": "",
                 }
                 if sug["mb_valid"]:
                     sug["mb_url"] = f"https://musicbrainz.org/release/{_aid_id}"
-                    _pf = _run_ai_release_preflight(folder_path, _aid_id)
+                    _pf = _run_ai_release_preflight(folder_path, _aid_id, existing_album_id, wanted_tracks)
                     _apply_ai_preflight_to_suggestion(sug, _pf)
                 else:
                     _pf = None
@@ -1578,7 +1596,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         selected_candidate, mb_id = _ai_bind_selected_release(sug, mb_candidates)
         selected_preflight = None
         if sug["mb_valid"]:
-            selected_preflight = _run_ai_release_preflight(folder_path, mb_id)
+            selected_preflight = _run_ai_release_preflight(folder_path, mb_id, existing_album_id, wanted_tracks)
             _apply_ai_preflight_to_suggestion(sug, selected_preflight)
         _aa = (sug.get("albumartist") or "").strip()
         if _aa:
