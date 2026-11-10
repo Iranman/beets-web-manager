@@ -714,6 +714,48 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         self.assertTrue(r.get_json()["ok"])
         self.assertEqual(self.module._load_settings()["ai_api_key"], 0)
 
+    def test_get_settings_masks_query_and_schemeless_secrets(self):
+        # #585: secret query parameters and scheme-less userinfo were returned in full.
+        stored_in = {
+            "feed": "https://feed.invalid/x?api_key=fake-query-key&page=2",
+            "cb": "https://app.invalid/cb?pa%73s=fake-enc-pass#access_token=fake-frag-token",
+            "db": "fakedbuser:fake-db-pw@db.invalid:5432",
+            "db_wide": "fakedbuser:fake-wide-db-pw＠db.invalid:5432",
+            "contact": "someone@mail.invalid",
+            "cache_bypass": "yes",
+        }
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        body = json.dumps(got, ensure_ascii=False)
+        for leaked in ("fake-query-key", "fake-enc-pass", "fake-frag-token", "fake-db-pw", "fake-wide-db-pw", "fakedbuser"):
+            self.assertNotIn(leaked, body)
+        self.assertEqual(got["feed"], f"https://feed.invalid/x?api_key={mask}&page=2")
+        self.assertEqual(got["db"], f"{mask}@db.invalid:5432")
+        self.assertEqual(got["db_wide"], mask)
+        self.assertEqual(got["contact"], "someone@mail.invalid")
+        self.assertEqual(got["cache_bypass"], "yes")
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings(), stored_in)
+
+    def test_masked_list_entries_restore_by_identity(self):
+        # #585: a reordered list paired each masked secret with another entry.
+        servers = [{"name": "a", "password": "fake-pw-a"}, {"name": "b", "password": "fake-pw-b"}]
+        r = self.client.post("/api/setup/settings", json={"servers": servers})
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        r = self.client.post("/api/setup/settings", json={
+            "servers": list(reversed(got["servers"])), "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings()["servers"], list(reversed(servers)))
+        # An edited entry still carrying a mask cannot be tied to a stored secret.
+        rev = r.get_json()["revision"]
+        edited = [{"name": "renamed", "password": self.module._SECRET_MASK}]
+        r = self.client.post("/api/setup/settings", json={"servers": edited, "expected_revision": rev})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.module._load_settings()["servers"], list(reversed(servers)))
+
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
         self.assertEqual(r.status_code, 400)

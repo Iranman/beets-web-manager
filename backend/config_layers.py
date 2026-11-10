@@ -600,7 +600,7 @@ _SECRET_QUERY_KEYS = ("token", "key", "secret", "pass", "auth", "signature", "si
 
 def is_secret_config_key(key: str) -> bool:
     """A config.yaml key whose value is treated as a secret: the exact list
-    above, any ``*key``/``*pass``/``*pwd`` suffix, ``auth*`` prefix, or a key
+    above, any ``*key``/``*pass``/``*pwd`` suffix (not ``*bypass``), ``auth*`` prefix, or a key
     containing a secret word (SEC-237-5). One predicate for the config editor
     and the setup preview diff."""
     k = str(key).strip().strip("\"'").strip().lower()
@@ -608,7 +608,7 @@ def is_secret_config_key(key: str) -> bool:
         return False
     return (
         k in SECRET_CONFIG_KEYS
-        or k.endswith(("key", "pass", "pwd")) or k.startswith("auth")
+        or (k.endswith(("key", "pass", "pwd")) and not k.endswith("bypass")) or k.startswith("auth")
         or any(word in k for word in _SECRET_KEY_WORDS)
     )
 
