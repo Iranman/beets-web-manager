@@ -343,6 +343,38 @@ class OrphanStagingReconcileTests(_CarrierStateMixin):
             spy.assert_not_called()
             self.assertTrue(again.exists())
 
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd,
+                         "markers need the no-follow fd primitives (POSIX)")
+    def test_marker_key_under_a_torrent_or_playlist_root_proves_nothing(self):
+        # #583 F1: WEB_MANAGER_DATA_DIR (the key's home) under a torrent root
+        # distinct from downloads, or under a playlist root: whoever writes
+        # there could read the key and forge markers, so the sweep keeps the
+        # folder, as _app_managed_download_path does.
+        import backend.app_runtime as app_runtime
+        import backend.slskd as slskd
+        for attr in ("TORRENT_SOURCE_ROOTS", "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS"):
+            with self.subTest(attr):
+                other = Path(self.tmp) / ("other-" + attr)
+                key_dir = other / "web-manager-data"
+                key_dir.mkdir(parents=True)
+                with mock.patch.object(slskd, "app_download_key_path",
+                                       return_value=key_dir / slskd.APP_DOWNLOAD_KEY_FILE), \
+                        mock.patch.object(app_runtime, "DOWNLOADS_ALLOWED_ROOTS",
+                                          [Path(self.tmp) / "downloads"]), \
+                        mock.patch.object(app_runtime, attr, [other]):
+                    folder = self.root / ("rec-0123456789abcdef-" + attr)
+                    slskd.make_app_download_dir(folder)
+                    self.assertTrue(slskd.app_download_marker_valid(folder))  # genuine marker
+                    t = time.time() - self.old
+                    os.utime(str(folder), (t, t))
+                    spy = mock.MagicMock()
+                    with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                            mock.patch("backend.composite_workflows.delete_file", spy):
+                        summary = recovery_service.reconcile_orphan_staging_folders(log=[])
+                    spy.assert_not_called()
+                    self.assertTrue(folder.exists())
+                    self.assertGreaterEqual(summary["kept"], 1, summary)
+
     @unittest.skipUnless(_symlinks_work(), "symlinks unavailable on this host")
     def test_symlink_child_escaping_to_music_is_skipped_fail_closed(self):
         music = Path(self.tmp) / "music_library"
