@@ -275,6 +275,11 @@ def _is_secret_env(name: str) -> bool:
     return config_layers.is_secret_name(upper) or any(part in upper for part in _SECRET_ENV_PARTS)
 
 
+def _mask_secret_settings(settings: dict) -> dict:
+    """Mask settings.json values by the env secret rule, not just key/token."""
+    return {k: (_mask(v) if _is_secret_env(str(k)) else v) for k, v in settings.items()}
+
+
 def _decode_env_value(raw: str) -> str:
     raw = raw.strip()
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
@@ -1059,7 +1064,8 @@ def _resolve_setting_item(
             type="secret",
             value=_mask(env_val or persisted_val) if configured else "",
             effective_value=None,
-            saved_value="••••••••••••••••" if has_stored else None,
+            # One mask value everywhere, so POST can recognise an echo (#522).
+            saved_value=_SECRET_MASK if has_stored else None,
             has_saved_value=has_stored,
             is_overridden=is_overridden,
             default=default_val,
@@ -2571,8 +2577,6 @@ def _beets_setup_warnings(
 
 
 def _build_setup_status_payload() -> Dict[str, Any]:
-    settings = _load_settings()
-
     beets_config_path, config_path_error = _checked_beets_config_path()
     diagnostics = _beets_plugin_diagnostics(beets_config_path)
     remote_paths = diagnostics.get("paths") if isinstance(diagnostics.get("paths"), dict) else {}
@@ -2825,8 +2829,8 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         "plugins_ready": bool(plugins_report.get("all_required_healthy", False)),
         "auth": auth_status,
         "integrations": integrations,
-        "settings": {k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v)
-                     for k, v in settings.items()},
+        # No "settings": this endpoint is unauthenticated and nothing read it;
+        # saved settings are only served (masked) by GET /api/setup/settings.
     }
 
 
@@ -2941,7 +2945,9 @@ def setup_save_env():
     for key, raw_value in raw_updates.items():
         key = str(key)
         value = "" if raw_value is None else str(raw_value)
-        if _is_secret_env(key) and value == "" and key not in raw_clear:
+        # GET returns secrets as _SECRET_MASK; posting that echo back must
+        # never replace the saved value (#522). Clearing uses `clear`.
+        if _is_secret_env(key) and (value == _SECRET_MASK or (value == "" and key not in raw_clear)):
             continue
         if _is_redacted_url_echo(key, value.strip(), (str(stored_env.get(key, "")).strip(), config_layers.legacy_env_value(key).strip())):
             continue
@@ -3365,9 +3371,8 @@ def setup_test_plex():
 def setup_get_settings():
     record = _load_settings_record()
     settings = dict(record.get("settings") or {})
-    return jsonify({"ok": True, "revision": record.get("revision"), "settings": {
-        k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v) for k, v in settings.items()
-    }})
+    return jsonify({"ok": True, "revision": record.get("revision"),
+                    "settings": _mask_secret_settings(settings)})
 
 
 @app.post("/api/setup/settings")
@@ -3385,7 +3390,9 @@ def setup_save_settings():
     if record.get("exists") and not expected_revision:
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "settings_missing_revision"}), 428
     settings = dict(json.loads(record.get("content") or "{}"))
-    settings.update(payload)
+    # GET masks secret fields; a round-tripped mask keeps the stored value (#522).
+    settings.update({k: v for k, v in payload.items()
+                     if not (v == _SECRET_MASK and _is_secret_env(str(k)))})
     try:
         result = store.save_json(relative_name, settings, is_secret=False, expected_revision=expected_revision)
     except WebManagerConfigStoreConflictError:

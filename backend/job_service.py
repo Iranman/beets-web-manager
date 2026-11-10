@@ -156,6 +156,7 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
         outcome: the terminal child, or None when it is still running after
         CHILD_SETTLE_SECONDS (or its record vanished): outcome unknown."""
         if child.status != "running":
+            _mirror(child)  # it may have ended since the loop last read its log
             return child
         child.kill()
         log.append(f"  [{prefix}] Asked job {job_id} to stop; waiting up to {CHILD_SETTLE_SECONDS}s "
@@ -165,8 +166,11 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
             current = jobs.get(job_id)
             if current is None:
                 return None
+            # Status before log: job_engine writes the ERROR line before the
+            # job turns terminal, so a terminal read means the line is there.
+            status = current.status
             _mirror(current)
-            if current.status != "running":
+            if status != "running":
                 return current
             if time.time() >= end:
                 return None
@@ -230,7 +234,11 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
             note_job_progress(mutation_started=True)
         # The settled child may say why it failed (e.g. audio inspection
         # incomplete); carry that, as for a child that failed on its own.
-        raise ChildJobFailed(reason, _reason_code(done))
+        # Lead with its error line, in the same form as that path, so a
+        # refusal code in the text still stops the caller's retries (#445).
+        detail = _child_failure_detail()
+        message = f"{prefix} job failed: {detail} (settled after the wait ended: {reason})" if detail else reason
+        raise ChildJobFailed(message, _reason_code(done))
 
     while True:
         now = time.time()
@@ -244,10 +252,11 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
                 )
                 return {"job_id": job_id, "status": "success", "result_inferred_from_log": True}
             raise _vanished(f"child job not found: {job_id}")
+        status = child.status  # before the log read; see _settle
         new_lines = _mirror(child)
         child_state = dict(getattr(child, "state", {}) or {})
         state_key = (
-            child.status,
+            status,
             len(child.log),
             child_state.get("scanned_count"),
             child_state.get("found_count"),
@@ -264,8 +273,8 @@ def _wait_for_child_job(job_id: str, log: list, cancel_event=None,
             last_state_key = state_key
             if progress and child_state:
                 progress(child_state)
-        if child.status != "running":
-            if child.status != "success":
+        if status != "running":
+            if status != "success":
                 detail = _child_failure_detail()
                 raise ChildJobFailed(f"{prefix} job failed: {detail}" if detail else f"{prefix} job failed",
                                      _reason_code(child))
