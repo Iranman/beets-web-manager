@@ -186,7 +186,9 @@ class PlaylistRootsValidated(unittest.TestCase):
         with mock.patch.object(lib, "DOWNLOADS_ALLOWED_ROOTS", ()), \
                 mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ROOT", pl):
             with mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", (pl,)):
-                self.assertTrue(lib._app_managed_download_path(pl / "k" / "downloads"))
+                self.assertFalse(lib._app_managed_download_path(pl / "k" / "downloads"))  # unmarked (#566)
+                with mock.patch.object(lib, "app_download_marker_valid", return_value=True):
+                    self.assertTrue(lib._app_managed_download_path(pl / "k" / "downloads"))
             with mock.patch.object(lib, "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS", ()):
                 self.assertFalse(lib._app_managed_download_path(pl / "k" / "downloads"))
 

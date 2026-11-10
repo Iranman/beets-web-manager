@@ -25,6 +25,8 @@ class SingleStagingTests(unittest.TestCase):
         self.store = root / "pending.json"
         self.decisions = []
         patches = [
+            # The marker key staging writes (#566) lives outside the downloads root.
+            mock.patch.dict("os.environ", {"WEB_MANAGER_DATA_DIR": str(root / "data")}),
             mock.patch.object(imp, "validated_downloads_root", return_value=self.downloads),
             mock.patch.object(imp, "DOWNLOADS_ROOT", self.downloads),
             mock.patch.object(imp, "MUSIC_ROOT", root / "music"),

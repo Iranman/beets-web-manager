@@ -19,8 +19,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 #: the staged folder, values the original basenames.
 RECOVERY_ORIGINAL_NAMES_SIDECAR = ".bwm_recovery_original_names.json"
 
-#: Ownership proof: written into each download folder the app creates outside
-#: its private roots (``_beets_missing_import``, playlist roots), so a user
+#: Ownership proof: written into each download folder the app creates, its
+#: ``_beets_missing_import`` staging and playlist folders included (#566), so a user
 #: Import never picks it up and ``library_service._app_managed_download_path``
 #: need not trust a folder name. Dot-prefixed: scans and Beets skip it. Its
 #: content is an HMAC of the folder's real path under APP_DOWNLOAD_KEY_FILE, a
@@ -722,7 +722,14 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
     if not prefix:
         prefix = uuid.uuid4().hex[:10]
     stage = Path(downloads_root) / "_beets_missing_import" / f"{prefix}-{safe_album}"
-    stage.mkdir(parents=True, exist_ok=True)
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    if stage.parent.is_symlink():
+        raise RuntimeError("staged import folder is not safely contained in the downloads root")
+    try:
+        stage.mkdir()
+        stage_is_new = True
+    except FileExistsError:
+        stage_is_new = False
     # SEC-007 / #325 containment: the staged-folder name is now PREDICTABLE when
     # a deterministic prefix is used, so verify the real path is a non-symlink
     # directory that still resolves under the downloads root before copying into
@@ -747,6 +754,10 @@ def stage_selected_audio_files(downloads_root: Path, audio_exts: Iterable[str],
         raise RuntimeError(
             "refusing to stage recovery files: fd-relative, symlink-safe copy is "
             "unavailable on this host (needs O_NOFOLLOW and os.supports_dir_fd)")
+    if stage_is_new:
+        # #566: only a folder this call made is the app's; one that was already
+        # there keeps whatever proof it had (none = the user's, copied, never moved).
+        mark_app_download_dir(stage)
 
     def _target_dest(src: Path, target: Dict[str, Any]) -> Path:
         try:

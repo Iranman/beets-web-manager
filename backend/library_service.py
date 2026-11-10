@@ -626,20 +626,30 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
     return ""
 
 
+def _in_app_private_root(path: Path) -> bool:
+    """Whether ``path`` is written under ``<downloads>/_beets_missing_import`` or a
+    playlist download root. Location only, never ownership (#566): callers may
+    use it to leave a folder OUT of a user scan, never to move or delete it."""
+    roots = [r / "_beets_missing_import" for r in DOWNLOADS_ALLOWED_ROOTS]
+    roots += list(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS)
+    lexical = os.path.abspath(path)
+    return any(lexical == os.path.abspath(r) or lexical.startswith(os.path.abspath(r).rstrip(os.sep) + os.sep)
+               for r in roots)
+
+
 def _app_managed_download_path(path: Path) -> bool:
     # Validated roots only: an unsafe DOWNLOADS_ROOT authorizes nothing (#251 F-1).
-    managed_roots = [root / "_beets_missing_import" for root in DOWNLOADS_ALLOWED_ROOTS]
-    managed_roots.extend(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS)  # #268 S-4
+    # Being under _beets_missing_import or a playlist root proves nothing on its
+    # own (#566): folders there need the same marker and link checks as any other.
     try:
         path_res = path.resolve(strict=False)
     except Exception:
         path_res = path
-    if any(_path_is_under(path_res, root) for root in managed_roots):
-        return True
-    root = next((r for r in DOWNLOADS_ALLOWED_ROOTS if _path_is_under(path_res, r)), None)
+    root = next((r for r in (*DOWNLOADS_ALLOWED_ROOTS, *PLAYLIST_DOWNLOAD_ALLOWED_ROOTS)
+                 if _path_is_under(path_res, r)), None)
     if root is None:
         return False
-    # Ownership proof under a validated downloads root: a valid APP_DOWNLOAD_MARKER
+    # Ownership proof under a validated downloads (or playlist) root: a valid APP_DOWNLOAD_MARKER
     # (keyed HMAC of that folder's path, slskd.app_download_marker_valid) in the
     # folder or a folder above it, written when the app created it. A marker at
     # or above a downloads/torrent root never counts (#325 F1), nor one checked
