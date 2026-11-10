@@ -109,6 +109,16 @@ class MusicFormatPreferencesTests(unittest.TestCase):
         self.assertEqual(result["layout"], "stereo")
         self.assertEqual(run.call_count, 2)
         self.assertIn("-probesize", run.call_args_list[1].args[0])
+        self.assertIsNone(result["bit_depth"])  # lossy: no bit depth
+
+    def test_inspect_audio_file_reports_flac_bit_depth(self):
+        probe = type("Proc", (), {"returncode": 0, "stderr": "", "stdout": json.dumps({
+            "streams": [{"codec_type": "audio", "codec_name": "flac", "channels": 2, "channel_layout": "stereo",
+                         "sample_rate": "96000", "bits_per_raw_sample": "24", "bits_per_sample": 0}],
+            "format": {"bit_rate": "3000000"}})})()
+        with mock.patch("backend.audio_preferences.subprocess.run", return_value=probe):
+            result = inspect_audio_file("/music/hires.flac", ffprobe_bin="ffprobe")
+        self.assertEqual((result["format"], result["bit_depth"], result["sample_rate"]), ("flac", 24, 96000))
     def test_rejected_download_delete_or_quarantine(self):
         with tempfile.TemporaryDirectory() as tmp:
             doomed = Path(tmp) / "bad.flac"

@@ -5,13 +5,14 @@ from __future__ import annotations
 from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
-import json, os, re, sqlite3, threading, time
+import json, os, re, sqlite3, stat, threading, time
 from collections import Counter, defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, DOWNLOADS_ALLOWED_ROOTS, DOWNLOADS_ROOT, EDITABLE_FIELDS, MUSIC_ROOT, PLAYLIST_DOWNLOAD_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, TORRENT_SOURCE_MOVE_ALLOWED, TORRENT_SOURCE_ROOTS, WEB_MANAGER_DATA_DIR, _ANSI_RE, _LITERAL_PLACEHOLDER_RE, _MB_TRACK_REPAIR_MATCH_THRESHOLD, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _YEAR_SFXRE, _s, _up, _ur
 from backend.ai_evidence_service import _AI_EVIDENCE_DISC_FOLDER_RE, _ai_evidence_clean_artist_guess, _ai_evidence_clean_segment, _ai_evidence_extract_year, _ai_evidence_scene_guess, _ai_evidence_weak_album_guess, _ai_evidence_weak_artist_guess, _ai_suggest_genre, _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
-from backend.pending_review_store import _apply_review_origin, _is_music_root_path, _load_pending_reviews, _queue_folder_for_manual_review, _remove_pending_review_for_path
+from backend.pending_review_store import _apply_review_origin, _is_music_root_path, _load_pending_reviews, _pending_review_torrent_rows, _queue_folder_for_manual_review, _remove_pending_review_for_path
 from backend.playlist_service import _artist_folder_merge_key, _safe_artist_folder_name
 from backend.import_reconciliation_service import _apply_artist_folder_reconcile_resilient
 from backend.cleanup_service import _album_cleanup_file_info, _album_cleanup_quality_tuple, _album_cleanup_remove_empty_tree, _album_cleanup_verified_same_file, _artist_alias_key, _unique_dest
@@ -26,6 +27,7 @@ import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags, same_recording_proof
 from backend.artwork_service import _album_dir_for_art, _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
+from backend.slskd import APP_DOWNLOAD_LEGACY_NAME_UNTIL, APP_DOWNLOAD_MARKER, APP_DOWNLOAD_NAME_RE, app_download_key_path, app_download_marker_valid
 from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _load_album_mb_suggestions, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
 from job_engine import DuplicateJobError
@@ -634,15 +636,56 @@ def _app_managed_download_path(path: Path) -> bool:
         path_res = path
     if any(_path_is_under(path_res, root) for root in managed_roots):
         return True
-    # #325 S-3: a name alone is spoofable; it must be the exact name the
-    # acquisition flow generates ("<album> - <source> missing <epoch ms>")
-    # and sit under a validated downloads root.
-    # ponytail: name-based; a marker file written at creation would be proof.
-    return bool(_APP_MANAGED_NAME.search(path.name.casefold())) and any(
-        _path_is_under(path_res, root) for root in DOWNLOADS_ALLOWED_ROOTS)
-
-
-_APP_MANAGED_NAME = re.compile(r" - (?:yt|ytdlp|soundcloud|spotiflac) missing \d{13}$")
+    root = next((r for r in DOWNLOADS_ALLOWED_ROOTS if _path_is_under(path_res, r)), None)
+    if root is None:
+        return False
+    # Ownership proof under a validated downloads root: a valid APP_DOWNLOAD_MARKER
+    # (keyed HMAC of that folder's path, slskd.app_download_marker_valid) in the
+    # folder or a folder above it, written when the app created it. A marker at
+    # or above a downloads/torrent root never counts (#325 F1), nor one checked
+    # with a key that downloads could have planted. Until
+    # APP_DOWNLOAD_LEGACY_NAME_UNTIL, a folder made before the marker is proven
+    # by its exact generated name, except under a torrent root other than this
+    # downloads root. Nothing counts through a symlinked folder.
+    root_res = root.resolve(strict=False)
+    try:
+        path_res.relative_to(root_res)
+    except ValueError:
+        return False
+    torrent_roots = [r.resolve(strict=False) for r in TORRENT_SOURCE_ROOTS]
+    guard_roots = torrent_roots + [r.resolve(strict=False) for r in DOWNLOADS_ALLOWED_ROOTS]
+    legacy_ok = date.today() < APP_DOWNLOAD_LEGACY_NAME_UNTIL and not any(
+        t != root_res and _path_is_under(path_res, t) for t in torrent_roots)
+    # Walk the path as given, every level below the root (written or real
+    # spelling): one reaching it through an outside symlink, or with "..",
+    # which resolves elsewhere than it reads, proves nothing. Once each level
+    # passes lstat it is its own real path, so folder_res needs no per-level
+    # resolve (8000-torrent scans).
+    if ".." in path.parts:
+        return False
+    lexical = os.path.abspath(path)
+    written = os.path.abspath(root).rstrip(os.sep) + os.sep
+    real = str(root_res).rstrip(os.sep) + os.sep
+    if not lexical.startswith((written, real)):
+        return False
+    rel = Path(lexical[len(written if lexical.startswith(written) else real):]).parts
+    folder = Path(lexical)
+    folder_res = root_res.joinpath(*rel)
+    proven = False
+    for level in range(len(rel)):
+        try:
+            if stat.S_ISLNK(os.lstat(folder).st_mode):
+                return False
+        except OSError:
+            pass  # not there (yet): its name may still prove it
+        if not proven and level == 0 and legacy_ok:
+            proven = bool(APP_DOWNLOAD_NAME_RE.search(folder.name.casefold()))
+        if not proven and not any(g == folder_res or folder_res in g.parents for g in guard_roots):
+            proven = app_download_marker_valid(folder) and not any(
+                _path_is_under(app_download_key_path(), r)
+                for r in guard_roots + list(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS))
+        folder, folder_res = folder.parent, folder_res.parent
+    return proven
 
 
 def _preserve_torrent_source_path(path_value: str | Path) -> bool:
@@ -670,6 +713,25 @@ def _preserve_torrent_source_file(path_value: str | Path) -> bool:
     folder = Path(path_value).parent
     return _preserve_torrent_source_path(folder) or any(
         _preserve_torrent_source_path(a) for a in folder.parents if a.resolve(strict=False) not in roots)
+
+
+def _review_torrent_files_protected(path_value: str | Path) -> bool:
+    """True when deleting or quarantining files at ``path_value`` could take
+    a seeding torrent's files: a Review row at, inside or above it is
+    qBittorrent-origin (always torrent data, whatever TORRENT_SOURCE_ROOTS or
+    ALLOW_TORRENT_SOURCE_MOVE say) and not a copy the app made, or is a
+    quality upgrade whose own folder is a preserved torrent source. Judges
+    each row's own path, not ``path_value``, so a parent folder cannot carry
+    a protected row out. Raises when the queue cannot be read; callers fail
+    closed."""
+    for row_path, evidence in _pending_review_torrent_rows(str(path_value)):
+        row = Path(row_path)
+        if evidence.get("source_mode") == "qbittorrent":
+            if not _app_managed_download_path(row):
+                return True
+        elif _preserve_torrent_source_path(row):
+            return True
+    return False
 
 
 _MUSIC_LIBRARY_ROOT = str(MUSIC_ROOT)
@@ -735,7 +797,8 @@ def _source_proven_in_library(folder_path: str, album_id: int, target_releasegro
         return ev
     audio = [p for p in files if p.suffix.lower() in AUDIO_EXT]
     unrecognised = [p for p in files
-                    if p.suffix.lower() not in AUDIO_EXT and p.suffix.lower() not in _PROVEN_SOURCE_SIDECAR_EXTS]
+                    if p.suffix.lower() not in AUDIO_EXT and p.suffix.lower() not in _PROVEN_SOURCE_SIDECAR_EXTS
+                    and not (p.name == APP_DOWNLOAD_MARKER and app_download_marker_valid(p.parent))]
     if unrecognised:
         ev["reason"] = "unrecognised_file"
         ev["files"] = [{"path": str(p), "proof": ""} for p in unrecognised[:20]]

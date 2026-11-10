@@ -10,7 +10,7 @@ import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, reconcileArtwork, recoverAiBatch, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
-import type { AiBatchFolderState, AiBatchState, PreflightFolder, PreflightResponse } from '../../api/types';
+import type { AiBatchFolderState, AiBatchSource, AiBatchSourceReport, AiBatchState, PreflightFolder, PreflightResponse } from '../../api/types';
 import { LogViewer } from '../../components/LogViewer';
 import { downloadsRootProblem, useDownloadsRoot, useJobPoll } from '../../lib/hooks';
 
@@ -83,6 +83,7 @@ function PreflightSummary({ result }: { result: PreflightResponse }) {
 
 function ConfirmStartDialog({
   open,
+  source,
   path,
   folderCount,
   fileCount,
@@ -91,6 +92,7 @@ function ConfirmStartDialog({
   busy,
 }: {
   open: boolean;
+  source: AiBatchSource;
   path: string;
   folderCount: number;
   fileCount: number;
@@ -109,11 +111,17 @@ function ConfirmStartDialog({
             folders in Import Review. This can write tags and move imported files according to the Beets config.
           </p>
           <div className="mt-4 rounded border border-graphite-800 bg-graphite-950 p-3">
-            <div className="truncate font-mono text-xs text-zinc-300">{path}</div>
-            <div className="mt-2 flex flex-wrap gap-2 text-xs text-zinc-500">
-              <span>{folderCount} new folders</span>
-              <span>{fileCount} audio files</span>
-            </div>
+            {source === 'qbittorrent' ? (
+              <div className="text-xs leading-5 text-zinc-300">Source: qBittorrent. {QBIT_SOURCE_EXPLANATION}</div>
+            ) : (
+              <>
+                <div className="truncate font-mono text-xs text-zinc-300">{path}</div>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs text-zinc-500">
+                  <span>{folderCount} new folders</span>
+                  <span>{fileCount} audio files</span>
+                </div>
+              </>
+            )}
           </div>
           <div className="mt-5 flex justify-end gap-2">
             <Button disabled={busy} variant="outlined" onClick={onClose}>
@@ -171,8 +179,91 @@ export function folderStatusLabel(status?: string) {
     ai_failed: 'AI failed',
     timed_out: 'Timed out',
     skipped: 'Skipped',
+    source_missing: 'Source missing or changed',
   };
   return labels[String(status || '')] || String(status || 'Unknown');
+}
+
+export const QBIT_SOURCE_EXPLANATION =
+  'qBittorrent decides what is imported: only the audio files of completed torrents (seeding counts) that it reports. ' +
+  'Files are copied, never moved, so torrents keep seeding, and each file is checked unchanged after import. ' +
+  'The folder path is not used.';
+
+const SOURCE_CHECK_LABELS: Record<string, string> = {
+  source_unsafe: 'No longer safe to import',
+  source_changed: 'Changed since discovery',
+  source_modified_during_import: 'Changed during import',
+  source_mode_mismatch: 'Different import source',
+};
+
+export function sourceCheckLabel(code: string) {
+  return SOURCE_CHECK_LABELS[code] || codeLabel(code) || code;
+}
+
+/** The torrent filter the backend applied (QBITTORRENT_IMPORT_CATEGORY / _TAG). */
+export function sourceFilterText(filter?: AiBatchSourceReport['filter']) {
+  const parts = [filter?.category && `Category: ${filter.category}`, filter?.tag && `Tag: ${filter.tag}`].filter(Boolean);
+  return parts.length ? parts.join(' · ') : 'Filter: all completed torrents';
+}
+
+const SOURCE_EXCLUSION_LABELS: Record<string, string> = {
+  missing: 'Missing on disk',
+  not_audio: 'Not audio',
+  outside_allowed_root: 'Outside the import folders',
+  protected_location: 'Protected location',
+  symlink: 'Linked file or folder',
+  app_managed: "Web Manager's own downloads",
+  unsafe_path: 'Unsafe path',
+  duplicate: 'Taken by another torrent',
+  empty_file: 'Empty file',
+  incomplete_torrent: 'Torrent not complete',
+  not_selected: 'Not selected in qBittorrent',
+  unreadable: 'Unreadable',
+};
+
+export function sourceExclusionLabel(reason: string) {
+  return SOURCE_EXCLUSION_LABELS[reason] || SOURCE_CHECK_LABELS[reason] || codeLabel(reason) || reason;
+}
+
+/** The qBittorrent source summary: what qBittorrent offered and what was left out. */
+export function SourceReportSummary({ report, missing, folders = [] }: { report: AiBatchSourceReport; missing: number; folders?: AiBatchFolderState[] }) {
+  const exclusions = Object.entries(report.exclusions ?? {}).filter(([, count]) => count > 0);
+  // Neutral and final: no retry, no Review row. Pagination comes later; show the first few.
+  const missingFolders = folders.filter((folder) => folder.status === 'source_missing').slice(0, 8);
+  return (
+    <section aria-label="qBittorrent source summary" className="rounded border border-graphite-800 bg-graphite-950/50 p-3 text-sm">
+      <div className="text-xs font-semibold uppercase tracking-wide text-zinc-500">qBittorrent source</div>
+      <div className="mt-1 text-xs text-zinc-400">{sourceFilterText(report.filter)}</div>
+      <div className="mt-2 grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <BatchMetric label="Ownership verified" value={`${report.ownership_verified_pct ?? 0}%`} tone="text-sky-200" />
+        <BatchMetric label="Eligible files" value={report.eligible_files ?? 0} tone="text-emerald-200" />
+        <BatchMetric label="Completed torrents" value={`${report.torrents_complete ?? 0} / ${report.torrents ?? 0}`} tone="text-zinc-200" />
+        <BatchMetric label="Source missing or changed" value={missing} tone="text-zinc-300" />
+      </div>
+      {exclusions.length ? (
+        <div className="mt-2 text-xs text-zinc-400">
+          <span className="text-zinc-500">Left out: </span>
+          {exclusions.map(([reason, count]) => `${sourceExclusionLabel(reason)} ${count}`).join(' · ')}
+        </div>
+      ) : null}
+      {missingFolders.length ? (
+        <ul aria-label="Source missing or changed" className="mt-2 space-y-1 text-xs">
+          {missingFolders.map((folder) => (
+            <li key={folder.folder_id} className="min-w-0">
+              <span className="text-zinc-200">{folderName(folder.source_folder)}</span>
+              <span className="text-zinc-500">
+                {' — '}
+                {folder.source_check
+                  ? `${sourceCheckLabel(folder.source_check.code)}: ${folder.source_check.detail}`
+                  : codeLabel(folder.failure_reason) || 'Source missing'}
+                . Not retried; start a new import once the torrent is settled.
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
 }
 
 const STAGE_LABELS: Record<string, string> = {
@@ -390,13 +481,20 @@ function JobLog({
   jobId,
   onDone,
   onJobIdChange,
+  onSourceMode,
 }: {
   jobId: string;
   onDone: () => void;
   onJobIdChange: (jobId: string | null) => void;
+  onSourceMode?: (source: AiBatchSource) => void;
 }) {
   const navigate = useNavigate();
   const [batchState, setBatchState] = useState<AiBatchState | null>(null);
+  // The selector follows the tracked batch, so a qBittorrent batch never shows the folder controls.
+  const batchSource = batchState?.source_mode;
+  useEffect(() => {
+    if (batchSource === 'qbittorrent' || batchSource === 'local') onSourceMode?.(batchSource);
+  }, [batchSource, onSourceMode]);
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [statusError, setStatusError] = useState('');
   const batchStatus = batchState?.status;
@@ -676,6 +774,22 @@ function JobLog({
           </Alert>
         ) : null}
 
+        {batchState?.source_error || batchState?.current_step === 'source_verification_required' ? (
+          <Alert severity="error">
+            <div>
+              qBittorrent could not be verified: {batchState.source_error?.message || batchState.last_error || 'the qBittorrent source is not available'}
+            </div>
+            <div className="mt-1 text-xs">
+              Nothing was imported or queued, and the downloads folder was not scanned instead. Check the qBittorrent
+              connection (QBITTORRENT_URL and its login), then start a new qBittorrent import.
+            </div>
+          </Alert>
+        ) : null}
+
+        {batchState?.source_mode === 'qbittorrent' && batchState.source_report ? (
+          <SourceReportSummary report={batchState.source_report} missing={batchState.folders_source_missing ?? 0} folders={batchState.folders} />
+        ) : null}
+
         {missing ? (
           <Alert severity="error">
             Batch job no longer exists for this ID. Use Re-scan to start a fresh import, or check Jobs for its history.
@@ -708,6 +822,9 @@ function JobLog({
               <BatchMetric label="Replacements" value={replacementQueuedCount} tone="text-violet-200" />
               <BatchMetric label="Failed" value={failedCount} tone="text-rose-200" />
               <BatchMetric label="Skipped" value={skippedCount} tone="text-zinc-300" />
+              {batchState?.folders_source_missing ? (
+                <BatchMetric label="Source missing or changed" value={batchState.folders_source_missing} tone="text-zinc-300" />
+              ) : null}
             </>
           ) : (
             <>
@@ -895,6 +1012,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
   const downloadsRoot = downloads.root;
   const downloadsProblem = downloadsRootProblem(downloads);
   const [path, setPath] = useState('');
+  const [source, setSource] = useState<AiBatchSource>('local');
   // Prefill with the configured root once it loads, unless the user (or a
   // resumed batch) already chose a path.
   useEffect(() => {
@@ -937,6 +1055,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
         const nextJobId = result.state.job_id || result.state.batch_job_id;
         if (nextJobId) rememberJobId(nextJobId);
         if (result.state.source_path) setPath(result.state.source_path);
+        if (result.state.source_mode === 'qbittorrent') setSource('qbittorrent');
       })
       .catch(() => undefined);
     return () => {
@@ -1050,15 +1169,22 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
   };
   const startImport = async () => {
     const nextPath = path.trim() || downloadsRoot;
-    if (!nextPath) return;
+    if (source === 'local' && !nextPath) return;
     setImporting(true);
     setImportError('');
     try {
-      const result = await startAiBatchImport(nextPath);
+      const result = source === 'qbittorrent'
+        ? await startAiBatchImport('', undefined, 'qbittorrent')
+        : await startAiBatchImport(nextPath);
       rememberJobId(result.state?.job_id || result.job_id);
       setConfirmOpen(false);
     } catch (err) {
-      setImportError(errorMessage(err));
+      if (source === 'qbittorrent') {
+        setImportError(`Could not start the qBittorrent import: ${errorMessage(err)} Nothing was imported.`);
+        setConfirmOpen(false);
+      } else {
+        setImportError(errorMessage(err));
+      }
     } finally {
       setImporting(false);
     }
@@ -1066,7 +1192,8 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
 
   const onJobDone = () => {
     rememberJobId(null);
-    void scan();
+    // A qBittorrent batch never falls back to previewing the folder.
+    if (source === 'local') void scan();
   };
 
   return (
@@ -1080,6 +1207,36 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
             </p>
           </div>
 
+          <fieldset className="flex flex-wrap gap-4 text-sm text-zinc-200" disabled={Boolean(jobId) || importing}>
+            <legend className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">Source</legend>
+            {([['local', 'Local folder'], ['qbittorrent', 'qBittorrent']] as const).map(([value, label]) => (
+              <label key={value} className="flex cursor-pointer items-center gap-2">
+                <input
+                  checked={source === value}
+                  className="accent-red-500"
+                  name="import-source"
+                  type="radio"
+                  value={value}
+                  onChange={() => {
+                    setSource(value);
+                    setImportError('');
+                  }}
+                />
+                {label}
+              </label>
+            ))}
+          </fieldset>
+
+          {source === 'qbittorrent' ? (
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+              <Alert className="flex-1" severity="info">{QBIT_SOURCE_EXPLANATION}</Alert>
+              {!jobId ? (
+                <Button disabled={importing} variant="contained" onClick={() => setConfirmOpen(true)}>
+                  Import All
+                </Button>
+              ) : null}
+            </div>
+          ) : (
           <div className="flex flex-col gap-3 lg:flex-row">
             <TextField
               fullWidth
@@ -1137,6 +1294,8 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
               </Button>
             </div>
           </div>
+          )}
+          {source === 'qbittorrent' && importError ? <Alert severity="error">{importError}</Alert> : null}
 
           <div className="flex flex-wrap gap-2">
             <Chip
@@ -1163,7 +1322,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       {retryNotice ? <Alert severity="info" onClose={() => setRetryNotice('')}>{retryNotice}</Alert> : null}
       {retryError && !retryDialogOpen ? <Alert severity="error">{retryError}</Alert> : null}
 
-      {preflight && !jobId ? (
+      {source === 'local' && preflight && !jobId ? (
         <div className="space-y-4">
           <PreflightSummary result={preflight} />
 
@@ -1215,7 +1374,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
         </div>
       ) : null}
 
-      {jobId ? <JobLog jobId={jobId} onDone={onJobDone} onJobIdChange={rememberJobId} /> : null}
+      {jobId ? <JobLog jobId={jobId} onDone={onJobDone} onJobIdChange={rememberJobId} onSourceMode={setSource} /> : null}
 
       <ConfirmStartDialog
         busy={importing}
@@ -1223,6 +1382,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
         folderCount={newFolderCount}
         open={confirmOpen}
         path={path.trim() || downloadsRoot}
+        source={source}
         onClose={() => setConfirmOpen(false)}
         onConfirm={() => void startImport()}
       />
