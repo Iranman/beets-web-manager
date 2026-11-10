@@ -118,7 +118,7 @@ class FolderAiSuggestFallbackSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.fn = _function_source(
-            APP_SOURCE, "def _ai_suggest_folder_internal(folder_path: str) -> dict:", "\n\ndef _candidate_track_local_candidates("
+            APP_SOURCE, "def _ai_suggest_folder_internal(folder_path: str, existing_album_id: int = 0,", "\n\ndef _candidate_track_local_candidates("
         )
 
     def test_does_not_return_early_on_missing_api_key(self):
@@ -158,7 +158,7 @@ class FolderAiSuggestFallbackSourceTests(unittest.TestCase):
         # The artist-mismatch safety gate must apply regardless of whether
         # `sug` came from AI or from the MB-only fallback.
         fallback_pos = self.fn.index("if sug is None:")
-        identity_gate_pos = self.fn.index("identity_rejection_reason = \"\"")
+        identity_gate_pos = self.fn.index("identity_rejection_reason = _ai_artist_mismatch_reason(")
         self.assertLess(fallback_pos, identity_gate_pos)
 
 
@@ -177,6 +177,11 @@ class AlbumAiSuggestFallbackSourceTests(unittest.TestCase):
             r'api_key = os\.environ\.get\("OPENAI_API_KEY", ""\)\s*\n\s*if not api_key:\s*\n\s*return',
         )
         self.assertIn("ai_available = bool(api_key)", self.fn)
+
+    def test_identity_gate_runs_against_fallback_candidate(self):
+        fallback_pos = self.fn.index("if sug is None:")
+        identity_gate_pos = self.fn.index("identity_rejection_reason = _ai_artist_mismatch_reason(")
+        self.assertLess(fallback_pos, identity_gate_pos)
 
     def test_falls_back_to_top_mb_candidate(self):
         self.assertIn("if sug is None:", self.fn)

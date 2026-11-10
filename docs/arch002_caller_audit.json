@@ -313,6 +313,10 @@
       "COMPATIBILITY_WRAPPER",
       "AI identification then reimport_disk (canonical preflight + engine deterministic gate)."
     ],
+    "routes_library.py::_import_all_discovery_accepted": [
+      "COMPATIBILITY_WRAPPER",
+      "Import All pre-gate (#520): refuses low confidence, rejected identity or failed canonical preflight before reimport_disk; never accepts on its own."
+    ],
     "app.py::modify_item": [
       "DISPLAY_ONLY",
       "Transaction metadata for a user edit."
@@ -708,6 +712,10 @@
     "backend/ai_service.py::_ai_bind_selected_release": [
       "CANDIDATE_GENERATION_ONLY",
       "Binds the AI's candidate_index to that candidate's Release and Release Group; an out-of-range index selects nothing and is downgraded. Decides nothing automatic."
+    ],
+    "backend/ai_service.py::_ai_reply_object": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Allowlists and type-checks the album/folder AI reply keys, including the confidence label; it only narrows an untrusted reply and decides nothing."
     ],
     "backend/item_ai_suggest_service.py::<module>": [
       "CANDIDATE_GENERATION_ONLY",

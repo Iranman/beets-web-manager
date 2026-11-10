@@ -33,7 +33,7 @@ from backend.acoustid_service import (ACOUSTID_FAILURE_MESSAGES, _acoustid_hits_
                                       acoustid_failure_status)
 from backend.artwork_service import _ART_EXTS, _move_artwork_to_target
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_norm, _strip_track_filename_id_suffix, _wanted_track_label
-from backend.matching_service import EXISTING_ALBUM_MERGE_FAILED_MESSAGE, _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
+from backend.matching_service import BEETS_SKIP_REASON_CODES, EXISTING_ALBUM_MERGE_FAILED_MESSAGE, _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
@@ -1706,6 +1706,11 @@ def _reimport_refuse_failed_import(ctx: _ReimportContext, atomic_res: Dict[str, 
             review_reason,
             allow_existing=bool(existing_album_id),
         )
+        # #428: a stable code (IMPORT_REFUSAL_REASONS) so the acquisition
+        # loop stops when the skip is not about this copy.
+        code = BEETS_SKIP_REASON_CODES.get(_s(atomic_res.get("skip_reason")), "")
+        if code:
+            review_reason = f"{review_reason[:-1]} [reason_code={code}]."
         raise RuntimeError(f"{review_reason} Queued for Review without changing library files.")
     # A verification failure after Beets imported (release_group_mismatch,
     # import_ambiguous) keeps the album rows and sends the folder to review.
@@ -2010,7 +2015,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
         # Web Manager mounts the downloads root and (read-only) the library
         # in the documented compose, so the audio policy reads the files here.
-        _validate_import_source_audio(aldir, log, reject_downloads=True)
+        # #567: a hardlinked download is copied and its rejected files kept.
+        keep_hardlinked_source = not source_is_music_library and _has_hardlinked_file(aldir)
+        _validate_import_source_audio(aldir, log, reject_downloads=True,
+                                      preserve_source=True if keep_hardlinked_source else None)
         log.append(f"[1/3] Importing '{Path(aldir).name}' with Beets as MB release {mb_albumid}…")
         import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_file_count", 0))
         # Beets' own importer does the work (beet import -q --search-id
@@ -2033,9 +2041,8 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "existing_album_id": existing_album_id,
             "mb_albumid": mb_albumid,
             "mb_releasegroupid": planned_rg,
-            # #567: a hardlinked source is copied too, never moved.
             "use_move": (not source_is_music_library and not _preserve_torrent_source_path(aldir)
-                         and not _has_hardlinked_file(aldir)),
+                         and not keep_hardlinked_source),
             "in_place": source_is_music_library,
             "duplicate_action": "keep" if existing_album_id else "skip",
             # A missing-track fill holds only the missing tracks; Beets would
