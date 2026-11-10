@@ -2016,8 +2016,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
         # #568: a qBittorrent Review row at, inside or above aldir makes it
         # seeding torrent data: copy it and keep rejected files in place.
         review_torrent_source = not source_is_music_library and _review_row_is_torrent_source(aldir)
-        _validate_import_source_audio(aldir, log, reject_downloads=True,
-                                      preserve_source=True if review_torrent_source else None)
+        if review_torrent_source:
+            _validate_import_source_audio(aldir, log, reject_downloads=True, preserve_source=True)
+        else:
+            _validate_import_source_audio(aldir, log, reject_downloads=True)
         log.append(f"[1/3] Importing '{Path(aldir).name}' with Beets as MB release {mb_albumid}…")
         import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_file_count", 0))
         # Beets' own importer does the work (beet import -q --search-id
