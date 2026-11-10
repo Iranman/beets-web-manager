@@ -82,6 +82,24 @@ class ReviewFolderDeleteTorrentGuardTests(unittest.TestCase):
             self.assertEqual(resp.status_code, 200, (folder, resp.get_json()))
         self.assertEqual([c.args[0] for c in self.delete.call_args_list], [str(self.stage), str(self.local)])
 
+    @unittest.skipIf(os.name == "nt", "Windows cannot create a folder whose name ends in a space")
+    def test_trailing_space_folder_name_still_overlaps_its_disc_folder(self):
+        # "Torrent " (trailing space) is a different folder from "Torrent":
+        # the path key must not strip it, or the qBittorrent row no longer
+        # contains its own "Torrent /CD1" and Delete Folder takes torrent data.
+        torrent = self._folder("Torrent ")
+        disc = self._folder("Torrent /CD1")
+        self.store.write_text(json.dumps([
+            {"path": str(torrent), "status": "review_required", "evidence": {"source_mode": "qbittorrent"}},
+            {"path": str(disc), "status": "review_required", "evidence": {}},
+        ]))
+        resp = self.post_delete(disc)
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        self.assertEqual(resp.get_json()["error_code"], CODE)
+        self.delete.assert_not_called()
+        self.assertTrue((disc / "01.flac").is_file())
+        self.assertTrue((torrent / "01.flac").is_file())
+
     def test_dismiss_still_removes_a_qbittorrent_row(self):
         resp = self.client.delete("/api/ai-pending-review", headers=_CSRF, json={"path": str(self.torrent)})
         self.assertEqual(resp.status_code, 200, resp.get_json())

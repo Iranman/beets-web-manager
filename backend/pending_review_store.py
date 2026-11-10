@@ -851,8 +851,11 @@ def _pending_review_keys_overlap(row: str, key: str) -> bool:
 
 
 def _pending_review_path_key(folder_path: str) -> str:
-    raw = _s(folder_path).strip()
-    if not raw:
+    # Whitespace only decides emptiness: "Torrent " and "Torrent" are
+    # different folders, so stripping would split a row from its own disc
+    # folders (and merge it with a sibling).
+    raw = _s(folder_path)
+    if not raw.strip():
         return ""
     try:
         return str(Path(raw).resolve(strict=False)).replace("\\", "/").rstrip("/").casefold()
