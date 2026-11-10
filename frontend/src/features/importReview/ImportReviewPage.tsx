@@ -1268,7 +1268,7 @@ function targetPreviewKey(item: ReviewItem, selectedMatch?: SelectedMatch): stri
     existingAlbumId(item) || '',
     selectedMatch.release_group_id,
     selectedMatch.representative_release_id,
-    selectedMatch.identity_validated === false ? 'identity-invalid' : 'identity-ok',
+    selectedMatch.identity_validated === false ? 'identity-invalid' : selectedMatch.identity_validated === true ? 'identity-ok' : 'identity-unresolved',
     selectedMatch.candidate_identity_error || '',
     selectedMatch.preflight_status,
     selectedMatch.track_match_count ?? '',
@@ -1548,7 +1548,7 @@ interface TrackData {
   release_title?: string;
   release_artist?: string;
   date?: string;
-  identity_validated?: boolean;
+  identity_validated?: boolean | null;
   candidate_identity_error?: string;
   release_group_diagnostics?: Record<string, unknown>;
   preflight?: TrackDataPreflight | null;
@@ -1657,7 +1657,7 @@ function buildCandidateSelectedMatch(
     source: 'candidate',
   };
 }
-function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
+export function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
   const releaseGroupId = (suggestion.mb_releasegroupid || '').trim();
   const representativeReleaseId = (suggestion.representative_mb_albumid || suggestion.mb_albumid || '').trim();
   const preflight = suggestion.preflight ?? null;
@@ -1672,6 +1672,7 @@ function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
   const localCount = suggestion.local_track_count ?? preflight?.audio_count ?? null;
   const missingTrackCount = total !== null ? Math.max(0, total - importableTrackCount) : 0;
   const isPartialImport = Boolean(importableTrackCount > 0 && total !== null && importableTrackCount < total);
+  // null = the artist could not be compared (#584): not blocked, but not proven.
   const identityValidated = suggestion.identity_validated !== false;
   const candidateIdentityError = (suggestion.candidate_identity_error || '').trim();
   const isReleaseGroupUsable = isMusicBrainzUuid(releaseGroupId);
@@ -1733,7 +1734,7 @@ function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
     missing_track_count: missingTrackCount,
     match_count: importableTrackCount || matched,
     preflight_ok: status === 'passed' ? true : status === 'failed' ? false : null,
-    identity_validated: identityValidated,
+    identity_validated: identityValidated ? (suggestion.identity_validated ?? null) : false,
     candidate_identity_error: candidateIdentityError,
     representative_release_group_id: suggestion.representative_release_group_id || '',
     rejected_representative_release_id: suggestion.rejected_representative_release_id || '',
@@ -2956,6 +2957,15 @@ export function ReviewCard({
                   label={selectedMatch.is_partial_import ? 'Partial auto-import ready' : 'Auto-import eligible'}
                 />
               ) : null}
+              {selectedMatchActive && selectedMatch?.identity_validated === null ? (
+                <Chip
+                  size="small"
+                  color="warning"
+                  variant="outlined"
+                  label="Artist identity unresolved"
+                  title="The folder artist could not be compared with this release. Check it before importing."
+                />
+              ) : null}
               {selectedMatchActive && selectedMatch?.is_release_group_usable && selectedMatch.identity_validated !== false ? (
                 <Chip size="small" color="success" label="Release Group ID ready" />
               ) : item.mb_valid ? (
@@ -4076,7 +4086,7 @@ export function ImportReviewPage({
       existing_album_id: existingAlbumId(item) || undefined,
       track_mapping: selectedMatch.track_mapping,
       selected_source_files: selectedImportSourceFiles(selectedMatch),
-      identity_validated: selectedMatch.identity_validated !== false,
+      identity_validated: selectedMatch.identity_validated ?? null,
       candidate_identity_error: selectedMatch.candidate_identity_error || '',
     })
       .then((preview) => {

@@ -2637,9 +2637,11 @@ def reimport_disk():
 def _import_all_discovery_accepted(result: Optional[Dict[str, Any]]) -> bool:
     """Whether Import All may import a discovered match without review (#520).
 
-    Needs a valid, medium/high-confidence release whose identity was not
-    rejected and whose preflight did not fail. A failed preflight goes to
-    Import Review instead of relying only on the child job's own preflight.
+    Needs a valid, medium/high-confidence release whose identity was proven
+    (``identity_validated is True``: artist gate passed, or the AcoustID
+    shortcut) and whose preflight did not fail. An unresolved identity
+    (``None``, #584) or a failed preflight goes to Import Review instead of
+    relying only on the child job's own preflight.
     """
     result = result or {}
     sug = result.get("suggestion") or {}
@@ -2649,7 +2651,7 @@ def _import_all_discovery_accepted(result: Optional[Dict[str, Any]]) -> bool:
         and (sug.get("mb_albumid") or "").strip()
         and (sug.get("confidence") or "low").lower() in ("high", "medium")
         and sug.get("mb_valid")
-        and sug.get("identity_validated") is not False
+        and sug.get("identity_validated") is True
         and preflight.get("ok") is not False
     )
 
@@ -2729,6 +2731,9 @@ def library_import_all():
                         # A failed preflight's note (counts, artist, error) is
                         # already prefixed onto sug["reason"]; fall back to its error.
                         reason = (sug.get("candidate_identity_error")
+                                  or ("Artist identity unresolved: the folder artist could not be "
+                                      "compared with the release." if sug and sug.get("identity_validated") is None
+                                      and _pf.get("ok") is not False else "")
                                   or sug.get("reason")
                                   or (("Preflight failed: " + (_s(_pf.get("error"))
                                                                or "the folder does not match the release."))
