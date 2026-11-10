@@ -202,7 +202,7 @@ class World:
             "_delete_source_if_proven_in_library": None,
             "_start_reimport_disk_job_internal": "child-1",
             "_wait_for_child_job": None,
-            "_filter_import_review_selected_audio_files": lambda files, _log: list(files),
+            "_filter_import_review_selected_audio_files": lambda files, _log, **_k: list(files),
             "_beet_import_timeout": 300,
             "_remaining_audio_files": [],
             "_move_artwork_to_target": None,
@@ -221,6 +221,9 @@ class World:
             mock.patch.object(Path, "rglob", _sorted_listing(Path.rglob)),
             mock.patch.object(isvc, "_IMPORT_JOB_LOCK", self.held("import-job-lock")),
             mock.patch.object(isvc, "MUSIC_ROOT", self.music_root),
+            # The selected files here are not on disk; F8 is covered by
+            # test_review_partial_import_torrent_preserve.
+            mock.patch.object(isvc, "_selected_sources_need_copy", return_value=False),
             mock.patch.object(isvc.jobs, "start_python", self.start_python),
             mock.patch.object(isvc.job_contract, "held", self.held),
             mock.patch.object(isvc.recovery_carrier, "load_for_folder", self.spy("carrier.load_for_folder")),

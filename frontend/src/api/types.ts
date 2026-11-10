@@ -313,6 +313,16 @@ export interface ReviewEvidence {
   unreadable_paths?: string[];
   /** beets_partial: paths Beets skipped while importing the rest. */
   skipped_paths?: string[];
+  /** Where the folder came from; "qbittorrent" rows are seeding torrents (no Delete Folder). */
+  source_mode?: string;
+  /** origin_step quality_upgrade: same release group as a library album, higher-quality source. */
+  duplicate_rule?: string;
+  quality_upgrade?: {
+    release_group_id?: string;
+    library_album_ids?: number[];
+    library_format?: string;
+    source_format?: string;
+  };
   top_candidates?: ReviewCandidate[];
   current?: RecordingLocalEvidence;
   recording_candidates?: ReviewRecordingCandidate[];
@@ -1216,6 +1226,7 @@ export type AiBatchFolderStatus =
   | 'replacement_unavailable'
   | 'completed_with_fallback'
   | 'handled_warning'
+  | 'source_missing'
   | 'failed'
   | 'import_failed'
   | 'ai_failed'
@@ -1255,6 +1266,8 @@ export interface AiBatchFolderState {
   warnings?: string[];
   auto_import?: { eligible: boolean; reasons: string[] };
   missing_release_group_album_ids?: number[];
+  /** Why a qBittorrent folder was refused at processing time (status source_missing). */
+  source_check?: { code: 'source_unsafe' | 'source_changed' | 'source_modified_during_import' | 'source_mode_mismatch' | string; detail: string };
 }
 
 export interface AiBatchEvidenceCapabilities {
@@ -1263,7 +1276,31 @@ export interface AiBatchEvidenceCapabilities {
   ai_configured: boolean;
 }
 
+export type AiBatchSource = 'local' | 'qbittorrent';
+
+/** What the batch source offered (backend/ai_service.py _ai_batch_qbit_units). */
+export interface AiBatchSourceReport {
+  source: AiBatchSource | string;
+  units?: number;
+  torrents?: number;
+  torrents_complete?: number;
+  audio_files?: number;
+  ownership_verified?: number;
+  ownership_verified_pct?: number;
+  eligible_files?: number;
+  /** Files left out, by reason code. */
+  exclusions?: Record<string, number>;
+  exclusion_samples?: Array<{ reason: string; path: string; torrent?: string }>;
+  /** Torrent filter applied; empty means all completed torrents. */
+  filter?: { category?: string; tag?: string };
+}
+
 export interface AiBatchState {
+  source_mode?: AiBatchSource | string;
+  source_report?: AiBatchSourceReport;
+  /** Set when the source could not be verified; nothing was queued. */
+  source_error?: { code: string; message: string };
+  folders_source_missing?: number;
   evidence_capabilities?: AiBatchEvidenceCapabilities;
   /** Batch-level warnings, as full sentences. */
   warnings?: string[];
