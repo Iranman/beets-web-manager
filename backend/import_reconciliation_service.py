@@ -13,7 +13,7 @@ from backend.app_runtime import _path_has_symlink_component_under, _path_is_unde
 from backend.beets_adapter import BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsBadRequestError, BeetsNotFoundError
 import backend.composite_workflows as composite_workflows
 from backend.app_runtime import jobs
-from backend.serializers import _import_review_path_text_error, _resolve_import_review_source_path
+from backend.serializers import _review_path_text, _import_review_path_text_error, _resolve_import_review_source_path
 
 # ── ARCH-001 extracted code ──
 
@@ -257,8 +257,8 @@ def _review_paths_equal(a: str, b: str) -> bool:
 
 def _import_review_reconcile_job_lookup(job_id: str, source_path: str, review_item_id: str, idempotency_key: str):
     job_id = _s(job_id).strip()
-    source_path = _s(source_path).strip()
-    review_item_id = _s(review_item_id).strip()
+    source_path = _review_path_text(source_path)
+    review_item_id = _review_path_text(review_item_id)
     idempotency_key = _s(idempotency_key).strip()
     if job_id:
         job = jobs.get(job_id)
@@ -276,7 +276,7 @@ def _import_review_reconcile_job_lookup(job_id: str, source_path: str, review_it
         matched = False
         if idempotency_key and _s(meta.get("import_review_auto_idempotency_key")).strip() == idempotency_key:
             matched = True
-        if review_item_id and _s(meta.get("review_item_id")).strip() == review_item_id:
+        if review_item_id and _s(meta.get("review_item_id")) == review_item_id:
             matched = True
         if source_path and _review_paths_equal(_s(meta.get("path")), source_path):
             matched = True

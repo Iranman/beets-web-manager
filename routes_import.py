@@ -24,7 +24,7 @@ from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_f
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
 from backend.musicbrainz_service import _parse_manual_musicbrainz_identifier
 from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, PendingReviewLoadError, _add_to_pending, _ai_pending_lock, _apply_review_origin, _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_is_quality_upgrade, _pending_review_item_is_resolved, _pending_review_matches, _record_ai_review_decision, _refresh_recovery_stage, _remove_pending_review_for_path, _save_pending_reviews
-from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_origin_payload, json_route_result, query_int_arg
+from backend.serializers import beets_engine_error_response, REVIEW_CLIENT_TEXT_MAX, _client_review_suggestion, _normalize_review_origin_type, _resolve_import_review_source_path, _resolve_import_scan_root, _review_path_has_traversal, _review_path_text, _review_origin_payload, json_route_result, query_int_arg
 from app import app  # noqa: E402  (route modules load after app.py defines app)
 import uuid
 import backend.acquisition_service as _acquisition_service
@@ -135,9 +135,14 @@ def _torrent_rows_protect(path: str) -> bool:
 def delete_import_review_folder():
     payload = request.get_json(silent=True)
     payload = payload if isinstance(payload, dict) else {}
-    src_path = _s(payload.get("path")).strip()
-    if not src_path:
+    raw_path = _review_path_text(payload.get("path"))  # literal: "Album " is not "Album" (#565)
+    if not raw_path:
         return jsonify({"ok": False, "error": "Review path is required."}), 400
+    # #572 F3: refuse "."/".." before authorising, so the authorised path,
+    # the torrent guard and the planner all name the same folder.
+    if _review_path_has_traversal(raw_path):
+        return jsonify({"ok": False, "error": _REVIEW_FOLDER_NOT_PENDING}), 400
+    src_path = raw_path
     # REV-04: the client's confirmed_wrong_library_folder / allow_library_delete
     # flags are still accepted for back-compat but never authorize anything.
     # The server decides whether the path is in the library (MUSIC_ROOT), and
@@ -176,7 +181,7 @@ def delete_import_review_folder():
     # A qBittorrent (or preserved quality-upgrade) row at, inside or above
     # the folder may still be seeding: refuse unless the row is a copy the
     # app made. Dismissing the row still works. The planner re-checks.
-    if _torrent_rows_protect(str(resolved)):
+    if _torrent_rows_protect(src_path):
         return jsonify(_TORRENT_SOURCE_PROTECTED), 409
 
     # CodeQL #1388: the ValueError and the log carry executor and exception
@@ -250,18 +255,21 @@ def _import_review_cleanup_plan_error(plan_res: Dict[str, Any],
 @app.post("/api/import/review-files/cleanup")
 def cleanup_import_review_files():
     payload = request.get_json(silent=True) or {}
-    folder_path = _s(payload.get("path")).strip()
-    review_item_id = _s(payload.get("review_item_id")).strip()
+    folder_path = _s(payload.get("path"))  # literal paths (#565)
+    review_item_id = _s(payload.get("review_item_id"))
     action = _s(payload.get("action") or "quarantine_rejected").strip().lower()
     raw_files = payload.get("files") if isinstance(payload.get("files"), list) else []
     log: List[str] = []
 
     if action not in {"quarantine_rejected", "quarantine_duplicate", "delete_rejected", "delete_duplicate"}:
         return jsonify({"ok": False, "error": "Unsupported cleanup action.", "log": log}), 400
-    if not folder_path:
+    if not folder_path.strip():
         return jsonify({"ok": False, "error": "Review folder path is required.", "log": log}), 400
     if not raw_files:
         return jsonify({"ok": False, "error": "At least one cleanup file is required.", "log": log}), 400
+    # #572 F3: same traversal refusal as Delete Folder, before authorising.
+    if _review_path_has_traversal(folder_path):
+        return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
     if not _pending_review_matches(folder_path, review_item_id):
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
@@ -918,7 +926,7 @@ def import_review_auto_enqueue():
     except Exception as ex:
         reason = str(ex)
         if _is_music_format_policy_handled_error(reason):
-            folder_path = _s(payload.get("path")).strip()
+            folder_path = _review_path_text(payload.get("path"))
             outcome = _finalize_pending_review_format_policy_rejection(
                 folder_path,
                 reason,
@@ -940,7 +948,7 @@ def import_review_auto_enqueue():
         _app_logger.warning("import_review_auto_enqueue failed: %s", type(ex).__name__)
         _import_review_auto_update(key, status="failed", error=reason)
         _mark_pending_review_status(
-            _s(payload.get("path")).strip(),
+            _review_path_text(payload.get("path")),
             "auto_enqueue_failed",
             reason,
             idempotency_key=key,
@@ -954,7 +962,7 @@ def import_review_auto_enqueue_reconcile():
     eligibility = evaluate_import_eligibility(payload)
     key = _s(eligibility.get("idempotency_key") or payload.get("idempotency_key")).strip()
     job = _import_review_auto_job_for_submission(payload, key)
-    folder_path = _s(payload.get("path")).strip()
+    folder_path = _review_path_text(payload.get("path"))
     state = _import_review_auto_state().get(key) if key else {}
     state_job_id = _s((state or {}).get("job_id")).strip() if isinstance(state, dict) else ""
     state_job = jobs.get(state_job_id) if state_job_id else None
@@ -1051,8 +1059,10 @@ def import_review_auto_enqueue_reconcile():
 def import_reconcile_job():
     payload = request.get_json(silent=True) or {}
     job_id = _s(payload.get("job_id")).strip()
-    source_path = _s(payload.get("source_path")).strip()
-    review_item_id = _s(payload.get("review_item_id")).strip()
+    source_path = _s(payload.get("source_path"))  # literal paths (#565)
+    review_item_id = _s(payload.get("review_item_id"))
+    if not source_path.strip():
+        source_path = ""
     idempotency_key = _s(payload.get("idempotency_key") or payload.get("auto_import_idempotency_key")).strip()
     if not source_path and review_item_id.startswith("pending:"):
         source_path = review_item_id[len("pending:"):]
@@ -1071,7 +1081,7 @@ def import_reconcile_job():
         job_log = list(getattr(job, "log", []) or [])
         last = next((_s(line).strip() for line in reversed(job_log[-20:]) if _s(line).strip()), "")
         meta = getattr(job, "metadata", {}) or {}
-        job_source_path = source_path or _s(meta.get("path")).strip()
+        job_source_path = source_path or _review_path_text(meta.get("path"))
         if job.status == "failed" and job_source_path and _is_music_format_policy_handled_error(last):
             outcome = _finalize_pending_review_format_policy_rejection(
                 job_source_path,
@@ -1199,7 +1209,7 @@ def ai_suggest_folder():
     """
     payload = request.get_json(silent=True)
     payload = payload if isinstance(payload, dict) else {}
-    folder_path = _s(payload.get("path")).strip()
+    folder_path = _review_path_text(payload.get("path"))
     return jsonify(_ai_suggest_folder_internal(folder_path))
 
 
@@ -1272,7 +1282,7 @@ def add_ai_pending_review():
 def clear_ai_pending_review():
     payload = request.get_json(silent=True)
     payload = payload if isinstance(payload, dict) else {}
-    folder_path = _s(payload.get("path")).strip()
+    folder_path = _review_path_text(payload.get("path"))
     clear_all = payload.get("all") is True
     # F15: an empty body must never wipe the whole queue; clearing all needs
     # an explicit {"all": true}.

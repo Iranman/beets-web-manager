@@ -1046,8 +1046,9 @@ def execute_import_review_cleanup_plan(
     music_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute plan creation for import review folder/files with strict validation and durable step tracking."""
-    raw_path = str(payload.get("path") or payload.get("folder") or "").strip()
-    if not raw_path:
+    # Literal path (#565): "Album " and "Album<NBSP>" are not "Album".
+    raw_path = str(payload.get("path") or payload.get("folder") or "")
+    if not raw_path.strip():
         return {"ok": False, "error": "Review path is required."}
 
     # N1: never URL-decode. Callers send the literal path in JSON, and the
@@ -1119,8 +1120,8 @@ def execute_import_review_cleanup_plan(
     if raw_files:
         for f in raw_files:
             try:
-                f_raw = str(f).strip()
-                if not f_raw or "\x00" in f_raw or "%00" in f_raw:
+                f_raw = str(f)
+                if not f_raw.strip() or "\x00" in f_raw or "%00" in f_raw:
                     skipped.append({"file": f_raw, "reason": "invalid_path"})
                     continue
 
