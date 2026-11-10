@@ -7,6 +7,7 @@ routes_setup, matching how a real Flask blueprint would be exercised without
 the rest of the application's side effects.
 """
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -675,6 +676,42 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         r = self.client.post("/api/setup/settings", json={"ai_api_key": "", "expected_revision": r.get_json()["revision"]})
         self.assertTrue(r.get_json()["ok"])
         self.assertEqual(self.module._load_settings()["ai_api_key"], "")
+
+    def test_get_settings_masks_nested_url_and_passwd_and_keeps_on_echo(self):
+        # #570: nested secrets, URL userinfo and names like passwd were returned in full.
+        stored_in = {
+            "plex": {"url": "http://plex.invalid:32400", "token": "fake-nested-token",
+                     "servers": [{"name": "a", "password": "fake-list-pw"}]},
+            "feed_url": "https://fakeuser:fake-url-pw@feed.invalid/path",
+            "passwd": "fake-passwd",
+            "ai_model": "m1",
+        }
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        body = json.dumps(got)
+        for leaked in ("fake-nested-token", "fake-list-pw", "fake-url-pw", "fakeuser", "fake-passwd"):
+            self.assertNotIn(leaked, body)
+        self.assertEqual(got["plex"]["token"], mask)
+        self.assertEqual(got["plex"]["url"], "http://plex.invalid:32400")
+        self.assertEqual(got["plex"]["servers"], [{"name": "a", "password": mask}])
+        self.assertEqual(got["feed_url"], f"https://{mask}@feed.invalid/path")
+        self.assertEqual(got["passwd"], mask)
+        self.assertEqual(got["ai_model"], "m1")
+        # Posting the whole masked document back leaves every stored value unchanged.
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings(), stored_in)
+
+    def test_falsy_secret_round_trips(self):
+        # #570: a secret of 0 was masked to "" and the echo erased it.
+        r = self.client.post("/api/setup/settings", json={"ai_api_key": 0})
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        self.assertEqual(got["ai_api_key"], self.module._SECRET_MASK)
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings()["ai_api_key"], 0)
 
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
