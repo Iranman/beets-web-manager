@@ -15,7 +15,7 @@ from backend.matching import (
     candidate_is_unrelated as _candidate_is_unrelated,
 )
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, MUSIC_ROOT, WEB_MANAGER_DATA_DIR, _AI_CONF_ORDER, _AI_REPAIR_MIN_CONF, _AI_USE_CASE_THRESHOLDS, _env_int, _s
 from backend.library_service import _app_managed_download_path, _apply_artist_folder_groups, _build_folder_evidence, _preserve_torrent_source_path, _scan_artist_folder_groups
 from backend.pending_review_store import PendingReviewLoadError, _add_to_pending, _remove_pending_review_for_path
@@ -487,6 +487,19 @@ def _ai_artist_mismatch_reason(candidate: Optional[Dict[str, Any]], source_artis
     )
 
 
+def _ai_artist_identity_verdict(candidate: Optional[Dict[str, Any]],
+                                source_artist: str) -> Tuple[Optional[bool], str]:
+    """``(identity_validated, rejection)`` from the AI artist gate. A missing
+    artist on either side proves nothing (#579): ``None`` = unresolved, so
+    the batch cache and Missing IDs (which need ``is True``) don't trust it."""
+    reason = _ai_artist_mismatch_reason(candidate, source_artist)
+    if reason:
+        return False, reason
+    if not (_s(source_artist).strip() and _s((candidate or {}).get("artist", "")).strip()):
+        return None, ""
+    return True, ""
+
+
 def _classify_openai_error(exc: Exception) -> str:
     """Classify an OpenAI request failure into a short, human-readable reason.
 
@@ -833,8 +846,8 @@ def _ai_suggest_album_internal(
                 + urllib.parse.urlencode({"query": _aa, "type": "artist"}))
         # Same artist gate as the folder path. Album consumers (Missing IDs,
         # batch cache) read confidence, so a rejection also drops it to low.
-        identity_rejection_reason = _ai_artist_mismatch_reason(selected_candidate, album.albumartist)
-        sug["identity_validated"] = not identity_rejection_reason
+        sug["identity_validated"], identity_rejection_reason = _ai_artist_identity_verdict(
+            selected_candidate, album.albumartist)
         sug["candidate_identity_error"] = identity_rejection_reason
         if identity_rejection_reason:
             sug["confidence"] = "low"
@@ -1673,8 +1686,8 @@ def _ai_suggest_folder_internal(folder_path: str, existing_album_id: int = 0,
         # a matching album title must never rescue a wrong-artist candidate
         # (2026-07-16, Voyager/Vitalic fix: "same title, different artist"
         # was slipping through an earlier AND-based version of this check).
-        identity_rejection_reason = _ai_artist_mismatch_reason(selected_candidate, guessed_artist)
-        sug["identity_validated"] = not bool(identity_rejection_reason)
+        sug["identity_validated"], identity_rejection_reason = _ai_artist_identity_verdict(
+            selected_candidate, guessed_artist)
         sug["candidate_identity_error"] = identity_rejection_reason
         sug["ai_available"] = ai_available
         sug["ai_unavailable_reason"] = ai_unavailable_reason

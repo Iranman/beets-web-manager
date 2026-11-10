@@ -158,7 +158,7 @@ class FolderAiSuggestFallbackSourceTests(unittest.TestCase):
         # The artist-mismatch safety gate must apply regardless of whether
         # `sug` came from AI or from the MB-only fallback.
         fallback_pos = self.fn.index("if sug is None:")
-        identity_gate_pos = self.fn.index("identity_rejection_reason = _ai_artist_mismatch_reason(")
+        identity_gate_pos = self.fn.index("identity_rejection_reason = _ai_artist_identity_verdict(")
         self.assertLess(fallback_pos, identity_gate_pos)
 
 
@@ -180,7 +180,7 @@ class AlbumAiSuggestFallbackSourceTests(unittest.TestCase):
 
     def test_identity_gate_runs_against_fallback_candidate(self):
         fallback_pos = self.fn.index("if sug is None:")
-        identity_gate_pos = self.fn.index("identity_rejection_reason = _ai_artist_mismatch_reason(")
+        identity_gate_pos = self.fn.index("identity_rejection_reason = _ai_artist_identity_verdict(")
         self.assertLess(fallback_pos, identity_gate_pos)
 
     def test_falls_back_to_top_mb_candidate(self):
