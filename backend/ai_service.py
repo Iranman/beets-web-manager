@@ -2965,6 +2965,16 @@ def _ai_batch_process_folder(state: Dict[str, Any], fid: str, log: list, cancel_
         if not in_place:
             mark(staged_folder=folder)
 
+    # An "Upgrade available" Review row at, inside or above this folder (or its
+    # torrent source) is informational: importing it is refused, exactly as
+    # the Review import routes refuse it. An unreadable queue refuses too, and
+    # the folder stays retryable (#569).
+    if any(_pending_review_is_quality_upgrade(p) for p in (folder, _s(folder_state.get("source_folder")))):
+        log.append(f"  {QUALITY_UPGRADE_INFORMATIONAL['error']}")
+        mark(status="import_failed", current_step="quality upgrade refused",
+             failure_reason=QUALITY_UPGRADE_INFORMATIONAL["code"])
+        return
+
     # ── Stage 1: Beets quiet autotag import of this one folder ──────────────
     preserve = True if in_place else _preserve_torrent_source_path(folder)
     mark(status="importing", current_step="Stage 1: Beets import", stage="beets_import")
