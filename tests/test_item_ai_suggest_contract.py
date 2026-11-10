@@ -426,15 +426,15 @@ class ItemAiSuggestGoldenTests(unittest.TestCase):
 class AlbumAndFolderAiFallbackTests(unittest.TestCase):
     """AI failures on these paths must leave the MusicBrainz/AcoustID match standing."""
 
-    def _suggest(self, path, reply=None, env=None, artist="A"):
+    def _suggest(self, path, reply=None, env=None, artist="A", source_artist="A"):
         def release(*_a, **_k):
             return [{"mb_albumid": _REL, "mb_releasegroupid": _RG, "artist": artist, "album": "B", "year": "2012",
                      "country": "US", "score": 90, "tracks": 1, "title": "B", "label": "", "format_summary": "",
                      "mb_url": ""}]
-        album = types.SimpleNamespace(id=7, year=2012, album="B", albumartist="A", mb_releasegroupid="",
+        album = types.SimpleNamespace(id=7, year=2012, album="B", albumartist=source_artist, mb_releasegroupid="",
                                       mb_albumartistid="",
                                       items=lambda: [types.SimpleNamespace(track=1, title="t", path="")])
-        folder_evidence = {"audio_files": [], "folder_track_count": 1, "nested_audio_count": 0, "guessed_artist": "A",
+        folder_evidence = {"audio_files": [], "folder_track_count": 1, "nested_audio_count": 0, "guessed_artist": source_artist,
                            "guessed_artist_mbid": "", "guessed_album": "B", "guessed_year": "2012", "track_lines": [],
                            "filenames": []}
         source = mock.MagicMock()
@@ -550,6 +550,18 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                 s = self._suggest(path, reply)[0]["suggestion"]
                 self.assertTrue(s["identity_validated"])
                 self.assertEqual(s["candidate_identity_error"], "")
+
+    def test_missing_artist_on_either_side_is_unresolved_not_validated(self):
+        # #579: a title collision with no artist evidence proves nothing.
+        reply = {"candidate_index": 0, "albumartist": "Other", "confidence": "high", "reason": "ai reason"}
+        for path in ("album", "folder"):
+            for artist, source in (("A", ""), ("", "A"), ("", "")):
+                with self.subTest(path=path, candidate=artist, source=source):
+                    s = self._suggest(path, reply, artist=artist, source_artist=source)[0]["suggestion"]
+                    self.assertIsNone(s["identity_validated"])
+                    self.assertEqual(s["candidate_identity_error"], "")
+            with self.subTest(path=path, known_pair=True):
+                self.assertIs(self._suggest(path, reply)[0]["suggestion"]["identity_validated"], True)
 
     def test_va_source_matches_various_artists_candidate_only(self):
         various = {"artist": "Various Artists"}
@@ -705,6 +717,21 @@ class BatchAiSuggestCacheKeepsArtistGate(unittest.TestCase):
         _, saved = self._run({}, sug)
         self.assertEqual(saved["1"]["mb_releasegroupid"], rg)
         self.assertEqual(saved["1"]["mb_releasegroupurl"], f"https://musicbrainz.org/release-group/{rg}")
+
+    def test_empty_albumartist_suggestion_is_not_cached_as_validated(self):
+        # #579 end to end: the real album suggest with an empty albumartist,
+        # then the batch cache. No validated flag, no Release Group, rechecked.
+        out, _ = AlbumAndFolderAiFallbackTests._suggest(
+            self, "album", {"candidate_index": 0, "albumartist": "A", "confidence": "high"}, source_artist="")
+        sug = out["suggestion"]
+        self.assertEqual(sug["mb_releasegroupid"], _RG)
+        asked, saved = self._run({}, sug)
+        self.assertEqual(asked, [1])
+        self.assertIs(saved["1"]["identity_validated"], False)
+        self.assertEqual(saved["1"]["mb_releasegroupid"], "")
+        self.assertEqual(saved["1"]["mb_releasegroupurl"], "")
+        asked, _ = self._run(saved, sug)
+        self.assertEqual(asked, [1])
 
     def test_rejected_or_malformed_release_group_is_not_cached(self):
         rg = _RG
