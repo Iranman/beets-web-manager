@@ -3361,8 +3361,11 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                 _queue(fid, folder_state, folder, reason, status, "ai_batch_skip")
         elif status in _AI_BATCH_FAILED_FOLDER_STATUSES:
             errors += 1
-            _queue(fid, folder_state, folder, folder_state.get("failure_reason") or "Import failed", status,
-                   "ai_batch_failure")
+            # #569: a quality-upgrade refusal gets no generic failure row; one
+            # at a staged copy or a disc folder could be imported from Review.
+            if folder_state.get("failure_reason") != QUALITY_UPGRADE_INFORMATIONAL["code"]:
+                _queue(fid, folder_state, folder, folder_state.get("failure_reason") or "Import failed", status,
+                       "ai_batch_failure")
         elif status in _AI_BATCH_IMPORTED_FOLDER_STATUSES:
             imported += 1
         elif status in _AI_BATCH_REVIEW_FOLDER_STATUSES:

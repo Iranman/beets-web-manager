@@ -7,15 +7,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import backend.pending_review_store as prs
-
 import tests.test_import_batch_phase_b as pb
 
 RG = "22222222-2222-2222-2222-222222222222"
 
 
 def setUpModule():
+    # Import at run time, after the env is set: a collection-time backend
+    # import fixes app_runtime's paths for every later test module.
+    global prs, REAL_QUEUE
     pb.setUpModule()
+    import backend.pending_review_store as prs
+    REAL_QUEUE = pb.ai._ai_batch_queue_pending_review
 
 
 class BatchQualityUpgradeRefusedTests(pb._Batch):
@@ -64,6 +67,27 @@ class BatchQualityUpgradeRefusedTests(pb._Batch):
         self.folders = [str(parent)]
         _, folders = self.run_batch()
         self._assert_refused(folders, str(parent))
+
+    def test_refused_disc_folder_gets_no_failure_row_in_the_real_queue(self):
+        # F1: no generic ai_batch_failure row nested in the upgrade row; an
+        # ordinary failed folder in the same batch still gets one.
+        disc, failing = self.upgrade / "CD 01", self.tmp / "Failing - Album"
+        self._use(disc, failing)
+        self.reimport[str(failing)] = {"ok": False, "error": "Beets import failed"}
+        for target, name, kw in (
+                (pb.ai, "_ai_batch_queue_pending_review", {"new": REAL_QUEUE}),
+                (prs, "_library_album_ids_for_folder", {"return_value": []}),
+                (prs, "_pending_review_item_is_resolved", {"return_value": False}),
+                (prs, "_reconcile_pending_review_enqueue_item", {"side_effect": lambda i: (i, False)}),
+                (prs, "_record_ai_review_decision", {})):
+            patcher = mock.patch.object(target, name, **kw)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        _, folders = self.run_batch()
+        self._assert_refused(folders, str(disc))
+        self.assertEqual(folders[str(failing)]["status"], "import_failed", self.log)
+        rows = json.loads(self.store.read_text())
+        self.assertEqual(sorted(r["path"] for r in rows), sorted([str(self.upgrade), str(failing)]), self.log)
 
     def test_unreadable_review_queue_refuses(self):
         other = self.tmp / "Other - Album"
