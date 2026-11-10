@@ -2,11 +2,13 @@
 with ALLOW_TORRENT_SOURCE_MOVE=1 copies and keeps every torrent file, also a
 selected file that Music Format Preferences reject (never deleted or
 quarantined)."""
+import json
 import unittest
 from unittest import mock
 
 import backend.import_service as isvc
 import backend.library_service as libsvc
+import backend.pending_review_store as prs
 from tests import test_review_partial_import_torrent_preserve as base
 
 REL, RG = base.REL, base.RG
@@ -21,7 +23,7 @@ class QbitPartialRejectedFileTests(base.ReviewPartialImportSourceSafetyTests):
         rows = [{"path": str(self.src), "evidence": {"source_mode": "qbittorrent"}}]
         for target, name, kw in (
             (isvc, "_folder_import_selected_sources", {"side_effect": lambda f, p: ([self.selected, accepted], None)}),
-            (isvc, "_load_pending_reviews", {"side_effect": lambda **k: rows}),
+            (prs, "_AI_PENDING_FILE", {"new": self.src.parent / "ai_pending.json"}),
             (isvc, "_app_managed_download_path", {"return_value": False}),
             (libsvc, "TORRENT_SOURCE_MOVE_ALLOWED", {"new": True}),
             (isvc, "_music_format_preferences", {"return_value": {"rejected_download_handling": "delete"}}),
@@ -34,6 +36,7 @@ class QbitPartialRejectedFileTests(base.ReviewPartialImportSourceSafetyTests):
             p = mock.patch.object(target, name, **kw)
             p.start()
             self.addCleanup(p.stop)
+        prs._AI_PENDING_FILE.write_text(json.dumps(rows))
 
     def test_rejected_selected_torrent_file_is_kept(self):
         self.assertFalse(libsvc._preserve_torrent_source_file(self.selected))  # the flag alone would delete
