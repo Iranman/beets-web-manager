@@ -849,6 +849,234 @@
   }
  },
  {
+  "name": "library album, artist identity rejected",
+  "input": {
+   "item": {
+    "id": "review-1",
+    "type": "library_no_mb",
+    "status": "Needs review",
+    "reason": "",
+    "path": "/downloads/a",
+    "mb_valid": true,
+    "mb_albumid": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "existing_album_ids": [],
+    "target_kind": "album",
+    "album_id": 7
+   },
+   "mbid": "11111111-2222-3333-4444-555555555555",
+   "selected_match": {
+    "release_group_id": "11111111-2222-3333-4444-555555555555",
+    "representative_release_id": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "artist": "A",
+    "album": "B",
+    "year": "2000",
+    "track_mapping": [
+     {
+      "num": 1,
+      "local_title": "t1",
+      "mb_title": "T1",
+      "mb_trackid": "",
+      "status": "matched",
+      "source_path": "/downloads/a/01.flac"
+     },
+     {
+      "num": 2,
+      "local_title": "t2",
+      "mb_title": "T2",
+      "mb_trackid": "",
+      "status": "verified_match",
+      "source_path": "/downloads/a/02.flac"
+     },
+     {
+      "num": 3,
+      "local_title": "t3",
+      "mb_title": "T3",
+      "mb_trackid": "",
+      "status": "fuzzy",
+      "source_path": "/downloads/a/03.flac"
+     }
+    ],
+    "preflight_status": "passed",
+    "preflight_reason": "",
+    "is_release_group_usable": true,
+    "is_importable": true,
+    "is_partial_import": false,
+    "auto_fix_eligible": false,
+    "source": "candidate",
+    "identity_validated": false,
+    "candidate_identity_error": "AI candidate artist B does not match album artist A."
+   },
+   "target_preview_state": null
+  },
+  "expected": {
+   "match_bucket": "needs_id",
+   "blocked": true,
+   "ready": false,
+   "can_apply": false,
+   "apply_block_reason": "AI candidate artist B does not match album artist A.",
+   "block_reason": "AI candidate artist B does not match album artist A.",
+   "next_action": "Resolve this block before importing; uncertain audio stays in review.",
+   "action_label": "Import blocked",
+   "selected_source_files": []
+  }
+ },
+ {
+  "name": "library album, identity rejected without reason",
+  "input": {
+   "item": {
+    "id": "review-1",
+    "type": "library_no_mb",
+    "status": "Needs review",
+    "reason": "",
+    "path": "/downloads/a",
+    "mb_valid": true,
+    "mb_albumid": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "existing_album_ids": [],
+    "target_kind": "album",
+    "album_id": 7
+   },
+   "mbid": "11111111-2222-3333-4444-555555555555",
+   "selected_match": {
+    "release_group_id": "11111111-2222-3333-4444-555555555555",
+    "representative_release_id": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "artist": "A",
+    "album": "B",
+    "year": "2000",
+    "track_mapping": [
+     {
+      "num": 1,
+      "local_title": "t1",
+      "mb_title": "T1",
+      "mb_trackid": "",
+      "status": "matched",
+      "source_path": "/downloads/a/01.flac"
+     },
+     {
+      "num": 2,
+      "local_title": "t2",
+      "mb_title": "T2",
+      "mb_trackid": "",
+      "status": "verified_match",
+      "source_path": "/downloads/a/02.flac"
+     },
+     {
+      "num": 3,
+      "local_title": "t3",
+      "mb_title": "T3",
+      "mb_trackid": "",
+      "status": "fuzzy",
+      "source_path": "/downloads/a/03.flac"
+     }
+    ],
+    "preflight_status": "passed",
+    "preflight_reason": "",
+    "is_release_group_usable": true,
+    "is_importable": true,
+    "is_partial_import": false,
+    "auto_fix_eligible": false,
+    "source": "candidate",
+    "identity_validated": false
+   },
+   "target_preview_state": null
+  },
+  "expected": {
+   "match_bucket": "needs_id",
+   "blocked": true,
+   "ready": false,
+   "can_apply": false,
+   "apply_block_reason": "Import blocked: representative release does not belong to selected Release Group.",
+   "block_reason": "Import blocked: representative release does not belong to selected Release Group.",
+   "next_action": "Resolve this block before importing; uncertain audio stays in review.",
+   "action_label": "Import blocked",
+   "selected_source_files": []
+  }
+ },
+ {
+  "name": "existing-album repair, artist identity rejected",
+  "input": {
+   "item": {
+    "id": "review-1",
+    "type": "pending_ai",
+    "status": "Needs review",
+    "reason": "",
+    "path": "/downloads/a",
+    "mb_valid": true,
+    "mb_albumid": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "existing_album_ids": [
+     7
+    ]
+   },
+   "mbid": "11111111-2222-3333-4444-555555555555",
+   "selected_match": {
+    "release_group_id": "11111111-2222-3333-4444-555555555555",
+    "representative_release_id": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "artist": "A",
+    "album": "B",
+    "year": "2000",
+    "track_mapping": [
+     {
+      "num": 1,
+      "local_title": "t1",
+      "mb_title": "T1",
+      "mb_trackid": "",
+      "status": "matched",
+      "source_path": "/downloads/a/01.flac"
+     },
+     {
+      "num": 2,
+      "local_title": "t2",
+      "mb_title": "T2",
+      "mb_trackid": "",
+      "status": "verified_match",
+      "source_path": "/downloads/a/02.flac"
+     },
+     {
+      "num": 3,
+      "local_title": "t3",
+      "mb_title": "T3",
+      "mb_trackid": "",
+      "status": "fuzzy",
+      "source_path": "/downloads/a/03.flac"
+     }
+    ],
+    "preflight_status": "passed",
+    "preflight_reason": "",
+    "is_release_group_usable": true,
+    "is_importable": true,
+    "is_partial_import": false,
+    "auto_fix_eligible": false,
+    "source": "candidate",
+    "identity_validated": false,
+    "candidate_identity_error": "AI candidate artist B does not match album artist A."
+   },
+   "target_preview_state": {
+    "status": "ready",
+    "key": "k",
+    "preview": {
+     "ok": true,
+     "safe": true,
+     "status": "safe",
+     "blocked_reasons": [],
+     "warnings": [],
+     "tracks_to_import_count": 3,
+     "real_conflict_count": 0,
+     "tracks": []
+    }
+   }
+  },
+  "expected": {
+   "match_bucket": "ready",
+   "blocked": true,
+   "ready": false,
+   "can_apply": false,
+   "apply_block_reason": "AI candidate artist B does not match album artist A.",
+   "block_reason": "AI candidate artist B does not match album artist A.",
+   "next_action": "Resolve this block before importing; uncertain audio stays in review.",
+   "action_label": "Import blocked",
+   "selected_source_files": []
+  }
+ },
+ {
   "name": "track comparison not finished",
   "input": {
    "item": {

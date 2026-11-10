@@ -87,6 +87,19 @@ class DecisionRuleTests(unittest.TestCase):
                          "Only 2 of 12 tracks matched.")
         self.assertIn("until preflight is refreshed", self._decide("preflight stale")["apply_block_reason"])
 
+    def test_a_rejected_artist_identity_blocks_a_library_repair(self):
+        # #521: Match album / Repair would retag the album to the wrong-artist release.
+        rejected = {"identity_validated": False, "candidate_identity_error": "Artist mismatch."}
+        self.assertEqual(decision.apply_block_reason({"type": "library_no_mb", "album_id": 1}, RG, rejected, None),
+                         "Artist mismatch.")
+        self.assertEqual(decision.apply_block_reason({"type": "library_no_mb", "album_id": 1}, RG,
+                                                     {"identity_validated": False}, None),
+                         decision.IDENTITY_REJECTED_REASON)
+        out = self._decide("library album, artist identity rejected")
+        self.assertEqual((out["can_apply"], out["action_label"]), (False, "Import blocked"))
+        self.assertFalse(self._decide("existing-album repair, artist identity rejected")["can_apply"])
+        self.assertTrue(self._decide("library album without ID")["can_apply"])
+
     def test_a_file_that_conflicts_at_the_target_is_never_selected(self):
         out = self._decide("conflicting target file is not imported")
         self.assertEqual(out["selected_source_files"], ["/downloads/a/02.flac", "/downloads/a/03.flac"])

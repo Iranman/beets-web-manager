@@ -452,5 +452,121 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         self.assertEqual(selected["representative_release_id"], RELEASE_ID)
         self.assertTrue(selected["is_importable"])
         self.assertTrue(selected["auto_fix_eligible"])
+
+    def test_revalidated_score_ignores_ai_label_and_stored_scores(self):
+        # QA B1 (#521): 3/10 track evidence must not become auto-fixable
+        # because the AI said "high" or a stale stored score says 0.95.
+        comparison = _comparison()
+        comparison.update({
+            "mb_track_count": 10, "local_track_count": 10, "matched_count": 3,
+            "comparison": [{"status": "matched", "local_title": "Song", "mb_title": "Song"}] * 3,
+            "preflight": {"ok": True, "matches": 3, "expected": 10, "audio_count": 10,
+                          "match_ratio": 0.3, "source_match_ratio": 0.3},
+        })
+        preflight = dict(comparison["preflight"])
+        for suggestion in (
+            {"confidence": "high"},
+            {"confidence": "high", "confidence_score": 0.95, "match_total": 0.97, "score": 99},
+        ):
+            with self.subTest(suggestion=suggestion):
+                selected = self.app_module._import_review_build_revalidated_match(
+                    {"suggestion": suggestion}, comparison, preflight)
+                self.assertTrue(selected["is_importable"])
+                self.assertLessEqual(selected["confidence_score"], 0.3)
+                self.assertFalse(selected["auto_fix_eligible"])
+                self.assertEqual(selected["confidence_level"], "low")
+        # Strong deterministic evidence alone is still eligible, AI label "low" notwithstanding.
+        strong = self.app_module._import_review_build_revalidated_match(
+            {"suggestion": {"confidence": "low"}}, _comparison(),
+            {"ok": True, "matches": 1, "expected": 1, "audio_count": 1, "match_ratio": 1.0, "source_match_ratio": 1.0})
+        self.assertTrue(strong["auto_fix_eligible"])
+        self.assertEqual(strong["confidence_score"], 1.0)
+
+    def test_revalidation_keeps_the_ai_artist_gate(self):
+        # #521 P1: Release Group membership alone must not clear an artist
+        # rejection, or bulk revalidate + auto_enqueue imports a wrong artist.
+        preflight = {"ok": True, "matches": 1, "expected": 1, "audio_count": 1,
+                     "match_ratio": 1.0, "source_match_ratio": 1.0}
+        build = self.app_module._import_review_build_revalidated_match
+        wrong = dict(_comparison(), release_artist="Vitalic")
+        folder_item = {"suggestion": {}, "evidence": {"folder": {"guessed_artist": "Voyager"}}}
+
+        rechecked = build(folder_item, wrong, preflight)
+        self.assertIs(rechecked["identity_validated"], False)
+        self.assertFalse(rechecked["is_importable"])
+        self.assertFalse(rechecked["auto_fix_eligible"])
+        self.assertEqual(rechecked["preflight_status"], "failed")
+        self.assertIn("artist mismatch", rechecked["candidate_identity_error"])
+
+        # No folder artist to re-check against: the stored rejection stands.
+        stored_error = ("Rejected: artist mismatch. Album title matched, but candidate artist is "
+                        "Vitalic and source artist is Voyager.")
+        stored = build({"suggestion": {"identity_validated": False,
+                                       "candidate_identity_error": stored_error}},
+                       _comparison(), preflight)
+        self.assertIs(stored["identity_validated"], False)
+        self.assertEqual(stored["candidate_identity_error"], stored_error)
+        self.assertFalse(stored["is_importable"])
+
+        # A stored Release Group membership error is recomputed, not sticky.
+        membership = build({"suggestion": {"identity_validated": False,
+                                           "candidate_identity_error": "Representative Release ID rejected."}},
+                           _comparison(), preflight)
+        self.assertTrue(membership["is_importable"])
+
+        # Matching artist, and the manual-ID path (no evidence), stay importable.
+        right = dict(_comparison(), release_artist="Voyager")
+        self.assertTrue(build(folder_item, right, preflight)["is_importable"])
+        self.assertTrue(build({"suggestion": {}}, wrong, preflight)["is_importable"])
+
+    def test_artist_rejection_survives_a_membership_failed_revalidation(self):
+        # #521 N1: a revalidation that fails Release Group membership must not
+        # replace the stored artist rejection, or the next passing revalidation
+        # (artist unknown) finds no artist verdict and turns importable.
+        preflight = {"ok": True, "matches": 1, "expected": 1, "audio_count": 1,
+                     "match_ratio": 1.0, "source_match_ratio": 1.0}
+        build = self.app_module._import_review_build_revalidated_match
+        stored_error = ("Rejected: artist mismatch. Album title matched, but candidate artist is "
+                        "Vitalic and source artist is Voyager.")
+        membership_error = "Representative Release ID rejected: it does not belong to selected Release Group."
+        failed_membership = dict(_comparison(), identity_validated=False,
+                                 candidate_identity_error=membership_error)
+
+        first = build({"suggestion": {"identity_validated": False,
+                                      "candidate_identity_error": stored_error}},
+                      failed_membership, preflight)
+        self.assertIs(first["identity_validated"], False)
+        self.assertTrue(first["candidate_identity_error"].startswith(stored_error))
+        self.assertIn(membership_error, first["candidate_identity_error"])
+
+        # The stored suggestion now carries the first result; membership passes.
+        second = build({"suggestion": {"identity_validated": False,
+                                       "candidate_identity_error": first["candidate_identity_error"]}},
+                       _comparison(), preflight)
+        self.assertIs(second["identity_validated"], False)
+        self.assertFalse(second["is_importable"])
+        self.assertTrue(second["candidate_identity_error"].startswith("Rejected: artist mismatch."))
+
+        # With both artists known the gate re-runs and leads the error too.
+        folder_item = {"suggestion": {}, "evidence": {"folder": {"guessed_artist": "Voyager"}}}
+        rerun = build(folder_item, dict(failed_membership, release_artist="Vitalic"), preflight)
+        self.assertTrue(rerun["candidate_identity_error"].startswith("Rejected: artist mismatch."))
+        self.assertIn(membership_error, rerun["candidate_identity_error"])
+
+
+class AiBatchStoreConnectionTests(unittest.TestCase):
+    def test_each_call_closes_its_connection(self):
+        # A leaked handle kept ai_batch_state.db locked on Windows, failing
+        # this module's tearDownClass with WinError 32.
+        import sqlite3
+        from backend.ai_batch_state_store import AiBatchStateStore
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AiBatchStateStore(Path(tmp) / "ai_batch_state.db")
+            with store._get_conn() as conn:
+                conn.execute("SELECT 1")
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute("SELECT 1")
+
+
 if __name__ == "__main__":
     unittest.main()
