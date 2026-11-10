@@ -649,23 +649,30 @@ def _app_managed_download_path(path: Path) -> bool:
     # downloads root. Nothing counts through a symlinked folder.
     root_res = root.resolve(strict=False)
     try:
-        depth = len(path_res.relative_to(root_res).parts)
+        path_res.relative_to(root_res)
     except ValueError:
         return False
     torrent_roots = [r.resolve(strict=False) for r in TORRENT_SOURCE_ROOTS]
     guard_roots = torrent_roots + [r.resolve(strict=False) for r in DOWNLOADS_ALLOWED_ROOTS]
     legacy_ok = date.today() < APP_DOWNLOAD_LEGACY_NAME_UNTIL and not any(
         t != root_res and _path_is_under(path_res, t) for t in torrent_roots)
-    # The walked (lexical) path must itself sit under this root, as written or
-    # real: one reaching it through a symlink outside the root proves nothing.
-    lexical = os.path.abspath(path)
-    if not lexical.startswith((os.path.abspath(root).rstrip(os.sep) + os.sep,
-                               str(root_res).rstrip(os.sep) + os.sep)):
+    # Walk the path as given, every level below the root (written or real
+    # spelling): one reaching it through an outside symlink, or with "..",
+    # which resolves elsewhere than it reads, proves nothing. Once each level
+    # passes lstat it is its own real path, so folder_res needs no per-level
+    # resolve (8000-torrent scans).
+    if ".." in path.parts:
         return False
+    lexical = os.path.abspath(path)
+    written = os.path.abspath(root).rstrip(os.sep) + os.sep
+    real = str(root_res).rstrip(os.sep) + os.sep
+    if not lexical.startswith((written, real)):
+        return False
+    rel = Path(lexical[len(written if lexical.startswith(written) else real):]).parts
     folder = Path(lexical)
-    folder_res = path_res  # lexical twin of folder: no resolve per level (8000-torrent scans)
+    folder_res = root_res.joinpath(*rel)
     proven = False
-    for level in range(depth):
+    for level in range(len(rel)):
         try:
             if stat.S_ISLNK(os.lstat(folder).st_mode):
                 return False

@@ -175,6 +175,19 @@ class OwnershipProofTests(_Roots):
         self.assertFalse(self.managed(self.outside / "dl" / "Artist" / "Album (2021)"))
         self.assertTrue(self.managed(self.dl / "Artist" / "Album (2021)"))
 
+    def test_symlink_inside_the_root_is_walked_at_every_level(self):
+        """A path that reads as an app folder but resolves to a user folder
+        ("..", or a link back up the tree) never borrows the app folder's marker."""
+        self.app_folder("owned")
+        self.audio(self.dl / "a" / "b" / "owned")  # the user's, unmarked
+        (self.dl / "a" / "b" / "c").mkdir()
+        _symlink(self.dl / "a" / "b" / "c", self.dl / "jump", True)
+        _symlink(self.dl, self.dl / "a" / "back", True)
+        self.assertFalse(self.managed(self.dl / "jump" / ".." / "owned"))
+        self.assertFalse(self.managed(self.dl / "a" / "back" / "owned"))
+        self.assertFalse(self.managed(self.dl / "a" / "b" / "owned"))
+        self.assertTrue(self.managed(self.dl / "owned"))
+
     def test_symlinked_downloads_root_still_proves_by_either_spelling(self):
         self.require_fd()
         real = self.tmp / "real-dl"
