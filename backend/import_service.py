@@ -41,6 +41,7 @@ from backend.serializers import _client_review_origin, _client_review_suggestion
 from backend.pending_review_store import _finalize_pending_review_format_policy_rejection, _load_pending_reviews, _mark_pending_review_status, _pending_review_matches, _pending_review_path_key
 from backend.pending_review_store import QUALITY_UPGRADE_INFORMATIONAL, _pending_review_is_quality_upgrade
 from backend.app_runtime import PLEX_SYNC_AUTO_REFRESH
+from backend.library_service import _review_torrent_files_protected
 from backend.plex_service import _plex_configured, _trigger_plex_refresh
 
 # ── ARCH-001 extracted code ──
@@ -886,20 +887,17 @@ def _start_reimport_disk_job_internal(aldir: str, mb_albumid: str,
 
 
 def _review_row_is_torrent_source(folder_path: str) -> bool:
-    """True when a Review row from a qBittorrent batch points at this folder
-    itself (not at our staged copy): its files are a torrent's and are
-    always copied, whatever ALLOW_TORRENT_SOURCE_MOVE says. An unreadable
-    queue reads as True (copying is the safe side)."""
+    """True when a qBittorrent-batch Review row (not our staged copy) is at,
+    inside or above this folder (#568): ``<row>/CD 01`` and a parent of the
+    row hold the torrent's files too, so they are always copied, whatever
+    ALLOW_TORRENT_SOURCE_MOVE says. Same rule as the destructive Review
+    guard. An unreadable queue reads as True (copying is the safe side)."""
     if _app_managed_download_path(Path(folder_path)):
         return False
-    key = _pending_review_path_key(folder_path)
     try:
-        rows = _load_pending_reviews(prune_resolved=False, strict=True)
+        return bool(_review_torrent_files_protected(folder_path))
     except Exception:
         return True
-    return any(_pending_review_path_key(_s(r.get("path"))) == key
-               and _s((r.get("evidence") or {}).get("source_mode")) == "qbittorrent"
-               for r in rows if isinstance(r, dict))
 
 
 def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
@@ -2015,7 +2013,11 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
 
         # Web Manager mounts the downloads root and (read-only) the library
         # in the documented compose, so the audio policy reads the files here.
-        _validate_import_source_audio(aldir, log, reject_downloads=True)
+        # #568: a qBittorrent Review row at, inside or above aldir makes it
+        # seeding torrent data: copy it and keep rejected files in place.
+        review_torrent_source = not source_is_music_library and _review_row_is_torrent_source(aldir)
+        _validate_import_source_audio(aldir, log, reject_downloads=True,
+                                      preserve_source=True if review_torrent_source else None)
         log.append(f"[1/3] Importing '{Path(aldir).name}' with Beets as MB release {mb_albumid}…")
         import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_file_count", 0))
         # Beets' own importer does the work (beet import -q --search-id
@@ -2038,7 +2040,7 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             "existing_album_id": existing_album_id,
             "mb_albumid": mb_albumid,
             "mb_releasegroupid": planned_rg,
-            "use_move": not source_is_music_library and not _preserve_torrent_source_path(aldir),
+            "use_move": not source_is_music_library and not _preserve_torrent_source_path(aldir) and not review_torrent_source,
             "in_place": source_is_music_library,
             "duplicate_action": "keep" if existing_album_id else "skip",
             # A missing-track fill holds only the missing tracks; Beets would
