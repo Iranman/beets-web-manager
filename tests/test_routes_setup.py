@@ -184,11 +184,18 @@ class RoutesSetupStatusTests(unittest.TestCase):
         self.assertIn("beets", body)
         self.assertIn("plugin_failures", body["beets"])
 
-    def test_status_masks_secret_looking_settings(self):
-        self.client.post("/api/setup/settings", json={"ai_api_key": "sk-verysecretvalue123"})
-        r = self.client.get("/api/setup/status")
-        settings = r.get_json()["settings"]
-        self.assertNotIn("verysecretvalue123", str(settings))
+    def test_status_does_not_expose_saved_settings(self):
+        # Unauthenticated status used to echo saved settings (masked by name
+        # only). Nothing read them, so they are gone: no name rule can leak.
+        stored = {"qbit_password": "pw-plain-value", "odd_name": "cred-plain-value",
+                  "nested": {"inner_token": "nested-plain-value"}, "ai_model": "visible-model"}
+        record = {"settings": stored, "revision": "r1"}
+        with mock.patch.object(self.module, "_load_settings_record", return_value=record), \
+                mock.patch.object(self.module, "_load_settings", return_value=stored):
+            r = self.client.get("/api/setup/status?refresh=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("settings", r.get_json())
+        self.assertNotIn("plain-value", r.get_data(as_text=True))
 
     def test_status_sanitizes_remote_diagnostic_exceptions(self):
         sensitive = "/database/internal/path token=super-secret-key Traceback... File \"secret.py\", line 7"
@@ -637,6 +644,38 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         r = self.client.get("/api/setup/settings")
         self.assertEqual(r.get_json()["settings"]["ai_model"], "gpt-4o-mini")
 
+    def test_posting_masked_key_keeps_saved_value(self):
+        # #522: GET masks key/token settings; echoing that mask back must not overwrite.
+        r = self.client.post("/api/setup/settings", json={"ai_api_key": "fake-saved-key"})
+        rev = r.get_json()["revision"]
+        masked = self.client.get("/api/setup/settings").get_json()["settings"]["ai_api_key"]
+        self.assertEqual(masked, self.module._SECRET_MASK)
+        r = self.client.post("/api/setup/settings", json={
+            "ai_api_key": masked, "ai_model": "m2", "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"])
+        stored = self.module._load_settings()
+        self.assertEqual(stored["ai_api_key"], "fake-saved-key")
+        self.assertEqual(stored["ai_model"], "m2")
+
+    def test_get_settings_masks_password_and_secret_and_keeps_on_echo(self):
+        # qbit_pass is a secret only via its legacy alias (QBIT_PASS -> QBITTORRENT_PASSWORD).
+        r = self.client.post("/api/setup/settings", json={
+            "qbit_password": "pw-plain-value", "client_secret": "cs-x", "qbit_pass": "alias-x"})
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        self.assertEqual(got, {"qbit_password": mask, "client_secret": mask, "qbit_pass": mask})
+        r = self.client.post("/api/setup/settings", json={
+            "qbit_password": got["qbit_password"], "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings()["qbit_password"], "pw-plain-value")
+
+    def test_posting_empty_string_clears_settings_secret(self):
+        r = self.client.post("/api/setup/settings", json={"ai_api_key": "fake-saved-key"})
+        r = self.client.post("/api/setup/settings", json={"ai_api_key": "", "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings()["ai_api_key"], "")
+
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
         self.assertEqual(r.status_code, 400)
@@ -696,6 +735,30 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertTrue(variables["PLEX_TOKEN"]["has_value"])
         self.assertNotIn("supersecretvalue", str(body))
 
+    def test_posting_masked_secret_keeps_saved_value(self):
+        # #522: the GET mask echoed back must not replace the saved secret.
+        self.env_file.write_text("PLEX_TOKEN=fake-saved-token\nLIDARR_API_KEY=fake-saved-lidarr\n", encoding="utf-8")
+        variables = {v["name"]: v for v in self.client.get("/api/setup/env").get_json()["variables"]}
+        # Every masked field GET returns uses the one mask POST recognises.
+        self.assertEqual(variables["LIDARR_API_KEY"]["saved_value"], self.module._SECRET_MASK)
+        self.assertEqual(variables["LIDARR_API_KEY"]["value"], self.module._SECRET_MASK)
+        r = self.client.post("/api/setup/env", json={"variables": {
+            "LIDARR_API_KEY": variables["LIDARR_API_KEY"]["saved_value"]}})
+        self.assertEqual(r.get_json()["saved"], [])
+        self.assertIn("LIDARR_API_KEY=fake-saved-lidarr", self.env_file.read_text(encoding="utf-8"))
+        # (No non-secret key here: a saved value lands in os.environ and can be
+        # captured by config_layers' boot snapshot, pinning it for later tests.)
+        r = self.client.post("/api/setup/env", json={"variables": {"PLEX_TOKEN": self.module._SECRET_MASK}})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["saved"], [])
+        text = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("PLEX_TOKEN=fake-saved-token", text)
+        self.assertNotIn(self.module._SECRET_MASK, text)
+        # An explicit clear still works.
+        self.client.post("/api/setup/env", json={
+            "variables": {"PLEX_TOKEN": self.module._SECRET_MASK}, "clear": ["PLEX_TOKEN"]})
+        self.assertNotIn("fake-saved-token", self.env_file.read_text(encoding="utf-8"))
+
     def test_secret_aliases_are_masked_and_not_saveable(self):
         self.env_file.write_text("QBIT_PASS=fake-saved-qbit\nQB_PASS=fake-saved-qb\n", encoding="utf-8")
         os.environ["QBIT_PASS"] = "fake-env-qbit"
@@ -717,6 +780,11 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         r = self.client.post("/api/setup/env", json={"variables": {"QBIT_PASS": "fake-new"}})
         self.assertEqual(r.status_code, 400)
         self.assertNotIn("fake-new", self.env_file.read_text(encoding="utf-8"))
+
+        # #522: echoing the GET mask for an unsaveable alias is ignored, not a 400.
+        r = self.client.post("/api/setup/env", json={"variables": {"QBIT_PASS": self.module._SECRET_MASK}})
+        self.assertEqual((r.status_code, r.get_json()["saved"]), (200, []))
+        self.assertIn("QBIT_PASS=fake-saved-qbit", self.env_file.read_text(encoding="utf-8"))
 
     def test_url_query_credential_is_masked_and_survives_an_echo(self):
         raw = "https://ai.test/v1?api_key=fake-query-credential"

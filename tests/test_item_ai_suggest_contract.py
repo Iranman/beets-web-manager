@@ -499,6 +499,89 @@ class AlbumAndFolderAiFallbackTests(unittest.TestCase):
                     self._assert_evidence_fallback(out)
                     opened.assert_called_once()
 
+    def test_ai_reply_cannot_supply_keys_outside_the_prompt(self):
+        forged = {"confidence_score": 1.0, "match_total": 1.0, "score": 100, "track_mapping": {},
+                  "mb_trackid": _INVENTED, "trusted_for_apply": True, "identity_validated": True,
+                  "preflight": {"ok": True}, "auto_fix_eligible": True}
+        reply = {"candidate_index": 0, "albumartist": "A", "album": "B", "year": 2012, "label": "", "country": "US",
+                 "confidence": "HIGH", "reason": "ai reason", **forged}
+        for path in ("album", "folder"):
+            with self.subTest(path):
+                out, _ = self._suggest(path, reply)
+                s = out["suggestion"]
+                self.assertTrue(s["ai_available"])
+                self.assertEqual((s["reason"], s["confidence"]), ("ai reason", "high"))
+                self.assertEqual((s["album"], s["year"], s["label"], s["country"]), ("B", 2012, "", "US"))
+                for field in ("confidence_score", "match_total", "score", "track_mapping", "mb_trackid",
+                              "trusted_for_apply", "auto_fix_eligible"):
+                    self.assertNotIn(field, s)
+                self.assertNotEqual(s.get("preflight"), {"ok": True})
+
+    def test_ai_reply_year_as_digit_string_becomes_an_int(self):
+        reply = '{"candidate_index": 0, "albumartist": "A", "album": "B", "year": " 2012 ", "confidence": "high"}'
+        for path in ("album", "folder"):
+            with self.subTest(path):
+                out, _ = self._suggest(path, reply)
+                self.assertTrue(out["suggestion"]["ai_available"])
+                self.assertEqual(out["suggestion"]["year"], 2012)
+
+    def test_malformed_ai_reply_fields_fall_back_to_the_evidence(self):
+        base = '{"candidate_index": 0, "albumartist": "A", "reason": "ai reason", '
+        for path in ("album", "folder"):
+            for bad in ('"confidence": NaN', '"confidence": 0.99', '"confidence": "certain"', '"confidence": "high", '
+                        '"year": NaN', '"confidence": "high", "year": 1.5', '"confidence": "high", "album": ["B"]',
+                        '"confidence": "high", "reason": "' + "x" * 1001 + '"', '"confidence": "high", "year": "soon"',
+                        '"confidence": "high", "year": true', '"confidence": "high", "year": 99999'):
+                with self.subTest(path=path, bad=bad[:40]):
+                    out, opened = self._suggest(path, base + bad + "}")
+                    self._assert_evidence_fallback(out)
+                    opened.assert_called_once()
+
+    def test_wrong_artist_candidate_is_rejected_on_both_paths(self):
+        reply = {"candidate_index": 0, "albumartist": "Other", "confidence": "high", "reason": "ai reason"}
+        for path in ("album", "folder"):
+            with self.subTest(path):
+                s = self._suggest(path, reply, artist="Completely Different Band")[0]["suggestion"]
+                self.assertFalse(s["identity_validated"])
+                self.assertIn("artist mismatch", s["candidate_identity_error"])
+                if path == "album":
+                    self.assertEqual(s["confidence"], "low")
+                    self.assertIn("artist mismatch", s["reason"])
+                s = self._suggest(path, reply)[0]["suggestion"]
+                self.assertTrue(s["identity_validated"])
+                self.assertEqual(s["candidate_identity_error"], "")
+
+    def test_va_source_matches_various_artists_candidate_only(self):
+        various = {"artist": "Various Artists"}
+        for source in ("VA", "V.A.", "v/a", "Various", "Various Artists"):
+            with self.subTest(source):
+                self.assertEqual(ai_service._ai_artist_mismatch_reason(various, source), "")
+                self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": "Vitalic"}, source))
+        self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason(various, "Vitalic"))
+
+    def test_va_alias_does_not_fuzzy_match_similar_single_artist(self):
+        # QA N1 (#521): a VA alias on either side requires both to be VA aliases.
+        for cand, source in (("VAST", "VA"), ("Vast", "V.A."), ("Various Cruelties", "Various"),
+                             ("VA", "VAST"), ("Various", "Various Cruelties")):
+            with self.subTest(cand=cand, source=source):
+                self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": cand}, source))
+        # Ordinary near-identical single-artist names still fuzzy-match.
+        self.assertEqual(ai_service._ai_artist_mismatch_reason({"artist": "The Vitalic"}, "Vitalic"), "")
+
+    def test_va_alias_check_ignores_punctuation_and_invisible_characters(self):
+        # Security review F1 (#521): punctuation / zero-width / full-width
+        # spellings of a VA alias must not fall through to the fuzzy scorer.
+        for source in ("VA.", "V-A", "V⁠A", "V​A", "ＶＡ", "Various Artists.", "V. A.",
+                       "VÁ", "V́A", "Várious", "‮VA"):
+            with self.subTest(source=source):
+                self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": "VAST"}, source))
+                self.assertIn("artist mismatch", ai_service._ai_artist_mismatch_reason({"artist": source}, "VAST"))
+                self.assertEqual(ai_service._ai_artist_mismatch_reason({"artist": "Various Artists"}, source), "")
+        self.assertIn("artist mismatch",
+                      ai_service._ai_artist_mismatch_reason({"artist": "Various Cruelties"}, "Various Artists."))
+        self.assertIn("artist mismatch",
+                      ai_service._ai_artist_mismatch_reason({"artist": "Various Cruelties"}, "Várious"))
+
 
 class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):
     """Import All must send a candidate that failed identity validation to Review, not to the reimport."""
@@ -559,6 +642,78 @@ class ImportAllDiscoveryIdentityGateTests(unittest.TestCase):
                 queue.assert_not_called()
                 reimport.assert_called_once()
                 self.assertEqual(reimport.call_args.args[:2], ("/downloads/x", _REL))
+
+
+class BatchAiSuggestCacheKeepsArtistGate(unittest.TestCase):
+    """The batch AI suggest job caches album suggestions for Missing IDs. It
+    stores the artist gate's verdict, and an entry cached before the gate
+    existed (no identity_validated) is checked again instead of skipped."""
+
+    _REJECTED = {"mb_albumid": _REL, "mb_valid": True, "confidence": "low",
+                 "identity_validated": False, "candidate_identity_error": "Rejected: artist mismatch."}
+
+    def _run(self, cached, suggestion):
+        asked, saved = [], []
+        store = mock.Mock(save_suggestions_cache=lambda r: saved.append(dict(r)))
+
+        def run_now(fn, **_kw):
+            fn([])
+            return mock.Mock(job_id="j")
+        albums = {"albums": [{"id": 1, "mb_albumid": ""}], "singletons": []}
+        with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}), \
+                mock.patch.object(routes_library, "_ai_api_key", return_value="k"), \
+                mock.patch.object(routes_library.composite_workflows, "get_unmatched_review_items",
+                                  return_value=albums), \
+                mock.patch.object(routes_library, "_load_album_mb_suggestions", return_value=cached), \
+                mock.patch.object(routes_library.lib, "get_album",
+                                  side_effect=lambda aid: mock.Mock(albumartist="Vitalic", album="Voyager")), \
+                mock.patch.object(routes_library, "_ai_suggest_album_internal",
+                                  side_effect=lambda album, log, existing_album_id: asked.append(existing_album_id)
+                                  or {"suggestion": suggestion, "evidence": {}}), \
+                mock.patch.object(routes_library, "_get_ai_batch_store", return_value=store), \
+                mock.patch.object(routes_library.jobs, "start_python", side_effect=run_now):
+            app_module.app.test_client().post("/api/albums/batch-ai-suggest", json={}, headers=_CSRF)
+        return asked, (saved[-1] if saved else {})
+
+    def test_rejection_is_cached(self):
+        asked, saved = self._run({}, self._REJECTED)
+        self.assertEqual(asked, [1])
+        self.assertIs(saved["1"]["identity_validated"], False)
+        self.assertEqual(saved["1"]["candidate_identity_error"], "Rejected: artist mismatch.")
+        self.assertEqual(saved["1"]["confidence"], "low")
+
+    def test_pre_gate_high_entry_is_rechecked(self):
+        stale = {"1": {"mb_albumid": _REL, "mb_valid": True, "confidence": "high"}}
+        asked, saved = self._run(stale, self._REJECTED)
+        self.assertEqual(asked, [1])
+        self.assertEqual(saved["1"]["confidence"], "low")
+
+    def test_validated_high_entry_is_skipped(self):
+        cached = {"1": {"mb_albumid": _REL, "mb_valid": True, "confidence": "high", "identity_validated": True}}
+        asked, _ = self._run(cached, self._REJECTED)
+        self.assertEqual(asked, [])
+
+    def test_suggestion_without_a_gate_verdict_is_not_validated(self):
+        _, saved = self._run({}, {"confidence": "low"})
+        self.assertIs(saved["1"]["identity_validated"], False)
+        self.assertEqual(saved["1"]["candidate_identity_error"], "")
+
+    def test_validated_entry_caches_the_release_group(self):
+        rg = _RG
+        sug = {"mb_albumid": _REL, "mb_releasegroupid": rg, "mb_valid": True,
+               "identity_validated": True, "confidence": "high"}
+        _, saved = self._run({}, sug)
+        self.assertEqual(saved["1"]["mb_releasegroupid"], rg)
+        self.assertEqual(saved["1"]["mb_releasegroupurl"], f"https://musicbrainz.org/release-group/{rg}")
+
+    def test_rejected_or_malformed_release_group_is_not_cached(self):
+        rg = _RG
+        for sug in (dict(self._REJECTED, mb_releasegroupid=rg),
+                    {"mb_valid": True, "identity_validated": True, "mb_releasegroupid": "not-a-uuid"}):
+            with self.subTest(sug=sug):
+                _, saved = self._run({}, sug)
+                self.assertEqual(saved["1"]["mb_releasegroupid"], "")
+                self.assertEqual(saved["1"]["mb_releasegroupurl"], "")
 
 
 if __name__ == "__main__":

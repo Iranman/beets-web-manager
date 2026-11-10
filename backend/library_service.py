@@ -22,13 +22,14 @@ from backend.title_normalize import restore_time_colon_title as _restore_time_co
 from helpers_mb import _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release, _resolve_mb_release_id, _fetch_mb_release_candidate, _mb_release_group_candidates
 from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsBadRequestError, BeetsNotFoundError
 import backend.composite_workflows as composite_workflows
+from backend.ai_batch_state_service import _load_album_mb_suggestions
 from backend.library_cache import library_cache
 import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags, same_recording_proof
 from backend.artwork_service import _album_dir_for_art, _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
 from backend.slskd import APP_DOWNLOAD_LEGACY_NAME_UNTIL, APP_DOWNLOAD_MARKER, APP_DOWNLOAD_NAME_RE, app_download_key_path, app_download_marker_valid
-from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _load_album_mb_suggestions, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
+from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
 from job_engine import DuplicateJobError
 from backend.musicbrainz_service import _artist_album_index, _artist_folder_key, _mb_artist_lookup_by_id, _mb_artist_search_one, _mb_canonical_for_artist_entries, _mb_release_has_tracks, _mb_release_search_by_folder_tracks
@@ -5500,14 +5501,23 @@ def _missing_mb_rows(search: str = "") -> List[Dict[str, Any]]:
         row["in_import_review"] = row["album_id"] in claimed
         stored = suggestions.get(str(row["album_id"]))
         if stored:
+            # Only a suggestion that passed the artist gate counts as usable; one
+            # rejected by it, or cached before it existed, stays a low lead.
+            validated = stored.get("identity_validated") is True
+            mb_url = _s(stored.get("mb_url"))
+            # Import Review prefills its ID box from these, so an unvalidated
+            # entry's IDs would be one click from Apply; drop them.
             row.update({
-                "mb_albumid": stored.get("mb_albumid", ""),
-                "mb_releasegroupid": stored.get("mb_releasegroupid", ""),
-                "mb_releasegroupurl": stored.get("mb_releasegroupurl", ""),
-                "confidence": stored.get("confidence", ""),
+                "mb_albumid": stored.get("mb_albumid", "") if validated else "",
+                "mb_releasegroupid": stored.get("mb_releasegroupid", "") if validated else "",
+                "mb_releasegroupurl": stored.get("mb_releasegroupurl", "") if validated else "",
+                "confidence": stored.get("confidence", "") if validated else "low",
                 "reason": stored.get("reason", ""),
-                "mb_valid": bool(stored.get("mb_valid")),
-                "mb_url": stored.get("mb_url", ""),
+                "mb_valid": bool(stored.get("mb_valid")) and validated,
+                "identity_validated": validated,
+                "candidate_identity_error": _s(stored.get("candidate_identity_error")),
+                # A pre-allowlist cache entry could hold an AI-written URL; the UI renders it as a link.
+                "mb_url": mb_url if validated and mb_url.startswith("https://musicbrainz.org/") else "",
                 "top_candidates": stored.get("top_candidates") or [],
                 "preflight": stored.get("preflight"),
             })
