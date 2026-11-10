@@ -165,6 +165,28 @@ class OwnershipProofTests(_Roots):
         self.assertFalse(self.managed(self.dl / "B - yt missing 1793260626692"))
         self.assertFalse(self.managed(self.dl / "Linked" / "Album (2021)"))
 
+    def test_folder_reached_through_an_outside_symlink_is_no_proof(self):
+        """Only the walked path's own location counts: a symlink outside the
+        downloads root into an app folder (any depth) never proves it."""
+        self.app_folder("Artist/Album (2021)")
+        _symlink(self.dl / "Artist" / "Album (2021)", self.outside / "deep", True)
+        _symlink(self.dl, self.outside / "dl", True)
+        self.assertFalse(self.managed(self.outside / "deep"))
+        self.assertFalse(self.managed(self.outside / "dl" / "Artist" / "Album (2021)"))
+        self.assertTrue(self.managed(self.dl / "Artist" / "Album (2021)"))
+
+    def test_symlinked_downloads_root_still_proves_by_either_spelling(self):
+        self.require_fd()
+        real = self.tmp / "real-dl"
+        real.mkdir()
+        alias = self.tmp / "dl-alias"
+        _symlink(real, alias, True)
+        with mock.patch.object(lib, "DOWNLOADS_ALLOWED_ROOTS", [alias]), \
+                mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", [alias]):
+            slskd.make_app_download_dir(alias / "Album (2021)")
+            self.assertTrue(self.managed(alias / "Album (2021)"))
+            self.assertTrue(self.managed(real / "Album (2021)"))
+
     def test_existing_folder_is_never_marked(self):
         folder = self.audio(self.dl / "Artist" / "User")
         slskd.make_app_download_dir(folder)

@@ -656,7 +656,13 @@ def _app_managed_download_path(path: Path) -> bool:
     guard_roots = torrent_roots + [r.resolve(strict=False) for r in DOWNLOADS_ALLOWED_ROOTS]
     legacy_ok = date.today() < APP_DOWNLOAD_LEGACY_NAME_UNTIL and not any(
         t != root_res and _path_is_under(path_res, t) for t in torrent_roots)
-    folder = Path(os.path.abspath(path))
+    # The walked (lexical) path must itself sit under this root, as written or
+    # real: one reaching it through a symlink outside the root proves nothing.
+    lexical = os.path.abspath(path)
+    if not lexical.startswith((os.path.abspath(root).rstrip(os.sep) + os.sep,
+                               str(root_res).rstrip(os.sep) + os.sep)):
+        return False
+    folder = Path(lexical)
     folder_res = path_res  # lexical twin of folder: no resolve per level (8000-torrent scans)
     proven = False
     for level in range(depth):
