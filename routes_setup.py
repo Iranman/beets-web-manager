@@ -284,7 +284,11 @@ def _is_secret_setting_key(name: str) -> bool:
 
 
 def _redact_setting_url(value: str) -> str:
-    return config_layers.redact_url_userinfo_in_text(value, _SECRET_MASK)
+    redacted = config_layers.redact_url_userinfo_in_text(value, _SECRET_MASK)
+    if redacted == value and "://" in value and config_layers.url_has_userinfo(value):
+        # Encoded or lookalike "@" (%40, U+FF20) that the span scan misses: fail closed.
+        return _SECRET_MASK
+    return redacted
 
 
 def _mask_setting_value(value: Any, secret: bool = False) -> Any:

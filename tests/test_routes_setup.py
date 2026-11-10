@@ -683,6 +683,7 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
             "plex": {"url": "http://plex.invalid:32400", "token": "fake-nested-token",
                      "servers": [{"name": "a", "password": "fake-list-pw"}]},
             "feed_url": "https://fakeuser:fake-url-pw@feed.invalid/path",
+            "alt_url": "https://fakeuser:fake-wide-pw＠feed.invalid/",
             "passwd": "fake-passwd",
             "ai_model": "m1",
         }
@@ -691,7 +692,7 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         got = self.client.get("/api/setup/settings").get_json()["settings"]
         mask = self.module._SECRET_MASK
         body = json.dumps(got)
-        for leaked in ("fake-nested-token", "fake-list-pw", "fake-url-pw", "fakeuser", "fake-passwd"):
+        for leaked in ("fake-nested-token", "fake-list-pw", "fake-url-pw", "fake-wide-pw", "fakeuser", "fake-passwd"):
             self.assertNotIn(leaked, body)
         self.assertEqual(got["plex"]["token"], mask)
         self.assertEqual(got["plex"]["url"], "http://plex.invalid:32400")
