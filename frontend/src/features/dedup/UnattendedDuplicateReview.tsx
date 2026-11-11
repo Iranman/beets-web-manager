@@ -1,4 +1,5 @@
-import { errorMessage } from '../../lib/errors';
+import { errorMessage, panelError } from '../../lib/errors';
+import { useEngineOffline } from '../../components/EngineOfflineBanner';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -65,6 +66,7 @@ function ProposalRow({ row }: { row: DuplicateProposalRow }) {
 export function UnattendedDuplicateReview({ onMusicRoot }: { onMusicRoot?: (root: string) => void }) {
   const [status, setStatus] = useState<UnattendedCleanupStatus | null>(null);
   const [error, setError] = useState('');
+  const shownError = panelError(error, useEngineOffline());
   const [busy, setBusy] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [message, setMessage] = useState('');
@@ -121,7 +123,7 @@ export function UnattendedDuplicateReview({ onMusicRoot }: { onMusicRoot?: (root
           <Button size="small" variant="text" disabled={busy} onClick={() => void load()}>Refresh</Button>
         </div>
       </div>
-      {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
+      {shownError && <Alert severity="error" onClose={() => setError('')}>{shownError}</Alert>}
       {message && <Alert severity="info" onClose={() => setMessage('')}>{message}</Alert>}
       <div className="text-xs text-zinc-400">
         {proposal.length
