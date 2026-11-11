@@ -42,7 +42,7 @@ import {
 } from '../lib/jobFeed';
 import { useGlobalJobs, useInterval, useJobPoll } from '../lib/hooks';
 import { panelError } from '../lib/errors';
-import { useEngineOffline } from '../components/EngineOfflineBanner';
+import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 import type { ApiOkResponse } from '../api/types';
 import type {
   Job,
@@ -2635,7 +2635,8 @@ export default function Jobs() {
   const [error, setError] = useState('');
   const [listFailed, setListFailed] = useState(false);
   const [notice, setNotice] = useState('');
-  const shownError = panelError(error, useEngineOffline());
+  const engineOffline = useEngineOffline();
+  const shownError = panelError(error, engineOffline);
 
   // Feed
   const [feed, setFeed] = useState<JobLogFeedResponse['entries']>([]);
@@ -2689,6 +2690,7 @@ export default function Jobs() {
   }, [load, loadFeed]);
 
   useEffect(() => { void load(); void loadFeed(); }, [load, loadFeed]);
+  useReloadOnEngineReturn(refreshAll);
 
   const counts = useMemo(() => {
     const n = { total: jobs.length, running: 0, failed: 0, success: 0 };

@@ -1,4 +1,5 @@
 import { formatEpochDateTime } from '../lib/dates';
+import { useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 import { errorMessage, sentences } from '../lib/errors';
 import { Description, Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
@@ -304,6 +305,8 @@ export default function LibraryChanges() {
       setListFailed(false);
       if (!selectedId && response.transactions[0]) setSelectedId(response.transactions[0].id);
     } catch (ex) {
+      // Rows from the previous load would contradict "Transactions unknown" (#618).
+      setRows([]);
       setListFailed(true);
       setError(errorMessage(ex));
     } finally {
@@ -327,6 +330,7 @@ export default function LibraryChanges() {
   useEffect(() => {
     void loadRows();
   }, [loadRows]);
+  useReloadOnEngineReturn(loadRows);
 
   useEffect(() => {
     void loadDetail(selectedId);
