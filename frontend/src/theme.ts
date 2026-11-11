@@ -28,9 +28,10 @@ const button = {
   secondaryHover: '#2d3440',
   secondaryText: '#f8fafc',
   secondaryBorder: '#a8b0bd',
-  disabledBg: '#3a424f',
-  disabledText: '#eef2f7',
-  disabledBorder: '#9aa3b2',
+  // Disabled (#610): dim fill, soft border, muted label; reads as unavailable, never as primary.
+  disabledBg: 'rgba(255,255,255,0.04)',
+  disabledText: graphite.muted2,
+  disabledBorder: graphite.border,
   dangerBg: '#991b1b',
   dangerHover: '#dc2626',
   dangerText: '#ffffff',
@@ -39,6 +40,12 @@ const button = {
   warningText: '#fff7ed',
   warningBorder: '#f59e0b',
   focusRing: '#f87171',
+};
+
+const disabledButton = {
+  backgroundColor: button.disabledBg,
+  borderColor: button.disabledBorder,
+  color: button.disabledText,
 };
 
 // Medium-dark graphite theme with clear red accents for brand, primary actions, and active states.
@@ -167,19 +174,20 @@ export const theme = createTheme({
           fontWeight: 650,
           // Labels stay on one line at phone widths (#607); containers wrap instead.
           whiteSpace: 'nowrap',
+          minHeight: 32,
+          // Hierarchy (#610): contained = the one primary action, outlined = secondary,
+          // text = tertiary (navigation, shortcuts, dismiss). Disabled looks the same in every variant.
           '&.Mui-disabled': {
             opacity: 1,
           },
+          // MUI sets pointer-events: none on disabled; re-enable on native buttons only so the cursor shows.
+          'button&.Mui-disabled': { pointerEvents: 'auto', cursor: 'not-allowed' },
           '&.MuiButton-contained': {
             backgroundColor: button.primaryBg,
             border: `1px solid ${button.primaryBg}`,
             color: button.primaryText,
             '&:hover': { backgroundColor: button.primaryHover, borderColor: button.primaryHover },
-            '&.Mui-disabled': {
-              backgroundColor: button.disabledBg,
-              borderColor: button.disabledBorder,
-              color: button.disabledText,
-            },
+            '&:active': { backgroundColor: red.dark, borderColor: red.dark },
           },
           '&.MuiButton-containedError': {
             backgroundColor: button.dangerBg,
@@ -202,11 +210,7 @@ export const theme = createTheme({
               borderColor: red.hover,
               color: button.secondaryText,
             },
-            '&.Mui-disabled': {
-              backgroundColor: button.disabledBg,
-              borderColor: button.disabledBorder,
-              color: button.disabledText,
-            },
+            '&:active': { backgroundColor: graphite.surface2 },
           },
           '&.MuiButton-outlinedWarning': {
             backgroundColor: button.warningBg,
@@ -216,11 +220,6 @@ export const theme = createTheme({
               backgroundColor: button.warningHover,
               borderColor: button.warningBorder,
               color: button.warningText,
-            },
-            '&.Mui-disabled': {
-              backgroundColor: button.disabledBg,
-              borderColor: button.disabledBorder,
-              color: button.disabledText,
             },
           },
           '&.MuiButton-outlinedError': {
@@ -236,11 +235,7 @@ export const theme = createTheme({
           '&.MuiButton-text': {
             color: graphite.text,
             '&:hover': { color: red.hover, backgroundColor: alpha(red.main, 0.1) },
-            '&.Mui-disabled': {
-              backgroundColor: button.disabledBg,
-              border: `1px solid ${button.disabledBorder}`,
-              color: button.disabledText,
-            },
+            '&:active': { backgroundColor: alpha(red.main, 0.2) },
           },
           '&.MuiButton-textWarning': {
             backgroundColor: alpha(button.warningBg, 0.18),
@@ -251,6 +246,10 @@ export const theme = createTheme({
             color: '#fecaca',
             '&:hover': { backgroundColor: alpha(button.dangerBg, 0.26), color: '#fee2e2' },
           },
+          // Declared last at the same specificity as the variant :hover/:active rules, so no
+          // variant or colour beats it (hover is reachable because the cursor rule restores pointer events).
+          '&.MuiButton-root.Mui-disabled': disabledButton,
+          '&.MuiButton-text.Mui-disabled': { backgroundColor: 'transparent' },
         },
       },
     },
