@@ -23,6 +23,7 @@ from unittest import mock
 import backend.acquisition_service as acq
 import backend.job_contract as job_contract
 import backend.recovery_carrier as recovery_carrier
+import backend.recovery_service as recovery_service
 
 
 RGID = "17a64abf-6d31-473f-a740-38ffa548f225"
@@ -91,6 +92,12 @@ class AcquisitionCarrierTests(unittest.TestCase):
             mock.patch.object(acq.job_contract, "guarded", wraps=job_contract.guarded),
             mock.patch.object(acq.recovery_carrier, "advance_state",
                               wraps=recovery_carrier.advance_state),
+            # #622: any test that imports app.py registers the real
+            # recovery-advance jobs.every schedule in this process. Its tick
+            # would call job_contract.guarded / advance_state (and sweep this
+            # test's carrier store) on another thread, landing in the spies
+            # above. Keep that background sweep out of this test.
+            mock.patch.object(recovery_service, "start_recovery_advance_job"),
         ]
         started = [p.start() for p in patches]
         self.addCleanup(lambda: [p.stop() for p in reversed(patches)])
