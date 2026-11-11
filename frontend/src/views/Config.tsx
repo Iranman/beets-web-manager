@@ -190,6 +190,8 @@ export default function Config() {
   const [savedFormatPrefs, setSavedFormatPrefs] = useState<MusicFormatPreferences>(DEFAULT_MUSIC_FORMAT_PREFS);
   const [replacementRows, setReplacementRows] = useState<MusicFormatReplacementTrack[]>([]);
   const [formatLoading, setFormatLoading] = useState(true);
+  // Until real preferences load, the form holds defaults; saving them would overwrite stored values (#609).
+  const [formatLoaded, setFormatLoaded] = useState(false);
   const [formatBusy, setFormatBusy] = useState(false);
   const [formatMsg, setFormatMsg] = useState('');
   const [formatError, setFormatError] = useState('');
@@ -225,6 +227,7 @@ export default function Config() {
       ]);
       setFormatPrefs(prefs.preferences);
       setSavedFormatPrefs(prefs.preferences);
+      setFormatLoaded(true);
       setReplacementRows(statuses.tracks ?? []);
     } catch (err) {
       setFormatError(errorMessage(err));
@@ -402,12 +405,18 @@ export default function Config() {
             <Button size="small" variant="outlined" onClick={() => void loadMusicFormat()} disabled={formatLoading || formatBusy}>Reload</Button>
             <Button size="small" variant="outlined" onClick={() => void handleStartMusicFormatScan()} disabled={formatLoading || formatBusy}>Scan library</Button>
             <Button size="small" variant="outlined" color="warning" onClick={() => void handleStartMusicFormatReplacement()} disabled={formatLoading || formatBusy || queuedReplacementCount === 0}>Replace queued</Button>
-            <Button size="small" variant="contained" onClick={() => void handleSaveMusicFormat()} disabled={formatLoading || formatBusy || !formatDirty || formatPrefs.preferred_formats.length === 0}>Save</Button>
+            <Button size="small" variant="contained" onClick={() => void handleSaveMusicFormat()} disabled={!formatLoaded || formatLoading || formatBusy || !formatDirty || formatPrefs.preferred_formats.length === 0}>Save</Button>
           </div>
         </div>
         {formatMsg && <Alert severity="success" onClose={() => setFormatMsg('')}>{formatMsg}</Alert>}
         {formatError && <Alert severity="error">{formatError}</Alert>}
+        {!formatLoaded && !formatLoading && (
+          <Alert severity="warning">
+            Your saved Music Format Preferences could not be loaded, so the form is locked to avoid overwriting them with defaults. Use Reload to try again.
+          </Alert>
+        )}
         {formatLoading && <LinearProgress sx={{ borderRadius: 1 }} />}
+        <fieldset disabled={!formatLoaded} aria-label="Music format preference fields" className="m-0 min-w-0 space-y-3 border-0 p-0">
         <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
             <div className="text-sm font-medium text-zinc-200">Audio layouts</div>
@@ -552,6 +561,7 @@ export default function Config() {
             </div>
           </div>
         </div>
+        </fieldset>
       </section>
       {/* Plugin controls */}
       <section className="space-y-3">
