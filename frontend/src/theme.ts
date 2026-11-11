@@ -28,10 +28,11 @@ const button = {
   secondaryHover: '#2d3440',
   secondaryText: '#f8fafc',
   secondaryBorder: '#a8b0bd',
-  // Disabled (#610): dim fill, soft border, muted label; reads as unavailable, never as primary.
-  disabledBg: 'rgba(255,255,255,0.04)',
-  disabledText: graphite.muted2,
-  disabledBorder: graphite.border,
+  // Disabled (#610): recessed fill, soft border, muted label (>= 4.5:1 on its fill);
+  // reads as unavailable, never as primary. Literal hex: tests/test_import_review_button_contrast.py parses these.
+  disabledBg: '#1c2027',
+  disabledText: '#8e95a3',
+  disabledBorder: '#414a58',
   dangerBg: '#991b1b',
   dangerHover: '#dc2626',
   dangerText: '#ffffff',
