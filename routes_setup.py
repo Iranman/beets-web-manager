@@ -284,11 +284,12 @@ def _is_secret_setting_key(name: str) -> bool:
     return _is_secret_env(name) or config_layers.is_secret_config_key(name)
 
 
-# A "key=" in a query or fragment (#access_token=...) or in free text and
-# keyword DSNs ("host=x password=y", #599): at the start or after a separator
-# or whitespace. A non-secret value is rescanned, so a nested
-# "?access_token=" is matched on its own (#593).
-_SETTING_PARAM_KEY_RE = re.compile(r"(?:^|(?<=[?&;#\s]))([^=&#;?\s]+)=")
+# A "key=" in a query or fragment (#access_token=...) or anywhere in free
+# text and keyword DSNs ("host=x password=y", #599). Scanned run by run (a
+# run of non-separator characters is a key when "=" follows it), so the scan
+# is linear and a non-secret value is rescanned: a nested "?access_token="
+# is matched on its own (#593).
+_SETTING_PARAM_KEY_RE = re.compile(r"([^=&#;?\s]+)(=?)")
 # A secret value runs to "&", "#" or whitespace; a raw "?" or ";" is part of
 # it (#599 N1). A quoted DSN value runs to its closing quote, or to the end
 # when unclosed (fail closed).
@@ -305,15 +306,15 @@ def _is_secret_param_key(name: str) -> bool:
 
 
 def _redact_secret_params(text: str) -> str:
-    out, pos = [], 0
-    for m in _SETTING_PARAM_KEY_RE.finditer(text):
-        if m.start() < pos or not _is_secret_param_key(m.group(1)):
-            continue
-        v = _SETTING_SECRET_VALUE_RE.match(text, m.end())
-        if v:
-            out.append(text[pos:m.end()] + _CUT)
-            pos = v.end()
-    return "".join(out) + text[pos:]
+    out, done, pos = [], 0, 0
+    while (m := _SETTING_PARAM_KEY_RE.search(text, pos)):
+        pos = m.end()
+        if m.group(2) and _is_secret_param_key(m.group(1)):
+            v = _SETTING_SECRET_VALUE_RE.match(text, pos)
+            if v:
+                out.append(text[done:pos] + _CUT)
+                done = pos = v.end()
+    return "".join(out) + text[done:]
 
 
 _URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")

@@ -833,6 +833,7 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
             "dsn": "host=db.invalid password=fake-r03 user=x",
             "dsn_quoted": "host=db.invalid password='fake r04 \\' fake-r05' user=x",
             "dsn_unclosed": "host=db.invalid password='fake-r06 fake-r07",
+            "after_quote": "password='fake-r15'token=fake-r16 (api_key=fake-r17) secret=fake-r18",
             "spaced": "fakeu:pass fake-r08@db.invalid",
             "user_only": "fake-r09@git.invalid/org/repo",
             "n1_q": "https://h.invalid/?token=a?fake-r10",
