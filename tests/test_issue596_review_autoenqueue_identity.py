@@ -71,6 +71,23 @@ class RevalidatedAutoFixRequiresProvenIdentity(unittest.TestCase):
     def test_proven_identity_is_auto_fixable(self):
         self.assertTrue(self._match({"identity_validated": True})["auto_fix_eligible"])
 
+    def test_stored_non_artist_rejection_does_not_become_proof(self):
+        # QA (#597): a stored False from a failed lookup, revalidated with no
+        # folder artist to compare, must stay unresolved, not turn True.
+        m = self._match({"identity_validated": False,
+                         "candidate_identity_error": "Release Group lookup returned no usable releases."})
+        self.assertIsNone(m["identity_validated"])
+        self.assertTrue(m["is_importable"])
+        self.assertFalse(m["auto_fix_eligible"])
+        eligibility = EligibilityRequiresProvenIdentity._eligibility(
+            self, selected_match={"identity_validated": m["identity_validated"]})
+        self.assertFalse(eligibility["eligible"])
+        self.assertIn("Artist identity unresolved", "; ".join(eligibility["blocking_reasons"]))
+
+    def test_truthy_non_bool_is_not_proof(self):
+        result = EligibilityRequiresProvenIdentity._eligibility(self, selected_match={"identity_validated": 1})
+        self.assertFalse(result["eligible"])
+
 
 if __name__ == "__main__":
     unittest.main()

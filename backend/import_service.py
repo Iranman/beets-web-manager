@@ -3093,8 +3093,8 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
     # #596: auto-enqueue needs proven identity (artist gate passed or the
     # AcoustID shortcut), the same rule as Import All (#584). Unresolved
     # (None) goes to manual review; a manual import stays allowed.
-    identity_proven = not identity_invalid and True in (
-        payload.get("identity_validated"), selected_match.get("identity_validated"))
+    identity_proven = not identity_invalid and (
+        payload.get("identity_validated") is True or selected_match.get("identity_validated") is True)
 
     blockers: List[str] = []
     warnings: List[str] = []

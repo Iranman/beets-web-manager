@@ -1148,9 +1148,10 @@ def _import_review_build_revalidated_match(
             artist_rejection = f"{artist_rejection} {candidate_identity_error}"
         identity_validated = False
         candidate_identity_error = artist_rejection
-    elif artist_rejection is None and identity_validated and suggestion.get("identity_validated") is None:
-        # #584: Release Group membership does not resolve the artist; an
-        # unresolved identity stays None (not a rejection, not proof).
+    elif artist_rejection is None and identity_validated and suggestion.get("identity_validated") is not True:
+        # #584/#596: Release Group membership does not resolve the artist;
+        # without a stored proof (None, or a non-artist False such as a failed
+        # lookup) the identity stays unresolved (not a rejection, not proof).
         identity_validated = None
     identity_ok = identity_validated is not False
     mapping = comparison.get("comparison") if isinstance(comparison.get("comparison"), list) else []

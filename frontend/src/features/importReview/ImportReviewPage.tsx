@@ -580,6 +580,7 @@ function selectedMatchAutomationReason(
   isPartialImport: boolean,
   matchCount: number | null,
   totalTracks: number | null,
+  identityProven: boolean,
 ): string {
   if (!isReleaseGroupUsable) {
     return 'Auto-import blocked because this candidate does not include a valid MusicBrainz Release Group ID.';
@@ -616,6 +617,9 @@ function selectedMatchAutomationReason(
   const missingSuffix = missingTrackCount > 0
     ? ` ${missingTrackCount} album track${missingTrackCount === 1 ? '' : 's'} can be acquired later.`
     : '';
+  if (!identityProven) {
+    return `Review required because the artist identity is unresolved.${missingSuffix}`;
+  }
   return `Auto-import eligible — ${formatPercent(confidenceScore)} confidence.${missingSuffix}`;
 }
 function candidateName(candidate: ReviewCandidate): string {
@@ -1634,6 +1638,7 @@ export function buildCandidateSelectedMatch(
     isPartialImport,
     importableTrackCount || matched,
     totalTracks,
+    identityValidated === true,
   );
 
   return {
@@ -1706,7 +1711,8 @@ export function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
       : preflight
         ? `${matched ?? 0}/${total ?? 0} tracks matched.`
         : 'Track comparison has not finished for this candidate.');
-  const autoFixEligible = isImportable && confidenceScore !== null && confidenceScore >= AUTO_IMPORT_CONFIDENCE_THRESHOLD;
+  // #596: an unresolved identity (null) is never auto-import eligible.
+  const autoFixEligible = suggestion.identity_validated === true && isImportable && confidenceScore !== null && confidenceScore >= AUTO_IMPORT_CONFIDENCE_THRESHOLD;
   return {
     release_group_id: releaseGroupId,
     representative_release_id: representativeReleaseId,
@@ -1740,6 +1746,7 @@ export function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
       isPartialImport,
       importableTrackCount || matched,
       total,
+      suggestion.identity_validated === true,
     ),
     missing_track_count: missingTrackCount,
     match_count: importableTrackCount || matched,

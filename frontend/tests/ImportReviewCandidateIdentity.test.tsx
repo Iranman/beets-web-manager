@@ -5,8 +5,8 @@
  * importable by hand, and is never auto-import eligible.
  */
 import { describe, expect, it } from 'vitest';
-import type { ReviewCandidate } from '../src/api/types';
-import { buildCandidateSelectedMatch } from '../src/features/importReview/ImportReviewPage';
+import type { AiSuggestion, ReviewCandidate } from '../src/api/types';
+import { buildAiSelectedMatch, buildCandidateSelectedMatch } from '../src/features/importReview/ImportReviewPage';
 
 const RG = '11111111-2222-3333-4444-555555555555';
 const REL = '66666666-7777-8888-9999-aaaaaaaaaaaa';
@@ -32,6 +32,7 @@ describe('candidate match keeps an unresolved artist identity (#596)', () => {
       expect(match.identity_validated).toBeNull();
       expect(match.is_importable).toBe(true);
       expect(match.auto_fix_eligible).toBe(false);
+      expect(match.auto_fix_reason).not.toMatch(/Auto-import eligible/);
     }
   });
 
@@ -44,5 +45,26 @@ describe('candidate match keeps an unresolved artist identity (#596)', () => {
     const match = build({ identity_validated: true, mb_releasegroupid: RG });
     expect(match.identity_validated).toBe(true);
     expect(match.auto_fix_eligible).toBe(true);
+  });
+});
+
+describe('AI match with an unresolved identity is not auto eligible (#596)', () => {
+  const suggestion = {
+    album: 'B', albumartist: 'A', mb_albumid: REL, mb_releasegroupid: RG, confidence_score: 0.95,
+    preflight: { ok: true, matches: 1, expected: 1, audio_count: 1 },
+    track_mapping: [{ num: 1, local_title: 'a', mb_title: 'A', mb_trackid: '', status: 'matched', source_path: '/m/01.flac' }],
+  } as unknown as AiSuggestion;
+
+  it('null is importable by hand but not auto eligible', () => {
+    const match = buildAiSelectedMatch({ ...suggestion, identity_validated: null });
+    expect(match.is_importable).toBe(true);
+    expect(match.auto_fix_eligible).toBe(false);
+    expect(match.auto_fix_reason).not.toMatch(/Auto-import eligible/);
+  });
+
+  it('true is auto eligible', () => {
+    const match = buildAiSelectedMatch({ ...suggestion, identity_validated: true });
+    expect(match.auto_fix_eligible).toBe(true);
+    expect(match.auto_fix_reason).toMatch(/Auto-import eligible/);
   });
 });
