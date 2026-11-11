@@ -90,10 +90,12 @@ class ImportReviewButtonContrastTests(unittest.TestCase):
         self.assertIn("outline: `2px solid ${button.focusRing}`", THEME_SOURCE)
 
     def test_import_review_dark_queue_controls_stay_readable(self):
-        self.assertIn("text-zinc-200", IMPORT_REVIEW_SOURCE)
-        self.assertIn("text-zinc-100 transition hover:bg-graphite-700", IMPORT_REVIEW_SOURCE)
+        self.assertIn("text-graphite-200", IMPORT_REVIEW_SOURCE)
+        self.assertIn("text-graphite-100 transition hover:bg-graphite-700", IMPORT_REVIEW_SOURCE)
         self.assertIn("focus-visible:outline-sky-300", IMPORT_REVIEW_SOURCE)
-        self.assertIn("disabled:text-zinc-500", IMPORT_REVIEW_SOURCE)
+        self.assertIn("disabled:text-muted", IMPORT_REVIEW_SOURCE)
+        # #611: light-theme zinc text must not come back.
+        self.assertNotIn("text-zinc-", IMPORT_REVIEW_SOURCE)
     def test_blocked_panel_actions_use_local_contrast_styles(self):
         self.assertIn("blockedPanelActionButtonSx", IMPORT_REVIEW_SOURCE)
         self.assertIn("blockedPanelWarningButtonSx", IMPORT_REVIEW_SOURCE)

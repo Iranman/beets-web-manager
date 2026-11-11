@@ -328,7 +328,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
   return (
     <section aria-labelledby="missing-ids-batch-title" className="rounded border border-graphite-700 bg-graphite-800/40 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id="missing-ids-batch-title" className="text-sm font-semibold text-zinc-100">Fix proven matches in a batch</h2>
+        <h2 id="missing-ids-batch-title" className="text-sm font-semibold text-graphite-100">Fix proven matches in a batch</h2>
         <div className="flex flex-wrap gap-2">
           <Button size="small" variant="outlined" disabled={!rows.length || selected.size >= MISSING_IDS_BATCH_MAX} onClick={selectPage}>
             Select this page (max {MISSING_IDS_BATCH_MAX})
@@ -339,7 +339,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
           </Button>
         </div>
       </div>
-      <p className="mt-1 text-xs text-zinc-400">
+      <p className="mt-1 text-xs text-muted">
         Select up to {MISSING_IDS_BATCH_MAX} rows. The preview proves each one by fingerprint and MusicBrainz evidence and writes nothing.
         Only proven rows can be written, and only after you confirm.
       </p>
@@ -347,7 +347,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
         <fieldset className="mt-2 max-h-56 overflow-auto rounded border border-graphite-700 p-2">
           <legend className="sr-only">Rows on this page</legend>
           {rows.map((row) => (
-            <label key={row.id} className="flex items-center gap-2 py-0.5 text-sm text-zinc-200">
+            <label key={row.id} className="flex items-center gap-2 py-0.5 text-sm text-graphite-200">
               <input
                 type="checkbox"
                 checked={selected.has(row.id)}
@@ -362,7 +362,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
       ) : null}
       <div className="mt-1 text-xs text-muted">{selected.size} of {MISSING_IDS_BATCH_MAX} selected</div>
 
-      <div role="status" aria-live="polite" className="mt-2 text-xs text-zinc-300">{message}</div>
+      <div role="status" aria-live="polite" className="mt-2 text-xs text-graphite-300">{message}</div>
       {error ? <Alert className="mt-2" severity="error">{error}</Alert> : null}
 
       {job ? (
@@ -373,14 +373,14 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
             variant={progress ? 'determinate' : 'indeterminate'}
             value={progress ? (100 * progress.done) / progress.total : undefined}
           />
-          <span className="text-xs text-zinc-400">{progress ? `${progress.done}/${progress.total}` : 'Starting…'}</span>
+          <span className="text-xs text-muted">{progress ? `${progress.done}/${progress.total}` : 'Starting…'}</span>
           <Button size="small" variant="outlined" color="warning" onClick={() => void cancelJob()}>Cancel</Button>
         </div>
       ) : null}
 
       {preview ? (
         <div className="mt-3">
-          <div className="text-xs text-zinc-300">
+          <div className="text-xs text-graphite-300">
             {preview.counts.proven} proven · {preview.counts.needs_review} need review
           </div>
           <PreviewRows rows={preview.rows} label={label} />
@@ -391,7 +391,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
               Apply {plural(proven.length, 'proven row')}…
             </Button>
           ) : (
-            <div className="mt-2 text-xs text-zinc-400">No row was proven, so there is nothing to apply. Fix these rows one at a time below.</div>
+            <div className="mt-2 text-xs text-muted">No row was proven, so there is nothing to apply. Fix these rows one at a time below.</div>
           )}
         </div>
       ) : null}
@@ -402,10 +402,10 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
         <DialogBackdrop className="fixed inset-0 bg-graphite-950/70" />
         <div className="fixed inset-0 flex items-center justify-center p-4">
           <DialogPanel className="w-full max-w-lg rounded-md border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
-            <DialogTitle className="text-base font-semibold text-zinc-100">
+            <DialogTitle className="text-base font-semibold text-graphite-100">
               Write MusicBrainz IDs to {plural(provenKinds.albums, 'album')} and {plural(provenKinds.tracks, 'track')}?
             </DialogTitle>
-            <p className="mt-2 text-sm leading-6 text-zinc-400">
+            <p className="mt-2 text-sm leading-6 text-muted">
               This changes your library. An album with no Release ID gets its Release Group and Release ID, then its tags
               are written and its files may be renamed or moved by your Beets path settings. An album that already has a
               Release ID keeps it and gets only its Release Group, written to its tags; its files are not moved. Each track
@@ -433,13 +433,13 @@ function PreviewRows({ rows, label }: { rows: MissingMbPreviewRow[]; label: (id:
         <li key={row.row_id} className="rounded border border-graphite-700 px-2 py-1 text-sm">
           <div className="flex flex-wrap items-center gap-2">
             <Chip size="small" color={row.proven ? 'success' : 'warning'} variant="outlined" label={previewChipLabel(row)} />
-            <span className="truncate text-zinc-200">{label(row.row_id)}</span>
+            <span className="truncate text-graphite-200">{label(row.row_id)}</span>
           </div>
-          <div className="text-xs text-zinc-400">{row.message}</div>
+          <div className="text-xs text-muted">{row.message}</div>
           {row.proven ? (
-            <div className="font-mono text-[0.7rem] text-zinc-300">Will write: {writeText(row.write)}</div>
+            <div className="font-mono text-[0.7rem] text-graphite-300">Will write: {writeText(row.write)}</div>
           ) : row.reasons.length ? (
-            <div className="text-xs text-zinc-400">Why: {row.reasons.map(reasonLabel).join('; ')}</div>
+            <div className="text-xs text-muted">Why: {row.reasons.map(reasonLabel).join('; ')}</div>
           ) : null}
           {row.evidence?.release_group_held_by?.length ? (
             <div className="text-xs text-amber-300">
@@ -460,7 +460,7 @@ function ApplyRows({ result, label }: { result: MissingMbApplyResult; label: (id
   const recovery = result.status === 'Recovery Required';
   return (
     <div className="mt-3">
-      <div className="text-xs font-semibold text-zinc-200">Apply result: {result.status}</div>
+      <div className="text-xs font-semibold text-graphite-200">Apply result: {result.status}</div>
       {recovery ? (
         <Alert className="mt-2" severity="error">
           A write could not be verified or rolled back, so the batch stopped. Check the affected album or track before retrying.{' '}
@@ -472,10 +472,10 @@ function ApplyRows({ result, label }: { result: MissingMbApplyResult; label: (id
           <li key={row.row_id} className="rounded border border-graphite-700 px-2 py-1 text-sm">
             <div className="flex flex-wrap items-center gap-2">
               <Chip size="small" color={applyStatusColor(row.status)} variant="outlined" label={APPLY_STATUS_LABELS[row.status] || row.status} />
-              <span className="truncate text-zinc-200">{label(row.row_id)}</span>
+              <span className="truncate text-graphite-200">{label(row.row_id)}</span>
             </div>
-            <div className="text-xs text-zinc-400">{row.message}</div>
-            {row.reasons?.length ? <div className="text-xs text-zinc-400">Why: {row.reasons.map(reasonLabel).join('; ')}</div> : null}
+            <div className="text-xs text-muted">{row.message}</div>
+            {row.reasons?.length ? <div className="text-xs text-muted">Why: {row.reasons.map(reasonLabel).join('; ')}</div> : null}
             {(row.transaction_ids ?? []).filter(Boolean).map((id) => (
               <Link key={id} className="mr-2 text-xs text-sky-400 underline" to={`/changes?tx=${encodeURIComponent(id)}`}>
                 Transaction {id}
