@@ -220,7 +220,7 @@ def _reconcile_pending_review_enqueue_item(item: Dict[str, Any]) -> Tuple[Option
             suggestion["reason"] = item["status_note"]
             return item, True
         item["status"] = "auto_enqueue_failed"
-        item["status_note"] = "Import enqueue did not create an active job; retry enqueue."
+        item["status_note"] = "Import enqueue did not create an active job; revalidate this Review item to queue it again."
         suggestion = item.get("suggestion") if isinstance(item.get("suggestion"), dict) else {}
         item["suggestion"] = suggestion
         suggestion["reason"] = item["status_note"]

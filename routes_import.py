@@ -972,6 +972,11 @@ def import_review_auto_enqueue():
         return jsonify({"ok": False, "error": "Could not queue this import.", "eligibility": eligibility}), 500
 
 
+# #623: auto-enqueue refuses auto_enqueue_failed items until revalidated.
+_REVALIDATE_TO_REQUEUE = "revalidate this Review item to queue it again."
+_LOST_ENQUEUE_NOTE = f"Import enqueue acknowledgement was lost and no active job was found; {_REVALIDATE_TO_REQUEUE}"
+
+
 @app.post("/api/import-review/auto-enqueue/reconcile")
 def import_review_auto_enqueue_reconcile():
     # #617: bookkeeping keys off the stored pending Review item, never the
@@ -979,9 +984,13 @@ def import_review_auto_enqueue_reconcile():
     item = _import_review_stored_item_for_path((request.get_json(silent=True) or {}).get("path"))
     if item is None:
         return jsonify({"ok": False, "queued": False, "error": "No pending Review item for this folder."}), 404
+    # #623: same stored-path trust check as auto-enqueue.
+    if _trusted_stored_review_path(_review_path_text(item.get("path"))) is None:
+        return jsonify({"ok": False, "queued": False, "error": _UNTRUSTED_STORED_REVIEW_PATH}), 400
     payload = _import_review_payload_from_pending_item(item)
     eligibility = evaluate_import_eligibility(payload)
-    key = _s(eligibility.get("idempotency_key") or item.get("auto_import_idempotency_key")).strip()
+    stored_key = _s(item.get("auto_import_idempotency_key")).strip()
+    key = _s(eligibility.get("idempotency_key") or stored_key).strip()
     job = _import_review_auto_job_for_submission(payload, key)
     folder_path = _review_path_text(payload.get("path"))
     state = _import_review_auto_state().get(key) if key else {}
@@ -1052,18 +1061,28 @@ def import_review_auto_enqueue_reconcile():
             "note": note,
             "eligibility": eligibility,
         })
+    # #623: nothing was ever enqueued for this item (no stored key, no
+    # auto-import state), so there is nothing to reconcile; leave its status.
+    if not (stored_key or _s(item.get("auto_import_job_id")).strip() or state):
+        return jsonify({
+            "ok": True,
+            "queued": False,
+            "reconciled": False,
+            "note": "No auto-import was recorded for this Review item; status unchanged.",
+            "eligibility": eligibility,
+        })
     if state_job_id and not state_job:
         _import_review_auto_update(
             key,
             status="stale_job_missing",
             job_id="",
             stale_job_id=state_job_id,
-            error="Previous auto-import job is no longer in the job store; retry enqueue.",
+            error=f"Previous auto-import job is no longer in the job store; {_REVALIDATE_TO_REQUEUE}",
         )
     _mark_pending_review_status(
         folder_path,
         "auto_enqueue_failed",
-        "Import enqueue acknowledgement was lost and no active job was found; retry enqueue.",
+        _LOST_ENQUEUE_NOTE,
         idempotency_key=key,
     )
     return jsonify({
@@ -1071,7 +1090,7 @@ def import_review_auto_enqueue_reconcile():
         "queued": False,
         "reconciled": True,
         "retryable": True,
-        "note": "Import enqueue acknowledgement was lost and no active job was found; retry enqueue.",
+        "note": _LOST_ENQUEUE_NOTE,
         "eligibility": eligibility,
     })
 
