@@ -93,5 +93,30 @@ class MatchUsesResolvedReleaseTests(unittest.TestCase):
         plan.assert_not_called()
 
 
+class ImportSearchesWholeGroupTests(unittest.TestCase):
+    """QA on #598: the import path must not force-import the group's first
+    Official release (RG_REL here, which does not fit) when another release
+    in the group (REL_X) fits the folder."""
+
+    def test_override_import_of_bare_group_picks_the_fitting_release(self):
+        import backend.library_service as ls
+        rel_x = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        log = []
+        with mock.patch.object(helpers_mb.provider_boundary, "opened", _fake_opened([])), \
+                mock.patch.object(ls, "_folder_import_track_count", return_value=10), \
+                mock.patch.object(ls, "_mb_release_has_tracks", side_effect=lambda r: r in (RG_REL, rel_x)), \
+                mock.patch.object(ls, "_resolve_release_group_to_release", return_value=RG_REL), \
+                mock.patch.object(ls, "_mb_release_group_candidates",
+                                  return_value=[{"mb_albumid": RG_REL, "track_count": 10},
+                                                {"mb_albumid": rel_x, "track_count": 10}]), \
+                mock.patch.object(ls, "_folder_release_preflight",
+                                  side_effect=lambda _f, rel, **_k: {"ok": rel == rel_x, "matches": 10,
+                                                                      "expected": 10, "audio_count": 10}):
+            got = ls._resolve_album_release_for_import(
+                RG, "Artist", "Album", "", 10, log, source_folder="/downloads/Artist - Album",
+                allow_provided_release_override=True)
+        self.assertEqual(got, rel_x)
+
+
 if __name__ == "__main__":
     unittest.main()
