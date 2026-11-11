@@ -85,13 +85,13 @@ describe('Candidate carousel keeps the artist identity rejection (#521)', () => 
       candidate_identity_error: 'Representative Release ID rejected: it does not belong to selected Release Group.',
       mb_releasegroupid: RG,
     });
-    expect(match.identity_validated).toBe(true);
+    expect(match.identity_validated).toBeNull(); // not blocked; artist still unproven (#596)
     expect(applyBlockReason(libraryAlbum, RG, match)).toBe('');
   });
 
   it('a stored rejection with no reason does not block the whole Release Group (#580)', async () => {
     const match = await lastSelectedMatch({ identity_validated: false, mb_releasegroupid: RG });
-    expect(match.identity_validated).toBe(true);
+    expect(match.identity_validated).toBeNull(); // not blocked; artist still unproven (#596)
   });
 
   it('a rejection of another Release Group does not block this candidate', async () => {
@@ -100,6 +100,6 @@ describe('Candidate carousel keeps the artist identity rejection (#521)', () => 
       candidate_identity_error: ARTIST_ERROR,
       mb_releasegroupid: 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff',
     });
-    expect(match.identity_validated).toBe(true);
+    expect(match.identity_validated).toBeNull(); // not blocked; artist still unproven (#596)
   });
 });

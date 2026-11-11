@@ -1554,7 +1554,7 @@ interface TrackData {
   preflight?: TrackDataPreflight | null;
 }
 
-function buildCandidateSelectedMatch(
+export function buildCandidateSelectedMatch(
   candidate: ReviewCandidate,
   trackData: TrackData | null,
   status: SelectedMatch['preflight_status'] = trackData ? 'passed' : 'not_run',
@@ -1565,7 +1565,17 @@ function buildCandidateSelectedMatch(
   const representativeReleaseId = (trackData?.representative_release_id || candidate.mb_albumid || '').trim();
   // The track comparison does not run the artist gate; keep the suggestion's rejection.
   const rejectedReason = identityRejectionFor(releaseGroupId, representativeReleaseId, identityRejection);
-  const identityValidated = trackData?.identity_validated !== false && rejectedReason === null;
+  // #596: the comparison proves Release Group membership, not the artist. Only
+  // the suggestion's own proven verdict for this same candidate makes it true;
+  // otherwise it stays unresolved (null): importable by hand, never auto.
+  const sameAsSuggestion = sameMbid(releaseGroupId, identityRejection?.mb_releasegroupid)
+    || sameMbid(representativeReleaseId, identityRejection?.representative_mb_albumid || identityRejection?.mb_albumid);
+  const identityValidated: boolean | null = trackData?.identity_validated === false || rejectedReason !== null
+    ? false
+    : trackData?.identity_validated === true && identityRejection?.identity_validated === true && sameAsSuggestion
+      ? true
+      : null;
+  const identityOk = identityValidated !== false;
   const candidateIdentityError = (trackData?.candidate_identity_error || '').trim() || rejectedReason || '';
   const totalTracks = trackData?.mb_track_count ?? (typeof candidate.tracks === 'number' ? candidate.tracks : null);
   const localCount = trackData?.local_track_count ?? null;
@@ -1579,12 +1589,12 @@ function buildCandidateSelectedMatch(
   );
   const backendPreflightOk = Boolean(trackData?.preflight?.ok);
   const preflightStatus: SelectedMatch['preflight_status'] = trackData
-    ? identityValidated && (backendPreflightOk || importableTrackCount > 0) ? 'passed' : 'failed'
+    ? identityOk && (backendPreflightOk || importableTrackCount > 0) ? 'passed' : 'failed'
     : status;
   const missingFromRelease = totalTracks !== null ? Math.max(0, totalTracks - importableTrackCount) : 0;
   const extraCount = trackData?.extra_count ?? mapping.filter((row) => row.status === 'extra').length;
   const defaultReason = trackData
-    ? !identityValidated
+    ? !identityOk
       ? candidateIdentityError || 'Representative Release ID rejected: it does not belong to selected Release Group.'
       : isPartialImport
         ? `Partial import ready: ${importableTrackCount} verified track${importableTrackCount === 1 ? '' : 's'} will import.${extraCount > 0 ? ` ${extraCount} unmatched file${extraCount === 1 ? '' : 's'} will stay in review.` : ''}${missingFromRelease > 0 ? ` ${missingFromRelease} album track${missingFromRelease === 1 ? '' : 's'} can be acquired later.` : ''}`
@@ -1595,7 +1605,7 @@ function buildCandidateSelectedMatch(
   const isReleaseGroupUsable = isMusicBrainzUuid(releaseGroupId);
   const hasRepresentativeRelease = isMusicBrainzUuid(representativeReleaseId);
   const isImportable = (
-    identityValidated &&
+    identityOk &&
     isReleaseGroupUsable &&
     hasRepresentativeRelease &&
     importableTrackCount > 0 &&
@@ -1603,12 +1613,12 @@ function buildCandidateSelectedMatch(
   );
   const confidenceScore = normalizedScoreValue(scoreValue(candidate));
   let confidenceLevel = confidenceLevelForScore(confidenceScore);
-  if (!identityValidated || !isReleaseGroupUsable) {
+  if (!identityOk || !isReleaseGroupUsable) {
     confidenceLevel = 'blocked';
   } else if (preflightStatus === 'failed') {
     confidenceLevel = 'not_importable';
   }
-  const autoFixEligible = isImportable && confidenceScore !== null && confidenceScore >= AUTO_IMPORT_CONFIDENCE_THRESHOLD;
+  const autoFixEligible = identityValidated === true && isImportable && confidenceScore !== null && confidenceScore >= AUTO_IMPORT_CONFIDENCE_THRESHOLD;
   const autoFixRequiresReview = false;
   const autoFixReason = selectedMatchAutomationReason(
     confidenceLevel,
@@ -2354,7 +2364,7 @@ export function CandidateCarousel({
                   ? `${confidenceLabel(visibleConfidence)} (${formatPercent(normalizedScore)})`
                   : confidenceLabel(visibleConfidence)}
               />
-              {visibleMatch.auto_fix_eligible ? (
+              {visibleMatch.auto_fix_eligible && visibleMatch.identity_validated === true ? (
                 <Chip
                   size="small"
                   color="success"
