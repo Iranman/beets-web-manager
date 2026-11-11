@@ -331,7 +331,7 @@ Beets Web Manager builds and publishes exactly one image, `ghcr.io/iranman/beets
 
 ## Music Format Preferences and rejected downloads
 
-Settings > Music Format Preferences decides which audio an import or download may bring in. The preferences are stored in `MUSIC_FORMAT_PREFS_FILE` (default `/config/music_format_preferences.json`). The defaults are:
+Settings > Music Format Preferences decides which audio an import or download may bring in. The preferences are stored in `MUSIC_FORMAT_PREFS_FILE` (default `/config/music_format_preferences.json`). Saving through `POST /api/settings/music-format` requires the `revision` from the last `GET` as `expected_revision`: a stale revision gets 409 and a missing one 428, so a second tab cannot overwrite a newer save. The defaults are:
 
 - **Accepted channel layouts:** stereo, 2.1 and Dolby Atmos. Mono, 5.1 and 7.1 are rejected, and so is any other channel count unless you set a custom maximum.
 - **Accepted formats:** FLAC, MP3, AAC, E-AC-3 and TrueHD. Every other format is rejected, including WAV, ALAC, Opus and Ogg Vorbis.

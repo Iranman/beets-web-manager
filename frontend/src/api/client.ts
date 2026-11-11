@@ -1172,8 +1172,8 @@ export function getMusicFormatPreferences(): Promise<MusicFormatPreferencesRespo
   return apiJson<MusicFormatPreferencesResponse>('/api/settings/music-format');
 }
 
-export function saveMusicFormatPreferences(preferences: MusicFormatPreferences): Promise<MusicFormatPreferencesResponse> {
-  return apiJson<MusicFormatPreferencesResponse>('/api/settings/music-format', jsonRequest('POST', { preferences }));
+export function saveMusicFormatPreferences(preferences: MusicFormatPreferences, expectedRevision: string): Promise<MusicFormatPreferencesResponse> {
+  return apiJson<MusicFormatPreferencesResponse>('/api/settings/music-format', jsonRequest('POST', { preferences, expected_revision: expectedRevision }));
 }
 
 export function getMusicFormatReplacementStatuses(): Promise<MusicFormatReplacementStatusResponse> {

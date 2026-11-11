@@ -3222,7 +3222,7 @@ export default function Playlists() {
                       tabIndex={0}
                       aria-expanded={expanded}
                       aria-label={`${expanded ? 'Collapse' : 'Expand'} details for ${playlist.name}`}
-                      className="min-w-0 flex-1 cursor-pointer outline-none"
+                      className="min-w-0 flex-1 cursor-pointer"
                       onClick={() => toggleSavedPlaylistDetails(playlist.name)}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {

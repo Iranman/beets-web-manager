@@ -2315,7 +2315,7 @@ function ConsoleHistory({
       {/* Filter bar */}
       <div className="flex shrink-0 items-center gap-2 border-b border-graphite-800/70 px-2.5 py-1.5">
         <input
-          className="h-6 min-w-0 flex-1 bg-transparent text-xs text-zinc-300 outline-none placeholder:text-muted"
+          className="h-6 min-w-0 flex-1 bg-transparent text-xs text-zinc-300 placeholder:text-muted"
           placeholder="Search jobs…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -2414,7 +2414,7 @@ function JobStatusBar({
         <Switch
           aria-label="Auto-refresh"
           checked={autoRefresh}
-          className={cx('relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none', autoRefresh ? 'bg-sky-500' : 'bg-graphite-700')}
+          className={cx('relative inline-flex h-5 w-9 items-center rounded-full transition-colors', autoRefresh ? 'bg-sky-500' : 'bg-graphite-700')}
           onChange={onAutoRefresh}
         >
           <span className={cx('inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform', autoRefresh ? 'translate-x-4' : 'translate-x-0.5')} />
