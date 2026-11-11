@@ -611,7 +611,7 @@ export default function Submissions() {
                 </button>
               );
             })}
-            {!visibleItems.length ? <div className="rounded border border-graphite-800 bg-graphite-950/35 p-3 text-sm text-zinc-400">No items match this filter.</div> : null}
+            {!visibleItems.length && !loading && !error ? <div className="rounded border border-graphite-800 bg-graphite-950/35 p-3 text-sm text-zinc-400">No items match this filter.</div> : null}
           </div>
         </aside>
 

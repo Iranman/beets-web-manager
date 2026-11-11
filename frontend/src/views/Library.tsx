@@ -1185,9 +1185,11 @@ export default function Library() {
     }
   }, []);
 
+  // Reload when the Shell's engine probe sees the engine come back (#618).
+  const engineOffline = useEngineOffline();
   useEffect(() => {
-    void loadLibrary();
-  }, [loadLibrary]);
+    if (!engineOffline) void loadLibrary();
+  }, [loadLibrary, engineOffline]);
 
   // The page paints from whatever /api/library returns first, then polls in the
   // background (bounded, backing off) while that payload is not yet fresh:
@@ -1222,11 +1224,15 @@ export default function Library() {
   }, reconcilePollDelay);
 
   useEffect(() => {
+    if (engineOffline) return undefined;
     let cancelled = false;
     async function loadArtRepair() {
       try {
         const report = await getLibraryArtRepairReport();
-        if (!cancelled) setArtRepairReport(report);
+        if (!cancelled) {
+          setArtRepairReport(report);
+          setArtRepairError('');
+        }
       } catch (err) {
         if (!cancelled) setArtRepairError(errorMessage(err));
       }
@@ -1235,7 +1241,7 @@ export default function Library() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [engineOffline]);
 
   useEffect(() => {
     const needsTrackRows = query.trim().length >= 2 && (scope === 'all' || scope === 'tracks');
@@ -1423,7 +1429,7 @@ export default function Library() {
     navigate(path);
   }, [navigate]);
   const loadFailed = !data && Boolean(error);
-  const shownError = panelError(error, useEngineOffline());
+  const shownError = panelError(error, engineOffline);
 
   return (
     <div className="space-y-4">
