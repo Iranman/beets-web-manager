@@ -228,9 +228,9 @@ const typeLabels: Record<ReviewBucket, string> = {
 };
 
 const typeTones: Record<ReviewBucket, string> = {
-  pending_ai: 'border-amber-200 bg-amber-50 text-amber-800',
-  skipped: 'border-violet-200 bg-violet-50 text-violet-800',
-  library_no_mb: 'border-cyan-200 bg-cyan-50 text-cyan-800',
+  pending_ai: 'border-amber-500/30 bg-amber-950/40 text-amber-200',
+  skipped: 'border-graphite-700 bg-graphite-900 text-graphite-100',
+  library_no_mb: 'border-cyan-500/30 bg-cyan-950/40 text-cyan-200',
 };
 
 const matchLabels: Record<MatchBucket, string> = {
@@ -243,12 +243,12 @@ const matchLabels: Record<MatchBucket, string> = {
 };
 
 const matchTones: Record<MatchBucket, string> = {
-  ready: 'border-emerald-200 bg-emerald-50 text-emerald-800',
-  blocked: 'border-amber-300 bg-amber-50 text-amber-900',
-  audio_mismatch: 'border-rose-300 bg-rose-50 text-rose-900',
-  failed: 'border-rose-200 bg-rose-50 text-rose-800',
-  no_candidate: 'border-graphite-300 bg-graphite-50 text-zinc-700',
-  needs_id: 'border-cyan-200 bg-cyan-50 text-cyan-800',
+  ready: 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200',
+  blocked: 'border-amber-500/40 bg-amber-950/40 text-amber-200',
+  audio_mismatch: 'border-rose-500/40 bg-rose-950/40 text-rose-200',
+  failed: 'border-rose-500/30 bg-rose-950/40 text-rose-200',
+  no_candidate: 'border-graphite-700 bg-graphite-850 text-graphite-200',
+  needs_id: 'border-cyan-500/30 bg-cyan-950/40 text-cyan-200',
 };
 const AUTO_IMPORT_CONFIDENCE_THRESHOLD = 0.60;
 
@@ -516,19 +516,19 @@ function normalizedScoreValue(value: number | string | undefined): number | null
 
 function scoreClass(value: number | string | undefined): string {
   const score = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(score)) return 'text-zinc-500';
-  if (score >= 80) return 'text-emerald-700';
-  if (score >= 60) return 'text-amber-700';
-  if (score >= 0.8) return 'text-emerald-700';
-  if (score >= 0.6) return 'text-amber-700';
-  return 'text-zinc-500';
+  if (!Number.isFinite(score)) return 'text-muted';
+  if (score >= 80) return 'text-emerald-300';
+  if (score >= 60) return 'text-amber-300';
+  if (score >= 0.8) return 'text-emerald-300';
+  if (score >= 0.6) return 'text-amber-300';
+  return 'text-muted';
 }
 
 function confidenceClass(confidence?: string): string {
-  if (confidence === 'high') return 'text-emerald-700';
-  if (confidence === 'medium') return 'text-amber-700';
-  if (confidence === 'low') return 'text-rose-700';
-  return 'text-zinc-600';
+  if (confidence === 'high') return 'text-emerald-300';
+  if (confidence === 'medium') return 'text-amber-300';
+  if (confidence === 'low') return 'text-rose-300';
+  return 'text-muted';
 }
 
 function confidenceLevelForScore(score: number | null): MatchConfidenceLevel {
@@ -553,10 +553,10 @@ function confidenceLabel(level: MatchConfidenceLevel): string {
 }
 
 function confidenceClassForLevel(level: MatchConfidenceLevel): string {
-  if (level === 'high') return 'text-emerald-700';
-  if (level === 'medium') return 'text-amber-700';
-  if (level === 'blocked' || level === 'not_importable') return 'text-rose-700';
-  return 'text-zinc-600';
+  if (level === 'high') return 'text-emerald-300';
+  if (level === 'medium') return 'text-amber-300';
+  if (level === 'blocked' || level === 'not_importable') return 'text-rose-300';
+  return 'text-muted';
 }
 
 function confidenceChipColor(level: MatchConfidenceLevel): 'success' | 'warning' | 'error' | 'default' {
@@ -876,11 +876,11 @@ function normalizedMetricValue(value: unknown): { value: string; toneClass: stri
   if (score !== null && score >= 0 && score <= 1) {
     return { value: formatPercent(score), toneClass: scoreClass(score) };
   }
-  return { value: valueLabel(value), toneClass: 'text-zinc-500' };
+  return { value: valueLabel(value), toneClass: 'text-muted' };
 }
 
 function rawMetricValue(value: unknown): { value: string; toneClass: string } {
-  return { value: valueLabel(value), toneClass: 'text-zinc-500' };
+  return { value: valueLabel(value), toneClass: 'text-muted' };
 }
 
 function recordingCandidateMetric(candidate: ReviewRecordingCandidate): RecordingCandidateMetric {
@@ -935,13 +935,13 @@ function DetailRow({
   const text = valueLabel(value);
   return (
     <div className="min-w-0">
-      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted">{label}</div>
       {href && text !== '-' ? (
-        <a className={`${mono ? 'font-mono' : ''} break-all text-xs text-sky-700 underline decoration-sky-300`} href={href} target="_blank" rel="noreferrer">
+        <a className={`${mono ? 'font-mono' : ''} break-all text-xs text-sky-300 underline decoration-sky-300`} href={href} target="_blank" rel="noreferrer">
           {text}
         </a>
       ) : (
-        <div className={`${mono ? 'font-mono' : ''} break-words text-xs text-zinc-800`}>{text}</div>
+        <div className={`${mono ? 'font-mono' : ''} break-words text-xs text-graphite-100`}>{text}</div>
       )}
     </div>
   );
@@ -956,17 +956,17 @@ function MatchSummaryRow({ label, field }: { label: string; field?: { status?: s
     ? `${valueLabel(field.local)} vs ${valueLabel(field.suggested)}`
     : delta;
   const tone = status === 'yes'
-    ? 'text-emerald-700'
+    ? 'text-emerald-300'
     : status === 'conflict' || status === 'no'
-      ? 'text-rose-700'
+      ? 'text-rose-300'
       : status === 'fuzzy' || status === 'tolerance'
-        ? 'text-amber-700'
-        : 'text-zinc-500';
+        ? 'text-amber-300'
+        : 'text-muted';
   return (
-    <div className="flex items-start justify-between gap-3 border-b border-graphite-100 py-1.5 last:border-b-0">
+    <div className="flex items-start justify-between gap-3 border-b border-graphite-800 py-1.5 last:border-b-0">
       <div className="min-w-0">
-        <div className="text-xs font-medium text-zinc-700">{label}</div>
-        {detail ? <div className="truncate text-[0.72rem] text-zinc-500">{detail}</div> : null}
+        <div className="text-xs font-medium text-graphite-200">{label}</div>
+        {detail ? <div className="truncate text-[0.72rem] text-muted">{detail}</div> : null}
       </div>
       <div className={`shrink-0 text-xs font-semibold ${tone}`}>{status}{score}</div>
     </div>
@@ -999,20 +999,20 @@ function RecordingCandidateRow({
   const label = recordingCandidateRowLabel({ isBackendSelected, matchesEnteredId, isFirstBackendCandidate });
   const canUseRecordingId = isMusicBrainzUuid(candidate.mb_trackid);
   return (
-    <div className={`rounded border px-2 py-2 text-xs ${matchesEnteredId ? 'border-sky-300 bg-sky-50' : 'border-graphite-200 bg-white'}`}>
+    <div className={`rounded border px-2 py-2 text-xs ${matchesEnteredId ? 'border-sky-500/40 bg-sky-950/40' : 'border-graphite-700 bg-graphite-900'}`}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-semibold text-zinc-900">{label}</span>
+        <span className="font-semibold text-graphite-50">{label}</span>
         {matchesEnteredId ? <Chip size="small" color="info" label="Entered ID" /> : null}
         <span className={metric.toneClass}>{metric.label}: {metric.value}</span>
-        {candidate.match_method || candidate.source ? <span className="text-zinc-500">{candidate.match_method || candidate.source}</span> : null}
-        {candidate.safety_result ? <span className="font-medium text-zinc-700">{candidate.safety_result}</span> : null}
+        {candidate.match_method || candidate.source ? <span className="text-muted">{candidate.match_method || candidate.source}</span> : null}
+        {candidate.safety_result ? <span className="font-medium text-graphite-200">{candidate.safety_result}</span> : null}
       </div>
-      <div className="mt-1 min-w-0 font-medium text-zinc-800">
+      <div className="mt-1 min-w-0 font-medium text-graphite-100">
         {candidate.recording_artist || candidate.artist || '(unknown artist)'} - {candidate.recording_title || candidate.title || '(unknown title)'}
       </div>
-      <div className="mt-0.5 min-w-0 text-zinc-600">{releaseLabel || 'No linked release context'}</div>
-      {candidate.reason ? <div className="mt-1 text-zinc-600">{candidate.reason}</div> : null}
-      {candidate.conflicts?.length ? <div className="mt-1 font-medium text-amber-800">Conflicts: {candidate.conflicts.join(', ')}</div> : null}
+      <div className="mt-0.5 min-w-0 text-muted">{releaseLabel || 'No linked release context'}</div>
+      {candidate.reason ? <div className="mt-1 text-muted">{candidate.reason}</div> : null}
+      {candidate.conflicts?.length ? <div className="mt-1 font-medium text-amber-200">Conflicts: {candidate.conflicts.join(', ')}</div> : null}
       <div className="mt-2 flex flex-wrap gap-2">
         <Button size="small" variant={matchesEnteredId ? 'contained' : 'outlined'} onClick={() => onUseCandidate(candidate.mb_trackid || '')} disabled={!canUseRecordingId}>
           Use Recording ID
@@ -1055,9 +1055,9 @@ function RecordingIdEvidencePanel({
   const linkedReleases = displayCandidate?.linked_releases ?? [];
 
   return (
-    <div className="mt-3 rounded border border-cyan-200 bg-cyan-50 p-3 text-xs text-zinc-700">
+    <div className="mt-3 rounded border border-cyan-500/30 bg-cyan-950/40 p-3 text-xs text-graphite-200">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-semibold text-zinc-900">Recording ID review</span>
+        <span className="font-semibold text-graphite-50">Recording ID review</span>
         <Chip size="small" color="info" label={`Missing ID type: ${missingIdType(item)}`} />
         {displayReason ? <Chip size="small" variant="outlined" label={displayReason} /> : null}
         {displayCandidate?.safety_result ? <Chip size="small" variant="outlined" label={displayCandidate.safety_result} /> : null}
@@ -1065,8 +1065,8 @@ function RecordingIdEvidencePanel({
       </div>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
-        <div className="rounded border border-white/70 bg-white/80 p-3">
-          <div className="font-semibold text-zinc-900">Local file evidence</div>
+        <div className="rounded border border-graphite-700 bg-graphite-950/40 p-3">
+          <div className="font-semibold text-graphite-50">Local file evidence</div>
           <div className="mt-2 grid grid-cols-2 gap-2">
             <DetailRow label="Filename" value={local.filename} />
             <DetailRow label="Fingerprint status" value={local.fingerprint_status} />
@@ -1081,8 +1081,8 @@ function RecordingIdEvidencePanel({
           </div>
         </div>
 
-        <div className="rounded border border-white/70 bg-white/80 p-3">
-          <div className="font-semibold text-zinc-900">Suggested MusicBrainz / AcoustID match</div>
+        <div className="rounded border border-graphite-700 bg-graphite-950/40 p-3">
+          <div className="font-semibold text-graphite-50">Suggested MusicBrainz / AcoustID match</div>
           {displayCandidate ? (
             <div className="mt-2 grid grid-cols-2 gap-2">
               <DetailRow label="Displayed candidate" value={displayReason} />
@@ -1117,21 +1117,21 @@ function RecordingIdEvidencePanel({
               <DetailRow label="Eligibility" value={displayCandidate.decision?.eligibility_reason} />
             </div>
           ) : (
-            <div className="mt-2 text-zinc-700">Use Find Match or Enter MusicBrainz ID to load backend recording evidence.</div>
+            <div className="mt-2 text-graphite-200">Use Find Match or Enter MusicBrainz ID to load backend recording evidence.</div>
           )}
-          {displayCandidate?.reason ? <div className="mt-2 text-zinc-700">{displayCandidate.reason}</div> : null}
+          {displayCandidate?.reason ? <div className="mt-2 text-graphite-200">{displayCandidate.reason}</div> : null}
           {displayCandidate?.decision?.hard_conflicts?.length ? (
-            <div className="mt-2 font-medium text-rose-800">Hard conflicts: {displayCandidate.decision.hard_conflicts.map(humanizeCode).join(', ')}</div>
+            <div className="mt-2 font-medium text-rose-200">Hard conflicts: {displayCandidate.decision.hard_conflicts.map(humanizeCode).join(', ')}</div>
           ) : null}
-          {displayCandidate?.conflicts?.length ? <div className="mt-2 font-medium text-amber-800">Backend conflicts: {displayCandidate.conflicts.join(', ')}</div> : null}
+          {displayCandidate?.conflicts?.length ? <div className="mt-2 font-medium text-amber-200">Backend conflicts: {displayCandidate.conflicts.join(', ')}</div> : null}
           {displayCandidate?.decision?.review_reasons?.length ? (
-            <div className="mt-2 text-amber-800">Review reasons: {displayCandidate.decision.review_reasons.map(humanizeCode).join(', ')}</div>
+            <div className="mt-2 text-amber-200">Review reasons: {displayCandidate.decision.review_reasons.map(humanizeCode).join(', ')}</div>
           ) : null}
           {displayCandidate?.decision?.warnings?.length ? (
-            <div className="mt-2 text-zinc-700">Warnings: {displayCandidate.decision.warnings.map(humanizeCode).join(', ')}</div>
+            <div className="mt-2 text-graphite-200">Warnings: {displayCandidate.decision.warnings.map(humanizeCode).join(', ')}</div>
           ) : null}
           {decision?.year_match?.status === 'conflict' ? (
-            <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-900">
+            <div className="mt-2 rounded border border-amber-500/30 bg-amber-950/40 px-2 py-1.5 text-amber-200">
               <div className="font-semibold">Year conflict</div>
               <div>Local {localYear || 'unknown'} vs Suggested {suggestedYear || 'unknown'}</div>
             </div>
@@ -1140,8 +1140,8 @@ function RecordingIdEvidencePanel({
       </div>
 
       {decision ? (
-        <div className="mt-3 rounded border border-white/70 bg-white/80 p-3">
-          <div className="font-semibold text-zinc-900">Backend match evidence</div>
+        <div className="mt-3 rounded border border-graphite-700 bg-graphite-950/40 p-3">
+          <div className="font-semibold text-graphite-50">Backend match evidence</div>
           <div className="mt-1 divide-y divide-graphite-100">
             <MatchSummaryRow label="Title" field={decision.title_match} />
             <MatchSummaryRow label="Artist" field={decision.artist_match} />
@@ -1154,17 +1154,17 @@ function RecordingIdEvidencePanel({
       ) : null}
 
       {linkedReleases.length > 1 ? (
-        <div className="mt-3 rounded border border-white/70 bg-white/80 p-3">
-          <div className="font-semibold text-zinc-900">Same recording appears on {linkedReleases.length} releases</div>
-          <div className="mt-1 text-zinc-600">
+        <div className="mt-3 rounded border border-graphite-700 bg-graphite-950/40 p-3">
+          <div className="font-semibold text-graphite-50">Same recording appears on {linkedReleases.length} releases</div>
+          <div className="mt-1 text-muted">
             {displayCandidate?.matching_local_release_found ? 'Backend marked a local album/year release context.' : 'No backend local album/year preference was reported.'}
           </div>
           <div className="mt-2 grid gap-2 md:grid-cols-2">
             {linkedReleases.slice(0, 4).map((release, index) => {
               return (
-                <div key={`${release.mb_albumid || index}`} className="rounded border border-graphite-200 bg-white px-2 py-1.5">
-                  <div className="truncate font-medium text-zinc-800">{release.album || '(unknown release)'}</div>
-                  <div className="truncate text-zinc-500">{[release.artist, release.year || release.date, release.country, release.medium_format || release.media_format].filter(Boolean).join(' / ')}</div>
+                <div key={`${release.mb_albumid || index}`} className="rounded border border-graphite-700 bg-graphite-900 px-2 py-1.5">
+                  <div className="truncate font-medium text-graphite-100">{release.album || '(unknown release)'}</div>
+                  <div className="truncate text-muted">{[release.artist, release.year || release.date, release.country, release.medium_format || release.media_format].filter(Boolean).join(' / ')}</div>
                   {release.mb_albumid ? <MbidLink entity="release" id={release.mb_albumid} status="suggested" label="Release" /> : null}
                 </div>
               );
@@ -1175,7 +1175,7 @@ function RecordingIdEvidencePanel({
 
       {candidates.length ? (
         <div id={`recording-candidates-${item.id}`} className="mt-3 space-y-2">
-          <div className="font-semibold text-zinc-900">Backend recording candidates</div>
+          <div className="font-semibold text-graphite-50">Backend recording candidates</div>
           {candidates.map((candidateRow, index) => {
             const isBackendSelected = Boolean(backendSelectedCandidate && sameMbid(candidateRow.mb_trackid, backendSelectedCandidate.mb_trackid));
             const matchesEnteredId = Boolean(candidateMatchingEnteredId && sameMbid(candidateRow.mb_trackid, candidateMatchingEnteredId.mb_trackid));
@@ -1343,7 +1343,7 @@ export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
         : ['', []];
   const more = paths.length - BATCH_PATHS_SHOWN;
   return (
-    <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-900">
+    <div className="rounded border border-amber-500/30 bg-amber-950/40 px-2 py-1 text-amber-200">
       <div>{text}</div>
       {paths.length ? (
         <>
@@ -1376,12 +1376,12 @@ export function QualityUpgradeNotice({ evidence }: { evidence?: ReviewEvidence }
   if (!isQualityUpgrade(evidence)) return null;
   const upgrade = evidence?.quality_upgrade;
   return (
-    <div className="mt-2 space-y-1 text-sm text-zinc-700">
+    <div className="mt-2 space-y-1 text-sm text-graphite-200">
       <Chip size="small" color="info" label="Upgrade available" />
       {upgrade?.library_format && upgrade.source_format ? (
         <div>Library: {upgrade.library_format} → This download: {upgrade.source_format}</div>
       ) : null}
-      <div className="text-xs text-zinc-600">
+      <div className="text-xs text-muted">
         The library copy is unchanged. Replacing it with this download is not available here yet.
       </div>
     </div>
@@ -1397,11 +1397,11 @@ function EvidenceSummary({ item, evidence: evidenceOverride }: { item?: ReviewIt
   const batchStop = <BatchStopEvidence evidence={evidence} />;
 
   if (!best && !preflight) {
-    return evidence?.origin_step ? <div className="mt-3 text-xs text-zinc-600">{batchStop}</div> : null;
+    return evidence?.origin_step ? <div className="mt-3 text-xs text-muted">{batchStop}</div> : null;
   }
 
   return (
-    <div className="mt-3 space-y-2 text-xs text-zinc-600">
+    <div className="mt-3 space-y-2 text-xs text-muted">
       {batchStop}
       <div className="flex flex-wrap items-center gap-2">
         {best ? (
@@ -1414,7 +1414,7 @@ function EvidenceSummary({ item, evidence: evidenceOverride }: { item?: ReviewIt
           <>
             <span>
               Preflight{' '}
-              <strong className={preflight.ok ? 'text-emerald-700' : 'text-rose-700'}>
+              <strong className={preflight.ok ? 'text-emerald-300' : 'text-rose-300'}>
                 {preflight.ok ? 'OK' : 'Fail'}
               </strong>{' '}
               {preflight.matches ?? 0}/{preflight.expected ?? 0}
@@ -1425,7 +1425,7 @@ function EvidenceSummary({ item, evidence: evidenceOverride }: { item?: ReviewIt
               <span>Folder match {formatPercent(preflight.source_match_ratio)}</span>
             ) : null}
             {preflight.acoustid_top_release ? (
-              <span className={preflight.acoustid_mismatch ? 'font-semibold text-rose-700' : 'text-zinc-600'}>
+              <span className={preflight.acoustid_mismatch ? 'font-semibold text-rose-300' : 'text-muted'}>
                 AcoustID {preflight.acoustid_mismatch ? 'mismatch' : 'checked'}: selected{' '}
                 {preflight.acoustid_target_hits ?? 0}, top {preflight.acoustid_top_hits ?? 0}
               </span>
@@ -1434,22 +1434,22 @@ function EvidenceSummary({ item, evidence: evidenceOverride }: { item?: ReviewIt
         ) : null}
       </div>
       {preflight?.acoustid_mismatch ? (
-        <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-rose-800">
+        <div className="rounded border border-rose-500/30 bg-rose-950/40 px-2 py-1 text-rose-200">
           {audioMismatchPreflightDetail(preflight)} Keep this in review until a matching release is selected or the wrong source folder is deleted.
         </div>
       ) : null}
       {preflight?.error ? (
-        <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-rose-800">
+        <div className="rounded border border-rose-500/30 bg-rose-950/40 px-2 py-1 text-rose-200">
           {preflight.error}
         </div>
       ) : null}
       {examples.length ? (
         <Disclosure>
-          <DisclosureButton className="text-xs font-medium text-zinc-700 underline decoration-zinc-400 underline-offset-2 hover:text-zinc-900">
+          <DisclosureButton className="text-xs font-medium text-graphite-200 underline decoration-zinc-400 underline-offset-2 hover:text-graphite-50">
             Track match examples
           </DisclosureButton>
           <DisclosurePanel>
-            <ul className="mt-1 space-y-1 rounded border border-graphite-200 bg-graphite-50 p-2 font-mono text-[11px] text-zinc-700">
+            <ul className="mt-1 space-y-1 rounded border border-graphite-700 bg-graphite-850 p-2 font-mono text-[11px] text-graphite-200">
               {examples.map((example) => (
                 <li key={example}>{example.trim()}</li>
               ))}
@@ -1925,20 +1925,20 @@ export function MatchingSafetyPanel({ response, selectedMatch }: { response?: Ai
   const { rows, warnings } = matchingSafetyData(response, selectedMatch);
   if (!rows.length && !warnings.length) return null;
   return (
-    <div className="mt-3 rounded border border-graphite-200 bg-graphite-50 px-3 py-2 text-xs text-zinc-700" data-import-review-matching-safety>
-      <div className="font-semibold text-zinc-900">Backend matching safety</div>
+    <div className="mt-3 rounded border border-graphite-700 bg-graphite-850 px-3 py-2 text-xs text-graphite-200" data-import-review-matching-safety>
+      <div className="font-semibold text-graphite-50">Backend matching safety</div>
       {rows.length ? (
         <div className="mt-2 grid gap-1 sm:grid-cols-2">
           {rows.map((row) => (
             <div key={`${row.label}:${row.value}`}>
-              <span className="font-medium text-zinc-900">{row.label}:</span>{' '}
-              <span className={row.tone === 'warn' ? 'text-amber-900' : row.tone === 'ok' ? 'text-emerald-800' : 'text-zinc-700'}>{row.value}</span>
+              <span className="font-medium text-graphite-50">{row.label}:</span>{' '}
+              <span className={row.tone === 'warn' ? 'text-amber-200' : row.tone === 'ok' ? 'text-emerald-200' : 'text-graphite-200'}>{row.value}</span>
             </div>
           ))}
         </div>
       ) : null}
       {warnings.length ? (
-        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-amber-950">
+        <div className="mt-2 rounded border border-amber-500/40 bg-amber-950/40 px-2 py-1.5 text-amber-200">
           <div className="font-semibold">Warnings</div>
           <ul className="mt-1 list-disc space-y-1 pl-4">
             {warnings.map((warning) => <li key={warning}>{warning}</li>)}
@@ -1949,16 +1949,16 @@ export function MatchingSafetyPanel({ response, selectedMatch }: { response?: Ai
   );
 }
 const TRACK_STATUS_COLORS: Record<TrackRow['status'], string> = {
-  matched: 'text-emerald-700',
-  fuzzy: 'text-amber-600',
-  verified_match: 'text-emerald-700',
-  acoustid_verified: 'text-emerald-700',
-  different: 'text-red-600',
-  conflicting: 'text-red-600',
-  missing: 'text-zinc-400',
-  extra: 'text-zinc-400',
-  unmatched_extra: 'text-zinc-400',
-  ignored_for_this_import: 'text-zinc-400',
+  matched: 'text-emerald-300',
+  fuzzy: 'text-amber-400',
+  verified_match: 'text-emerald-300',
+  acoustid_verified: 'text-emerald-300',
+  different: 'text-red-400',
+  conflicting: 'text-red-400',
+  missing: 'text-muted',
+  extra: 'text-muted',
+  unmatched_extra: 'text-muted',
+  ignored_for_this_import: 'text-muted',
 };
 
 const TRACK_STATUS_LABELS: Record<TrackRow['status'], string> = {
@@ -1982,30 +1982,30 @@ function TrackComparisonTable({ tracks }: { tracks: TrackRow[] }) {
   if (!tracks.length) return null;
   const hasSourcePaths = tracks.some((row) => row.source_path);
   return (
-    <div className="mt-3 max-h-48 overflow-auto rounded border border-graphite-200">
+    <div className="mt-3 max-h-48 overflow-auto rounded border border-graphite-700">
       <table className="min-w-full text-xs">
         <thead>
-          <tr className="border-b border-graphite-200 bg-graphite-50">
-            <th className="px-2 py-1.5 text-left font-semibold text-zinc-500">#</th>
-            <th className="px-2 py-1.5 text-left font-semibold text-zinc-600">Local Title</th>
-            <th className="px-2 py-1.5 text-left font-semibold text-zinc-600">MB Title</th>
-            {hasSourcePaths ? <th className="px-2 py-1.5 text-left font-semibold text-zinc-600">File</th> : null}
-            <th className="px-2 py-1.5 text-left font-semibold text-zinc-600">Status</th>
+          <tr className="border-b border-graphite-700 bg-graphite-850">
+            <th className="px-2 py-1.5 text-left font-semibold text-muted">#</th>
+            <th className="px-2 py-1.5 text-left font-semibold text-muted">Local Title</th>
+            <th className="px-2 py-1.5 text-left font-semibold text-muted">MB Title</th>
+            {hasSourcePaths ? <th className="px-2 py-1.5 text-left font-semibold text-muted">File</th> : null}
+            <th className="px-2 py-1.5 text-left font-semibold text-muted">Status</th>
           </tr>
         </thead>
         <tbody>
           {tracks.map((row) => (
-            <tr key={`${row.num}-${row.mb_title}`} className="border-b border-graphite-100 last:border-b-0">
-              <td className="px-2 py-1 text-zinc-400">{row.num}</td>
-              <td className="max-w-[12rem] truncate px-2 py-1 text-zinc-700" title={row.local_title}>
-                {row.local_title || <span className="text-zinc-400">—</span>}
+            <tr key={`${row.num}-${row.mb_title}`} className="border-b border-graphite-800 last:border-b-0">
+              <td className="px-2 py-1 text-muted">{row.num}</td>
+              <td className="max-w-[12rem] truncate px-2 py-1 text-graphite-200" title={row.local_title}>
+                {row.local_title || <span className="text-muted">—</span>}
               </td>
-              <td className="max-w-[12rem] truncate px-2 py-1 text-zinc-700" title={row.mb_title}>
-                {row.mb_title || <span className="text-zinc-400">—</span>}
+              <td className="max-w-[12rem] truncate px-2 py-1 text-graphite-200" title={row.mb_title}>
+                {row.mb_title || <span className="text-muted">—</span>}
               </td>
               {hasSourcePaths ? (
-                <td className="max-w-[10rem] truncate px-2 py-1 font-mono text-zinc-500" title={row.source_path}>
-                  {row.source_path ? fileBasename(row.source_path) : <span className="text-zinc-300">—</span>}
+                <td className="max-w-[10rem] truncate px-2 py-1 font-mono text-muted" title={row.source_path}>
+                  {row.source_path ? fileBasename(row.source_path) : <span className="text-graphite-300">—</span>}
                 </td>
               ) : null}
               <td className={`px-2 py-1 font-medium ${TRACK_STATUS_COLORS[row.status]}`}>
@@ -2029,14 +2029,14 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
   if (!state || state.status === 'idle') return null;
   if (state.status === 'loading') {
     return (
-      <div className="mt-3 rounded border border-graphite-200 bg-graphite-50 px-3 py-2 text-xs text-zinc-600">
+      <div className="mt-3 rounded border border-graphite-700 bg-graphite-850 px-3 py-2 text-xs text-muted">
         Target path preview loading…
       </div>
     );
   }
   if (state.status === 'error') {
     return (
-      <div className="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+      <div className="mt-3 rounded border border-rose-500/30 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
         <div className="font-semibold">Target path preview failed</div>
         <div className="mt-0.5">{state.error || 'Preview unavailable.'}</div>
       </div>
@@ -2049,18 +2049,18 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
   const cleanupRequired = blocked && preview.next_action === 'verify_or_cleanup_unmatched';
   const borderClass = blocked
     ? cleanupRequired
-      ? 'border-amber-200 bg-amber-50 text-amber-900'
-      : 'border-rose-200 bg-rose-50 text-rose-900'
+      ? 'border-amber-500/30 bg-amber-950/40 text-amber-200'
+      : 'border-rose-500/30 bg-rose-950/40 text-rose-200'
     : existingFolder
-      ? 'border-sky-200 bg-sky-50 text-sky-900'
-      : 'border-emerald-200 bg-emerald-50 text-emerald-900';
+      ? 'border-sky-500/30 bg-sky-950/40 text-sky-200'
+      : 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200';
   const badgeClass = blocked
     ? cleanupRequired
-      ? 'bg-amber-100 text-amber-900'
-      : 'bg-rose-100 text-rose-800'
+      ? 'bg-amber-900/50 text-amber-200'
+      : 'bg-rose-900/50 text-rose-200'
     : existingFolder
-      ? 'bg-sky-100 text-sky-800'
-      : 'bg-emerald-100 text-emerald-800';
+      ? 'bg-sky-900/50 text-sky-200'
+      : 'bg-emerald-900/50 text-emerald-200';
   const badgeLabel = cleanupRequired ? 'Needs cleanup' : blocked ? 'Blocked' : existingFolder ? 'Existing folder' : 'Safe';
   const importCount = preview.tracks_to_import_count ?? preview.track_count;
   const missingCount = preview.missing_album_track_count ?? 0;
@@ -2072,26 +2072,26 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
         <div className="font-semibold">Target preview</div>
         <span className={`rounded px-2 py-0.5 font-semibold ${badgeClass}`}>{badgeLabel}</span>
       </div>
-      <div className="mt-2 grid grid-cols-2 gap-2 text-zinc-700 md:grid-cols-4">
+      <div className="mt-2 grid grid-cols-2 gap-2 text-graphite-200 md:grid-cols-4">
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500">Import</div>
+          <div className="text-[10px] uppercase tracking-wide text-muted">Import</div>
           <div className="font-semibold">{importCount}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500">Missing</div>
+          <div className="text-[10px] uppercase tracking-wide text-muted">Missing</div>
           <div className="font-semibold">{missingCount}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500">Left in review</div>
+          <div className="text-[10px] uppercase tracking-wide text-muted">Left in review</div>
           <div className="font-semibold">{unmatchedCount}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500">Conflicts</div>
+          <div className="text-[10px] uppercase tracking-wide text-muted">Conflicts</div>
           <div className="font-semibold">{conflictCount}</div>
         </div>
       </div>
       {blocked ? (
-        <div className={cleanupRequired ? 'mt-2 text-amber-900' : 'mt-2 text-rose-800'}>
+        <div className={cleanupRequired ? 'mt-2 text-amber-200' : 'mt-2 text-rose-200'}>
           {cleanupRequired ? (
             <div className="font-medium">No verified tracks are selected after automatic verification. Use guarded cleanup for the unmatched source file or choose another match.</div>
           ) : null}
@@ -2102,25 +2102,25 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
           </ul>
         </div>
       ) : existingFolder ? (
-        <div className="mt-2 font-medium text-sky-800">
+        <div className="mt-2 font-medium text-sky-200">
           Existing album folder found. Verified tracks will be imported into it.
         </div>
       ) : (
-        <div className="mt-2 font-medium text-emerald-800">Target path preview passed.</div>
+        <div className="mt-2 font-medium text-emerald-200">Target path preview passed.</div>
       )}
       {preview.warnings?.length ? (
-        <ul className="mt-2 list-disc space-y-1 pl-4 text-amber-800">
+        <ul className="mt-2 list-disc space-y-1 pl-4 text-amber-200">
           {preview.warnings.map((warning) => (
             <li key={warning}>{warning}</li>
           ))}
         </ul>
       ) : null}
       <Disclosure>
-        <DisclosureButton className="mt-2 text-xs font-medium text-zinc-700 underline decoration-zinc-400 underline-offset-2 hover:text-zinc-900">
+        <DisclosureButton className="mt-2 text-xs font-medium text-graphite-200 underline decoration-zinc-400 underline-offset-2 hover:text-graphite-50">
           Show target details
         </DisclosureButton>
         <DisclosurePanel>
-          <div className="mt-2 grid gap-1 text-zinc-700 md:grid-cols-2">
+          <div className="mt-2 grid gap-1 text-graphite-200 md:grid-cols-2">
             <div><span className="font-medium">Final album folder:</span> {preview.album_folder}</div>
             <div><span className="font-medium">Release Group ID:</span> <span className="font-mono">{preview.release_group_id || 'missing'}</span></div>
             <div><span className="font-medium">Target folder exists:</span> {preview.target_folder_exists ? 'yes' : 'no'}</div>
@@ -2140,19 +2140,19 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
             <div><span className="font-medium">Placeholder warnings:</span> {preview.placeholder_warning_count}</div>
             <div><span className="font-medium">Release-ID path warnings:</span> {preview.release_id_path_warning_count}</div>
           </div>
-          <div className="mt-2 truncate font-mono text-[11px] text-zinc-600" title={preview.album_path}>
+          <div className="mt-2 truncate font-mono text-[11px] text-muted" title={preview.album_path}>
             {preview.album_path}
           </div>
           {preview.tracks?.length ? (
             <Disclosure>
-              <DisclosureButton className="mt-2 text-xs font-medium text-zinc-700 underline decoration-zinc-400 underline-offset-2 hover:text-zinc-900">
+              <DisclosureButton className="mt-2 text-xs font-medium text-graphite-200 underline decoration-zinc-400 underline-offset-2 hover:text-graphite-50">
                 Track target paths ({preview.tracks.length})
               </DisclosureButton>
               <DisclosurePanel>
-                <div className="mt-2 max-h-72 overflow-auto rounded border border-graphite-200 bg-white">
+                <div className="mt-2 max-h-72 overflow-auto rounded border border-graphite-700 bg-graphite-900">
                   <table className="min-w-full text-[11px]">
                     <thead>
-                      <tr className="border-b border-graphite-200 bg-graphite-50 text-left text-zinc-500">
+                      <tr className="border-b border-graphite-700 bg-graphite-850 text-left text-muted">
                         <th className="px-2 py-1 font-semibold">#</th>
                         <th className="px-2 py-1 font-semibold">Current source</th>
                         <th className="px-2 py-1 font-semibold">Proposed target</th>
@@ -2161,22 +2161,22 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
                     </thead>
                     <tbody>
                       {preview.tracks.map((track) => (
-                        <tr key={`${track.track}-${track.target_path}`} className="border-b border-graphite-100 last:border-b-0">
-                          <td className="px-2 py-1 text-zinc-500">{track.track}</td>
-                          <td className="max-w-[15rem] px-2 py-1 font-mono text-zinc-600" title={track.source_path}>
-                            {track.source_path ? shortPath(track.source_path) : <span className="text-zinc-400">missing source</span>}
+                        <tr key={`${track.track}-${track.target_path}`} className="border-b border-graphite-800 last:border-b-0">
+                          <td className="px-2 py-1 text-muted">{track.track}</td>
+                          <td className="max-w-[15rem] px-2 py-1 font-mono text-muted" title={track.source_path}>
+                            {track.source_path ? shortPath(track.source_path) : <span className="text-muted">missing source</span>}
                           </td>
-                          <td className="max-w-[18rem] px-2 py-1 font-mono text-zinc-700" title={track.target_path}>
+                          <td className="max-w-[18rem] px-2 py-1 font-mono text-graphite-200" title={track.target_path}>
                             {shortPath(track.target_path)}
                           </td>
                           <td className={`px-2 py-1 font-medium ${
                             track.target_conflict || track.unresolved_placeholder || track.uses_release_id_in_path
-                              ? 'text-rose-700'
+                              ? 'text-rose-300'
                               : track.already_imported
-                                ? 'text-sky-600'
+                                ? 'text-sky-400'
                                 : track.status === 'extra'
-                                  ? 'text-amber-600'
-                                  : 'text-emerald-700'
+                                  ? 'text-amber-400'
+                                  : 'text-emerald-300'
                           }`}>
                             {track.already_imported
                               ? 'already imported'
@@ -2335,23 +2335,23 @@ export function CandidateCarousel({
       aria-label="Candidate matches (Left/Right arrow keys switch matches)"
       tabIndex={-1}
       onKeyDown={handleCarouselKeyDown}
-      className="mt-3 rounded border border-graphite-200 bg-white"
+      className="mt-3 rounded border border-graphite-700 bg-graphite-900"
     >
-      <div className="flex items-center gap-2 border-b border-graphite-200 px-3 py-1.5">
+      <div className="flex items-center gap-2 border-b border-graphite-700 px-3 py-1.5">
         <button
           aria-label="Previous match"
-          className="flex h-8 w-8 items-center justify-center rounded text-lg font-bold text-zinc-600 transition-colors hover:bg-graphite-100 disabled:cursor-not-allowed disabled:opacity-30"
+          className="flex h-8 w-8 items-center justify-center rounded text-lg font-bold text-muted transition-colors hover:bg-graphite-800 disabled:cursor-not-allowed disabled:opacity-30"
           disabled={currentIndex === 0}
           onClick={() => goTo(currentIndex - 1)}
         >
           ←
         </button>
-        <span className="flex-1 text-center text-xs font-semibold text-zinc-600">
+        <span className="flex-1 text-center text-xs font-semibold text-muted">
           Match {currentIndex + 1} of {total}
         </span>
         <button
           aria-label="Next match"
-          className="flex h-8 w-8 items-center justify-center rounded text-lg font-bold text-zinc-600 transition-colors hover:bg-graphite-100 disabled:cursor-not-allowed disabled:opacity-30"
+          className="flex h-8 w-8 items-center justify-center rounded text-lg font-bold text-muted transition-colors hover:bg-graphite-800 disabled:cursor-not-allowed disabled:opacity-30"
           disabled={currentIndex === total - 1}
           onClick={() => goTo(currentIndex + 1)}
         >
@@ -2382,8 +2382,8 @@ export function CandidateCarousel({
               {current.is_current ? <Chip size="small" color="success" label="current" /> : null}
               {current.is_vinyl ? <Chip size="small" color="warning" label="vinyl" /> : null}
             </div>
-            <h3 className="mt-1 text-sm font-semibold text-zinc-900">{candidateName(current)}</h3>
-            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-600">
+            <h3 className="mt-1 text-sm font-semibold text-graphite-50">{candidateName(current)}</h3>
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
               {candidateMeta(current).map((part) => (
                 <span key={part}>{part}</span>
               ))}
@@ -2392,7 +2392,7 @@ export function CandidateCarousel({
               <div className="mt-1.5 flex flex-wrap items-center gap-2">
                 <MbidLink entity="release-group" id={rgid} status="suggested" label="Release group" />
                 {current.release_group_primary_type ? (
-                  <span className="rounded bg-graphite-100 px-1 py-0.5 text-xs text-zinc-500">{current.release_group_primary_type}</span>
+                  <span className="rounded bg-graphite-800 px-1 py-0.5 text-xs text-muted">{current.release_group_primary_type}</span>
                 ) : null}
               </div>
             ) : mbid ? (
@@ -2401,19 +2401,19 @@ export function CandidateCarousel({
               </div>
             ) : null}
             {matchSummary ? (
-              <div className="mt-1 text-xs font-medium text-zinc-600">{matchSummary}</div>
+              <div className="mt-1 text-xs font-medium text-muted">{matchSummary}</div>
             ) : null}
             {visibleMatch.auto_fix_reason ? (
               <div className={`mt-2 rounded border px-2 py-1 text-xs ${
                 visibleMatch.auto_fix_eligible
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                  : 'border-graphite-200 bg-graphite-50 text-zinc-600'
+                  ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200'
+                  : 'border-graphite-700 bg-graphite-850 text-muted'
               }`}>
                 {visibleMatch.auto_fix_reason}
               </div>
             ) : null}
             {current.acoustid_hits || current.acoustid_release_hits ? (
-              <span className="mt-1 inline-block rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs text-sky-700">
+              <span className="mt-1 inline-block rounded border border-sky-500/30 bg-sky-950/40 px-2 py-0.5 text-xs text-sky-300">
                 {current.acoustid_hits || current.acoustid_release_hits} AcoustID hit(s)
               </span>
             ) : null}
@@ -2502,12 +2502,12 @@ export function CandidateCarousel({
         </div>
 
         {trackLoading ? (
-          <div className="mt-3 text-xs text-zinc-400">Loading track comparison…</div>
+          <div className="mt-3 text-xs text-muted">Loading track comparison…</div>
         ) : trackError ? (
-          <div className="mt-3 text-xs text-rose-500">Track fetch failed: {trackError}</div>
+          <div className="mt-3 text-xs text-rose-400">Track fetch failed: {trackError}</div>
         ) : trackData ? (
           <Disclosure>
-            <DisclosureButton className="mt-3 text-xs font-medium text-zinc-700 underline decoration-zinc-400 underline-offset-2 hover:text-zinc-900">
+            <DisclosureButton className="mt-3 text-xs font-medium text-graphite-200 underline decoration-zinc-400 underline-offset-2 hover:text-graphite-50">
               Track matches ({trackData.matched_count}/{trackData.mb_track_count})
             </DisclosureButton>
             <DisclosurePanel>
@@ -2543,7 +2543,7 @@ function AiSuggestionPanel({
   const hasRgid = Boolean(suggestion?.mb_releasegroupid);
 
   return (
-    <div className="mt-3 rounded border border-red-200 bg-red-50 p-3">
+    <div className="mt-3 rounded border border-red-500/30 bg-red-950/40 p-3">
       {suggestion ? (
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -2565,11 +2565,11 @@ function AiSuggestionPanel({
             ) : null}
           </div>
           {suggestionPreflightFailed && suggestion.preflight ? (
-            <p className="mt-1 text-xs font-medium text-rose-700">
+            <p className="mt-1 text-xs font-medium text-rose-300">
               {`Tracklist check: ${suggestion.preflight.matches ?? 0} of ${suggestion.preflight.expected ?? 0} tracks matched — import blocked.`}
             </p>
           ) : null}
-          {suggestion.reason ? <p className="mt-1 text-sm text-zinc-700">{suggestion.reason}</p> : null}
+          {suggestion.reason ? <p className="mt-1 text-sm text-graphite-200">{suggestion.reason}</p> : null}
           <EvidenceSummary evidence={evidence} />
         </div>
       ) : null}
@@ -2630,19 +2630,19 @@ function MbsubmitDialog({
     <Dialog open onClose={onClose}>
       <DialogBackdrop className="fixed inset-0 bg-black/40" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-2xl rounded-xl bg-white p-6 shadow-xl">
-          <DialogTitle className="mb-3 text-base font-semibold text-zinc-900">
+        <DialogPanel className="w-full max-w-2xl rounded-xl bg-graphite-900 p-6 shadow-xl">
+          <DialogTitle className="mb-3 text-base font-semibold text-graphite-50">
             MusicBrainz Submission — {albumTitle}
           </DialogTitle>
           {status === 'loading' ? (
             <LinearProgress />
           ) : (
-            <pre className="max-h-96 overflow-auto rounded border border-graphite-200 bg-graphite-50 p-3 text-xs text-zinc-800 whitespace-pre-wrap">
+            <pre className="max-h-96 overflow-auto rounded border border-graphite-700 bg-graphite-850 p-3 text-xs text-graphite-100 whitespace-pre-wrap">
               {output || '(no output)'}
             </pre>
           )}
           {status === 'done' ? (
-            <p className="mt-3 text-xs text-zinc-500">
+            <p className="mt-3 text-xs text-muted">
               Copy the text above and submit at{' '}
               <a href="https://musicbrainz.org/release/add" target="_blank" rel="noreferrer" className="underline">
                 musicbrainz.org/release/add
@@ -2716,8 +2716,8 @@ function AddMbidsDialog({
     <Dialog open onClose={onClose}>
       <DialogBackdrop className="fixed inset-0 bg-black/40" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
-          <DialogTitle className="mb-4 text-base font-semibold text-zinc-900">
+        <DialogPanel className="w-full max-w-md rounded-xl bg-graphite-900 p-6 shadow-xl">
+          <DialogTitle className="mb-4 text-base font-semibold text-graphite-50">
             Add MusicBrainz IDs — {albumTitle}
           </DialogTitle>
           <div className="flex flex-col gap-3">
@@ -2892,13 +2892,13 @@ export function ReviewCard({
           ? item.status.replace(/_/g, ' ')
           : typeLabels[item.type];
   const lifecycleTone = recoveryIdentity
-    ? 'border-violet-300 bg-violet-50 text-violet-900'
+    ? 'border-graphite-700 bg-graphite-900 text-graphite-100'
     : queueingImport
-    ? 'border-sky-200 bg-sky-50 text-sky-800'
+    ? 'border-sky-500/30 bg-sky-950/40 text-sky-200'
     : item.status === 'format_policy_rejected'
-      ? 'border-amber-300 bg-amber-50 text-amber-900'
+      ? 'border-amber-500/40 bg-amber-950/40 text-amber-200'
       : item.status === 'auto_enqueue_failed'
-        ? 'border-rose-200 bg-rose-50 text-rose-800'
+        ? 'border-rose-500/30 bg-rose-950/40 text-rose-200'
         : typeTones[item.type];
   const originDisplay = itemOriginLabel(item);
   const representativeRelease =
@@ -2959,7 +2959,7 @@ export function ReviewCard({
               <span className={`rounded border px-2 py-1 text-xs font-semibold ${matchTones[visibleMatchBucket]}`}>
                 {matchLabels[visibleMatchBucket]}
               </span>
-              <span className="rounded border border-sky-200 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-800">
+              <span className="rounded border border-sky-500/30 bg-sky-950/40 px-2 py-1 text-xs font-semibold text-sky-200">
                 {originDisplay}
               </span>
               {selectedConfidence ? (
@@ -3002,8 +3002,8 @@ export function ReviewCard({
               <SuggestionStaleBadge item={item} selectedMatchActive={selectedMatchActive} />
             </div>
 
-            <h2 className="mt-3 truncate text-lg font-semibold text-zinc-950">{itemTitle(item)}</h2>
-            {meta.length ? <div className="mt-1 text-sm text-zinc-600">{meta.join(' / ')}</div> : null}
+            <h2 className="mt-3 truncate text-lg font-semibold text-graphite-50">{itemTitle(item)}</h2>
+            {meta.length ? <div className="mt-1 text-sm text-muted">{meta.join(' / ')}</div> : null}
             <QualityUpgradeNotice evidence={item.evidence} />
 
             <RecoveryReviewCard
@@ -3017,8 +3017,8 @@ export function ReviewCard({
               primaryActionDisabled={busy || upgradeRow || (!recoveryIdentity && Boolean(applyBlockedReason))}
             />
 
-            {visibleReason ? <p className="mt-3 text-sm text-zinc-700">{visibleReason}</p> : null}
-            {item.path ? <div className="mt-3 truncate font-mono text-xs text-zinc-500">{item.path}</div> : null}
+            {visibleReason ? <p className="mt-3 text-sm text-graphite-200">{visibleReason}</p> : null}
+            {item.path ? <div className="mt-3 truncate font-mono text-xs text-muted">{item.path}</div> : null}
             {itemReleaseGroupId ? (
               <div className="mt-2">
                 <MbidLink
@@ -3039,7 +3039,7 @@ export function ReviewCard({
               </div>
             ) : null}
             {visibleMatchNote ? (
-              <div className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              <div className="mt-3 rounded border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
                 {visibleMatchNote}
               </div>
             ) : null}
@@ -3054,32 +3054,32 @@ export function ReviewCard({
                 onUseCandidate={onUseCandidate}
               />
             ) : selectedMatch ? (
-              <div className="mt-3 space-y-2 text-xs text-zinc-600">
+              <div className="mt-3 space-y-2 text-xs text-muted">
                 <div>
                   <span>Selected candidate: </span>
                   {selectedMatch.track_match_count !== null && selectedMatch.total_tracks !== null ? (
                     <strong className={
                       selectedMatch.preflight_status === 'passed'
-                        ? 'text-emerald-700'
+                        ? 'text-emerald-300'
                         : selectedMatch.preflight_status === 'failed'
-                          ? 'text-rose-700'
-                          : 'text-amber-600'
+                          ? 'text-rose-300'
+                          : 'text-amber-400'
                     }>
                       {selectedMatch.track_match_count}/{selectedMatch.total_tracks} tracks matched
                     </strong>
                   ) : (
-                    <strong className="text-amber-600">preflight {selectedMatch.preflight_status.replace('_', ' ')}</strong>
+                    <strong className="text-amber-400">preflight {selectedMatch.preflight_status.replace('_', ' ')}</strong>
                   )}
                   {selectedPreflightReason ? (
-                    <span className="ml-1 text-zinc-500">{selectedPreflightReason}</span>
+                    <span className="ml-1 text-muted">{selectedPreflightReason}</span>
                   ) : null}
                 </div>
                 <div className={`rounded border px-2 py-1.5 ${
                   selectedMatch.is_partial_import
-                    ? 'border-sky-200 bg-sky-50 text-sky-900'
+                    ? 'border-sky-500/30 bg-sky-950/40 text-sky-200'
                     : autoFixShown
-                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                      : 'border-graphite-200 bg-graphite-50 text-zinc-600'
+                      ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200'
+                      : 'border-graphite-700 bg-graphite-850 text-muted'
                 }`}>
                   <div className="font-semibold">
                     {selectedMatch.is_partial_import
@@ -3090,7 +3090,7 @@ export function ReviewCard({
                   </div>
                   <div className="mt-0.5">{selectedMatch.auto_fix_reason}</div>
                   {!selectedMatch.is_partial_import && selectedMatch.missing_track_count > 0 ? (
-                    <div className="mt-1 font-medium text-amber-800">
+                    <div className="mt-1 font-medium text-amber-200">
                       Incomplete: {selectedMatch.missing_track_count} release track{selectedMatch.missing_track_count === 1 ? '' : 's'} still need import/acquisition.
                     </div>
                   ) : null}
@@ -3148,7 +3148,7 @@ export function ReviewCard({
               disabled={busy}
               helperText={item.target_kind === 'item' ? 'Paste a recording UUID or recording URL.' : 'Paste a release UUID, release-group UUID, or MusicBrainz URL.'}
               slotProps={{ htmlInput: { 'data-import-review-manual-id': item.id } }}
-              sx={{ '& .MuiFormHelperText-root': { color: '#475569' } }}
+              sx={{ '& .MuiFormHelperText-root': { color: 'text.secondary' } }}
             />
             <div className="grid grid-cols-2 gap-2">
               <Button size="small" variant="contained" onClick={onValidateManualId} disabled={busy || manualChecking || !mbid.trim()}>
@@ -3159,7 +3159,7 @@ export function ReviewCard({
               </Button>
             </div>
             {manualValidation?.message ? (
-              <div className={`rounded border px-2 py-1.5 text-xs ${manualError ? 'border-rose-200 bg-rose-50 text-rose-900' : manualValid ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-sky-200 bg-sky-50 text-sky-900'}`}>
+              <div className={`rounded border px-2 py-1.5 text-xs ${manualError ? 'border-rose-500/30 bg-rose-950/40 text-rose-200' : manualValid ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200' : 'border-sky-500/30 bg-sky-950/40 text-sky-200'}`}>
                 <div className="font-semibold">{manualValid ? `Valid ${manualEntityLabel}` : manualError ? 'MusicBrainz ID rejected' : 'Checking MusicBrainz ID'}</div>
                 <div className="mt-0.5">{manualValidation.message}</div>
                 {manualValidation.statusLines?.length ? (
@@ -3200,18 +3200,18 @@ export function ReviewCard({
             ) : null}
 
             {item.target_kind !== 'item' && representativeRelease ? (
-              <div className="rounded border border-graphite-200 bg-graphite-50 px-2 py-1.5 text-xs text-zinc-500">
+              <div className="rounded border border-graphite-700 bg-graphite-850 px-2 py-1.5 text-xs text-muted">
                 {/* A representative release id is, by construction, a release
                     (edition) id distinct from the release-group id, so it links
                     to /release/ via MbidLink — full UUID, validated, copyable,
                     status — never a bare mono string. */}
                 <MbidLink entity="release" id={representativeRelease} status="suggested" label="Representative Release ID" />
-                <div className="mt-0.5 text-zinc-400">Used only for tracklist comparison or beets compatibility.</div>
+                <div className="mt-0.5 text-muted">Used only for tracklist comparison or beets compatibility.</div>
               </div>
             ) : null}
 
             {blockedActive && visibleBlockReason ? (
-              <div className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-950">
+              <div className="rounded border border-amber-500/40 bg-amber-950/40 px-2 py-1.5 text-xs text-amber-200">
                 <div className="font-semibold">{isRecordingReview ? 'Attach blocked' : 'Import blocked'}</div>
                 <div className="mt-0.5">{visibleBlockReason}</div>
                 {visibleBlockHint ? <div className="mt-1 font-medium">Next: {visibleBlockHint}</div> : null}
@@ -3253,7 +3253,7 @@ export function ReviewCard({
                 </Button>
               )}
             </div>
-            {upgradeRow ? <p id={upgradeReasonId} className="text-xs text-zinc-600">{QUALITY_UPGRADE_IMPORT_REASON}</p> : null}
+            {upgradeRow ? <p id={upgradeReasonId} className="text-xs text-muted">{QUALITY_UPGRADE_IMPORT_REASON}</p> : null}
 
             <Button size="small" variant="text" color="inherit" onClick={onDismiss} disabled={busy}>
               {item.type === 'pending_ai' || item.type === 'skipped' ? 'Remove from Review' : 'Hide'}
@@ -3268,8 +3268,8 @@ export function ReviewCard({
               Submit Metadata
             </Button>
             {canDeleteFolder(item) ? (
-              <div className="mt-2 rounded border border-rose-200 bg-rose-50/60 p-2" aria-label="Destructive actions">
-                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-700">Destructive</div>
+              <div className="mt-2 rounded border border-rose-500/30 bg-rose-950/30 p-2" aria-label="Destructive actions">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-300">Destructive</div>
                 <Button
                   size="small"
                   variant="outlined"
@@ -3281,16 +3281,16 @@ export function ReviewCard({
                 >
                   {deleteFolderActionLabel(item)}
                 </Button>
-                <div className="mt-1 text-xs text-rose-700">Permanent. Asks for confirmation first.</div>
+                <div className="mt-1 text-xs text-rose-300">Permanent. Asks for confirmation first.</div>
               </div>
             ) : needsOnlyReleaseGroup(item) ? (
-              <span className="self-center text-xs text-zinc-600">Use Fix proven matches to add the release group.</span>
+              <span className="self-center text-xs text-muted">Use Fix proven matches to add the release group.</span>
             ) : isTorrentSource(item) ? (
-              <span className="self-center text-xs text-zinc-600">{TORRENT_DELETE_REASON}</span>
+              <span className="self-center text-xs text-muted">{TORRENT_DELETE_REASON}</span>
             ) : null}
 
             {isLibraryNoMb ? (
-              <div className="mt-2 flex flex-col gap-2 border-t border-graphite-100 pt-3">
+              <div className="mt-2 flex flex-col gap-2 border-t border-graphite-800 pt-3">
                 <Button
                   size="small"
                   variant="outlined"
@@ -3385,12 +3385,12 @@ export function ConfirmDialog({
     <Dialog open={Boolean(intent)} onClose={onClose} className="relative z-50">
       <DialogBackdrop className="fixed inset-0 bg-graphite-950/50" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-lg rounded bg-white p-5 shadow-xl">
-          <DialogTitle className="text-lg font-semibold text-zinc-950">{title}</DialogTitle>
-          <p className="mt-2 text-sm leading-6 text-zinc-600">{detail}</p>
+        <DialogPanel className="w-full max-w-lg rounded bg-graphite-900 p-5 shadow-xl">
+          <DialogTitle className="text-lg font-semibold text-graphite-50">{title}</DialogTitle>
+          <p className="mt-2 text-sm leading-6 text-muted">{detail}</p>
           {item ? (
-            <div className="mt-4 rounded border border-graphite-200 bg-graphite-50 p-3">
-              <div className="truncate text-sm font-semibold text-zinc-900">{itemTitle(item)}</div>
+            <div className="mt-4 rounded border border-graphite-700 bg-graphite-850 p-3">
+              <div className="truncate text-sm font-semibold text-graphite-50">{itemTitle(item)}</div>
               {intent?.kind === 'apply' ? (
                 (() => {
                   // Truthful entity carried on the intent (ADR-0002): an album's
@@ -3411,15 +3411,15 @@ export function ConfirmDialog({
               ) : null}
               {intent?.kind === 'delete_folder' && item.path ? (
                 <div className="mt-2 space-y-2">
-                  <div className="truncate font-mono text-xs text-zinc-600" title={item.path}>{item.path}</div>
+                  <div className="truncate font-mono text-xs text-muted" title={item.path}>{item.path}</div>
                   {wrongSourceNote ? (
-                    <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-800">
+                    <div className="rounded border border-rose-500/30 bg-rose-950/40 px-2 py-1 text-xs text-rose-200">
                       <div className="font-semibold">Wrong audio evidence</div>
                       <div>{wrongSourceNote}</div>
                     </div>
                   ) : null}
                   {intent.folderStats?.exists ? (
-                    <div className="flex flex-wrap gap-3 text-xs text-zinc-500">
+                    <div className="flex flex-wrap gap-3 text-xs text-muted">
                       <span>{intent.folderStats.audio_count} audio file{intent.folderStats.audio_count !== 1 ? 's' : ''}</span>
                       {intent.folderStats.art_count > 0 ? (
                         <span>{intent.folderStats.art_count} artwork file{intent.folderStats.art_count !== 1 ? 's' : ''}</span>
@@ -3432,14 +3432,14 @@ export function ConfirmDialog({
                 </div>
               ) : null}
               {intent?.kind === 'cleanup_files' ? (
-                <ul aria-label="Files to remove" className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-xs text-zinc-600">
+                <ul aria-label="Files to remove" className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-xs text-muted">
                   {intent.files.map((file) => (
                     <li key={file} className="truncate" title={file}>{file}</li>
                   ))}
                 </ul>
               ) : null}
               {intent?.kind === 'attach_recording_confirm' ? (
-                <div className="mt-2 space-y-2 text-xs text-zinc-600">
+                <div className="mt-2 space-y-2 text-xs text-muted">
                   <MbidLink
                     entity="recording"
                     id={intent.candidate.mb_trackid}
@@ -3447,13 +3447,13 @@ export function ConfirmDialog({
                     label="Recording ID"
                   />
                   {(intent.candidate.conflicts || []).length ? (
-                    <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-rose-800">
+                    <div className="rounded border border-rose-500/30 bg-rose-950/40 px-2 py-1 text-rose-200">
                       <div className="font-semibold">Conflicts</div>
                       <div>{(intent.candidate.conflicts || []).join(', ')}</div>
                     </div>
                   ) : null}
                   {(intent.candidate.warnings || []).length ? (
-                    <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+                    <div className="rounded border border-amber-500/30 bg-amber-950/40 px-2 py-1 text-amber-200">
                       <div className="font-semibold">Warnings</div>
                       <div>{(intent.candidate.warnings || []).join(', ')}</div>
                     </div>
@@ -3523,7 +3523,7 @@ function BackgroundJobsStrip({
     if (isActiveBgJob(job)) return 'text-amber-400';
     if (job.status === 'failed') return 'text-rose-400';
     if (isMissingBgJob(job) || job.status === 'status_unknown' || job.status === 'still_running') return 'text-sky-400';
-    if (job.status === 'cancelled') return 'text-zinc-500';
+    if (job.status === 'cancelled') return 'text-muted';
     return 'text-emerald-400';
   };
   const statusIcon = (job: BgJob) => {
@@ -3582,14 +3582,14 @@ function BackgroundJobsStrip({
                 {statusIcon(job)}
               </span>
               <div className="min-w-0 flex-1">
-                <div className="truncate font-medium text-zinc-300">{itemTitle(job.item)}</div>
-                <div className="mt-0.5 truncate text-zinc-500">{job.message}</div>
+                <div className="truncate font-medium text-graphite-300">{itemTitle(job.item)}</div>
+                <div className="mt-0.5 truncate text-muted">{job.message}</div>
               </div>
               {!isActiveBgJob(job) ? (
                 <div className="flex shrink-0 items-center gap-2">
                   {canRetryStatus || canReturnToReview ? (
                     <button
-                      className="text-sky-500 hover:text-sky-300 text-xs"
+                      className="text-sky-400 hover:text-sky-300 text-xs"
                       title={canRetryStatus ? 'Run one backend status reconciliation' : 'Return this item to the review queue'}
                       onClick={() => onRetryJob(job.item.id)}
                     >
@@ -3597,7 +3597,7 @@ function BackgroundJobsStrip({
                     </button>
                   ) : null}
                   <button
-                    className="text-zinc-600 hover:text-zinc-400"
+                    className="text-muted hover:text-graphite-100"
                     title="Dismiss"
                     onClick={() => onDismissJob(job.item.id)}
                   >
@@ -5043,12 +5043,12 @@ export function ImportReviewPage({
       {/* Counts + action bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
-          <span className="text-zinc-700">{total} total</span>
-          {activeJobHiddenCount ? <span className="text-zinc-700">{activeJobHiddenCount} active job hidden</span> : null}
+          <span className="text-graphite-200">{total} total</span>
+          {activeJobHiddenCount ? <span className="text-graphite-200">{activeJobHiddenCount} active job hidden</span> : null}
           {missingIdsMode ? (
             <>
-              <span className="text-zinc-700">{kindCounts.album} album{kindCounts.album === 1 ? '' : 's'} without a Release or Release Group ID</span>
-              <span className="text-zinc-700">{kindCounts.item} track{kindCounts.item === 1 ? '' : 's'} without a Recording ID</span>
+              <span className="text-graphite-200">{kindCounts.album} album{kindCounts.album === 1 ? '' : 's'} without a Release or Release Group ID</span>
+              <span className="text-graphite-200">{kindCounts.item} track{kindCounts.item === 1 ? '' : 's'} without a Recording ID</span>
             </>
           ) : (
             <>
@@ -5058,11 +5058,11 @@ export function ImportReviewPage({
                   { id: 'skipped', label: 'skipped' },
                 ] as Array<{ id: ReviewItemType; label: string }>
               ).map(({ id, label }) => (
-                <span key={id} className="text-zinc-700">
+                <span key={id} className="text-graphite-200">
                   {countFor(counts, id)} {label}
                 </span>
               ))}
-              <Link to="/library/missing-ids" className="text-sky-700 underline underline-offset-2">
+              <Link to="/library/missing-ids" className="text-sky-300 underline underline-offset-2">
                 Library albums and tracks missing IDs are in Library: Missing IDs
               </Link>
             </>
@@ -5091,13 +5091,13 @@ export function ImportReviewPage({
             </Button>
           </div>
           {queueUpdatesAvailable ? (
-            <span className="inline-flex items-center gap-2 text-xs font-medium text-zinc-700">
+            <span className="inline-flex items-center gap-2 text-xs font-medium text-graphite-200">
               {missingIdsMode ? 'Updates to this list are available.' : 'Review queue updates are available.'}
               <Button size="small" variant="text" onClick={() => void loadQueue()} disabled={loading}>Load updates</Button>
             </span>
           ) : null}
-          {revalidateMsg ? <span className="text-xs text-zinc-700">{revalidateMsg}</span> : null}
-          {cleanupMsg ? <span role="status" className="text-xs text-zinc-700">{cleanupMsg}</span> : null}
+          {revalidateMsg ? <span className="text-xs text-graphite-200">{revalidateMsg}</span> : null}
+          {cleanupMsg ? <span role="status" className="text-xs text-graphite-200">{cleanupMsg}</span> : null}
         </div>
       </div>
 
@@ -5113,20 +5113,20 @@ export function ImportReviewPage({
               fullWidth
             />
             {missingIdsMode ? null : (
-              <div className="flex items-center justify-between gap-3 rounded border border-graphite-200 bg-graphite-50 px-3 py-2">
-                <span className="text-sm font-medium text-zinc-700">Evidence only</span>
+              <div className="flex items-center justify-between gap-3 rounded border border-graphite-700 bg-graphite-850 px-3 py-2">
+                <span className="text-sm font-medium text-graphite-200">Evidence only</span>
                 <Switch
                   checked={evidenceOnly}
                   onChange={setEvidenceOnly}
-                  className="group inline-flex h-7 w-12 items-center rounded-full bg-graphite-300 transition data-[checked]:bg-sky-600"
+                  className="group inline-flex h-7 w-12 items-center rounded-full bg-graphite-600 transition data-[checked]:bg-red-700"
                 >
-                  <span className="size-5 translate-x-1 rounded-full bg-white shadow transition group-data-[checked]:translate-x-6" />
+                  <span className="size-5 translate-x-1 rounded-full bg-graphite-300 shadow transition group-data-[checked]:translate-x-6" />
                 </Switch>
               </div>
             )}
           </div>
           {activeFilterSummary ? (
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
               <span>Active: {activeFilterSummary}</span>
               {hasExtraFilters ? (
                 <Button size="small" variant="text" onClick={clearFilters}>Clear filters</Button>
@@ -5172,12 +5172,12 @@ export function ImportReviewPage({
             })}
           </div>
           {pageBucketFilter ? (
-            <div className="mt-2 text-xs text-zinc-500">
+            <div className="mt-2 text-xs text-muted">
               This filter applies to the {items.length} item{items.length === 1 ? '' : 's'} on this page.
             </div>
           ) : null}
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Source</span>
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Source</span>
             {originFilters.map((entry) => {
               const count = sourceFilterCounts[entry.id];
               const active = sourceFilter === entry.id;
@@ -5202,7 +5202,7 @@ export function ImportReviewPage({
             {loading ? '' : resultsAnnouncement}
           </div>
           {total > REVIEW_PAGE_SIZE || offset > 0 ? (
-            <nav aria-label="Pages" className="mt-3 flex flex-wrap items-center gap-2 text-xs text-zinc-600">
+            <nav aria-label="Pages" className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
               <span>Showing {pageStart}–{pageEnd} of {total}</span>
               <Button size="small" variant="outlined" disabled={!hasPrevPage || loading} onClick={() => setOffset(Math.max(0, offset - REVIEW_PAGE_SIZE))}>
                 Previous page
@@ -5271,19 +5271,19 @@ export function ImportReviewPage({
             <button
               aria-label="Previous item"
               title="Previous [[]"
-              className="flex h-8 w-8 items-center justify-center rounded text-zinc-100 transition hover:bg-graphite-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:cursor-not-allowed disabled:text-zinc-500"
+              className="flex h-8 w-8 items-center justify-center rounded text-graphite-100 transition hover:bg-graphite-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:cursor-not-allowed disabled:text-muted"
               disabled={activeIndex <= 0}
               onClick={handlePrev}
             >
               ←
             </button>
             <div className="min-w-0 flex-1 text-center">
-              <div className="text-[0.7rem] text-zinc-200">
+              <div className="text-[0.7rem] text-graphite-200">
                 {activeIndex + 1} of {visibleItems.length} shown · items {pageStart}–{pageEnd} of {total}
                 {activeJobHiddenCount ? ` · ${activeJobHiddenCount} hidden by active jobs` : ''}
               </div>
               {activeItem ? (
-                <div className="truncate text-sm font-semibold text-zinc-200" title={itemTitle(activeItem)}>
+                <div className="truncate text-sm font-semibold text-graphite-200" title={itemTitle(activeItem)}>
                   {itemTitle(activeItem)}
                 </div>
               ) : null}
@@ -5291,14 +5291,14 @@ export function ImportReviewPage({
             <button
               aria-label="Next item"
               title="Next []]"
-              className="flex h-8 w-8 items-center justify-center rounded text-zinc-100 transition hover:bg-graphite-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:cursor-not-allowed disabled:text-zinc-500"
+              className="flex h-8 w-8 items-center justify-center rounded text-graphite-100 transition hover:bg-graphite-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:cursor-not-allowed disabled:text-muted"
               disabled={activeIndex >= visibleItems.length - 1}
               onClick={handleNext}
             >
               →
             </button>
             <button
-              className="rounded border border-graphite-400 px-3 py-1 text-xs font-medium text-zinc-100 transition hover:border-graphite-300 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:border-graphite-700 disabled:text-zinc-500"
+              className="rounded border border-graphite-400 px-3 py-1 text-xs font-medium text-graphite-100 transition hover:border-graphite-300 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:border-graphite-700 disabled:text-muted"
               disabled={activeIndex >= visibleItems.length - 1}
               onClick={handleSkip}
             >

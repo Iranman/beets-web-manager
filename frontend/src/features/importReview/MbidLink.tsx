@@ -48,9 +48,9 @@ const STATUS_TEXT: Record<MbidStatus, string> = {
 };
 
 const STATUS_CLASS: Record<MbidStatus, string> = {
-  verified: 'border-emerald-300 bg-emerald-50 text-emerald-800',
-  suggested: 'border-amber-300 bg-amber-50 text-amber-900',
-  conflicting: 'border-rose-300 bg-rose-50 text-rose-800',
+  verified: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-200',
+  suggested: 'border-amber-500/40 bg-amber-950/40 text-amber-200',
+  conflicting: 'border-rose-500/40 bg-rose-950/40 text-rose-200',
 };
 
 async function copyText(text: string): Promise<boolean> {
@@ -96,10 +96,10 @@ export function MbidLink({
 
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs" data-mbid-entity={entity}>
-      <span className="font-medium text-zinc-600">{typeLabel}:</span>
+      <span className="font-medium text-muted">{typeLabel}:</span>
       {url ? (
         <a
-          className="break-all font-mono underline decoration-zinc-400 hover:text-zinc-700"
+          className="break-all font-mono underline decoration-zinc-400 hover:text-graphite-50"
           href={url}
           target="_blank"
           rel="noreferrer noopener"
@@ -108,7 +108,7 @@ export function MbidLink({
           {trimmed}
         </a>
       ) : (
-        <span className="break-all font-mono text-rose-700" title="Not a valid MusicBrainz UUID">
+        <span className="break-all font-mono text-rose-300" title="Not a valid MusicBrainz UUID">
           {trimmed || '—'}
           <span className="ml-1 not-italic">(invalid MusicBrainz ID)</span>
         </span>
@@ -118,7 +118,7 @@ export function MbidLink({
           type="button"
           onClick={onCopy}
           aria-label={`Copy ${typeLabel} ID`}
-          className="rounded border border-zinc-300 bg-white px-1.5 py-0.5 font-medium text-zinc-600 hover:bg-zinc-50"
+          className="rounded border border-graphite-700 bg-graphite-900 px-1.5 py-0.5 font-medium text-muted hover:bg-graphite-800"
         >
           {copied ? 'Copied' : 'Copy ID'}
         </button>
@@ -210,31 +210,31 @@ export function RecoveryIdentityPanel({ item }: { item: ReviewItem }) {
 
   return (
     <section
-      className="mt-3 rounded border border-l-4 border-violet-300 border-l-violet-500 bg-violet-50 p-3"
+      className="mt-3 rounded border border-graphite-700 bg-graphite-900 p-3"
       aria-label="Missing-track recovery"
       data-recovery-panel="true"
     >
       <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded border border-violet-400 bg-violet-100 px-2 py-0.5 text-xs font-semibold text-violet-900">
+        <span className="rounded border border-graphite-700 bg-graphite-800 px-2 py-0.5 text-xs font-semibold text-graphite-100">
           Missing-track recovery
         </span>
-        <span className="text-xs font-medium text-violet-900">Not a new album</span>
+        <span className="text-xs font-medium text-graphite-100">Not a new album</span>
       </div>
-      <h3 className="mt-2 text-sm font-semibold text-violet-950">
+      <h3 className="mt-2 text-sm font-semibold text-graphite-100">
         Recovery of {album} — {trackNumbers(rec)}
       </h3>
-      <p className="mt-1 text-xs text-violet-900">
+      <p className="mt-1 text-xs text-graphite-100">
         These IDs identify the existing library album this download is being recovered into. They are
         not a confirmed match for the staged files yet — verify before importing.
       </p>
 
       <dl className="mt-2 space-y-1.5">
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <dt className="font-medium text-zinc-600">Target album:</dt>
-          <dd className="text-zinc-800">
+          <dt className="font-medium text-muted">Target album:</dt>
+          <dd className="text-graphite-100">
             {album}
             {rec.existingAlbumId > 0 ? (
-              <span className="ml-1 font-mono text-zinc-500">(in library · album {rec.existingAlbumId})</span>
+              <span className="ml-1 font-mono text-muted">(in library · album {rec.existingAlbumId})</span>
             ) : null}
           </dd>
         </div>
@@ -248,24 +248,24 @@ export function RecoveryIdentityPanel({ item }: { item: ReviewItem }) {
         ) : null}
         {rec.destinationPath ? (
           <div className="flex flex-wrap items-baseline gap-2 text-xs">
-            <dt className="font-medium text-zinc-600">Destination:</dt>
-            <dd className="break-all font-mono text-zinc-600">{rec.destinationPath}</dd>
+            <dt className="font-medium text-muted">Destination:</dt>
+            <dd className="break-all font-mono text-muted">{rec.destinationPath}</dd>
           </div>
         ) : null}
       </dl>
 
       {rec.expectedTracks.length ? (
         <div className="mt-2">
-          <div className="text-xs font-semibold text-violet-950">Expected tracks</div>
+          <div className="text-xs font-semibold text-graphite-100">Expected tracks</div>
           <ul className="mt-1 space-y-1.5">
             {rec.expectedTracks.map((t, i) => (
               <li key={t.recording_id || `${t.track ?? ''}:${i}`} className="text-xs">
-                <span className="font-medium text-zinc-700">
+                <span className="font-medium text-graphite-200">
                   {t.track !== null && t.track !== undefined && String(t.track).trim() !== ''
                     ? `Track ${t.track}`
                     : `Track ${i + 1}`}
                 </span>
-                {t.title ? <span className="ml-1 text-zinc-600">· {t.title}</span> : null}
+                {t.title ? <span className="ml-1 text-muted">· {t.title}</span> : null}
                 {t.recording_id ? (
                   <div className="mt-0.5">
                     <MbidLink entity="recording" id={t.recording_id} status="suggested" label="Recording" />
@@ -325,8 +325,8 @@ export function RecoveryStageIndicator({ item }: { item: ReviewItem }) {
   if (stage.stage === 'needs_review' || stage.stage === 'failed') {
     const failed = stage.stage === 'failed';
     const tone = failed
-      ? 'border-rose-300 bg-rose-50 text-rose-800'
-      : 'border-amber-300 bg-amber-50 text-amber-900';
+      ? 'border-rose-500/40 bg-rose-950/40 text-rose-200'
+      : 'border-amber-500/40 bg-amber-950/40 text-amber-200';
     return (
       <section className="mt-3" aria-label="Recovery progress" data-recovery-stage={stage.stage}>
         <p
@@ -337,7 +337,7 @@ export function RecoveryStageIndicator({ item }: { item: ReviewItem }) {
           <span>Recovery {failed ? 'failed' : 'needs review'}: {stage.label}</span>
         </p>
         {note ? (
-          <p className="mt-1 text-xs text-zinc-600" title={note} data-recovery-note="true">
+          <p className="mt-1 text-xs text-muted" title={note} data-recovery-note="true">
             {note}
           </p>
         ) : null}
@@ -353,7 +353,7 @@ export function RecoveryStageIndicator({ item }: { item: ReviewItem }) {
 
   return (
     <section
-      className="mt-3 rounded border border-violet-200 bg-violet-50/60 p-3"
+      className="mt-3 rounded border border-graphite-700 bg-graphite-900 p-3"
       aria-label="Recovery progress"
       data-recovery-stage={stage.stage}
     >
@@ -370,14 +370,14 @@ export function RecoveryStageIndicator({ item }: { item: ReviewItem }) {
           const green = isCurrent && isComplete;
           const marker = position === 'done' || green ? '✓' : isCurrent ? '●' : '○';
           const tone = green
-            ? 'text-emerald-700 font-semibold'
+            ? 'text-emerald-300 font-semibold'
             : position === 'done'
-              ? 'text-violet-800'
+              ? 'text-graphite-100'
               : isCurrent && s.key === 'plex_sync'
-                ? 'text-sky-700 font-semibold'
+                ? 'text-sky-300 font-semibold'
                 : isCurrent
-                  ? 'text-violet-900 font-semibold'
-                  : 'text-zinc-400';
+                  ? 'text-graphite-100 font-semibold'
+                  : 'text-muted';
           const announced = isCurrent ? (isComplete ? 'complete' : 'in progress') : position;
           return (
             <li
@@ -395,7 +395,7 @@ export function RecoveryStageIndicator({ item }: { item: ReviewItem }) {
         })}
       </ol>
       {note ? (
-        <p className="mt-2 text-xs text-zinc-600" title={note} data-recovery-note="true">
+        <p className="mt-2 text-xs text-muted" title={note} data-recovery-note="true">
           {note}
         </p>
       ) : null}
