@@ -120,6 +120,8 @@ export function HistoryPanel() {
   const [aiHistory, setAiHistory] = useState<RecentImport[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The lists failed to load: they are unknown, not empty (#618).
+  const [listFailed, setListFailed] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -131,7 +133,9 @@ export function HistoryPanel() {
       ]);
       setRecent(r.imports ?? []);
       setAiHistory(h.history ?? []);
+      setListFailed(false);
     } catch (err) {
+      setListFailed(true);
       setError(errorMessage(err));
     } finally {
       setLoading(false);
@@ -163,7 +167,7 @@ export function HistoryPanel() {
       {loading && <LinearProgress sx={{ borderRadius: 1 }} />}
       {error && <Alert severity="error">{error}</Alert>}
 
-      {!loading && (
+      {!loading && !listFailed && (
         <div className="space-y-5">
           <HistorySection
             title="Recently imported"

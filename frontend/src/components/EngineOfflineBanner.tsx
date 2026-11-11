@@ -1,5 +1,5 @@
 import Alert from '@mui/material/Alert';
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useEffect, useRef } from 'react';
 import { Link, useLocation } from 'react-router';
 import { ENGINE_OFFLINE_MESSAGE } from '../lib/api';
 
@@ -9,6 +9,17 @@ export const EngineOfflineContext = createContext(false);
 
 export function useEngineOffline(): boolean {
   return useContext(EngineOfflineContext);
+}
+
+/** Calls `reload` when the engine probe goes from offline to online (#618).
+ * Pages still load on mount themselves, whatever the probe says. */
+export function useReloadOnEngineReturn(reload: () => void): void {
+  const offline = useEngineOffline();
+  const wasOffline = useRef(offline);
+  useEffect(() => {
+    if (wasOffline.current && !offline) reload();
+    wasOffline.current = offline;
+  }, [offline, reload]);
 }
 
 /** The one page-level notice for an engine outage. Panels drop their own copy

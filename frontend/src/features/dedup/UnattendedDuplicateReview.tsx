@@ -142,7 +142,7 @@ export function UnattendedDuplicateReview({ onMusicRoot }: { onMusicRoot?: (root
             label={`Type "${ENABLE_CONFIRMATION}" to enable`}
             value={confirmText}
             onChange={(e) => setConfirmText(e.target.value)}
-            sx={{ minWidth: 380 }}
+            sx={{ width: '100%', maxWidth: 380 }}
           />
           <Button
             size="small"

@@ -102,14 +102,16 @@ export default function Shell({ username, onLogout }: ShellProps) {
     <div className="flex min-h-screen min-w-0 flex-col bg-graphite-950 text-zinc-100">
       <header className="sticky top-0 z-20 border-b border-red-900/55 bg-graphite-900/96 shadow-sm shadow-red-950/20 backdrop-blur">
         <div className="relative min-w-0 before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-red-600 before:via-red-500 before:to-transparent">
-          <div className="mx-auto flex max-w-full flex-wrap items-center gap-x-1 gap-y-0 px-3 sm:flex-nowrap sm:overflow-x-auto sm:px-4 lg:max-w-screen-2xl">
-            <span className="mr-3 flex shrink-0 select-none items-center gap-2 py-2.5 sm:mr-5">
+          <div className="mx-auto flex h-[var(--bw-header-h)] max-w-full items-center gap-x-1 px-3 sm:px-4 lg:max-w-screen-2xl">
+            <span className="mr-1 flex shrink-0 select-none items-center gap-2 sm:mr-5">
               <BeetsLogo />
-              <span className="text-sm font-black uppercase tracking-widest text-red-300">
+              <span className="hidden text-sm font-black uppercase tracking-widest text-red-300 sm:inline">
                 Beets
               </span>
             </span>
 
+            {/* Tabs scroll sideways on narrow screens instead of wrapping (#607). */}
+            <nav aria-label="Primary" data-testid="primary-nav" className="flex h-full min-w-0 flex-1 overflow-x-auto">
             {TABS.map(({ to, label }) => {
               const isJobs = to === '/jobs';
               return (
@@ -118,7 +120,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   to={to}
                   className={({ isActive }) =>
                     [
-                      'flex shrink-0 items-center border-b-2 px-2.5 py-3 text-[0.82rem] font-medium transition-colors sm:px-3',
+                      'flex shrink-0 items-center whitespace-nowrap border-b-2 px-2.5 text-[0.82rem] font-medium transition-colors focus-visible:-outline-offset-2! sm:px-3',
                       isActive
                         ? 'border-red-500 bg-red-950/35 text-white shadow-[inset_0_-1px_0_rgba(239,68,68,0.35)]'
                         : 'border-transparent text-zinc-300 hover:border-red-700/70 hover:bg-red-950/18 hover:text-white',
@@ -130,13 +132,14 @@ export default function Shell({ username, onLogout }: ShellProps) {
                 </NavLink>
               );
             })}
+            </nav>
 
             <div className="ml-auto flex shrink-0 items-center gap-3">
               {restartMsg && (
                 <span className="text-[0.72rem] text-emerald-400">{restartMsg}</span>
               )}
               {!restartMsg && running > 0 && (
-                <span className="flex items-center gap-1.5 text-[0.72rem] text-amber-300">
+                <span className="hidden items-center sm:flex gap-1.5 text-[0.72rem] text-amber-300">
                   <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-300" />
                   {running} running
                 </span>

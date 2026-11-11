@@ -548,7 +548,7 @@ export default function Submissions() {
   })();
 
   return (
-    <section className="pb-24">
+    <section className="md:pb-24">
       <div className="rounded-md border border-graphite-800 bg-graphite-950/45 px-4 py-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -573,15 +573,15 @@ export default function Submissions() {
       {/* Compact workflow stepper */}
       <div className="mt-3 flex items-center gap-1 rounded-md border border-graphite-800 bg-graphite-900/70 px-3 py-2">
         {STEPS.map((label, index) => (
-          <div key={label} className="flex flex-1 items-center gap-1">
-            <div className={['flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[0.68rem] font-semibold', index === activeStep ? 'bg-red-600 text-white' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-muted'].join(' ')}>{index + 1}</div>
-            <span className={['truncate text-[0.7rem]', index === activeStep ? 'text-zinc-100' : 'text-muted'].join(' ')}>{label}</span>
+          <div key={label} className="flex min-w-0 flex-1 items-center gap-1">
+            <div className={['flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-1.5 text-[0.68rem] font-semibold', index === activeStep ? 'bg-red-600 text-white' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-muted'].join(' ')}>{index + 1}</div>
+            <span className={['min-w-0 truncate text-[0.7rem]', index === activeStep ? 'text-zinc-100' : 'hidden text-muted sm:inline'].join(' ')}>{label}</span>
             {index < STEPS.length - 1 ? <div className={['mx-1 h-px flex-1', index < activeStep ? 'bg-emerald-800' : 'bg-graphite-800'].join(' ')} /> : null}
           </div>
         ))}
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[22rem_minmax(0,1fr)]">
+      <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[22rem_minmax(0,1fr)]">
         <aside className="space-y-3 rounded-md border border-graphite-800 bg-graphite-900/70 p-3">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-zinc-100">Review Queue</h2>
@@ -611,7 +611,7 @@ export default function Submissions() {
                 </button>
               );
             })}
-            {!visibleItems.length ? <div className="rounded border border-graphite-800 bg-graphite-950/35 p-3 text-sm text-zinc-400">No items match this filter.</div> : null}
+            {!visibleItems.length && !loading && !error ? <div className="rounded border border-graphite-800 bg-graphite-950/35 p-3 text-sm text-zinc-400">No items match this filter.</div> : null}
           </div>
         </aside>
 
@@ -685,7 +685,7 @@ export default function Submissions() {
           <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
             <h2 className="text-sm font-semibold text-zinc-100">Reference URLs</h2>
             <p className="mt-1 text-xs text-zinc-400">Paste a YouTube, MusicBrainz, Discogs, Bandcamp, or SoundCloud link to help identify this release. Metadata is retrieved without downloading any audio or video.</p>
-            <div className="mt-2 flex gap-2">
+            <div className="mt-2 flex flex-wrap gap-2 sm:flex-nowrap">
               <TextField fullWidth size="small" placeholder="https://www.youtube.com/watch?v=..." value={refUrlInput} onChange={(event) => setRefUrlInput(event.target.value)} disabled={!target} />
               <Button size="small" variant="contained" disabled={!target || !refUrlInput.trim() || refUrlBusy} onClick={() => void addReferenceUrl()}>{refUrlBusy ? 'Parsing…' : 'Add reference'}</Button>
             </div>
@@ -805,7 +805,7 @@ export default function Submissions() {
             </details>
           </section>
 
-          <section className="grid gap-4 lg:grid-cols-2">
+          <section className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-2">
             <div id="submission-duplicates" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold text-zinc-100">Duplicate Detection</h2>
@@ -839,7 +839,7 @@ export default function Submissions() {
         </div>
       </div>
 
-      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-graphite-800 bg-graphite-950/95 px-4 py-3 backdrop-blur">
+      <div data-testid="submission-action-bar" className="sticky bottom-0 z-10 -mx-3 mt-4 border-t border-graphite-800 bg-graphite-950/95 px-3 py-3 backdrop-blur sm:-mx-4 sm:px-4 md:fixed md:inset-x-0 md:z-20 md:mx-0 md:mt-0">
         <div className="mx-auto flex max-w-screen-2xl flex-col gap-2 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0 truncate text-sm text-zinc-400">
             {footerText}

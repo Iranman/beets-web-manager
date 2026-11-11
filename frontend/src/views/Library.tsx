@@ -22,7 +22,7 @@ import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { AlbumCleanupModal } from '../components/AlbumCleanupModal';
 import { TrackReplacementModal } from '../components/TrackReplacementModal';
-import { useEngineOffline } from '../components/EngineOfflineBanner';
+import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 
 type StatusFilter = 'all' | 'ids' | 'missing' | 'extra' | 'art' | 'clean';
 type SearchScope = 'all' | 'artists' | 'albums' | 'tracks';
@@ -1188,6 +1188,13 @@ export default function Library() {
   useEffect(() => {
     void loadLibrary();
   }, [loadLibrary]);
+  const engineOffline = useEngineOffline();
+  // Bumped when the engine comes back, to reload the art repair status too.
+  const [engineReturns, setEngineReturns] = useState(0);
+  useReloadOnEngineReturn(useCallback(() => {
+    void loadLibrary();
+    setEngineReturns((n) => n + 1);
+  }, [loadLibrary]));
 
   // The page paints from whatever /api/library returns first, then polls in the
   // background (bounded, backing off) while that payload is not yet fresh:
@@ -1226,7 +1233,10 @@ export default function Library() {
     async function loadArtRepair() {
       try {
         const report = await getLibraryArtRepairReport();
-        if (!cancelled) setArtRepairReport(report);
+        if (!cancelled) {
+          setArtRepairReport(report);
+          setArtRepairError('');
+        }
       } catch (err) {
         if (!cancelled) setArtRepairError(errorMessage(err));
       }
@@ -1235,7 +1245,7 @@ export default function Library() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [engineReturns]);
 
   useEffect(() => {
     const needsTrackRows = query.trim().length >= 2 && (scope === 'all' || scope === 'tracks');
@@ -1423,7 +1433,7 @@ export default function Library() {
     navigate(path);
   }, [navigate]);
   const loadFailed = !data && Boolean(error);
-  const shownError = panelError(error, useEngineOffline());
+  const shownError = panelError(error, engineOffline);
 
   return (
     <div className="space-y-4">

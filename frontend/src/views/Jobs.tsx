@@ -42,7 +42,7 @@ import {
 } from '../lib/jobFeed';
 import { useGlobalJobs, useInterval, useJobPoll } from '../lib/hooks';
 import { panelError } from '../lib/errors';
-import { useEngineOffline } from '../components/EngineOfflineBanner';
+import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 import type { ApiOkResponse } from '../api/types';
 import type {
   Job,
@@ -869,7 +869,7 @@ function AlbumFolderIssueDialog({
                 <Button disabled={busy || blocked} size="small" variant="contained" onClick={() => onApply(issue)}>
                   {busy ? 'Applying...' : 'Apply fix'}
                 </Button>
-                <Button disabled={busy || blocked} size="small" variant="contained" onClick={() => onApply(issue)}>
+                <Button disabled={busy || blocked} size="small" variant="outlined" onClick={() => onApply(issue)}>
                   Apply selected fixes
                 </Button>
                 <Button size="small" variant="text" onClick={onClose}>Close</Button>
@@ -1092,7 +1092,7 @@ function AlbumFolderCleanupPanel({
       {shownError ? <Alert severity="error" sx={{ fontSize: '0.75rem', py: 0.5 }}>{shownError}</Alert> : null}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="small" variant="contained" disabled={busy} onClick={() => void doScan()}>
+        <Button size="small" variant="outlined" disabled={busy} onClick={() => void doScan()}>
           Refresh Folder Report
         </Button>
         {summary && safeCount > 0 && (
@@ -2635,7 +2635,8 @@ export default function Jobs() {
   const [error, setError] = useState('');
   const [listFailed, setListFailed] = useState(false);
   const [notice, setNotice] = useState('');
-  const shownError = panelError(error, useEngineOffline());
+  const engineOffline = useEngineOffline();
+  const shownError = panelError(error, engineOffline);
 
   // Feed
   const [feed, setFeed] = useState<JobLogFeedResponse['entries']>([]);
@@ -2689,6 +2690,7 @@ export default function Jobs() {
   }, [load, loadFeed]);
 
   useEffect(() => { void load(); void loadFeed(); }, [load, loadFeed]);
+  useReloadOnEngineReturn(refreshAll);
 
   const counts = useMemo(() => {
     const n = { total: jobs.length, running: 0, failed: 0, success: 0 };

@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 from flask import jsonify, request
-from backend.audio_preferences import save_music_format_preferences as _save_music_format_preferences
+from backend.audio_preferences import (MusicFormatRevisionConflict, music_format_preferences_revision as _music_format_revision,
+                                       save_music_format_preferences as _save_music_format_preferences)
 from backend.beets_adapter import BeetsError, BeetsUnavailableError, BeetsAuthError
 import backend.composite_workflows as composite_workflows
 from backend.config_manager import ConfigConflictError, ConfigError, ConfigValidationError
@@ -104,18 +105,32 @@ def api_ai_matching_regressions():
 
 @app.get("/api/settings/music-format")
 def get_music_format_preferences():
-    return jsonify({"ok": True, "preferences": _music_format_preferences()})
+    prefs = _music_format_preferences()
+    return jsonify({"ok": True, "preferences": prefs, "revision": _music_format_revision(prefs)})
 
 
 @app.post("/api/settings/music-format")
 def save_music_format_preferences_route():
+    # Optimistic concurrency (#623): the client sends back the revision from its
+    # GET. A save without one (old client) is refused with 428, as for
+    # /api/setup/settings and /api/config, so it can never overwrite a newer save.
     payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "expected a JSON object"}), 400
+    expected_revision = _s(payload.pop("expected_revision", None) or "").strip()
+    if not expected_revision:
+        return jsonify({"ok": False, "error": "expected_revision is required",
+                        "code": "music_format_missing_revision"}), 428
     try:
-        prefs = _save_music_format_preferences(payload.get("preferences") or payload)
+        prefs = _save_music_format_preferences(payload.get("preferences") or payload,
+                                               expected_revision=expected_revision)
+    except MusicFormatRevisionConflict:
+        return jsonify({"ok": False, "error": "Preferences changed elsewhere; reload before saving.",
+                        "code": "music_format_revision_conflict"}), 409
     except Exception as ex:
         _app_logger.warning("Could not save music format preferences: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not save preferences."}), 400
-    return jsonify({"ok": True, "preferences": prefs})
+    return jsonify({"ok": True, "preferences": prefs, "revision": _music_format_revision(prefs)})
 
 
 _CONFIG_CONTENT_MAX_CHARS = _env_int(
