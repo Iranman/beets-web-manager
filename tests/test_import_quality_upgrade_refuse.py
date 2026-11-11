@@ -67,6 +67,8 @@ class QualityUpgradeRowRefusedTests(unittest.TestCase):
             (isvc, "_folder_import_reentry_identity", {"side_effect": lambda f, a, w: (a, w)}),
             (isvc, "_cached_import_target_preview", {"return_value": {"safe": True, "tracks_to_import_count": 2}}),
             (prs, "_record_ai_review_decision", {}),
+            # Temp folders sit outside the approved import roots (#617 trust check).
+            (routes_import, "_trusted_stored_review_path", {"side_effect": str}),
         ):
             patcher = mock.patch.object(target, name, **kw)
             patcher.start()
