@@ -1,5 +1,5 @@
 import { formatEpochDateTime } from '../lib/dates';
-import { useEngineOffline } from '../components/EngineOfflineBanner';
+import { useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 import { errorMessage, sentences } from '../lib/errors';
 import { Description, Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
@@ -327,11 +327,10 @@ export default function LibraryChanges() {
     }
   }, []);
 
-  // Reload when the Shell's engine probe sees the engine come back (#618).
-  const engineOffline = useEngineOffline();
   useEffect(() => {
-    if (!engineOffline) void loadRows();
-  }, [loadRows, engineOffline]);
+    void loadRows();
+  }, [loadRows]);
+  useReloadOnEngineReturn(loadRows);
 
   useEffect(() => {
     void loadDetail(selectedId);

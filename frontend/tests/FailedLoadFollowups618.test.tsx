@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import type { ReactElement } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { EngineOfflineContext } from '../src/components/EngineOfflineBanner';
 import Shell from '../src/components/layout/Shell';
 import { HistoryPanel } from '../src/features/history/HistoryPanel';
 import Jobs from '../src/views/Jobs';
@@ -84,7 +85,7 @@ describe('failed loads: missed pages, recovery and stale rows (#618)', () => {
     await waitFor(() => expect(screen.getByText('— artists')).toBeTruthy());
     await engineReturns(client);
     await waitFor(() => expect(screen.getByText('2 artists')).toBeTruthy());
-    expect(screen.queryByText(/Beets engine is unavailable/)).toBeNull();
+    await waitFor(() => expect(screen.queryByText(/Beets engine is unavailable/)).toBeNull());
   });
 
   it('Jobs reloads when the engine comes back', async () => {
@@ -116,5 +117,44 @@ describe('failed loads: missed pages, recovery and stale rows (#618)', () => {
     await waitFor(() => expect(screen.getByText('Transactions unknown')).toBeTruthy());
     const list = screen.getByText('Transactions unknown').closest('div.overflow-hidden') as HTMLElement;
     expect(within(list).queryByRole('button', { name: /album_cleanup/ })).toBeNull();
+  });
+
+  // QA of #635: the banner is already up (probe cached in Shell context) when
+  // the user opens the page. The page must still load, and show the failure as
+  // unknown, not as zero or empty.
+  function renderOffline(page: ReactElement) {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <EngineOfflineContext.Provider value>
+          <MemoryRouter>{page}</MemoryRouter>
+        </EngineOfflineContext.Provider>
+      </QueryClientProvider>,
+    );
+  }
+  const called = (path: string) => vi.mocked(global.fetch).mock.calls.some(([input]) => new URL(String(input), 'http://localhost').pathname === path);
+
+  it('Library Changes still loads on mount while the probe already says offline', async () => {
+    mockFetch();
+    renderOffline(<LibraryChanges />);
+    await waitFor(() => expect(screen.getByText('Transactions unknown')).toBeTruthy());
+    expect(called('/api/transactions')).toBe(true);
+    expect(screen.queryByText('No transactions found.')).toBeNull();
+  });
+
+  it('Library still loads on mount while the probe already says offline', async () => {
+    mockFetch();
+    renderOffline(<Library />);
+    await waitFor(() => expect(screen.queryByText(/Loading library/)).toBeNull());
+    expect(called('/api/library')).toBe(true);
+    expect(screen.getByText('— artists')).toBeTruthy();
+    expect(screen.queryByText(/^0 (artists|albums|tracks)$/)).toBeNull();
+  });
+
+  it('Jobs still loads on mount while the probe already says offline', async () => {
+    mockFetch();
+    renderOffline(<Jobs />);
+    await waitFor(() => expect(screen.getByText('— running')).toBeTruthy());
+    expect(called('/api/jobs')).toBe(true);
+    expect(screen.queryByText(/^0 (running|failed|completed)$/)).toBeNull();
   });
 });

@@ -42,7 +42,7 @@ import {
 } from '../lib/jobFeed';
 import { useGlobalJobs, useInterval, useJobPoll } from '../lib/hooks';
 import { panelError } from '../lib/errors';
-import { useEngineOffline } from '../components/EngineOfflineBanner';
+import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 import type { ApiOkResponse } from '../api/types';
 import type {
   Job,
@@ -2689,10 +2689,8 @@ export default function Jobs() {
     await Promise.all([load(), loadFeed()]);
   }, [load, loadFeed]);
 
-  // Reload when the Shell's engine probe sees the engine come back (#618).
-  useEffect(() => {
-    if (!engineOffline) { void load(); void loadFeed(); }
-  }, [load, loadFeed, engineOffline]);
+  useEffect(() => { void load(); void loadFeed(); }, [load, loadFeed]);
+  useReloadOnEngineReturn(refreshAll);
 
   const counts = useMemo(() => {
     const n = { total: jobs.length, running: 0, failed: 0, success: 0 };
