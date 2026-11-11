@@ -107,7 +107,9 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("const AUTO_IMPORT_CONFIDENCE_THRESHOLD = 0.60", review_source)
         self.assertIn("export const REVIEW_PAGE_SIZE = 100", review_source)
         self.assertIn("if (score >= AUTO_IMPORT_CONFIDENCE_THRESHOLD) return 'medium'", review_source)
-        self.assertIn("const autoFixEligible = isImportable && confidenceScore !== null && confidenceScore >= AUTO_IMPORT_CONFIDENCE_THRESHOLD", review_source)
+        # #596: both builders also require a proven identity.
+        self.assertIn("const autoFixEligible = identityValidated === true && isImportable && confidenceScore !== null && confidenceScore >= AUTO_IMPORT_CONFIDENCE_THRESHOLD", review_source)
+        self.assertIn("const autoFixEligible = suggestion.identity_validated === true && isImportable && confidenceScore !== null && confidenceScore >= AUTO_IMPORT_CONFIDENCE_THRESHOLD", review_source)
         self.assertIn("Review required because this match is below the 60% auto-import threshold.", review_source)
         self.assertIn("Auto-import eligible — ${formatPercent(confidenceScore)} confidence.", review_source)
         self.assertIn("const autoFixRequiresReview = false", review_source)

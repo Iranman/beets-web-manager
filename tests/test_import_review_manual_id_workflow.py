@@ -444,7 +444,7 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
 
     def test_manual_match_builder_keeps_target_preview_eligible_contract(self):
         selected = self.app_module._import_review_build_revalidated_match(
-            {"suggestion": {"confidence": "high"}},
+            {"suggestion": {"confidence": "high", "identity_validated": True}},
             _comparison(),
             {"ok": True, "matches": 1, "expected": 1, "audio_count": 1, "match_ratio": 1.0, "source_match_ratio": 1.0},
         )
@@ -477,7 +477,7 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
                 self.assertEqual(selected["confidence_level"], "low")
         # Strong deterministic evidence alone is still eligible, AI label "low" notwithstanding.
         strong = self.app_module._import_review_build_revalidated_match(
-            {"suggestion": {"confidence": "low"}}, _comparison(),
+            {"suggestion": {"confidence": "low", "identity_validated": True}}, _comparison(),
             {"ok": True, "matches": 1, "expected": 1, "audio_count": 1, "match_ratio": 1.0, "source_match_ratio": 1.0})
         self.assertTrue(strong["auto_fix_eligible"])
         self.assertEqual(strong["confidence_score"], 1.0)

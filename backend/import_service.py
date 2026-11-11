@@ -3090,6 +3090,11 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
     candidate_identity_error = _s(
         payload.get("candidate_identity_error") or selected_match.get("candidate_identity_error")
     ).strip()
+    # #596: auto-enqueue needs proven identity (artist gate passed or the
+    # AcoustID shortcut), the same rule as Import All (#584). Unresolved
+    # (None) goes to manual review; a manual import stays allowed.
+    identity_proven = not identity_invalid and (
+        payload.get("identity_validated") is True or selected_match.get("identity_validated") is True)
 
     blockers: List[str] = []
     warnings: List[str] = []
@@ -3110,6 +3115,8 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
             candidate_identity_error
             or "Representative Release ID rejected: it does not belong to selected Release Group"
         )
+    elif not identity_proven:
+        blockers.append("Artist identity unresolved: the folder artist could not be compared with the release")
     if confidence is None or confidence < IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD:
         blockers.append("confidence below 60% auto-import threshold")
     if selected_match.get("preflight_status") and selected_match.get("preflight_status") != "passed":
@@ -3143,8 +3150,7 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
         "track_mapping": track_mapping,
         "selected_source_files": [str(path) for path in selected_files],
         # #584: an unresolved identity (None) stays unresolved, never True.
-        "identity_validated": False if identity_invalid else (
-            True if True in (payload.get("identity_validated"), selected_match.get("identity_validated")) else None),
+        "identity_validated": False if identity_invalid else (True if identity_proven else None),
         "candidate_identity_error": candidate_identity_error,
     }
     preview = _cached_import_target_preview(preview_payload)
