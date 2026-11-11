@@ -66,7 +66,7 @@ export default function SubmissionReadinessCard({ preflight, loading, primaryAct
     return <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4 text-sm text-zinc-400">Checking readiness…</div>;
   }
   if (!preflight) {
-    return <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4 text-sm text-zinc-500">Select a resolvable review item to see submission readiness.</div>;
+    return <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4 text-sm text-muted">Select a resolvable review item to see submission readiness.</div>;
   }
 
   const stage = preflight.current_stage || 'identify';
@@ -109,7 +109,7 @@ export default function SubmissionReadinessCard({ preflight, loading, primaryAct
       ) : null}
 
       {showAcoustidNotice ? (
-        <p className="mt-3 text-[0.7rem] text-zinc-500">AcoustID · available after MusicBrainz recording IDs are attached.</p>
+        <p className="mt-3 text-[0.7rem] text-muted">AcoustID · available after MusicBrainz recording IDs are attached.</p>
       ) : null}
 
       <div className="mt-3 flex flex-wrap gap-2">
@@ -144,7 +144,7 @@ export default function SubmissionReadinessCard({ preflight, loading, primaryAct
                   aria-expanded={open}
                 >
                   <span>{GROUP_LABEL[group] || group}</span>
-                  <span className="flex items-center gap-2 text-[0.68rem] font-normal text-zinc-500">
+                  <span className="flex items-center gap-2 text-[0.68rem] font-normal text-muted">
                     {groupBlockers ? <span className="text-red-400">{groupBlockers} blocked</span> : null}
                     <span>{open ? 'Hide' : 'Show'}</span>
                   </span>
@@ -167,7 +167,7 @@ export default function SubmissionReadinessCard({ preflight, loading, primaryAct
                         {check.severity !== 'ready' && check.explanation ? <p className="mt-1 text-zinc-400">{check.explanation}</p> : null}
                         {check.severity !== 'ready' && check.action ? (
                           <div className="mt-1.5 flex items-center justify-between gap-2">
-                            <span className="text-zinc-500">{check.action}</span>
+                            <span className="text-muted">{check.action}</span>
                             {check.action_type ? (
                               <Button size="small" variant="text" onClick={() => onAction(check.action_type || '', check.action_target)}>
                                 {ACTION_LABEL[check.action_type] || 'Fix'}
@@ -175,7 +175,7 @@ export default function SubmissionReadinessCard({ preflight, loading, primaryAct
                             ) : null}
                           </div>
                         ) : null}
-                        {check.affected?.length ? <p className="mt-1 truncate text-zinc-600">{check.affected.slice(0, 4).join(', ')}</p> : null}
+                        {check.affected?.length ? <p className="mt-1 truncate text-muted">{check.affected.slice(0, 4).join(', ')}</p> : null}
                       </div>
                     ))}
                   </div>

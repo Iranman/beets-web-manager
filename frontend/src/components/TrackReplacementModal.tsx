@@ -164,7 +164,7 @@ export function TrackReplacementModal({
             {step === 'input' ? (
               <div className="mt-4 space-y-4">
                 <div className="rounded-md border border-graphite-800 bg-graphite-900/50 p-3 text-xs text-zinc-400">
-                  <span className="text-zinc-500">Current file:</span>{' '}
+                  <span className="text-muted">Current file:</span>{' '}
                   <span className="font-mono text-zinc-300 break-all">{originalPath || '(unknown)'}</span>
                 </div>
                 <TextField
@@ -212,16 +212,16 @@ export function TrackReplacementModal({
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 text-xs">
                   <div className="rounded border border-graphite-800 bg-graphite-900/50 p-2">
                     <div className="font-semibold text-zinc-300 mb-1">Existing track</div>
-                    <div className="text-zinc-500">Path:</div>
+                    <div className="text-muted">Path:</div>
                     <div className="font-mono text-zinc-300 break-all mb-1">{meta?.original_path}</div>
-                    <div className="text-zinc-500">Recording ID:</div>
+                    <div className="text-muted">Recording ID:</div>
                     <div className="font-mono text-zinc-300 break-all">{contract?.original_recording_id || '(none on file)'}</div>
                   </div>
                   <div className="rounded border border-graphite-800 bg-graphite-900/50 p-2">
                     <div className="font-semibold text-zinc-300 mb-1">Replacement candidate</div>
-                    <div className="text-zinc-500">Path:</div>
+                    <div className="text-muted">Path:</div>
                     <div className="font-mono text-zinc-300 break-all mb-1">{meta?.replacement_path}</div>
-                    <div className="text-zinc-500">Verified Recording ID:</div>
+                    <div className="text-muted">Verified Recording ID:</div>
                     <div className="font-mono text-zinc-300 break-all">{contract?.replacement_recording_id}</div>
                   </div>
                 </div>
@@ -281,7 +281,7 @@ export function TrackReplacementModal({
                       </Button>
                     )
                   ) : (
-                    <p className="text-zinc-500">Rollback is not available for this transaction.</p>
+                    <p className="text-muted">Rollback is not available for this transaction.</p>
                   )}
                 </div>
                 <div className="flex justify-end gap-2 pt-2 border-t border-graphite-800">

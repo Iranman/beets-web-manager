@@ -293,7 +293,7 @@ export default function FirstRunSetup() {
                     ? 'bg-red-700 text-white shadow-md ring-2 ring-red-500/50'
                     : isDone
                     ? 'bg-zinc-800 text-emerald-400 hover:bg-zinc-700 cursor-pointer'
-                    : 'bg-graphite-950 text-zinc-600'
+                    : 'bg-graphite-950 text-muted'
                 }`}
               >
                 {isDone ? '✓' : s.num}
@@ -359,7 +359,7 @@ export default function FirstRunSetup() {
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                     required
                   />
                 </div>
@@ -373,7 +373,7 @@ export default function FirstRunSetup() {
                       type={showPassword ? 'text' : 'password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full rounded-lg border border-zinc-700 bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="w-full rounded-lg border border-field-border bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white focus:border-red-500 focus:outline-none"
                       required
                     />
                     <button
@@ -394,7 +394,7 @@ export default function FirstRunSetup() {
                     type="password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                     required
                   />
                   {confirmPassword && !passwordsMatch && (
@@ -409,7 +409,7 @@ export default function FirstRunSetup() {
                     <li className={`flex items-center gap-1.5 ${hasLength ? 'text-emerald-400 font-medium' : ''}`}>
                       <span>{hasLength ? '✓' : '•'}</span> At least {minLength} characters
                     </li>
-                    <li className="flex items-center gap-1.5 text-zinc-500">
+                    <li className="flex items-center gap-1.5 text-muted">
                       Long passphrases are supported; uppercase, numbers, and symbols are not mandatory.
                     </li>
                   </ul>
@@ -659,7 +659,7 @@ export default function FirstRunSetup() {
                     value={acoustidKey}
                     onChange={(e) => setAcoustidKey(e.target.value)}
                     placeholder="Optional application key"
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>
 
@@ -736,7 +736,7 @@ export default function FirstRunSetup() {
                     value={aiApiKey}
                     onChange={(e) => setAiApiKey(e.target.value)}
                     placeholder="sk-..."
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>
 
@@ -749,7 +749,7 @@ export default function FirstRunSetup() {
                       type="text"
                       value={aiBaseUrl}
                       onChange={(e) => setAiBaseUrl(e.target.value)}
-                      className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                     />
                   </div>
                   <div>
@@ -760,7 +760,7 @@ export default function FirstRunSetup() {
                       type="text"
                       value={aiModel}
                       onChange={(e) => setAiModel(e.target.value)}
-                      className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                     />
                   </div>
                 </div>
@@ -883,7 +883,7 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
                     Required Core Plugins ({pluginsReport?.categories?.required?.length || 0})
                   </h3>
-                  <span className="text-[11px] text-zinc-500">Auto-configured for Web Manager</span>
+                  <span className="text-[11px] text-muted">Auto-configured for Web Manager</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {(pluginsReport?.categories?.required || []).map((plugin) => (
@@ -913,7 +913,7 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
                     Bundled Web Manager Extensions
                   </h3>
-                  <span className="text-[11px] text-zinc-500">Shared /config/beetsplug</span>
+                  <span className="text-[11px] text-muted">Shared /config/beetsplug</span>
                 </div>
                 <div className="rounded-lg border border-zinc-800 bg-graphite-950 p-3 flex items-center justify-between text-xs">
                   <div>
@@ -938,7 +938,7 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
                     Optional & Integration Plugins ({((pluginsReport?.categories?.optional?.length || 0) + (pluginsReport?.categories?.integration?.length || 0))})
                   </h3>
-                  <span className="text-[11px] text-zinc-500">Enabled on demand via settings / token</span>
+                  <span className="text-[11px] text-muted">Enabled on demand via settings / token</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {[...(pluginsReport?.categories?.optional || []), ...(pluginsReport?.categories?.integration || [])].map((plugin) => (
@@ -1001,7 +1001,7 @@ export default function FirstRunSetup() {
                     value={plexUrl}
                     onChange={(e) => setPlexUrl(e.target.value)}
                     placeholder="http://plex.local:32400"
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>
 
@@ -1014,7 +1014,7 @@ export default function FirstRunSetup() {
                     value={plexToken}
                     onChange={(e) => setPlexToken(e.target.value)}
                     placeholder="Token"
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>
 

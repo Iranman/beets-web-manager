@@ -355,12 +355,12 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
                 onChange={() => toggle(row.id)}
               />
               <span className="truncate">{[row.artist, row.album || row.title].filter(Boolean).join(' – ') || row.id}</span>
-              <span className="text-xs text-zinc-500">{row.target_kind === 'item' ? 'track' : 'album'}</span>
+              <span className="text-xs text-muted">{row.target_kind === 'item' ? 'track' : 'album'}</span>
             </label>
           ))}
         </fieldset>
       ) : null}
-      <div className="mt-1 text-xs text-zinc-500">{selected.size} of {MISSING_IDS_BATCH_MAX} selected</div>
+      <div className="mt-1 text-xs text-muted">{selected.size} of {MISSING_IDS_BATCH_MAX} selected</div>
 
       <div role="status" aria-live="polite" className="mt-2 text-xs text-zinc-300">{message}</div>
       {error ? <Alert className="mt-2" severity="error">{error}</Alert> : null}

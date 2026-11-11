@@ -74,7 +74,7 @@ export function JobStatusCard({ job, runningLabel, logLines = 2, className = '' 
             {!isRunning ? (
               <NavLink
                 to="/jobs"
-                className="ml-auto text-[0.68rem] text-zinc-500 underline underline-offset-2 hover:text-zinc-300"
+                className="ml-auto text-[0.68rem] text-muted underline underline-offset-2 hover:text-zinc-300"
               >
                 view log
               </NavLink>
@@ -90,7 +90,7 @@ export function JobStatusCard({ job, runningLabel, logLines = 2, className = '' 
               {lastLines.map((line, i) => (
                 <div
                   key={`${i}-${line}`}
-                  className="truncate font-mono text-[0.66rem] leading-4 text-zinc-500"
+                  className="truncate font-mono text-[0.66rem] leading-4 text-muted"
                   title={line}
                 >
                   {line}

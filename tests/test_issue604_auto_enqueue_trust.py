@@ -38,6 +38,8 @@ class AutoEnqueueIgnoresClientIdentityTests(unittest.TestCase):
             (isvc, "_pending_review_matches", {"return_value": True}),
             (isvc, "_import_review_selected_source_files", {"return_value": [self.folder / "01.flac"]}),
             (isvc, "_cached_import_target_preview", {"return_value": {"safe": True, "tracks_to_import_count": 1}}),
+            # Temp folders sit outside the approved import roots (#617 trust check).
+            (routes_import, "_trusted_stored_review_path", {"side_effect": str}),
         ):
             patcher = mock.patch.object(target, name, **kw)
             patcher.start()
