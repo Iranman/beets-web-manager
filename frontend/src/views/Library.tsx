@@ -1,4 +1,4 @@
-import { errorMessage } from '../lib/errors';
+import { errorMessage, panelError } from '../lib/errors';
 import {
   Dialog,
   DialogBackdrop,
@@ -22,6 +22,7 @@ import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { AlbumCleanupModal } from '../components/AlbumCleanupModal';
 import { TrackReplacementModal } from '../components/TrackReplacementModal';
+import { useEngineOffline } from '../components/EngineOfflineBanner';
 
 type StatusFilter = 'all' | 'ids' | 'missing' | 'extra' | 'art' | 'clean';
 type SearchScope = 'all' | 'artists' | 'albums' | 'tracks';
@@ -1421,6 +1422,8 @@ export default function Library() {
   const handleNavigate = useCallback((path: string) => {
     navigate(path);
   }, [navigate]);
+  const loadFailed = !data && Boolean(error);
+  const shownError = panelError(error, useEngineOffline());
 
   return (
     <div className="space-y-4">
@@ -1430,10 +1433,11 @@ export default function Library() {
             <p className="text-xs font-semibold uppercase text-red-400">Library</p>
             <h1 className="mt-1 text-2xl font-semibold text-zinc-100">Browse music library</h1>
             <div className="mt-2 flex flex-wrap gap-2">
-              <Chip label={`${numberFmt.format(data?.stats.artists ?? 0)} artists`} size="small" variant="outlined" />
-              <Chip label={`${numberFmt.format(data?.stats.albums ?? 0)} albums`} size="small" variant="outlined" />
-              <Chip label={`${numberFmt.format(data?.stats.tracks ?? 0)} tracks`} size="small" variant="outlined" />
-              {attentionAlbumCount ? (
+              {/* No library loaded yet, or the load failed: counts are unknown, not zero. */}
+              <Chip label={`${data ? numberFmt.format(data.stats.artists) : '—'} artists`} size="small" variant="outlined" />
+              <Chip label={`${data ? numberFmt.format(data.stats.albums) : '—'} albums`} size="small" variant="outlined" />
+              <Chip label={`${data ? numberFmt.format(data.stats.tracks) : '—'} tracks`} size="small" variant="outlined" />
+              {!data ? null : attentionAlbumCount ? (
                 <Chip color="warning" label={`${numberFmt.format(attentionAlbumCount)} review albums`} size="small" variant="outlined" />
               ) : (
                 <Chip color="success" label="No review issues" size="small" variant="outlined" />
@@ -1477,13 +1481,15 @@ export default function Library() {
         onNavigate={handleNavigate}
       />
 
-      <StatusCards
-        active={activeStatus}
-        counts={statusCounts}
-        onChange={handleStatusChange}
-      />
+      {loadFailed ? null : (
+        <StatusCards
+          active={activeStatus}
+          counts={statusCounts}
+          onChange={handleStatusChange}
+        />
+      )}
 
-      <div className="flex flex-wrap items-center gap-2 rounded-md border border-graphite-800 bg-graphite-950/35 px-3 py-2 text-sm">
+      {loadFailed ? null : <div className="flex flex-wrap items-center gap-2 rounded-md border border-graphite-800 bg-graphite-950/35 px-3 py-2 text-sm">
         <Chip
           color={statusChipColor(activeStatus)}
           label={activeStatus === 'all' ? 'Browsing artists' : `Active filter: ${activeFilter.label}`}
@@ -1501,7 +1507,7 @@ export default function Library() {
             ? `${numberFmt.format(filteredArtists.length)} artists visible, ${numberFmt.format(attentionArtistCount)} with review items`
             : `${numberFmt.format(albumResults.length)} matching albums`}
         </span>
-      </div>
+      </div>}
 
       <SearchRow
         query={query}
@@ -1516,11 +1522,12 @@ export default function Library() {
         onAlbumSortChange={setAlbumSort}
       />
 
-      {error ? <Alert severity="error">{error}</Alert> : null}
+      {shownError ? <Alert severity="error">{shownError}</Alert> : null}
       {artRepairError ? <Alert severity="warning">Art repair status could not be loaded: {artRepairError}</Alert> : null}
       {trackSearchError ? <Alert severity="warning">Track search rows could not be loaded: {trackSearchError}</Alert> : null}
 
-      {activeStatus !== 'all' ? (
+      {/* Under a load error there is no list: "No matching artists" would claim an empty library. */}
+      {loadFailed ? null : activeStatus !== 'all' ? (
         <AlbumGrid
           rows={albumResults}
           title={activeFilter.label}

@@ -1,6 +1,6 @@
 import { formatShortDateTime, formatShortTime } from '../lib/dates';
 import { useInterval } from '../lib/hooks';
-import { errorMessage } from '../lib/errors';
+import { errorMessage, panelError } from '../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -47,6 +47,7 @@ import type {
   PlaylistTrackSuggestion,
 } from '../api/types';
 import { LogViewer } from '../components/LogViewer';
+import { useEngineOffline } from '../components/EngineOfflineBanner';
 import { MusicBrainzUnavailableNotice, fingerprintNotCheckedLabel } from '../components/MusicBrainzUnavailableNotice';
 import { PlaylistSyncSummary, playlistSyncStatusLabel } from '../features/playlists/PlaylistSyncSummary';
 
@@ -1149,6 +1150,8 @@ function PlaylistJobProgress({
 }
 
 export default function Playlists() {
+  // Sync and pipeline runs need the Beets engine; disabled while it is down.
+  const engineOffline = useEngineOffline();
   const [playlists, setPlaylists] = useState<PlaylistEntry[]>([]);
   const [loadingPlaylists, setLoadingPlaylists] = useState(true);
   const [playlistError, setPlaylistError] = useState('');
@@ -2270,14 +2273,14 @@ export default function Playlists() {
       onClick: () => {
         void handleSavedPlaylistPipelineAction(playlist, 'resume');
       },
-      disabled: pipelineIsActive || Boolean(savedRowActionBusy),
+      disabled: pipelineIsActive || Boolean(savedRowActionBusy) || engineOffline,
     }] : []),
     {
       label: 'Run Pipeline',
       onClick: () => {
         void handleSavedPlaylistPipelineAction(playlist, 'run-full');
       },
-      disabled: pipelineIsActive || Boolean(savedRowActionBusy),
+      disabled: pipelineIsActive || Boolean(savedRowActionBusy) || engineOffline,
     },
     ...(summary.missing > 0 ? [{
       label: 'Download Missing',
@@ -2408,7 +2411,7 @@ export default function Playlists() {
                 variant="contained"
                 color={hasResumablePipeline ? 'warning' : 'primary'}
                 size="small"
-                disabled={!savedPlaylistName && !activePlaylist}
+                disabled={(!savedPlaylistName && !activePlaylist) || engineOffline}
                 onClick={() => {
                   if (savedPlaylistName) {
                     void handlePipelineAction(mainPipelineAction);
@@ -3122,7 +3125,7 @@ export default function Playlists() {
             <Button
               variant="contained"
               onClick={() => { void handleSyncAllPlaylists(); }}
-              disabled={startingPlaylistSync || Boolean(playlistSyncJobId) || Boolean(playlistSyncStatus?.running)}
+              disabled={startingPlaylistSync || Boolean(playlistSyncJobId) || Boolean(playlistSyncStatus?.running) || engineOffline}
             >
               {playlistSyncJobId || playlistSyncStatus?.running ? 'Syncing to Plex...' : 'Sync All to Plex'}
             </Button>
@@ -3153,7 +3156,7 @@ export default function Playlists() {
         <PlaylistSyncSummary status={playlistSyncStatus} />
 
         {loadingPlaylists && <LinearProgress sx={{ borderRadius: 1 }} />}
-        {playlistError && <Alert severity="error">{playlistError}</Alert>}
+        {panelError(playlistError, engineOffline) && <Alert severity="error">{playlistError}</Alert>}
         {playlistDetailsError ? (
           <Alert severity="error" sx={{ mt: 2 }}>{playlistDetailsError}</Alert>
         ) : null}

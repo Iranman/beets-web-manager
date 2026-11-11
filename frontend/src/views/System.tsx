@@ -1,5 +1,6 @@
 import { formatEpochDateTime } from '../lib/dates';
-import { errorMessage } from '../lib/errors';
+import { errorMessage, panelError } from '../lib/errors';
+import { useEngineOffline } from '../components/EngineOfflineBanner';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -586,6 +587,7 @@ function EnvVariableRow({
 }
 
 export default function System() {
+  const engineOffline = useEngineOffline();
   const [status, setStatus] = useState<SetupStatusResponse | null>(null);
   const [env, setEnv] = useState<SetupEnvResponse | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
@@ -961,7 +963,7 @@ export default function System() {
         </div>
       </section>
 
-      {error && <Alert severity="error">{error}</Alert>}
+      {panelError(error, engineOffline) && <Alert severity="error">{error}</Alert>}
       {message && <Alert severity="success">{message}</Alert>}
 
       <section className="grid gap-3 md:grid-cols-4">
@@ -1078,7 +1080,7 @@ export default function System() {
           </div>
 
           {pluginsMsg && <Alert severity="success">{pluginsMsg}</Alert>}
-          {pluginsError && <Alert severity="error">{pluginsError}</Alert>}
+          {panelError(pluginsError, engineOffline) && <Alert severity="error">{pluginsError}</Alert>}
 
           <div className="grid gap-2 text-[0.72rem] text-zinc-200 sm:grid-cols-2 lg:grid-cols-4 rounded bg-graphite-950 p-3 border border-graphite-800">
             <div><span className="font-semibold text-zinc-100">Plugin path:</span> {status.beets.pluginpath?.join(' then ') || 'not configured'}</div>
@@ -1351,7 +1353,7 @@ export default function System() {
           </div>
         </div>
         {configMsg && <Alert severity="success" onClose={() => setConfigMsg('')}>{configMsg}</Alert>}
-        {configError && <Alert severity="error">{configError}</Alert>}
+        {panelError(configError, engineOffline) && <Alert severity="error">{configError}</Alert>}
         {configLoading && <LinearProgress sx={{ borderRadius: 1 }} />}
         <TextField
           value={configText}

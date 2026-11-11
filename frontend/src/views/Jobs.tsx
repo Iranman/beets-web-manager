@@ -41,6 +41,8 @@ import {
   type PathHit,
 } from '../lib/jobFeed';
 import { useGlobalJobs, useInterval, useJobPoll } from '../lib/hooks';
+import { panelError } from '../lib/errors';
+import { useEngineOffline } from '../components/EngineOfflineBanner';
 import type { ApiOkResponse } from '../api/types';
 import type {
   Job,
@@ -468,7 +470,8 @@ function useWorkflowRunner(onStarted: () => Promise<void>) {
   }, [onStarted]);
 
   const busy = useCallback((key: string) => busyMap[key] ?? false, [busyMap]);
-  const err = useCallback((key: string) => errorMap[key] ?? '', [errorMap]);
+  const engineOffline = useEngineOffline();
+  const err = useCallback((key: string) => panelError(errorMap[key] ?? '', engineOffline), [errorMap, engineOffline]);
   return { run, busy, err };
 }
 
@@ -898,6 +901,7 @@ function AlbumFolderCleanupPanel({
   const [showDetails, setShowDetails] = useState(false);
   const [filter, setFilter] = useState<AlbumIssueFilter>('active');
   const [selectedIssue, setSelectedIssue] = useState<AlbumFolderIssue | null>(null);
+  const shownError = panelError(error, useEngineOffline());
   const [lastScanAt, setLastScanAt] = useState<number | null>(null);
   const prevScanStatus = useRef<string | null>(null);
   const prevApplyStatus = useRef<string | null>(null);
@@ -1085,7 +1089,7 @@ function AlbumFolderCleanupPanel({
         </p>
       </div>
 
-      {error ? <Alert severity="error" sx={{ fontSize: '0.75rem', py: 0.5 }}>{error}</Alert> : null}
+      {shownError ? <Alert severity="error" sx={{ fontSize: '0.75rem', py: 0.5 }}>{shownError}</Alert> : null}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button size="small" variant="contained" disabled={busy} onClick={() => void doScan()}>
@@ -1316,6 +1320,10 @@ function MaintenanceRunnerBar({
   const checkpointResumable = !running && (Boolean(report?.resumable || reportResume?.resumable) || hasStateCheckpoint);
   const checkpointNextLabel = String(reportResume?.next_task_label || nextIncompleteTask?.label || 'next pending phase');
   const artistFolderSkip = tasks.find((task) => task.id === 'artist_folder_merge' && task.status === 'skipped' && task.detail);
+  // Starting Clean All needs the engine; while it is down the button is disabled
+  // (the backend still refuses the start on its own).
+  const engineOffline = useEngineOffline();
+  const shownError = panelError(error, engineOffline);
 
   useEffect(() => {
     let cancelled = false;
@@ -1433,7 +1441,8 @@ function MaintenanceRunnerBar({
             <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
               {CLEAN_ALL_COUNT_LABELS.map(([key, label]) => (
                 <div key={key} className="rounded border border-graphite-800 bg-graphite-900/55 px-2 py-1.5">
-                  <div className="text-sm font-semibold tabular-nums text-zinc-100">{numberFmt.format(cleanAllCounts[key])}</div>
+                  {/* No run to read counts from: unknown, not zero. */}
+                  <div className="text-sm font-semibold tabular-nums text-zinc-100">{currentJob ? numberFmt.format(cleanAllCounts[key]) : '—'}</div>
                   <div className="text-[0.62rem] uppercase tracking-wide text-muted">{label}</div>
                 </div>
               ))}
@@ -1447,7 +1456,7 @@ function MaintenanceRunnerBar({
               <div className="mt-2 text-xs text-amber-300">
                 Resume checkpoint ready. Next phase: {checkpointNextLabel}.{' '}
                 <Button
-                  disabled={busy || running}
+                  disabled={busy || running || engineOffline}
                   size="small"
                   variant="text"
                   sx={{ p: 0, minWidth: 0, verticalAlign: 'baseline', fontSize: 'inherit', textTransform: 'none' }}
@@ -1466,7 +1475,7 @@ function MaintenanceRunnerBar({
             ) : null}
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
-            <Button disabled={busy || running} size="small" variant="contained" onClick={() => void runNow()}>
+            <Button disabled={busy || running || engineOffline} size="small" variant="contained" onClick={() => void runNow()}>
               {busy && !running ? (checkpointResumable ? 'Resuming...' : 'Starting...') : checkpointResumable ? 'Resume Clean All' : 'Clean All'}
             </Button>
             {running ? (
@@ -1509,7 +1518,7 @@ function MaintenanceRunnerBar({
           )}
         </div>
         {notice ? <Alert role="status" severity="info" sx={{ mt: 2 }} onClose={() => setNotice('')}>{notice}</Alert> : null}
-        {error ? <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert> : null}
+        {shownError ? <Alert severity="error" sx={{ mt: 2 }}>{shownError}</Alert> : null}
       </section>
       <MaintenanceRunnerReportDialog
         error={reportError}
@@ -2378,7 +2387,8 @@ function JobStatusBar({
   onRefresh,
   onClearDone,
 }: {
-  counts: { total: number; running: number; failed: number; success: number };
+  /** null when the job list could not be loaded: the counts are unknown. */
+  counts: { total: number; running: number; failed: number; success: number } | null;
 
   autoRefresh: boolean;
   loading: boolean;
@@ -2391,13 +2401,13 @@ function JobStatusBar({
     <section className="flex flex-wrap items-center gap-2 rounded-md border border-graphite-800 bg-graphite-950/60 px-3 py-2">
       <span className="text-sm font-semibold text-zinc-100">Job Status</span>
       <span className="rounded border border-sky-900/50 bg-sky-950/20 px-2 py-1 text-xs tabular-nums text-sky-200">
-        {numberFmt.format(counts.running)} running
+        {counts ? numberFmt.format(counts.running) : '—'} running
       </span>
       <span className="rounded border border-rose-900/50 bg-rose-950/20 px-2 py-1 text-xs tabular-nums text-rose-200">
-        {numberFmt.format(counts.failed)} failed
+        {counts ? numberFmt.format(counts.failed) : '—'} failed
       </span>
       <span className="rounded border border-emerald-900/50 bg-emerald-950/20 px-2 py-1 text-xs tabular-nums text-emerald-200">
-        {numberFmt.format(counts.success)} completed
+        {counts ? numberFmt.format(counts.success) : '—'} completed
       </span>
 
       <label className="flex items-center gap-2 rounded border border-graphite-800 px-2 py-1">
@@ -2623,7 +2633,9 @@ export default function Jobs() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [listFailed, setListFailed] = useState(false);
   const [notice, setNotice] = useState('');
+  const shownError = panelError(error, useEngineOffline());
 
   // Feed
   const [feed, setFeed] = useState<JobLogFeedResponse['entries']>([]);
@@ -2653,8 +2665,10 @@ export default function Jobs() {
     try {
       const r = await apiGet<JobListResponse>('/api/jobs');
       setJobs(r.jobs ?? []);
+      setListFailed(false);
       refreshBadge();
     } catch (e) {
+      setListFailed(true);
       setError(formatTransportErrorMessage(e));
     } finally {
       setLoading(false);
@@ -2800,7 +2814,7 @@ export default function Jobs() {
       <div className="space-y-3">
         <JobStatusBar
           autoRefresh={autoRefresh}
-          counts={counts}
+          counts={listFailed ? null : counts}
           hasDone={hasDone}
           loading={loading}
           onAutoRefresh={setAutoRefresh}
@@ -2810,7 +2824,7 @@ export default function Jobs() {
 
         {/* Alerts */}
         {notice ? <Alert severity="info" onClose={() => setNotice('')}>{notice}</Alert> : null}
-        {error ? <Alert severity="error">{error}</Alert> : null}
+        {shownError ? <Alert severity="error">{shownError}</Alert> : null}
         {loading ? <LinearProgress sx={{ borderRadius: 1 }} /> : null}
 
         <CurrentJobFeedSection
@@ -2818,7 +2832,7 @@ export default function Jobs() {
           jobs={runningJobs}
           latestJob={lastJob}
           loading={loading || feedLoading}
-          error={error}
+          error={listFailed ? 'Unknown: the job list could not be loaded.' : ''}
           onAction={setConfirmAction}
           onRetry={(job) => void handleRetryJob(job)}
           onSelectJob={(job, options) => void handleSelectJob(job, options)}
@@ -2828,11 +2842,13 @@ export default function Jobs() {
 
         <AdvancedMaintenanceSection linked={linkedPanel === 'album-tracks'} />
 
-        <JobHistorySection
-          jobs={jobs}
-          selectedJobId={selectedJobId}
-          onSelectJob={(job, options) => void handleSelectJob(job, options)}
-        />
+        {listFailed && !jobs.length ? null : (
+          <JobHistorySection
+            jobs={jobs}
+            selectedJobId={selectedJobId}
+            onSelectJob={(job, options) => void handleSelectJob(job, options)}
+          />
+        )}
       </div>
 
       <JobDetailsDialog

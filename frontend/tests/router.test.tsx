@@ -16,6 +16,7 @@ afterEach(cleanup);
 // so navigation-destination behavior is genuinely exercised.
 vi.mock('../src/lib/hooks', () => ({
   useGlobalJobs: () => ({ running: 0, failed: 0, refresh: () => {} }),
+  useEngineProbe: () => false,
 }));
 vi.mock('../src/api/client', () => ({
   getHealth: vi.fn().mockResolvedValue({ ok: true }),

@@ -1,4 +1,4 @@
-import { errorMessage } from '../../lib/errors';
+import { errorMessage, sentences } from '../../lib/errors';
 import {
   Dialog,
   DialogBackdrop,
@@ -4026,7 +4026,7 @@ export function ImportReviewPage({
           if (errors < 3) continue;
           ended = true;
           setRevalidateMsg(
-            `Could not check the background revalidation job (${jobId}): ${errorMessage(err)}. It may still be running; check the Jobs page, then click Refresh.`,
+            sentences(`Could not check the background revalidation job (${jobId}): ${errorMessage(err)}`, 'It may still be running; check the Jobs page, then click Refresh.'),
           );
           return;
         }
@@ -4079,7 +4079,7 @@ export function ImportReviewPage({
       }
       await applyRevalidateResult(result);
     } catch (err) {
-      setRevalidateMsg(`Revalidation failed: ${errorMessage(err)}. Click Refresh to see the current queue, then try again.`);
+      setRevalidateMsg(sentences(`Revalidation failed: ${errorMessage(err)}`, 'Click Refresh to see the current queue, then try again.'));
     }
     setRevalidateBusy(false);
   }, [applyRevalidateResult, followRevalidateJob]);
@@ -5218,8 +5218,10 @@ export function ImportReviewPage({
 
       {error ? (
         <Alert severity="error">
-          {missingIdsMode ? 'Could not load library albums and tracks missing MusicBrainz IDs: ' : 'Could not load the review queue: '}
-          {error}. {missingIdsMode ? 'This list is read from Beets; check the Beets status on the System page, then click Refresh.' : 'Click Refresh to try again.'}
+          {sentences(
+            `${missingIdsMode ? 'Could not load library albums and tracks missing MusicBrainz IDs' : 'Could not load the review queue'}: ${error}`,
+            missingIdsMode ? 'This list is read from Beets; check the Beets status on the System page, then click Refresh.' : 'Click Refresh to try again.',
+          )}
         </Alert>
       ) : null}
 
