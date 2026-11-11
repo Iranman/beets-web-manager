@@ -791,7 +791,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -1050,7 +1051,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -1300,7 +1302,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -1513,7 +1516,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -1734,7 +1738,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -1982,7 +1987,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -2230,7 +2236,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -2451,7 +2458,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -2668,7 +2676,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -3206,7 +3215,8 @@
     ],
     {
      "existing_album_id": 6,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -3471,7 +3481,8 @@
     ],
     {
      "existing_album_id": 6,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -3720,7 +3731,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -3966,7 +3978,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -4201,7 +4221,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -4436,7 +4464,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -4689,7 +4725,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 0
+      }
+     ]
     }
    ],
    [
@@ -5013,7 +5057,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -5274,7 +5326,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -5543,7 +5603,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -5812,7 +5880,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -6059,7 +6135,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -6334,7 +6418,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -6668,7 +6760,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -7037,7 +7137,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -7421,7 +7529,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -7814,7 +7930,21 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      },
+      {
+       "disc": 1,
+       "mb_trackid": "rec-3",
+       "title": "Three",
+       "track": 3
+      }
+     ]
     }
    ],
    [
@@ -8215,7 +8345,21 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      },
+      {
+       "disc": 1,
+       "mb_trackid": "rec-3",
+       "title": "Three",
+       "track": 3
+      }
+     ]
     }
    ],
    [
@@ -8561,7 +8705,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -9306,7 +9458,8 @@
     ],
     {
      "existing_album_id": 7,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -11208,7 +11361,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -11319,7 +11473,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -11492,7 +11647,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -11705,7 +11861,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -11964,7 +12121,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -12067,7 +12225,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -12321,7 +12480,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -12447,7 +12607,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -12705,7 +12866,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -12803,7 +12965,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -13049,7 +13212,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -13173,7 +13337,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -13466,7 +13631,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -14110,7 +14283,8 @@
     ],
     {
      "existing_album_id": 0,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -14324,7 +14498,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -14534,7 +14709,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -14629,7 +14805,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -14849,7 +15026,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -15129,7 +15307,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -15381,7 +15560,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -15686,7 +15873,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -16003,7 +16198,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -16195,7 +16391,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -16387,7 +16584,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -16605,7 +16803,8 @@
     ],
     {
      "existing_album_id": 0,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -17113,7 +17312,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -18029,7 +18229,8 @@
     ],
     {
      "existing_album_id": 0,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -18242,7 +18443,8 @@
     ],
     {
      "existing_album_id": 0,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -18401,7 +18603,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -18523,7 +18726,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -18681,7 +18885,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
@@ -18856,7 +19068,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -19117,7 +19330,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -19427,7 +19641,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -19715,7 +19930,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -19987,7 +20203,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -20287,7 +20504,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -20622,7 +20840,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -20844,7 +21063,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -21178,7 +21398,8 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": []
     }
    ],
    [
@@ -21430,7 +21651,15 @@
     ],
     {
      "existing_album_id": 5,
-     "log": "<log>"
+     "log": "<log>",
+     "wanted_tracks": [
+      {
+       "disc": 1,
+       "mb_trackid": "rec-2",
+       "title": "Two",
+       "track": 2
+      }
+     ]
     }
    ],
    [
