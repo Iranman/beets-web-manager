@@ -7,6 +7,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useState } from 'react';
 import {
+  apiErrorBody,
   getHealthDetail,
   getMbidStatus,
   getMusicFormatPreferences,
@@ -194,6 +195,8 @@ export default function Config() {
   const [formatLoading, setFormatLoading] = useState(true);
   // Until real preferences load, the form holds defaults; saving them would overwrite stored values (#609).
   const [formatLoaded, setFormatLoaded] = useState(false);
+  // Revision of the loaded preferences; a save from a stale load gets 409 (#623).
+  const [formatRevision, setFormatRevision] = useState('');
   const [formatBusy, setFormatBusy] = useState(false);
   const [formatMsg, setFormatMsg] = useState('');
   const [formatError, setFormatError] = useState('');
@@ -229,6 +232,7 @@ export default function Config() {
       ]);
       setFormatPrefs(prefs.preferences);
       setSavedFormatPrefs(prefs.preferences);
+      setFormatRevision(prefs.revision);
       setFormatLoaded(true);
       setReplacementRows(statuses.tracks ?? []);
     } catch (err) {
@@ -248,12 +252,16 @@ export default function Config() {
     setFormatMsg('');
     setFormatError('');
     try {
-      const saved = await saveMusicFormatPreferences(formatPrefs);
+      const saved = await saveMusicFormatPreferences(formatPrefs, formatRevision);
       setFormatPrefs(saved.preferences);
       setSavedFormatPrefs(saved.preferences);
+      setFormatRevision(saved.revision);
       setFormatMsg('Saved Music Format Preferences.');
     } catch (err) {
-      setFormatError(errorMessage(err));
+      // Keep the user's edits in the form; only Reload replaces them.
+      setFormatError(apiErrorBody(err)?.code === 'music_format_revision_conflict'
+        ? 'Music Format Preferences changed elsewhere (another tab or session), so this save was not applied. Your edits are still in the form. Use Reload to load the latest preferences, then reapply your changes and save.'
+        : errorMessage(err));
     } finally {
       setFormatBusy(false);
     }
