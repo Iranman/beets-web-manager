@@ -22,7 +22,7 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 const STATUS_DOT: Record<string, string> = {
-  running:   'bg-amber-300 animate-pulse',
+  running:   'bg-amber-300 motion-safe:animate-pulse',
   success:   'bg-emerald-400',
   failed:    'bg-red-400',
   killed:    'bg-red-400',
@@ -68,13 +68,13 @@ export function JobStatusCard({ job, runningLabel, logLines = 2, className = '' 
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-2">
             <span className="truncate text-sm font-medium text-zinc-100">{label}</span>
-            <span className={`text-[0.67rem] font-semibold uppercase tracking-wide ${textStyle}`}>
+            <span className={`text-xs font-semibold ${textStyle}`}>
               {formatJobStatus(job.status)}
             </span>
             {!isRunning ? (
               <NavLink
                 to="/jobs"
-                className="ml-auto text-[0.68rem] text-muted underline underline-offset-2 hover:text-zinc-300"
+                className="ml-auto text-xs text-muted underline underline-offset-2 hover:text-zinc-300"
               >
                 view log
               </NavLink>
@@ -90,7 +90,7 @@ export function JobStatusCard({ job, runningLabel, logLines = 2, className = '' 
               {lastLines.map((line, i) => (
                 <div
                   key={`${i}-${line}`}
-                  className="truncate font-mono text-[0.66rem] leading-4 text-muted"
+                  className="truncate font-mono text-xs leading-4 text-muted"
                   title={line}
                 >
                   {line}

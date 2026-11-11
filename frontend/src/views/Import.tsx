@@ -257,8 +257,7 @@ export default function Import() {
       <div className="rounded-md border border-graphite-800 bg-graphite-950/45 px-4 py-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase text-red-400">Import</p>
-            <h1 className="mt-1 text-2xl font-semibold text-zinc-100">Import music</h1>
+            <h1 className="text-2xl font-semibold text-zinc-100">Import music</h1>
             <div className="mt-2 flex flex-wrap gap-2">
               <Chip
                 color={summary.runningJobs ? 'info' : summary.partial ? 'warning' : 'default'}
@@ -312,7 +311,7 @@ export default function Import() {
               >
                 <span>{label}</span>
                 {badge ? (
-                  <span className="rounded border border-graphite-700 px-1.5 py-0.5 text-[0.66rem] font-semibold text-zinc-300">
+                  <span className="rounded border border-graphite-700 px-1.5 py-0.5 text-xs font-semibold text-zinc-300">
                     {badge}
                   </span>
                 ) : null}

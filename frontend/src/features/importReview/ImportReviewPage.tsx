@@ -935,7 +935,7 @@ function DetailRow({
   const text = valueLabel(value);
   return (
     <div className="min-w-0">
-      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted">{label}</div>
+      <div className="text-xs font-semibold text-muted">{label}</div>
       {href && text !== '-' ? (
         <a className={`${mono ? 'font-mono' : ''} break-all text-xs text-sky-300 underline decoration-sky-300`} href={href} target="_blank" rel="noreferrer">
           {text}
@@ -2074,19 +2074,19 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
       </div>
       <div className="mt-2 grid grid-cols-2 gap-2 text-graphite-200 md:grid-cols-4">
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-muted">Import</div>
+          <div className="text-xs text-muted">Import</div>
           <div className="font-semibold">{importCount}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-muted">Missing</div>
+          <div className="text-xs text-muted">Missing</div>
           <div className="font-semibold">{missingCount}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-muted">Left in review</div>
+          <div className="text-xs text-muted">Left in review</div>
           <div className="font-semibold">{unmatchedCount}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-muted">Conflicts</div>
+          <div className="text-xs text-muted">Conflicts</div>
           <div className="font-semibold">{conflictCount}</div>
         </div>
       </div>
@@ -3269,7 +3269,7 @@ export function ReviewCard({
             </Button>
             {canDeleteFolder(item) ? (
               <div className="mt-2 rounded border border-rose-500/30 bg-rose-950/30 p-2" aria-label="Destructive actions">
-                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-300">Destructive</div>
+                <div className="mb-1 text-xs font-semibold text-rose-300">Destructive</div>
                 <Button
                   size="small"
                   variant="outlined"
@@ -3540,7 +3540,7 @@ function BackgroundJobsStrip({
         <div className="flex flex-wrap items-center gap-3 text-xs font-medium">
           {running > 0 ? (
             <span className="flex items-center gap-1.5 text-amber-400">
-              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+              <span className="inline-block h-1.5 w-1.5 motion-safe:animate-pulse rounded-full bg-amber-400" />
               {running} importing…
             </span>
           ) : null}
@@ -5177,7 +5177,7 @@ export function ImportReviewPage({
             </div>
           ) : null}
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Source</span>
+            <span className="text-xs font-semibold text-muted">Source</span>
             {originFilters.map((entry) => {
               const count = sourceFilterCounts[entry.id];
               const active = sourceFilter === entry.id;

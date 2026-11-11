@@ -144,7 +144,7 @@ export default function SubmissionReadinessCard({ preflight, loading, primaryAct
                   aria-expanded={open}
                 >
                   <span>{GROUP_LABEL[group] || group}</span>
-                  <span className="flex items-center gap-2 text-[0.68rem] font-normal text-muted">
+                  <span className="flex items-center gap-2 text-xs font-normal text-muted">
                     {groupBlockers ? <span className="text-red-400">{groupBlockers} blocked</span> : null}
                     <span>{open ? 'Hide' : 'Show'}</span>
                   </span>

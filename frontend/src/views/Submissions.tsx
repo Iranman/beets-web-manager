@@ -552,8 +552,7 @@ export default function Submissions() {
       <div className="rounded-md border border-graphite-800 bg-graphite-950/45 px-4 py-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase text-red-400">Submissions</p>
-            <h1 className="mt-1 text-2xl font-semibold text-zinc-100">MusicBrainz and AcoustID</h1>
+            <h1 className="text-2xl font-semibold text-zinc-100">MusicBrainz and AcoustID</h1>
             <div className="mt-2 flex flex-wrap gap-2">
               <Chip label={stageLabel} color={stage === 'Complete' ? 'success' : stage.includes('Ready') ? 'info' : 'default'} size="small" variant="outlined" />
               {activeAlbumId ? <Chip label={`Album ${activeAlbumId}`} size="small" variant="outlined" /> : null}
@@ -574,7 +573,7 @@ export default function Submissions() {
       <div className="mt-3 flex items-center gap-1 rounded-md border border-graphite-800 bg-graphite-900/70 px-3 py-2">
         {STEPS.map((label, index) => (
           <div key={label} className="flex min-w-0 flex-1 items-center gap-1">
-            <div className={['flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-1.5 text-[0.68rem] font-semibold', index === activeStep ? 'bg-red-600 text-white' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-muted'].join(' ')}>{index + 1}</div>
+            <div className={['flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-1.5 text-xs font-semibold', index === activeStep ? 'bg-red-600 text-white' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-muted'].join(' ')}>{index + 1}</div>
             <span className={['min-w-0 truncate text-[0.7rem]', index === activeStep ? 'text-zinc-100' : 'hidden text-muted sm:inline'].join(' ')}>{label}</span>
             {index < STEPS.length - 1 ? <div className={['mx-1 h-px flex-1', index < activeStep ? 'bg-emerald-800' : 'bg-graphite-800'].join(' ')} /> : null}
           </div>
@@ -601,13 +600,13 @@ export default function Submissions() {
                 <button key={id} type="button" onClick={() => selectItem(item)} className={['w-full rounded border px-3 py-2 text-left transition-colors', selected ? 'border-red-500 bg-red-950/35 text-zinc-100' : 'border-graphite-800 bg-graphite-950/40 text-zinc-300 hover:border-graphite-700 hover:bg-graphite-850'].join(' ')}>
                   <div className="truncate text-sm font-semibold">{itemTitle(item)}</div>
                   <div className="mt-1 truncate text-xs text-muted">{itemArtist(item) || 'unknown artist'}{item.year ? ` / ${item.year}` : ''}</div>
-                  <div className="mt-2 grid grid-cols-2 gap-1 text-[0.68rem] text-zinc-400">
+                  <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-zinc-400">
                     <span>{trackCount} tracks</span>
                     <span>{item.album_id ? 'album' : 'singleton/folder'}</span>
                     <span className="truncate">{status}</span>
                     <span>{missing} missing</span>
                   </div>
-                  <div className="mt-1 truncate font-mono text-[0.65rem] text-muted">{item.source_folder || item.path || item.folder || ''}</div>
+                  <div className="mt-1 truncate font-mono text-xs text-muted">{item.source_folder || item.path || item.folder || ''}</div>
                 </button>
               );
             })}
@@ -636,7 +635,7 @@ export default function Submissions() {
             {target ? (
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div>
-                  <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-emerald-400">Known</div>
+                  <div className="text-xs font-semibold text-emerald-400">Known</div>
                   <ul className="mt-1 space-y-1 text-xs text-zinc-300">
                     <li>Artist: {target.summary.albumartist || '—'}</li>
                     <li>Title: {target.summary.title || '—'}</li>
@@ -647,13 +646,13 @@ export default function Submissions() {
                   </ul>
                 </div>
                 <div>
-                  <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-amber-400">Needs review</div>
+                  <div className="text-xs font-semibold text-amber-400">Needs review</div>
                   {needsReviewFields.length ? (
                     <ul className="mt-1 space-y-1 text-xs text-zinc-300">{needsReviewFields.map(([key, label]) => <li key={key}>{label}</li>)}</ul>
                   ) : <p className="mt-1 text-xs text-muted">Nothing outstanding.</p>}
                 </div>
                 <div>
-                  <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted">Optional</div>
+                  <div className="text-xs font-semibold text-muted">Optional</div>
                   {optionalMissingFields.length ? (
                     <ul className="mt-1 space-y-1 text-xs text-muted">{optionalMissingFields.map(([key, label]) => <li key={key}>{label}</li>)}</ul>
                   ) : <p className="mt-1 text-xs text-muted">Nothing to add.</p>}
@@ -815,7 +814,7 @@ export default function Submissions() {
               </div>
               <p className="mt-1 text-sm text-zinc-400">Likely existing releases from the current review evidence.</p>
               <div className="mt-3 space-y-2">
-                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-red-600" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-[0.68rem] text-muted">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
+                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-red-600" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-xs text-muted">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
                 {!selectedCandidateCount ? (discogsCandidate ? (
                   <Alert severity="info" action={<Button color="inherit" size="small" onClick={() => { markDuplicatesReviewed(); if (discogsCandidate.discogs_url) reprocessReferenceUrl(discogsCandidate.discogs_url); }}>Use as reference</Button>}>
                     No MusicBrainz match, but Discogs has a possible one: {discogsCandidate.artist || 'Unknown artist'} - {discogsCandidate.album || 'Unknown album'}{discogsCandidate.year ? ` (${discogsCandidate.year})` : ''}.

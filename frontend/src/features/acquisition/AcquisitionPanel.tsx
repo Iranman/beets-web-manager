@@ -298,7 +298,7 @@ function AcquisitionRow({
       {jobId || jobError ? (
         <div className="mt-3 rounded border border-graphite-800 bg-graphite-950/70 p-3">
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            {running ? <span className="inline-block size-2 animate-pulse rounded-full bg-sky-400" /> : null}
+            {running ? <span className="inline-block size-2 motion-safe:animate-pulse rounded-full bg-sky-400" /> : null}
             <span className="font-medium text-zinc-200">
               {job?.status === 'success'
                 ? 'Job complete'
@@ -802,7 +802,7 @@ export function AcquisitionPanel({
       {batchRunning && (batchJobId || batchError || batchJobError) ? (
         <div className="rounded border border-sky-500/30 bg-sky-950/15 p-3">
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="inline-block size-2 animate-pulse rounded-full bg-sky-400" />
+            <span className="inline-block size-2 motion-safe:animate-pulse rounded-full bg-sky-400" />
             <span className="font-medium text-zinc-200">{batchTitle}</span>
             {batchStatus ? <Chip color={jobStatusColor(batchStatus)} label={batchStatusLabel} size="small" variant="outlined" /> : null}
             {batchOutcome ? <span className="text-xs text-zinc-400">{batchOutcome}</span> : null}
@@ -844,7 +844,7 @@ export function AcquisitionPanel({
             {batchJobError ? <div className="text-xs text-red-300">{batchJobError}</div> : null}
             {currentFailures.length ? (
               <div className="space-y-1 text-xs text-zinc-400">
-                <div className="font-semibold uppercase text-muted">Failures</div>
+                <div className="font-semibold text-muted">Failures</div>
                 {currentFailures.map((failure) => (
                   <div key={`${failure.key}-${failure.artist}-${failure.album}`}>
                     <span className="text-zinc-300">{failure.artist} - {failure.album}</span>
@@ -855,7 +855,7 @@ export function AcquisitionPanel({
             ) : null}
             {(lastBatch?.log ?? []).length ? (
               <div className="mt-2 space-y-1 text-xs text-muted">
-                <div className="font-semibold uppercase text-muted">Log excerpt</div>
+                <div className="font-semibold text-muted">Log excerpt</div>
                 {(lastBatch?.log ?? []).filter(Boolean).slice(-6).map((line, index) => (
                   <div key={`${index}-${line}`} className="truncate" title={line}>{line}</div>
                 ))}

@@ -45,7 +45,7 @@ function HistoryRow({ entry }: { entry: RecentImport }) {
         {entry.reason && (
           <div className="text-[0.72rem] italic text-muted">{entry.reason}</div>
         )}
-        <div className="truncate font-mono text-[0.68rem] text-muted">
+        <div className="truncate font-mono text-xs text-muted">
           {entry.original_folder || entry.original_path || entry.aldir}
         </div>
       </div>
@@ -89,7 +89,7 @@ function HistorySection({
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950">
       <div className="flex items-center justify-between border-b border-graphite-800 px-3 py-2">
-        <span className="text-[0.75rem] font-semibold uppercase tracking-wide text-muted">
+        <span className="text-[0.75rem] font-semibold text-muted">
           {title} ({entries.length})
         </span>
         {onClear && entries.length > 0 && (

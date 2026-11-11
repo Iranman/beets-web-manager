@@ -340,7 +340,7 @@ function metric(label: string, value: number | string, tone = 'text-zinc-100') {
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/60 px-3 py-2">
       <div className={`text-lg font-semibold tabular-nums ${tone}`}>{value}</div>
-      <div className="mt-0.5 text-[0.65rem] uppercase tracking-wide text-muted">{label}</div>
+      <div className="mt-0.5 text-xs text-muted">{label}</div>
     </div>
   );
 }
@@ -834,7 +834,7 @@ function SavedBadge({ label, tone = 'idle', title }: { label: string; tone?: Sav
     info: 'border-sky-800 bg-sky-950/40 text-sky-300',
   }[tone];
   return (
-    <span title={title} className={`inline-flex min-h-6 items-center rounded-full border px-2 py-0.5 text-[0.68rem] font-medium ${toneClass}`}>
+    <span title={title} className={`inline-flex min-h-6 items-center rounded-full border px-2 py-0.5 text-xs font-medium ${toneClass}`}>
       {label}
     </span>
   );
@@ -863,7 +863,7 @@ function SavedPlaylistRowContext({ summary }: { summary: SavedPlaylistSummary })
         : 'text-zinc-400';
 
   return (
-    <div className="mt-1 min-w-0 space-y-0.5 text-[0.68rem]">
+    <div className="mt-1 min-w-0 space-y-0.5 text-xs">
       <div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
         <span className="min-w-0 truncate">
           <span className="text-muted">Next step: </span>
@@ -895,7 +895,7 @@ function SavedPlaylistDetailMetric({
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/50 px-3 py-2">
       <div className={`text-sm font-semibold tabular-nums ${tone}`}>{typeof value === 'number' ? value.toLocaleString() : value}</div>
-      <div className="mt-1 text-[0.65rem] uppercase tracking-wide text-muted">{label}</div>
+      <div className="mt-1 text-xs text-muted">{label}</div>
     </div>
   );
 }
@@ -922,13 +922,13 @@ function SavedPlaylistExpandedDetails({ summary }: { summary: SavedPlaylistSumma
       </div>
       {summary.lastError ? (
         <div className="mt-3 rounded border border-rose-900/70 bg-rose-950/20 px-3 py-2">
-          <div className="text-[0.65rem] font-semibold uppercase tracking-wide text-rose-300">Last error</div>
+          <div className="text-xs font-semibold text-rose-300">Last error</div>
           <div className="mt-1 whitespace-normal break-words text-xs text-rose-100">{summary.lastError}</div>
         </div>
       ) : null}
       {summary.plexIssue && summary.plexIssue !== summary.lastError ? (
         <div className="mt-3 rounded border border-amber-900/70 bg-amber-950/20 px-3 py-2">
-          <div className="text-[0.65rem] font-semibold uppercase tracking-wide text-amber-300">Plex issue</div>
+          <div className="text-xs font-semibold text-amber-300">Plex issue</div>
           <div className="mt-1 whitespace-normal break-words text-xs text-amber-100">{summary.plexIssue}</div>
         </div>
       ) : null}
@@ -995,7 +995,7 @@ function TrackList({
 }) {
   return (
     <div className="min-h-0">
-      <div className={`mb-2 text-[0.72rem] font-semibold uppercase tracking-wide ${tone}`}>
+      <div className={`mb-2 text-[0.72rem] font-semibold ${tone}`}>
         {title}
       </div>
       <div className="max-h-80 overflow-auto rounded border border-graphite-800 bg-graphite-950/40">
@@ -1116,7 +1116,7 @@ function PlaylistJobProgress({
       ) : null}
       {trackStatuses.length ? (
         <div className="mb-3 max-h-52 overflow-auto rounded border border-graphite-800 bg-graphite-950/50">
-          <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] border-b border-graphite-800 px-3 py-2 text-[0.7rem] font-semibold uppercase tracking-wide text-muted">
+          <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] border-b border-graphite-800 px-3 py-2 text-[0.7rem] font-semibold text-muted">
             <span>Track</span>
             <span>Source</span>
             <span>Status</span>
@@ -2468,10 +2468,10 @@ export default function Playlists() {
           onClick={() => setImportExpanded((value) => !value)}
         >
           <span className="flex min-w-0 items-center gap-2">
-            <span className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-400">
-              Add or Import Playlist
+            <span className="text-[0.78rem] font-semibold text-zinc-400">
+              Add or import playlist
             </span>
-            <span className="rounded border border-graphite-800 px-1.5 py-0.5 text-[0.68rem] uppercase tracking-wide text-muted">
+            <span className="rounded border border-graphite-800 px-1.5 py-0.5 text-xs text-muted">
               {importExpanded ? 'Hide' : 'Show'}
             </span>
           </span>
@@ -2727,7 +2727,7 @@ export default function Playlists() {
             <div className="rounded border border-amber-900/50 bg-amber-950/20 p-3">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[0.72rem] font-semibold uppercase tracking-wide text-amber-300">
+                  <div className="text-[0.72rem] font-semibold text-amber-300">
                     Needs cleanup
                   </div>
                   <div className="mt-1 text-xs text-amber-100/70">
@@ -3104,8 +3104,8 @@ export default function Playlists() {
       <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">
-              Saved Playlists
+            <h2 className="text-[0.78rem] font-semibold text-muted">
+              Saved playlists
             </h2>
             <div className="mt-1 text-xs text-muted">
               M3U files, manifests, and resumable checkpoints from <code className="text-zinc-400">&lt;music root&gt;/playlists</code>
@@ -3242,7 +3242,7 @@ export default function Playlists() {
                           <SavedBadge label={playlistCoverageNote(playlist)} tone="idle" />
                         ) : null}
                       </div>
-                      <div className="mt-0.5 truncate text-[0.68rem] text-muted">
+                      <div className="mt-0.5 truncate text-xs text-muted">
                         {summary.sourceLabel} · {summary.sourceStatus} · {summary.updatedLabel}
                       </div>
                       <SavedPlaylistRowContext summary={summary} />

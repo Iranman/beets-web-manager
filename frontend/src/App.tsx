@@ -143,7 +143,7 @@ export default function App() {
       <ThemeProvider theme={theme}>
         <CssBaseline />
         <div className="flex min-h-screen items-center justify-center bg-graphite-950 text-zinc-400">
-          <div className="text-sm font-semibold animate-pulse">Loading Beets Web Manager...</div>
+          <div className="text-sm font-semibold motion-safe:animate-pulse">Loading Beets Web Manager...</div>
         </div>
       </ThemeProvider>
     );

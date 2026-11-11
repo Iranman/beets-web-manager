@@ -5,7 +5,7 @@ import { login } from '../api/client';
 function BeetsLogo() {
   return (
     <span className="flex size-14 items-center justify-center rounded-2xl bg-red-700 text-white shadow-xl shadow-red-950/60 ring-1 ring-red-400/40">
-      <svg className="size-8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg aria-hidden="true" className="size-8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M12 7.4c3.5 0 6.1 2.9 5.5 6.3-.5 3.4-2.8 6.2-5.5 6.2s-5-2.8-5.5-6.2c-.6-3.4 2-6.3 5.5-6.3Z" fill="currentColor" />
         <path d="M12 7.9c-.2-2.5.8-4.1 3-4.8.3 2.3-.8 3.9-3 4.8Z" fill="#fca5a5" />
         <path d="M11.8 7.9c-2.4-.2-3.9-1.3-4.6-3.2 2.3-.1 3.9.9 4.6 3.2Z" fill="#fecaca" />
@@ -85,7 +85,7 @@ export default function Login({ onSuccess }: LoginProps) {
             <div>
               <label
                 htmlFor="login-username"
-                className="block text-xs font-semibold uppercase tracking-wider text-zinc-300"
+                className="block text-xs font-semibold text-zinc-300"
               >
                 Username
               </label>
@@ -103,7 +103,7 @@ export default function Login({ onSuccess }: LoginProps) {
             <div>
               <label
                 htmlFor="login-password"
-                className="block text-xs font-semibold uppercase tracking-wider text-zinc-300"
+                className="block text-xs font-semibold text-zinc-300"
               >
                 Password
               </label>
@@ -141,7 +141,7 @@ export default function Login({ onSuccess }: LoginProps) {
             <button
               type="submit"
               disabled={submitting || !username.trim() || !password}
-              className="mt-2 w-full rounded-lg bg-red-700 px-4 py-3 text-sm font-bold text-white shadow-md transition-all hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-graphite-900 disabled:cursor-not-allowed disabled:opacity-50"
+              className="mt-2 w-full rounded-lg bg-red-700 px-4 py-3 text-sm font-bold text-white shadow-md transition-colors hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-graphite-900 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {submitting ? 'Signing In...' : 'Sign In'}
             </button>

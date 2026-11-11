@@ -299,7 +299,7 @@ export function RecoveryReviewCard({
 
         {/* ── WANTED ── primary identity: the intended destination album. */}
         <section data-recovery-section="wanted" data-testid="recovery-primary-identity">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-graphite-100">Wanted</h3>
+          <h3 className="text-xs font-semibold text-graphite-100">Wanted</h3>
           <p className="mt-1 text-sm font-semibold text-graphite-50">
             {albumName}
             {identity.existingAlbumId > 0 ? (
@@ -342,7 +342,7 @@ export function RecoveryReviewCard({
         {/* ── DOWNLOADED ── per-track download/verification status. */}
         {trackStatuses.length ? (
           <section data-recovery-section="downloaded">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-graphite-100">Downloaded</h3>
+            <h3 className="text-xs font-semibold text-graphite-100">Downloaded</h3>
             <ul className="mt-1 space-y-1" data-testid="recovery-track-status">
               {trackStatuses.map((t, i) => (
                 <li key={t.recording_id || `${t.position ?? ''}:${i}`} className="flex flex-wrap items-center gap-2 text-xs">
@@ -362,7 +362,7 @@ export function RecoveryReviewCard({
 
         {/* ── WENT WRONG ── per-dimension confidence + provider chips. */}
         <section data-recovery-section="went-wrong">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-graphite-100">What needs checking</h3>
+          <h3 className="text-xs font-semibold text-graphite-100">What needs checking</h3>
           {reviewReason ? (
             <p className="mt-1 text-xs text-rose-200" data-testid="recovery-review-reason">{reviewReason}</p>
           ) : null}

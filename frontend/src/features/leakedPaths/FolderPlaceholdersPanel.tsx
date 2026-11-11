@@ -31,6 +31,7 @@ import {
   CleanSection,
 } from '../../components/CleanPanel';
 import { JobStatusCard } from '../../components/JobStatusCard';
+import { WarningIcon } from '../../components/WarningIcon';
 import { useJobPoll } from '../../lib/hooks';
 
 // ── Action bucket classification ──────────────────────────────────────────────
@@ -228,12 +229,12 @@ function ReviewDetailPanel({
           {/* Path comparison */}
           <div className="space-y-1.5">
             <div>
-              <div className="font-medium uppercase tracking-wide text-muted text-[0.65rem]">Source path</div>
+              <div className="font-medium text-muted text-xs">Source path</div>
               <div className="mt-0.5 font-mono text-rose-400 break-all">{review.source_path}</div>
             </div>
             {review.proposed_path ? (
               <div>
-                <div className="font-medium uppercase tracking-wide text-muted text-[0.65rem]">
+                <div className="font-medium text-muted text-xs">
                   Proposed canonical path
                   {review.target_folder_rgid
                     ? <span className="ml-1 normal-case text-emerald-600">(has Release Group ID)</span>
@@ -256,7 +257,7 @@ function ReviewDetailPanel({
             </div>
           )}
           {review.source_known_rgid && (
-            <div className="rounded border border-emerald-900/50 bg-emerald-950/20 px-2.5 py-1.5 text-emerald-300 text-[0.68rem]">
+            <div className="rounded border border-emerald-900/50 bg-emerald-950/20 px-2.5 py-1.5 text-emerald-300 text-xs">
               <span className="font-semibold">Release Group ID from DB: </span>
               <span className="font-mono">{review.source_known_rgid}</span>
               <span className="ml-1 text-emerald-500">— included in proposed canonical name.</span>
@@ -293,7 +294,7 @@ function ReviewDetailPanel({
           {review.reasons_blocked.length > 0 && (
             <div className="space-y-0.5">
               {review.reasons_blocked.map((r, i) => (
-                <div key={i} className="text-rose-400">⚠ {r}</div>
+                <div key={i} className="text-rose-400"><WarningIcon /> {r}</div>
               ))}
             </div>
           )}
@@ -302,8 +303,8 @@ function ReviewDetailPanel({
           {(review.source_only_files.length > 0 || review.target_only_files.length > 0 ||
             review.matching_files.length > 0 || review.conflicting_files.length > 0) && (
             <div className="space-y-2">
-              <div className="font-medium uppercase tracking-wide text-muted text-[0.65rem]">File comparison</div>
-              <div className="grid grid-cols-2 gap-2 text-[0.68rem]">
+              <div className="font-medium text-muted text-xs">File comparison</div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
                 <div>
                   <div className="font-medium text-zinc-400">
                     Source ({review.source_file_count} files, {review.source_audio_count} audio)
@@ -337,18 +338,18 @@ function ReviewDetailPanel({
               </div>
               {review.conflicting_files.length > 0 && (
                 <div>
-                  <div className="font-medium text-rose-400 text-[0.68rem]">
+                  <div className="font-medium text-rose-400 text-xs">
                     {review.conflicting_files.length} filename conflict(s) — same name, different size:
                   </div>
                   <ul className="mt-1 space-y-0.5">
                     {review.conflicting_files.slice(0, 8).map((f) => (
-                      <li key={f} className="font-mono text-[0.68rem] text-rose-400 truncate">{f}</li>
+                      <li key={f} className="font-mono text-xs text-rose-400 truncate">{f}</li>
                     ))}
                   </ul>
                 </div>
               )}
               {review.matching_files.length > 0 && review.conflicting_files.length === 0 && (
-                <div className="text-muted text-[0.68rem]">
+                <div className="text-muted text-xs">
                   {review.matching_files.length} file(s) exist in both folders with matching size.
                 </div>
               )}
@@ -362,20 +363,20 @@ function ReviewDetailPanel({
             <div className="rounded border border-graphite-700/50 bg-graphite-950/40 px-3 py-2.5 space-y-2">
               <div className="font-medium text-zinc-300 text-[0.72rem]">Merge preview (dry-run)</div>
               {preview.safe ? (
-                <div className="text-emerald-400 text-[0.68rem] font-medium">✓ Safe to merge — no conflicts, no DB items in source.</div>
+                <div className="text-emerald-400 text-xs font-medium">✓ Safe to merge — no conflicts, no DB items in source.</div>
               ) : (
                 <div className="space-y-1">
                   {preview.blocking_reasons.map((r, i) => (
-                    <div key={i} className="text-rose-400 text-[0.68rem]">⚠ {r}</div>
+                    <div key={i} className="text-rose-400 text-xs"><WarningIcon /> {r}</div>
                   ))}
                 </div>
               )}
               {preview.moves.length > 0 && (
                 <div>
-                  <div className="text-[0.68rem] font-medium text-zinc-400">Files to move ({preview.moves.length}):</div>
+                  <div className="text-xs font-medium text-zinc-400">Files to move ({preview.moves.length}):</div>
                   <ul className="mt-1 space-y-0.5">
                     {preview.moves.slice(0, 10).map((m, i) => (
-                      <li key={i} className="font-mono text-[0.68rem] text-zinc-400 truncate" title={`${m.from} → ${m.to}`}>
+                      <li key={i} className="font-mono text-xs text-zinc-400 truncate" title={`${m.from} → ${m.to}`}>
                         {m.from.split('/').at(-1)} → target
                       </li>
                     ))}
@@ -385,16 +386,16 @@ function ReviewDetailPanel({
               )}
               {preview.conflicts.length > 0 && (
                 <div>
-                  <div className="text-[0.68rem] font-medium text-rose-400">Conflicts ({preview.conflicts.length}):</div>
+                  <div className="text-xs font-medium text-rose-400">Conflicts ({preview.conflicts.length}):</div>
                   <ul className="mt-1 space-y-0.5">
                     {preview.conflicts.map((c) => (
-                      <li key={c.filename} className="font-mono text-[0.68rem] text-rose-400">{c.filename} ({c.source_size}B ≠ {c.target_size}B)</li>
+                      <li key={c.filename} className="font-mono text-xs text-rose-400">{c.filename} ({c.source_size}B ≠ {c.target_size}B)</li>
                     ))}
                   </ul>
                 </div>
               )}
               {preview.source_will_be_empty_after_move && (
-                <div className="text-zinc-400 text-[0.68rem]">Source folder would be empty after move and can be removed.</div>
+                <div className="text-zinc-400 text-xs">Source folder would be empty after move and can be removed.</div>
               )}
             </div>
           )}
@@ -422,7 +423,7 @@ function ReviewDetailPanel({
           {confirmRemove && (
             <div className="rounded border border-amber-700/50 bg-amber-950/30 px-3 py-2.5 space-y-2">
               <div className="font-semibold text-amber-200 text-[0.72rem]">Confirm: Remove empty placeholder folder?</div>
-              <div className="text-amber-300 text-[0.68rem]">
+              <div className="text-amber-300 text-xs">
                 This will remove the empty directory <span className="font-mono">{row.folder}</span> from disk.
                 The target canonical folder will not be changed. No files will be deleted.
               </div>
@@ -438,7 +439,7 @@ function ReviewDetailPanel({
           {confirmMerge && preview && (
             <div className="rounded border border-amber-700/50 bg-amber-950/30 px-3 py-2.5 space-y-2">
               <div className="font-semibold text-amber-200 text-[0.72rem]">Confirm: Apply merge preview?</div>
-              <div className="text-amber-300 text-[0.68rem]">
+              <div className="text-amber-300 text-xs">
                 This will move {preview.moves.length} source-only file(s) into the existing canonical target folder.
                 Existing target files will not be overwritten, and DB-tracked source folders are blocked.
               </div>
@@ -628,7 +629,7 @@ function FolderRow({
           {confirmRename && !renaming && (
             <div className="rounded border border-emerald-800/50 bg-emerald-950/30 px-2.5 py-2 space-y-1.5">
               <div className="font-semibold text-emerald-200">Confirm rename?</div>
-              <div className="text-[0.68rem] text-zinc-400 space-y-0.5">
+              <div className="text-xs text-zinc-400 space-y-0.5">
                 <div className="font-mono text-rose-400 break-all">From: {row.folder}</div>
                 <div className="font-mono text-emerald-600 break-all">To: {row.proposed_folder}</div>
               </div>
@@ -642,7 +643,7 @@ function FolderRow({
           )}
 
           {renameError && (
-            <div className="text-rose-400 text-[0.68rem]">Rename error: {renameError}</div>
+            <div className="text-rose-400 text-xs">Rename error: {renameError}</div>
           )}
         </div>
 
@@ -664,14 +665,14 @@ function FolderRow({
             {expanded ? 'Hide details' : 'Review details'}
           </button>
           <button
-            className="text-[0.68rem] text-muted hover:text-zinc-300 whitespace-nowrap"
+            className="text-xs text-muted hover:text-zinc-300 whitespace-nowrap"
             onClick={onMarkReviewed}
           >
             {reviewed ? 'Unmark reviewed' : 'Mark reviewed'}
           </button>
           {bucket === 'safe_rename' && !renameResult && (
             <button
-              className="text-[0.68rem] text-muted hover:text-zinc-400 whitespace-nowrap"
+              className="text-xs text-muted hover:text-zinc-400 whitespace-nowrap"
               onClick={onMarkReviewed}
             >
               Skip
@@ -998,7 +999,7 @@ export function FolderPlaceholdersPanel() {
                 </Button>
               ))}
             </div>
-            <label className="flex min-w-[180px] flex-col gap-1 text-[0.68rem] font-medium uppercase tracking-wide text-muted">
+            <label className="flex min-w-[180px] flex-col gap-1 text-xs font-medium text-muted">
               Sort
               <select
                 className="rounded border border-field-border bg-graphite-950 px-2 py-2 text-sm normal-case tracking-normal text-zinc-200"

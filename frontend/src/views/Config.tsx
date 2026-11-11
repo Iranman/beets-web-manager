@@ -84,7 +84,7 @@ function IntegrationRow({
 function StatCard({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="flex flex-col gap-1 rounded border border-graphite-800 bg-graphite-900 px-5 py-4">
-      <div className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted">
+      <div className="text-[0.72rem] font-semibold text-muted">
         {label}
       </div>
       <div className="text-2xl font-semibold text-zinc-100">
@@ -131,7 +131,7 @@ function HealthMetric({
   const color = tone === 'ok' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100';
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/35 px-3 py-2">
-      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted">
+      <div className="text-xs font-semibold text-muted">
         {label}
       </div>
       <div className={`mt-1 text-lg font-semibold tabular-nums ${color}`}>
@@ -355,7 +355,7 @@ export default function Config() {
 
       {/* Library stats */}
       <section className="space-y-3">
-        <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">Library</h2>
+        <h2 className="text-[0.78rem] font-semibold text-muted">Library</h2>
         {stats && (
           <div className="grid grid-cols-3 gap-3">
             <StatCard label="Artists" value={stats.artists} />
@@ -368,7 +368,7 @@ export default function Config() {
       {/* MusicBrainz coverage */}
       {mbStatus?.ok && (
         <section className="space-y-3">
-          <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">MusicBrainz</h2>
+          <h2 className="text-[0.78rem] font-semibold text-muted">MusicBrainz</h2>
           <div className="rounded border border-graphite-800 bg-graphite-900 px-5 py-4 space-y-4">
             <CoverageBar
               label="Albums with MB release ID"
@@ -393,7 +393,7 @@ export default function Config() {
       {/* Integration status */}
       {health && (
         <section className="space-y-3">
-          <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">Integrations</h2>
+          <h2 className="text-[0.78rem] font-semibold text-muted">Integrations</h2>
           <div className="grid gap-2 sm:grid-cols-2">
             {INTEGRATIONS.map(({ key, label, description }) => (
               <IntegrationRow key={key} label={label} description={description} ok={health.checks[key]} />
@@ -406,7 +406,7 @@ export default function Config() {
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">Music Format Preferences</h2>
+            <h2 className="text-[0.78rem] font-semibold text-muted">Music Format Preferences</h2>
             <p className="mt-1 text-xs text-muted">
               Downloaded tracks are inspected before import. Files that do not match your selected format preferences are rejected or replaced.
             </p>
@@ -575,7 +575,7 @@ export default function Config() {
       </section>
       {/* Plugin controls */}
       <section className="space-y-3">
-        <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">Plugins</h2>
+        <h2 className="text-[0.78rem] font-semibold text-muted">Plugins</h2>
         <PluginsPanel />
       </section>
 

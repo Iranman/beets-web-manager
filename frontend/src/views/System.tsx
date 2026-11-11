@@ -1,6 +1,7 @@
 import { formatEpochDateTime } from '../lib/dates';
 import { errorMessage, panelError } from '../lib/errors';
 import { useEngineOffline } from '../components/EngineOfflineBanner';
+import { WarningIcon } from '../components/WarningIcon';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -8,7 +9,7 @@ import Checkbox from '@mui/material/Checkbox';
 import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   apiErrorBody,
   authorizeSetupEnvReveal,
@@ -59,22 +60,22 @@ function integrationBadge(
   integration: IntegrationStatus,
   test: SetupIntegrationTestResponse | undefined,
   testing: boolean,
-): { icon: string; label: string; tone: 'ok' | 'warn' | 'neutral' } {
+): { icon: ReactNode; label: string; tone: 'ok' | 'warn' | 'neutral' } {
   if (testing) return { icon: '…', label: 'testing', tone: 'neutral' };
   if (test) {
     if (test.status === 'ready') return { icon: '✓', label: 'Connected', tone: 'ok' };
     if (test.status === 'not_configured') return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
-    if (test.reason === 'outbound_not_allowlisted') return { icon: '⚠', label: 'Blocked by outbound policy', tone: 'warn' };
-    return { icon: '⚠', label: 'Connection test failed', tone: 'warn' };
+    if (test.reason === 'outbound_not_allowlisted') return { icon: <WarningIcon />, label: 'Blocked by outbound policy', tone: 'warn' };
+    return { icon: <WarningIcon />, label: 'Connection test failed', tone: 'warn' };
   }
   const state = integration.state || (integration.configured ? 'configured' : 'not_configured');
   if (state === 'connected') return { icon: '✓', label: 'Connected', tone: 'ok' };
   if (state === 'configured') return { icon: '✓', label: 'Configured', tone: 'ok' };
   if (state === 'installed_but_disabled') return { icon: '○', label: 'Installed but disabled', tone: integration.required ? 'warn' : 'neutral' };
-  if (state === 'dependency_plugin_missing') return { icon: '⚠', label: 'Dependency/plugin missing', tone: 'warn' };
-  if (state === 'plugin_loader_failed') return { icon: '⚠', label: 'Plugin loader failed', tone: 'warn' };
-  if (state === 'connection_test_failed') return { icon: '⚠', label: 'Connection test failed', tone: 'warn' };
-  if (state === 'unavailable') return { icon: '⚠', label: 'Beets engine unreachable', tone: integration.required ? 'warn' : 'neutral' };
+  if (state === 'dependency_plugin_missing') return { icon: <WarningIcon />, label: 'Dependency/plugin missing', tone: 'warn' };
+  if (state === 'plugin_loader_failed') return { icon: <WarningIcon />, label: 'Plugin loader failed', tone: 'warn' };
+  if (state === 'connection_test_failed') return { icon: <WarningIcon />, label: 'Connection test failed', tone: 'warn' };
+  if (state === 'unavailable') return { icon: <WarningIcon />, label: 'Beets engine unreachable', tone: integration.required ? 'warn' : 'neutral' };
   return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
 }
 
@@ -143,7 +144,7 @@ function StatusCard({
   const color = tone === 'ok' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100';
   return (
     <div className="rounded border border-graphite-800 bg-graphite-900 px-4 py-3">
-      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted">{label}</div>
+      <div className="text-xs font-semibold text-muted">{label}</div>
       <div className={`mt-1 text-sm font-semibold ${color}`}>{value}</div>
     </div>
   );
@@ -239,11 +240,11 @@ function PasswordStrengthMeter({ value }: { value: string }) {
         <div className="flex items-center gap-2">
           <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-graphite-800">
             <div
-              className={`h-full rounded-full transition-all ${barColor}`}
+              className={`h-full rounded-full transition-[width] motion-reduce:transition-none ${barColor}`}
               style={{ width: `${(strength.met / strength.total) * 100}%` }}
             />
           </div>
-          <span className={`text-[0.68rem] font-semibold ${strength.tone === 'ok' ? 'text-emerald-300' : strength.tone === 'warn' ? 'text-amber-300' : 'text-red-300'}`}>
+          <span className={`text-xs font-semibold ${strength.tone === 'ok' ? 'text-emerald-300' : strength.tone === 'warn' ? 'text-amber-300' : 'text-red-300'}`}>
             {strength.label}
           </span>
         </div>
@@ -254,7 +255,7 @@ function PasswordStrengthMeter({ value }: { value: string }) {
           return (
             <span
               key={req.label}
-              className={`rounded px-1.5 py-0.5 text-[0.66rem] font-semibold ${
+              className={`rounded px-1.5 py-0.5 text-xs font-semibold ${
                 met ? 'bg-emerald-950/45 text-emerald-300' : 'bg-graphite-800 text-muted'
               }`}
             >
@@ -389,7 +390,7 @@ function EnvVariableRow({
     <div className="grid gap-3 rounded border border-graphite-800 bg-graphite-950/35 p-3.5 lg:grid-cols-[minmax(14rem,22rem)_minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="break-all text-[0.80rem] font-semibold text-zinc-100">{variable.name}</div>
-        <div className="mt-1.5 flex flex-wrap gap-1.5 text-[0.68rem] font-semibold">
+        <div className="mt-1.5 flex flex-wrap gap-1.5 text-xs font-semibold">
           <span className={`rounded px-1.5 py-0.5 ${badge.className}`}>{badge.label}</span>
           {variable.secret && (
             <span className="rounded bg-red-950/50 px-1.5 py-0.5 text-red-200 border border-red-800/50">secret</span>
@@ -442,7 +443,7 @@ function EnvVariableRow({
 
         {variable.is_overridden && (
           <div className="mt-2 rounded border border-amber-800/50 bg-amber-950/30 p-2 text-[0.70rem] text-amber-200">
-            <div className="font-semibold text-amber-300">⚠️ Environment overrides saved configuration</div>
+            <div className="font-semibold text-amber-300"><WarningIcon /> Environment overrides saved configuration</div>
             <div className="mt-0.5 font-mono text-zinc-300">
               <span>Running: </span>
               <strong className="text-amber-200">{variable.effective_value || '(set in environment)'}</strong>
@@ -1021,7 +1022,7 @@ export default function System() {
                 {Object.values(integrationTesting).some(Boolean) ? 'Testing...' : 'Test connections'}
               </Button>
             </div>
-            <div className="mb-2 text-[0.68rem] text-muted">
+            <div className="mb-2 text-xs text-muted">
               Each integration is tested independently — one failing does not disable the others.
             </div>
             {Object.entries(status.integrations).map(([name, integration]) => {
@@ -1035,7 +1036,7 @@ export default function System() {
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-[0.78rem] font-medium capitalize text-zinc-300">
                       {name}
-                      {integration.required && <span className="ml-1.5 text-[0.65rem] font-semibold text-muted">(required)</span>}
+                      {integration.required && <span className="ml-1.5 text-xs font-semibold text-muted">(required)</span>}
                     </span>
                     <span className={`flex items-center gap-1 text-[0.72rem] font-semibold ${toneClass}`}>
                       <span aria-hidden="true">{badge.icon}</span>
@@ -1043,13 +1044,13 @@ export default function System() {
                     </span>
                   </div>
                   {test?.error && (
-                    <div className="mt-1 text-[0.68rem] text-amber-300">{test.error}</div>
+                    <div className="mt-1 text-xs text-amber-300">{test.error}</div>
                   )}
                   {integration.detail && !test && (
-                    <div className="mt-1 text-[0.68rem] text-amber-300">{integration.detail}</div>
+                    <div className="mt-1 text-xs text-amber-300">{integration.detail}</div>
                   )}
                   {integration.note && !test && (
-                    <div className="mt-1 text-[0.68rem] text-zinc-300">{integration.note}</div>
+                    <div className="mt-1 text-xs text-zinc-300">{integration.note}</div>
                   )}
                 </div>
               );
@@ -1092,13 +1093,13 @@ export default function System() {
           {pluginsReport && (
             <div className="space-y-3 pt-2">
               <div className="flex items-center justify-between">
-                <div className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                  Required Core Plugins ({pluginsReport.required_healthy_count} of {pluginsReport.required_count} Healthy)
+                <div className="text-xs font-bold text-zinc-300">
+                  Required core plugins ({pluginsReport.required_healthy_count} of {pluginsReport.required_count} healthy)
                 </div>
                 <span className={`text-xs font-bold px-2 py-0.5 rounded ${
                   pluginsReport.all_required_healthy ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'
                 }`}>
-                  {pluginsReport.all_required_healthy ? '✓ All Required Healthy' : '⚠ Action Required'}
+                  {pluginsReport.all_required_healthy ? '✓ All required healthy' : <><WarningIcon /> Action required</>}
                 </span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
@@ -1109,21 +1110,21 @@ export default function System() {
                   >
                     <div className="min-w-0 pr-2">
                       <div className="font-semibold text-zinc-100 truncate">{plugin.display_name || plugin.name}</div>
-                      <div className="text-[10px] text-zinc-400 truncate">{plugin.description}</div>
+                      <div className="text-xs text-zinc-400 truncate">{plugin.description}</div>
                     </div>
-                    <span className={`shrink-0 px-2 py-0.5 rounded text-[10px] font-bold ${
+                    <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-bold ${
                       plugin.healthy
                         ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                         : 'bg-amber-950/80 text-amber-400 border border-amber-800'
                     }`}>
-                      {plugin.healthy ? '✓ Ready' : '⚠ Issue'}
+                      {plugin.healthy ? '✓ Ready' : <><WarningIcon /> Issue</>}
                     </span>
                   </div>
                 ))}
               </div>
 
-              <div className="text-xs font-bold uppercase tracking-wider text-zinc-300 pt-2">
-                Optional & Integration Plugins
+              <div className="text-xs font-bold text-zinc-300 pt-2">
+                Optional & integration plugins
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                 {[...pluginsReport.categories.optional, ...pluginsReport.categories.integration].map((plugin) => (
@@ -1133,9 +1134,9 @@ export default function System() {
                   >
                     <div className="min-w-0 pr-2">
                       <div className="font-semibold text-zinc-100 truncate">{plugin.display_name || plugin.name}</div>
-                      <div className="text-[10px] text-zinc-400 truncate">{plugin.description}</div>
+                      <div className="text-xs text-zinc-400 truncate">{plugin.description}</div>
                     </div>
-                    <span className={`shrink-0 px-2 py-0.5 rounded text-[10px] font-bold ${
+                    <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-bold ${
                       plugin.enabled
                         ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                         : 'bg-zinc-800 text-zinc-400'
@@ -1184,7 +1185,7 @@ export default function System() {
                   : '✗ Not configured'}
               </div>
               {status.auth.token_auto_generated && (
-                <div className="mt-1 text-[0.68rem] text-muted">
+                <div className="mt-1 text-xs text-muted">
                   A secure token was generated automatically on first run and printed once to the server log.
                   Regenerate it here any time.
                 </div>
@@ -1197,7 +1198,7 @@ export default function System() {
                   ? status.auth.password_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
                   : '✗ Not configured'}
               </div>
-              <div className="mt-1 text-[0.68rem] text-muted">
+              <div className="mt-1 text-xs text-muted">
                 {status.auth.password_auto_generated
                   ? `Username: ${status.auth.username || 'admin'}. Initial password was generated on first boot in /web-manager-data/.initial_admin_password. Set BEETS_WEB_PASSWORD below to replace it.`
                   : `Username: ${status.auth.username || 'admin'}. Set BEETS_WEB_PASSWORD or BEETS_WEB_USERNAME below to change browser credentials.`}
@@ -1300,7 +1301,7 @@ export default function System() {
 
         {grouped.map(([section, variables]) => (
           <div key={section} className="space-y-2">
-            <div className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted">{section}</div>
+            <div className="text-[0.72rem] font-semibold text-muted">{section}</div>
             {variables.map((variable) => (
               <EnvVariableRow
                 key={variable.name}

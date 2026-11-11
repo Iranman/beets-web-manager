@@ -341,7 +341,7 @@ export function LeakedPathsPanel() {
                 </Button>
               ))}
             </div>
-            <label className="flex min-w-[160px] flex-col gap-1 text-[0.68rem] font-medium uppercase tracking-wide text-muted">
+            <label className="flex min-w-[160px] flex-col gap-1 text-xs font-medium text-muted">
               Sort
               <select
                 className="rounded border border-field-border bg-graphite-950 px-2 py-2 text-sm normal-case tracking-normal text-zinc-200"

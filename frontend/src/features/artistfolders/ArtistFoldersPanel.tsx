@@ -57,9 +57,9 @@ function GroupRow({
           {group.variants.map((v) => v.name).join(' · ')}
         </div>
         {mbid && (
-          <div className="text-[0.65rem] text-muted font-mono">{mbid}</div>
+          <div className="text-xs text-muted font-mono">{mbid}</div>
         )}
-        <div className="text-[0.68rem] text-muted">
+        <div className="text-xs text-muted">
           {group.source_audio_files} file(s) to move ·{' '}
           {group.sources.map((s) => `${s.name} (${s.db_tracks} tracks)`).join(', ')}
         </div>
@@ -297,7 +297,7 @@ export function ArtistFoldersPanel() {
               <div className="rounded border border-graphite-800 bg-graphite-950">
                 {nameGroups.length > 0 && (
                   <>
-                    <div className="px-3 py-1.5 text-[0.68rem] font-semibold uppercase text-muted border-b border-graphite-800">
+                    <div className="px-3 py-1.5 text-xs font-semibold text-muted border-b border-graphite-800">
                       Name variants
                     </div>
                     {nameGroups.map((g) => (
@@ -318,7 +318,7 @@ export function ArtistFoldersPanel() {
                 )}
                 {mbidGroups.length > 0 && (
                   <>
-                    <div className="px-3 py-1.5 text-[0.68rem] font-semibold uppercase text-red-600 border-b border-graphite-800 border-t border-graphite-800">
+                    <div className="px-3 py-1.5 text-xs font-semibold text-red-600 border-b border-graphite-800 border-t border-graphite-800">
                       Same MB artist ID — different folder names
                     </div>
                     {mbidGroups.map((g) => (
@@ -343,7 +343,7 @@ export function ArtistFoldersPanel() {
 
           {dryRunLog.length > 0 && (
             <div className="rounded border border-graphite-700 bg-graphite-950 p-3">
-              <div className="mb-1 text-[0.72rem] font-semibold uppercase text-muted">Dry run output</div>
+              <div className="mb-1 text-[0.72rem] font-semibold text-muted">Dry run output</div>
               <LogViewer className="max-h-52 text-[0.71rem] leading-5" lines={dryRunLog} />
             </div>
           )}
