@@ -1,5 +1,6 @@
 import { formatEpochDateTime } from '../lib/dates';
-import { errorMessage } from '../lib/errors';
+import { errorMessage, panelError } from '../lib/errors';
+import { useEngineOffline } from '../components/EngineOfflineBanner';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import LinearProgress from '@mui/material/LinearProgress';
@@ -181,6 +182,7 @@ function formatLabel(key: MusicFormatKey) {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Config() {
+  const engineOffline = useEngineOffline();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [mbStatus, setMbStatus] = useState<MbidStatusResponse | null>(null);
@@ -337,7 +339,7 @@ export default function Config() {
         </Button>
       </div>
 
-      {error && <Alert severity="error">{error}</Alert>}
+      {panelError(error, engineOffline) && <Alert severity="error">{error}</Alert>}
       {loading && <LinearProgress sx={{ borderRadius: 1 }} />}
 
       {/* Library stats */}
@@ -406,7 +408,7 @@ export default function Config() {
           </div>
         </div>
         {formatMsg && <Alert severity="success" onClose={() => setFormatMsg('')}>{formatMsg}</Alert>}
-        {formatError && <Alert severity="error">{formatError}</Alert>}
+        {panelError(formatError, engineOffline) && <Alert severity="error">{formatError}</Alert>}
         {formatLoading && <LinearProgress sx={{ borderRadius: 1 }} />}
         <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <div className="rounded border border-graphite-800 bg-graphite-900 p-4">

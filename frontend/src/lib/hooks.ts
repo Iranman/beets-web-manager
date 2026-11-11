@@ -1,7 +1,7 @@
-import { errorMessage } from './errors';
+import { errorMessage, isEngineOffline, sentences } from './errors';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getDedupScan, getSetupStatus } from '../api/client';
+import { getDedupScan, getSetupStatus, getStats } from '../api/client';
 import { ApiError, apiGet, apiPost } from './api';
 import type { Job } from '../types/api';
 import type { DedupScanState } from '../api/types';
@@ -98,6 +98,22 @@ export function useGlobalJobs(): {
   return { running, failed, refresh };
 }
 
+// ── useEngineProbe ────────────────────────────────────────────────────────────
+// One shared check of whether the Beets engine is up (GET /api/stats answers
+// 503 ENGINE_OFFLINE when it is not). True only on that answer; any other
+// failure or a pending check stays false, so nothing is disabled on a guess.
+// Re-checks every 15 s while down so the page recovers on its own.
+export function useEngineProbe(): boolean {
+  const query = useQuery({
+    queryKey: ['engine-probe'],
+    queryFn: () => getStats(),
+    retry: false,
+    staleTime: 60_000,
+    refetchInterval: (q) => (isEngineOffline(q.state.error) ? 15_000 : false),
+  });
+  return isEngineOffline(query.error);
+}
+
 // ── useDedupScan ──────────────────────────────────────────────────────────────
 // Polls GET /api/dedup/scan/<jid> (separate from the regular job system).
 export function useDedupScan(jid: string | null): {
@@ -172,7 +188,7 @@ export function useAiConfigured(): boolean | null {
 export function downloadsRootProblem({ root, loading, error }: ReturnType<typeof useDownloadsRoot>): string {
   if (loading || root) return '';
   return error
-    ? `Could not load the configured downloads folder (DOWNLOADS_ROOT) from setup status: ${error}. Enter a path manually, or check System setup.`
+    ? sentences(`Could not load the configured downloads folder (DOWNLOADS_ROOT) from setup status: ${error}`, 'Enter a path manually, or check System setup.')
     : 'The server reported no downloads folder (DOWNLOADS_ROOT). Set it in the container environment, or enter a path manually.';
 }
 

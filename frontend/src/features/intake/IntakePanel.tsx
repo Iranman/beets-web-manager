@@ -1,4 +1,4 @@
-import { errorMessage } from '../../lib/errors';
+import { errorMessage, sentences } from '../../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -399,7 +399,7 @@ function RetryFailuresDialog({
             <div className="mt-3"><LinearProgress aria-label="Loading the last batch import" /></div>
           ) : error ? (
             <Alert className="mt-3" severity="error">
-              Could not load the last batch import: {error}. Nothing was retried. Refresh and try again.
+              {sentences(`Could not load the last batch import: ${error}`, 'Nothing was retried. Refresh and try again.')}
             </Alert>
           ) : !state ? (
             <p className="mt-2 text-sm text-zinc-400">No batch import has run yet, so there is nothing to retry.</p>
@@ -676,7 +676,7 @@ function JobLog({
       );
       setRetryDialogOpen(false);
     } catch (err) {
-      setActionError(`Could not start the retry: ${errorMessage(err)}. Nothing was retried.`);
+      setActionError(sentences(`Could not start the retry: ${errorMessage(err)}`, 'Nothing was retried.'));
       setRetryDialogOpen(false);
     } finally {
       setRecovering(false);
@@ -1162,7 +1162,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       if (outcome === 'started') await onJobStarted?.();
     } catch (err) {
       setRetryDialogOpen(false);
-      setRetryError(`Could not start the retry: ${errorMessage(err)}. Nothing was retried.`);
+      setRetryError(sentences(`Could not start the retry: ${errorMessage(err)}`, 'Nothing was retried.'));
     } finally {
       setRetryingFailed(false);
     }

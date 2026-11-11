@@ -1,5 +1,5 @@
 import { formatShortDateTime, normaliseEpochSeconds } from '../../lib/dates';
-import { errorMessage } from '../../lib/errors';
+import { errorMessage, sentences } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -97,9 +97,9 @@ function cacheStatus(cache: AcquisitionQueueCache | undefined) {
     const errorAge = cache.last_error_at ? formatAge(Date.now() / 1000 - cache.last_error_at) : '';
     const reason = cache.last_error || 'unknown error';
     if (!cache.built_at) {
-      return { severity: 'error' as const, text: `The Find Music list could not be built${errorAge ? ` (${errorAge})` : ''}: ${reason}. No earlier list exists, so nothing is shown. Check the Beets and Lidarr status on the System page, then click Refresh list.${updating}` };
+      return { severity: 'error' as const, text: sentences(`The Find Music list could not be built${errorAge ? ` (${errorAge})` : ''}: ${reason}`, `No earlier list exists, so nothing is shown. Check the Beets and Lidarr status on the System page, then click Refresh list.${updating}`) };
     }
-    return { severity: 'warning' as const, text: `The last list update failed${errorAge ? ` (${errorAge})` : ''}: ${reason}. The list below is the previous one, built ${age}, and may be out of date. Click Refresh list to try again.${updating}` };
+    return { severity: 'warning' as const, text: sentences(`The last list update failed${errorAge ? ` (${errorAge})` : ''}: ${reason}`, `The list below is the previous one, built ${age}, and may be out of date. Click Refresh list to try again.${updating}`) };
   }
   if (cache.state === 'stale') {
     return { severity: 'warning' as const, text: `This list was built ${age} and may be out of date.${updating || ' Click Refresh list to update it.'}` };
@@ -399,7 +399,7 @@ export function AcquisitionPanel({
       if (requestId !== requestRef.current) return;
       setQueue(null);
       setWantedError('');
-      setError(`The Find Music list could not be loaded: ${errorMessage(err)}. Nothing is shown. Reload the page to try again.`);
+      setError(sentences(`The Find Music list could not be loaded: ${errorMessage(err)}`, 'Nothing is shown. Reload the page to try again.'));
     } finally {
       if (requestId === requestRef.current) setLoading(false);
     }
@@ -445,7 +445,7 @@ export function AcquisitionPanel({
       await refreshAcquisitionQueue(showUnmonitored, afterDownload);
       await load();
     } catch (err) {
-      setRefreshError(`The list refresh could not be started: ${errorMessage(err)}. The list shown is unchanged. Try again, or check the Jobs page.`);
+      setRefreshError(sentences(`The list refresh could not be started: ${errorMessage(err)}`, 'The list shown is unchanged. Try again, or check the Jobs page.'));
     } finally {
       setRefreshStarting(false);
     }
@@ -585,7 +585,7 @@ export function AcquisitionPanel({
     })().catch((err) => {
       if (cancelled) return;
       setFailedRows([]);
-      setFailedRowsError(`The failed rows of the last batch could not be listed: ${errorMessage(err)}. Retry is unavailable until the list loads. Click Refresh list to try again.`);
+      setFailedRowsError(sentences(`The failed rows of the last batch could not be listed: ${errorMessage(err)}`, 'Retry is unavailable until the list loads. Click Refresh list to try again.'));
     });
     return () => { cancelled = true; };
   }, [albumType, batchRunning, failedKeySig, offset, queueItems, queueTotal, search, showUnmonitored, sort, sourceFilter]);
@@ -651,7 +651,7 @@ export function AcquisitionPanel({
         setBatchError('Nothing was started: the Find Music list is still building. Wait until the list status above says it is ready, then start the download again.');
         void load();
       } else {
-        setBatchError(`The batch download could not be started: ${errorMessage(err)}. Nothing was downloaded. Try again, or check the Jobs page.`);
+        setBatchError(sentences(`The batch download could not be started: ${errorMessage(err)}`, 'Nothing was downloaded. Try again, or check the Jobs page.'));
       }
     } finally {
       setBatchStarting(false);
