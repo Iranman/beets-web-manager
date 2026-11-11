@@ -45,10 +45,10 @@ export interface ProviderChip {
 }
 
 const CHIP_CLASS: Record<ChipTone, string> = {
-  ok: 'border-emerald-300 bg-emerald-50 text-emerald-800',
-  warn: 'border-amber-300 bg-amber-50 text-amber-900',
-  muted: 'border-zinc-300 bg-zinc-50 text-zinc-600',
-  error: 'border-rose-300 bg-rose-50 text-rose-800',
+  ok: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-200',
+  warn: 'border-amber-500/40 bg-amber-950/40 text-amber-200',
+  muted: 'border-graphite-700 bg-graphite-850 text-muted',
+  error: 'border-rose-500/40 bg-rose-950/40 text-rose-200',
 };
 
 /** AcoustID chip from the item-specific fingerprint evidence. "no match in the
@@ -128,7 +128,7 @@ function Chip({ chip }: { chip: ProviderChip }) {
       data-provider={chip.provider}
       data-provider-state={chip.text}
     >
-      <span className="text-zinc-500">{chip.provider}:</span>
+      <span className="text-muted">{chip.provider}:</span>
       <span>{chip.text}</span>
     </span>
   );
@@ -168,10 +168,10 @@ export function recoveryCounts(carrier: RecoveryCarrierIdentity): RecoveryCounts
 }
 
 const STATUS_CLASS: Record<string, string> = {
-  imported: 'border-emerald-300 bg-emerald-50 text-emerald-800',
-  verified: 'border-sky-300 bg-sky-50 text-sky-800',
-  downloaded: 'border-violet-300 bg-violet-50 text-violet-900',
-  pending: 'border-zinc-300 bg-zinc-50 text-zinc-600',
+  imported: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-200',
+  verified: 'border-sky-500/40 bg-sky-950/40 text-sky-200',
+  downloaded: 'border-graphite-700 bg-graphite-900 text-graphite-100',
+  pending: 'border-graphite-700 bg-graphite-850 text-muted',
 };
 
 function trackLabel(t: RecoveryExpectedTrack | RecoveryTrackStatus, index: number): string {
@@ -269,15 +269,15 @@ export function RecoveryReviewCard({
 
   return (
     <section
-      className="mt-3 rounded border border-l-4 border-violet-300 border-l-violet-500 bg-white"
+      className="mt-3 rounded border border-graphite-700 bg-graphite-900"
       aria-label="Missing-track recovery review"
       data-recovery-review-card="true"
     >
-      <header className="flex flex-wrap items-center gap-2 border-b border-violet-100 bg-violet-50 px-3 py-2">
-        <span className="rounded border border-violet-400 bg-violet-100 px-2 py-0.5 text-xs font-semibold text-violet-900">
+      <header className="flex flex-wrap items-center gap-2 border-b border-graphite-700 bg-graphite-900 px-3 py-2">
+        <span className="rounded border border-graphite-700 bg-graphite-800 px-2 py-0.5 text-xs font-semibold text-graphite-100">
           Missing-track recovery
         </span>
-        <span className="text-xs font-medium text-violet-900">Recovery into an existing album — not a new import</span>
+        <span className="text-xs font-medium text-graphite-100">Recovery into an existing album — not a new import</span>
         {confidence ? (
           <span
             className={`ml-auto rounded border px-1.5 py-0.5 text-xs font-semibold ${
@@ -299,16 +299,16 @@ export function RecoveryReviewCard({
 
         {/* ── WANTED ── primary identity: the intended destination album. */}
         <section data-recovery-section="wanted" data-testid="recovery-primary-identity">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-violet-700">Wanted</h3>
-          <p className="mt-1 text-sm font-semibold text-zinc-900">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-graphite-100">Wanted</h3>
+          <p className="mt-1 text-sm font-semibold text-graphite-50">
             {albumName}
             {identity.existingAlbumId > 0 ? (
-              <span className="ml-1 font-mono text-xs font-normal text-zinc-500">(library album {identity.existingAlbumId})</span>
+              <span className="ml-1 font-mono text-xs font-normal text-muted">(library album {identity.existingAlbumId})</span>
             ) : null}
           </p>
-          <p className="mt-0.5 text-xs text-zinc-600">
+          <p className="mt-0.5 text-xs text-muted">
             {counts.present} of {counts.expected} expected track{counts.expected === 1 ? '' : 's'} present ·{' '}
-            <span className="font-semibold text-violet-800">{counts.pending} still missing</span>
+            <span className="font-semibold text-graphite-100">{counts.pending} still missing</span>
           </p>
           <div className="mt-2">
             <MbidLink entity="release-group" id={identity.mbReleaseGroupId} status="suggested" label="Canonical Release Group" />
@@ -321,12 +321,12 @@ export function RecoveryReviewCard({
 
           {(carrier.expected_tracks || []).length ? (
             <div className="mt-2">
-              <div className="text-xs font-semibold text-zinc-700">Missing / expected tracks</div>
+              <div className="text-xs font-semibold text-graphite-200">Missing / expected tracks</div>
               <ul className="mt-1 space-y-1.5" data-testid="recovery-expected-tracks">
                 {(carrier.expected_tracks || []).map((t, i) => (
                   <li key={t.recording_id || `${t.track ?? ''}:${i}`} className="text-xs">
-                    <span className="font-medium text-zinc-700">{trackLabel(t, i)}</span>
-                    {t.title ? <span className="ml-1 text-zinc-600">· {t.title}</span> : null}
+                    <span className="font-medium text-graphite-200">{trackLabel(t, i)}</span>
+                    {t.title ? <span className="ml-1 text-muted">· {t.title}</span> : null}
                     {t.recording_id ? (
                       <div className="mt-0.5">
                         <MbidLink entity="recording" id={t.recording_id} status="suggested" label="Recording" />
@@ -342,12 +342,12 @@ export function RecoveryReviewCard({
         {/* ── DOWNLOADED ── per-track download/verification status. */}
         {trackStatuses.length ? (
           <section data-recovery-section="downloaded">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-violet-700">Downloaded</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-graphite-100">Downloaded</h3>
             <ul className="mt-1 space-y-1" data-testid="recovery-track-status">
               {trackStatuses.map((t, i) => (
                 <li key={t.recording_id || `${t.position ?? ''}:${i}`} className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="font-medium text-zinc-700">{trackLabel(t, i)}</span>
-                  {t.title ? <span className="text-zinc-600">{t.title}</span> : null}
+                  <span className="font-medium text-graphite-200">{trackLabel(t, i)}</span>
+                  {t.title ? <span className="text-muted">{t.title}</span> : null}
                   <span
                     className={`rounded border px-1.5 py-0.5 font-semibold ${STATUS_CLASS[t.status || 'pending'] || STATUS_CLASS.pending}`}
                     data-track-status={t.status || 'pending'}
@@ -362,9 +362,9 @@ export function RecoveryReviewCard({
 
         {/* ── WENT WRONG ── per-dimension confidence + provider chips. */}
         <section data-recovery-section="went-wrong">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-violet-700">What needs checking</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-graphite-100">What needs checking</h3>
           {reviewReason ? (
-            <p className="mt-1 text-xs text-rose-800" data-testid="recovery-review-reason">{reviewReason}</p>
+            <p className="mt-1 text-xs text-rose-200" data-testid="recovery-review-reason">{reviewReason}</p>
           ) : null}
 
           <div className="mt-2 flex flex-wrap gap-1.5" data-testid="recovery-provider-chips">
@@ -386,20 +386,20 @@ export function RecoveryReviewCard({
                     >
                       {dim.ok ? '✓' : '○'}
                     </span>
-                    <span className="font-medium text-zinc-700">{dimLabel}:</span>
-                    <span className="text-zinc-600">{dim.status || (dim.ok ? 'ok' : 'review')}</span>
-                    {dim.detail ? <span className="text-zinc-500">— {dim.detail}</span> : null}
+                    <span className="font-medium text-graphite-200">{dimLabel}:</span>
+                    <span className="text-muted">{dim.status || (dim.ok ? 'ok' : 'review')}</span>
+                    {dim.detail ? <span className="text-muted">— {dim.detail}</span> : null}
                   </li>
                 );
               })}
             </ul>
           ) : (
-            <p className="mt-2 text-xs text-zinc-500">No matching decision has been computed yet.</p>
+            <p className="mt-2 text-xs text-muted">No matching decision has been computed yet.</p>
           )}
 
           {/* AI confidence may appear ONLY when AI actually contributed. */}
           {aiChip.showConfidence && suggestion?.confidence_source === 'ai' && item.suggestion?.confidence ? (
-            <p className="mt-1 text-xs text-zinc-600" data-testid="recovery-ai-confidence">
+            <p className="mt-1 text-xs text-muted" data-testid="recovery-ai-confidence">
               AI confidence: {item.suggestion.confidence}
             </p>
           ) : null}
@@ -420,25 +420,25 @@ export function RecoveryReviewCard({
                 data-recovery-action-mode={actionAllowed ? 'auto' : 'manual'}
                 className={
                   actionAllowed
-                    ? 'rounded bg-violet-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-500'
-                    : 'rounded border border-violet-600 bg-white px-3 py-1.5 text-sm font-semibold text-violet-800 hover:bg-violet-50 disabled:cursor-not-allowed disabled:border-zinc-300 disabled:text-zinc-400'
+                    ? 'rounded bg-red-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:bg-graphite-700 disabled:text-graphite-300'
+                    : 'rounded border border-field-border bg-graphite-900 px-3 py-1.5 text-sm font-semibold text-graphite-50 hover:bg-graphite-800 disabled:cursor-not-allowed disabled:border-graphite-700 disabled:text-muted'
                 }
               >
                 {label}
               </button>
             ) : null}
             {!actionAllowed ? (
-              <span className="rounded border border-violet-300 bg-violet-50 px-1.5 py-0.5 text-xs font-semibold text-violet-800">
+              <span className="rounded border border-graphite-700 bg-graphite-900 px-1.5 py-0.5 text-xs font-semibold text-graphite-100">
                 Manual review — not an automatic import
               </span>
             ) : null}
           </div>
           {!actionAllowed ? (
-            <p className="text-xs text-zinc-600" data-testid="recovery-manual-note">
+            <p className="text-xs text-muted" data-testid="recovery-manual-note">
               Automatic import is not allowed:{' '}
               {decision?.recommended_action || decision?.explanation || 'verify the download matches this album before importing.'}{' '}
               You can still confirm this import by hand — it imports into{' '}
-              <span className="font-semibold text-zinc-800">{albumName}</span> (the canonical Release Group shown above),
+              <span className="font-semibold text-graphite-100">{albumName}</span> (the canonical Release Group shown above),
               never an alternative candidate, and the backend still validates it.
             </p>
           ) : null}
@@ -449,21 +449,21 @@ export function RecoveryReviewCard({
           <section
             data-recovery-section="alternatives"
             data-testid="recovery-alternatives"
-            className="rounded border border-dashed border-zinc-300 bg-zinc-50 p-2"
+            className="rounded border border-dashed border-graphite-700 bg-graphite-850 p-2"
           >
-            <h3 className="text-xs font-semibold text-zinc-500">
+            <h3 className="text-xs font-semibold text-muted">
               Alternative suggestions (secondary — not selected, not the recovery target)
             </h3>
-            <p className="mt-0.5 text-xs text-zinc-500">
+            <p className="mt-0.5 text-xs text-muted">
               These are other candidates the matcher saw. They are shown for reference only and are never imported as
               the recovery target.
             </p>
             <ul className="mt-1.5 space-y-1.5">
               {alternatives.map((c, i) => (
-                <li key={c.mb_trackid || c.mb_releasegroupid || i} className="text-xs text-zinc-600">
-                  <span className="font-medium text-zinc-700">{c.recording_title || c.title || 'Untitled'}</span>
+                <li key={c.mb_trackid || c.mb_releasegroupid || i} className="text-xs text-muted">
+                  <span className="font-medium text-graphite-200">{c.recording_title || c.title || 'Untitled'}</span>
                   {c.recording_artist || c.artist ? <span> — {c.recording_artist || c.artist}</span> : null}
-                  {c.album ? <span className="text-zinc-500"> · {c.album}</span> : null}
+                  {c.album ? <span className="text-muted"> · {c.album}</span> : null}
                   {isValidMbid(c.mb_releasegroupid) ? (
                     <div className="mt-0.5">
                       <MbidLink entity="release-group" id={c.mb_releasegroupid} status="suggested" label="Alt Release Group" />
@@ -477,11 +477,11 @@ export function RecoveryReviewCard({
 
         {/* Expandable logs / provenance. */}
         {identity.destinationPath || (carrier.provenance && Object.keys(carrier.provenance).length) ? (
-          <details className="rounded border border-zinc-200 bg-zinc-50" data-testid="recovery-provenance">
-            <summary className="cursor-pointer px-2 py-1 text-xs font-semibold text-zinc-600">
+          <details className="rounded border border-graphite-700 bg-graphite-850" data-testid="recovery-provenance">
+            <summary className="cursor-pointer px-2 py-1 text-xs font-semibold text-muted">
               Provenance &amp; details
             </summary>
-            <div className="space-y-1 px-2 pb-2 text-xs text-zinc-600">
+            <div className="space-y-1 px-2 pb-2 text-xs text-muted">
               {identity.destinationPath ? (
                 <div className="break-all font-mono">Destination: {identity.destinationPath}</div>
               ) : null}
@@ -490,7 +490,7 @@ export function RecoveryReviewCard({
                 <div className="font-mono">Identity key: {carrier.recovery_identity_key}</div>
               ) : null}
               {carrier.provenance && Object.keys(carrier.provenance).length ? (
-                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-white p-2 font-mono text-[11px] text-zinc-700">
+                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-graphite-900 p-2 font-mono text-[11px] text-graphite-200">
                   {JSON.stringify(carrier.provenance, null, 2)}
                 </pre>
               ) : null}

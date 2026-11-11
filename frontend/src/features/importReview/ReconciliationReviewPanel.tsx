@@ -11,16 +11,16 @@ function label(value?: string | null): string {
 function Side({ title, side }: { title: string; side?: ReconciliationSide }) {
   if (!side) return null;
   return (
-    <div className="rounded border border-graphite-200 bg-white/80 p-2 text-xs">
-      <div className="font-semibold text-zinc-900">{title} · item {side.item_id}</div>
-      <div className="mt-1 break-all font-mono text-zinc-600">{side.path}</div>
-      <div className="mt-1 text-zinc-700">
+    <div className="rounded border border-graphite-700 bg-graphite-950/40 p-2 text-xs">
+      <div className="font-semibold text-graphite-50">{title} · item {side.item_id}</div>
+      <div className="mt-1 break-all font-mono text-muted">{side.path}</div>
+      <div className="mt-1 text-graphite-200">
         Identity proof: {label(side.identity_proof)} · Confidence: {label(side.confidence_state)} · AcoustID:{' '}
         {label(side.acoustid?.status)}
       </div>
-      {side.recording_id ? <div className="font-mono text-zinc-600">Recording {side.recording_id}</div> : null}
+      {side.recording_id ? <div className="font-mono text-muted">Recording {side.recording_id}</div> : null}
       {side.hard_conflicts?.length ? (
-        <div className="mt-1 text-rose-800">Hard conflicts: {side.hard_conflicts.map(label).join(', ')}</div>
+        <div className="mt-1 text-rose-200">Hard conflicts: {side.hard_conflicts.map(label).join(', ')}</div>
       ) : null}
     </div>
   );
@@ -71,23 +71,23 @@ export function ReconciliationReviewPanel() {
 
   if (!reviews.length && !error) return null;
   return (
-    <section className="mb-4 rounded border border-amber-200 bg-amber-50/70 p-3 text-sm" aria-label="Reconciliation review">
-      <div className="font-semibold text-amber-900">Reconciliation review ({reviews.length})</div>
-      <div className="text-xs text-amber-900">
+    <section className="mb-4 rounded border border-graphite-700 bg-graphite-900 p-3 text-sm" aria-label="Reconciliation review">
+      <div className="font-semibold text-graphite-50">Reconciliation review ({reviews.length})</div>
+      <div className="text-xs text-muted">
         These imports landed on a track that already exists. Without deterministic evidence both files were kept.
       </div>
-      {error ? <div className="mt-2 text-rose-800">{error}</div> : null}
+      {error ? <div className="mt-2 text-rose-200">{error}</div> : null}
       <ul className="mt-2 space-y-3">
         {reviews.map((review) => {
           const slotReview = review.kind === 'contested_slot';
           return (
-            <li key={review.review_id} className="rounded border border-amber-200 bg-white/70 p-2">
-              <div className="text-xs text-zinc-800">
+            <li key={review.review_id} className="rounded border border-graphite-700 bg-graphite-950/40 p-2">
+              <div className="text-xs text-graphite-100">
                 {slotReview ? `Disc ${review.disc ?? 1} · Track ${review.track ?? '?'} · ` : ''}
                 {label(review.outcome || review.kind)} · Release Group {review.release_group_id || 'unknown'}
               </div>
-              <div className="text-xs text-zinc-700">Reasons: {review.reasons.map(label).join(', ')}</div>
-              {review.recommended_action ? <div className="text-xs text-zinc-700">{review.recommended_action}</div> : null}
+              <div className="text-xs text-graphite-200">Reasons: {review.reasons.map(label).join(', ')}</div>
+              {review.recommended_action ? <div className="text-xs text-graphite-200">{review.recommended_action}</div> : null}
               {slotReview ? (
                 <div className="mt-2 grid gap-2 md:grid-cols-2">
                   <Side title="Existing" side={review.existing} />
