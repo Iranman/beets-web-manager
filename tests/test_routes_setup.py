@@ -823,6 +823,66 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         self.assertTrue(r.get_json()["ok"])
         self.assertEqual(self.module._load_settings(), cases)
 
+    def test_settings_masking_residuals_599(self):
+        # #599: free-text key=value, DSN passwords, spaced and user-only
+        # tokens, "?"/";" inside a secret value (N1), and a literal mask in
+        # a password defeating the fail-closed check (N2).
+        cases = {
+            "free": "note api_key=fake-r01 here",
+            "free_start": "api_key=fake-r02",
+            "dsn": "host=db.invalid password=fake-r03 user=x",
+            "dsn_quoted": "host=db.invalid password='fake r04 \\' fake-r05' user=x",
+            "dsn_unclosed": "host=db.invalid password='fake-r06 fake-r07",
+            "spaced": "fakeu:pass fake-r08@db.invalid",
+            "user_only": "fake-r09@git.invalid/org/repo",
+            "n1_q": "https://h.invalid/?token=a?fake-r10",
+            "n1_semi": "https://h.invalid/?token=a;fake-r11&page=2",
+            "n2": "fakeu:fake-r12 x********@db.invalid",
+            "n2_enc": "https://a:fake-r13@h1.invalid x:fake-r14********%40h2.invalid",
+            "proxy_bypass": "proxy_bypass=1",
+            "cache_bypass": "https://h.invalid/?cache_bypass=1",
+            "email": "someone@mail.invalid",
+            "plain": "mode=fast",
+        }
+        r = self.client.post("/api/setup/settings", json=cases)
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        body = json.dumps(got, ensure_ascii=False)
+        for value in cases.values():
+            for secret in re.findall(r"fake-r\d\d", value):
+                self.assertNotIn(secret, body)
+        self.assertEqual(got["free"], f"note api_key={mask} here")
+        self.assertEqual(got["dsn"], f"host=db.invalid password={mask} user=x")
+        self.assertEqual(got["dsn_quoted"], f"host=db.invalid password={mask} user=x")
+        self.assertEqual(got["user_only"], f"{mask}@git.invalid/org/repo")
+        self.assertEqual(got["n1_semi"], f"https://h.invalid/?token={mask}&page=2")
+        for key in ("proxy_bypass", "cache_bypass", "email", "plain"):
+            self.assertEqual(got[key], cases[key])
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings(), cases)
+
+    def test_edited_scalar_keeping_a_mask_is_refused(self):
+        # #599 N3: an edited URL kept the mask and saved it literally; a mask
+        # posted for a list-valued key silently replaced the list.
+        stored_in = {"feed_url": "https://u:fake-pw-n3@feed.invalid/a",
+                     "urls": ["https://u:fake-pw-l@h.invalid"], "ai_api_key": "fake-key-n3"}
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        for edit in ({"feed_url": got["feed_url"].replace("/a", "/b")},
+                     {"urls": mask},
+                     {"ai_api_key": mask + "x"}):
+            r = self.client.post("/api/setup/settings", json={**edit, "expected_revision": rev})
+            self.assertEqual(r.status_code, 400, edit)
+            self.assertEqual(r.get_json()["code"], "settings_unmatched_mask")
+        self.assertEqual(self.module._load_settings(), stored_in)
+        # The unchanged echo and the whole-secret mask still restore.
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings(), stored_in)
+
     def test_ambiguous_masked_list_entry_is_refused(self):
         # #593 QA F2: entries identical once masked were paired by position.
         urls = ["https://alice:fake-pw-a@h.invalid", "https://bob:fake-pw-b@h.invalid"]
