@@ -191,7 +191,8 @@ class OrphanStagingReconcileTests(_CarrierStateMixin):
     def test_unbound_old_orphan_is_cleaned_via_controlled_path(self):
         orphan = self._folder("deadbeef-uuid-old-album", age_s=self.old)
         calls = []
-        with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+        with mock.patch("backend.slskd.app_download_marker_valid", return_value=True), \
+                mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
                 mock.patch("backend.composite_workflows.delete_file", side_effect=self._removing_spy(calls)):
             summary = recovery_service.reconcile_orphan_staging_folders(log=[])
         self.assertEqual(summary["removed"], 1, summary)
@@ -278,12 +279,101 @@ class OrphanStagingReconcileTests(_CarrierStateMixin):
         self._folder("deadbeef-a", age_s=self.old)
         self._folder("deadbeef-b", age_s=self.old)
         calls = []
-        with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+        with mock.patch("backend.slskd.app_download_marker_valid", return_value=True), \
+                mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
                 mock.patch("backend.composite_workflows.delete_file", side_effect=self._removing_spy(calls)):
             recovery_service.reconcile_orphan_staging_folders(log=[])
         self.assertTrue(calls)
         for c in calls:
             self.assertEqual(os.path.commonpath([c, self.root_real]), self.root_real)
+
+    def test_unmarked_old_orphan_is_kept_and_logged(self):
+        # #583: location is not ownership. An aged, carrier-unowned folder with
+        # no app marker is the user's: kept and logged, never handed to delete.
+        orphan = self._folder("deadbeef-user-folder", age_s=self.old)
+        spy = mock.MagicMock()
+        log = []
+        with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                mock.patch("backend.composite_workflows.delete_file", spy):
+            summary = recovery_service.reconcile_orphan_staging_folders(log=log)
+        spy.assert_not_called()
+        self.assertTrue(os.path.exists(orphan))
+        self.assertEqual(summary["removed"], 0, summary)
+        self.assertEqual(summary["kept"], 1, summary)
+        self.assertTrue(any("deadbeef-user-folder (no app ownership marker)" in m for m in log), log)
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd,
+                         "markers need the no-follow fd primitives (POSIX)")
+    def test_only_a_genuinely_marked_orphan_is_removed(self):
+        # #583: a real app marker proves the folder; a forged or copied one does
+        # not, nor a genuine one checked with a key the downloads side could hold.
+        import backend.app_runtime as app_runtime
+        import backend.slskd as slskd
+        key_dir = Path(self.tmp) / "data"
+        with mock.patch.object(slskd, "app_download_key_path",
+                               return_value=key_dir / slskd.APP_DOWNLOAD_KEY_FILE):
+            app = self.root / "rec-0123456789abcdef-App"
+            slskd.make_app_download_dir(app)
+            marker = (app / slskd.APP_DOWNLOAD_MARKER).read_text()
+            forged = Path(self._folder("deadbeef-forged"))
+            (forged / slskd.APP_DOWNLOAD_MARKER).write_text("0" * 64 + "\n")
+            copied = Path(self._folder("deadbeef-copied"))
+            (copied / slskd.APP_DOWNLOAD_MARKER).write_text(marker)
+            for d in (app, forged, copied):
+                (d / "01.flac").write_bytes(b"\x00" * 8)
+                t = time.time() - self.old
+                os.utime(str(d), (t, t))
+            calls = []
+            with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                    mock.patch("backend.composite_workflows.delete_file",
+                               side_effect=self._removing_spy(calls)):
+                summary = recovery_service.reconcile_orphan_staging_folders(log=[])
+            self.assertEqual(calls, [os.path.realpath(str(app))])
+            self.assertEqual(summary["kept"], 2, summary)
+            self.assertTrue(forged.exists() and copied.exists())
+            again = self.root / "rec-fedcba9876543210-App"
+            slskd.make_app_download_dir(again)
+            t = time.time() - self.old
+            os.utime(str(again), (t, t))
+            spy = mock.MagicMock()
+            with mock.patch.object(app_runtime, "DOWNLOADS_ALLOWED_ROOTS", [Path(self.tmp)]), \
+                    mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                    mock.patch("backend.composite_workflows.delete_file", spy):
+                recovery_service.reconcile_orphan_staging_folders(log=[])
+            spy.assert_not_called()
+            self.assertTrue(again.exists())
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd,
+                         "markers need the no-follow fd primitives (POSIX)")
+    def test_marker_key_under_a_torrent_or_playlist_root_proves_nothing(self):
+        # #583 F1: WEB_MANAGER_DATA_DIR (the key's home) under a torrent root
+        # distinct from downloads, or under a playlist root: whoever writes
+        # there could read the key and forge markers, so the sweep keeps the
+        # folder, as _app_managed_download_path does.
+        import backend.app_runtime as app_runtime
+        import backend.slskd as slskd
+        for attr in ("TORRENT_SOURCE_ROOTS", "PLAYLIST_DOWNLOAD_ALLOWED_ROOTS"):
+            with self.subTest(attr):
+                other = Path(self.tmp) / ("other-" + attr)
+                key_dir = other / "web-manager-data"
+                key_dir.mkdir(parents=True)
+                with mock.patch.object(slskd, "app_download_key_path",
+                                       return_value=key_dir / slskd.APP_DOWNLOAD_KEY_FILE), \
+                        mock.patch.object(app_runtime, "DOWNLOADS_ALLOWED_ROOTS",
+                                          [Path(self.tmp) / "downloads"]), \
+                        mock.patch.object(app_runtime, attr, [other]):
+                    folder = self.root / ("rec-0123456789abcdef-" + attr)
+                    slskd.make_app_download_dir(folder)
+                    self.assertTrue(slskd.app_download_marker_valid(folder))  # genuine marker
+                    t = time.time() - self.old
+                    os.utime(str(folder), (t, t))
+                    spy = mock.MagicMock()
+                    with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                            mock.patch("backend.composite_workflows.delete_file", spy):
+                        summary = recovery_service.reconcile_orphan_staging_folders(log=[])
+                    spy.assert_not_called()
+                    self.assertTrue(folder.exists())
+                    self.assertGreaterEqual(summary["kept"], 1, summary)
 
     @unittest.skipUnless(_symlinks_work(), "symlinks unavailable on this host")
     def test_symlink_child_escaping_to_music_is_skipped_fail_closed(self):
