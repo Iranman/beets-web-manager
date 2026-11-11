@@ -1217,7 +1217,9 @@ def _import_review_build_revalidated_match(
         "is_partial_import": bool(importable_count > 0 and total_tracks and importable_count < total_tracks),
         "confidence_score": round(float(confidence_score), 3),
         "confidence_level": confidence_level,
-        "auto_fix_eligible": bool(is_importable and confidence_score >= IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD),
+        # #596: unresolved identity (None) stays importable by hand, never automatically.
+        "auto_fix_eligible": bool(identity_validated is True and is_importable
+                                  and confidence_score >= IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD),
         "auto_fix_requires_review": False,
         "auto_fix_reason": reason,
         "missing_track_count": missing,
