@@ -513,7 +513,7 @@ function WorkflowCard({
     <div className="flex flex-col gap-3 rounded-lg border border-graphite-800 bg-graphite-900/60 p-4">
       <div>
         <h3 className="text-sm font-semibold text-zinc-100">{title}</h3>
-        <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">{description}</p>
+        <p className="mt-0.5 text-xs leading-relaxed text-muted">{description}</p>
       </div>
       {/* Mode selector */}
       <div className="flex flex-wrap gap-1.5">
@@ -537,7 +537,7 @@ function WorkflowCard({
         {primaryCount && actions.length > primaryCount ? (
           <button
             type="button"
-            className="rounded px-2.5 py-1 text-xs font-medium text-zinc-500 underline hover:text-zinc-300"
+            className="rounded px-2.5 py-1 text-xs font-medium text-muted underline hover:text-zinc-300"
             onClick={() => setShowMore((value) => !value)}
           >
             {showMore ? 'Fewer options' : 'More options'}
@@ -545,7 +545,7 @@ function WorkflowCard({
         ) : null}
       </div>
       {/* Selected action description */}
-      <p className="min-h-[2.2rem] text-xs leading-relaxed text-zinc-500">{action.description}</p>
+      <p className="min-h-[2.2rem] text-xs leading-relaxed text-muted">{action.description}</p>
       {error ? <p className="text-xs text-red-400">{error}</p> : null}
       <div className="flex items-center gap-2">
         <Button color={action.dangerous ? 'error' : 'primary'} disabled={busy} size="small" variant="contained" onClick={handleRun}>
@@ -631,7 +631,7 @@ function DuplicatesPanel() {
 
   return (
     <div>
-      <div className="mb-1 text-xs text-zinc-500">Duplicate type</div>
+      <div className="mb-1 text-xs text-muted">Duplicate type</div>
       <SelectorBar options={views} selected={view} onChange={setView} />
       {view === 0 && <DedupPanel />}
       {view === 1 && <ArtistFoldersPanel />}
@@ -808,15 +808,15 @@ function AlbumFolderIssueDialog({
       {rows.length ? (
         <div className="space-y-1">
           {rows.slice(0, 12).map((row, idx) => (
-            <div key={`${title}-${idx}`} className="grid gap-1 text-[0.7rem] text-zinc-500 md:grid-cols-2">
+            <div key={`${title}-${idx}`} className="grid gap-1 text-[0.7rem] text-muted md:grid-cols-2">
               <div className="truncate" title={opText(row, 'source')}>{opText(row, 'source') || String(row.relative_path ?? '')}</div>
               <div className="truncate text-zinc-400" title={opText(row, 'target')}>{opText(row, 'target') || String(row.reason ?? '')}</div>
             </div>
           ))}
-          {rows.length > 12 ? <div className="text-[0.68rem] text-zinc-600">+ {rows.length - 12} more</div> : null}
+          {rows.length > 12 ? <div className="text-[0.68rem] text-muted">+ {rows.length - 12} more</div> : null}
         </div>
       ) : (
-        <div className="text-[0.7rem] text-zinc-600">{empty}</div>
+        <div className="text-[0.7rem] text-muted">{empty}</div>
       )}
     </div>
   );
@@ -830,21 +830,21 @@ function AlbumFolderIssueDialog({
           {issue ? (
             <div className="mt-4 space-y-4">
               <div className="grid gap-2 rounded border border-graphite-800 bg-graphite-950/40 p-3 text-xs text-zinc-400 md:grid-cols-2">
-                <div><span className="text-zinc-500">Issue:</span> <span className="text-zinc-200">{issueKind(issue)}</span></div>
-                <div><span className="text-zinc-500">Risk:</span> <span className="text-zinc-200">{issueRisk(issue)}</span></div>
-                <div><span className="text-zinc-500">Artist:</span> <span className="text-zinc-200">{issue.artist || 'Unknown artist'}</span></div>
-                <div><span className="text-zinc-500">Album:</span> <span className="text-zinc-200">{issue.album || 'Unknown album'}</span></div>
-                <div className="md:col-span-2"><span className="text-zinc-500">Release Group ID:</span> <span className="font-mono text-zinc-200">{issue.release_group_id || 'Missing'}</span></div>
-                <div className="md:col-span-2"><span className="text-zinc-500">Reason:</span> <span className="text-zinc-200">{issueReason(issue)}</span></div>
+                <div><span className="text-muted">Issue:</span> <span className="text-zinc-200">{issueKind(issue)}</span></div>
+                <div><span className="text-muted">Risk:</span> <span className="text-zinc-200">{issueRisk(issue)}</span></div>
+                <div><span className="text-muted">Artist:</span> <span className="text-zinc-200">{issue.artist || 'Unknown artist'}</span></div>
+                <div><span className="text-muted">Album:</span> <span className="text-zinc-200">{issue.album || 'Unknown album'}</span></div>
+                <div className="md:col-span-2"><span className="text-muted">Release Group ID:</span> <span className="font-mono text-zinc-200">{issue.release_group_id || 'Missing'}</span></div>
+                <div className="md:col-span-2"><span className="text-muted">Reason:</span> <span className="text-zinc-200">{issueReason(issue)}</span></div>
               </div>
               <div className="grid gap-3 md:grid-cols-2">
                 <div className="rounded border border-graphite-800 bg-graphite-950/40 p-3">
                   <div className="mb-1 text-xs font-semibold text-zinc-300">Current/source folder</div>
-                  {current.map((path) => <div key={path} className="truncate text-xs text-zinc-500" title={path}>{path}</div>)}
+                  {current.map((path) => <div key={path} className="truncate text-xs text-muted" title={path}>{path}</div>)}
                 </div>
                 <div className="rounded border border-graphite-800 bg-graphite-950/40 p-3">
                   <div className="mb-1 text-xs font-semibold text-zinc-300">Canonical target folder</div>
-                  <div className="truncate text-xs text-zinc-500" title={canonical}>{canonical || 'Missing target'}</div>
+                  <div className="truncate text-xs text-muted" title={canonical}>{canonical || 'Missing target'}</div>
                 </div>
               </div>
               <div className="grid gap-3 md:grid-cols-2">
@@ -856,11 +856,11 @@ function AlbumFolderIssueDialog({
               <div className="rounded border border-graphite-800 bg-graphite-950/40 p-3">
                 <div className="mb-1 text-xs font-semibold text-zinc-300">Final expected folder layout</div>
                 {layout.length ? (
-                  <div className="grid gap-1 text-[0.7rem] text-zinc-500 md:grid-cols-2">
+                  <div className="grid gap-1 text-[0.7rem] text-muted md:grid-cols-2">
                     {layout.slice(0, 20).map((path) => <div key={path} className="truncate">{path}</div>)}
                   </div>
                 ) : (
-                  <div className="text-[0.7rem] text-zinc-600">Layout will be verified after apply.</div>
+                  <div className="text-[0.7rem] text-muted">Layout will be verified after apply.</div>
                 )}
               </div>
               <div className="flex flex-wrap justify-end gap-2">
@@ -1054,10 +1054,10 @@ function AlbumFolderCleanupPanel({
         : latestReadableLine(scanJob!) || 'Scanning album folders...')
     : null;
   const stats = [
-    { label: 'Safe fixes', value: safeCount, tone: safeCount ? 'text-emerald-300 border-emerald-900/50 bg-emerald-950/15' : 'text-zinc-500 border-graphite-800 bg-graphite-950/40' },
-    { label: 'Needs review', value: reviewCount, tone: reviewCount ? 'text-amber-300 border-amber-900/50 bg-amber-950/15' : 'text-zinc-500 border-graphite-800 bg-graphite-950/40' },
-    { label: 'Blocked', value: blockedCount, tone: blockedCount ? 'text-rose-300 border-rose-900/50 bg-rose-950/15' : 'text-zinc-500 border-graphite-800 bg-graphite-950/40' },
-    { label: 'Completed', value: completedCount, tone: completedCount ? 'text-sky-300 border-sky-900/50 bg-sky-950/15' : 'text-zinc-500 border-graphite-800 bg-graphite-950/40' },
+    { label: 'Safe fixes', value: safeCount, tone: safeCount ? 'text-emerald-300 border-emerald-900/50 bg-emerald-950/15' : 'text-muted border-graphite-800 bg-graphite-950/40' },
+    { label: 'Needs review', value: reviewCount, tone: reviewCount ? 'text-amber-300 border-amber-900/50 bg-amber-950/15' : 'text-muted border-graphite-800 bg-graphite-950/40' },
+    { label: 'Blocked', value: blockedCount, tone: blockedCount ? 'text-rose-300 border-rose-900/50 bg-rose-950/15' : 'text-muted border-graphite-800 bg-graphite-950/40' },
+    { label: 'Completed', value: completedCount, tone: completedCount ? 'text-sky-300 border-sky-900/50 bg-sky-950/15' : 'text-muted border-graphite-800 bg-graphite-950/40' },
   ];
   const detailStats = [
     { label: 'Empty folders', value: count('empty_folders'), tone: 'text-sky-300 border-sky-900/50 bg-sky-950/15' },
@@ -1084,7 +1084,7 @@ function AlbumFolderCleanupPanel({
     <div id="library-cleanup" className="rounded-lg border border-graphite-800 bg-graphite-900/60 p-4 space-y-3">
       <div>
         <h3 className="text-sm font-semibold text-zinc-100">Cleanup Report</h3>
-        <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">
+        <p className="mt-0.5 text-xs leading-relaxed text-muted">
           Review the latest folder cleanup report and apply safe folder fixes when a report exists.
         </p>
       </div>
@@ -1118,7 +1118,7 @@ function AlbumFolderCleanupPanel({
           Cleanup Report
         </Button>
         {lastScanAt && (
-          <span className="text-[0.68rem] text-zinc-600">
+          <span className="text-[0.68rem] text-muted">
             Scanned {new Date(lastScanAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </span>
         )}
@@ -1136,7 +1136,7 @@ function AlbumFolderCleanupPanel({
             {stats.map((stat) => (
               <div key={stat.label} className={cx('rounded border px-2.5 py-1.5', stat.tone)}>
                 <div className="text-sm font-semibold tabular-nums">{numberFmt.format(stat.value)}</div>
-                <div className="text-[0.62rem] uppercase tracking-wide text-zinc-500">{stat.label}</div>
+                <div className="text-[0.62rem] uppercase tracking-wide text-muted">{stat.label}</div>
               </div>
             ))}
           </div>
@@ -1147,7 +1147,7 @@ function AlbumFolderCleanupPanel({
                 {detailStats.map((stat) => (
                   <div key={stat.label} className={cx('rounded border px-2.5 py-1.5', stat.tone)}>
                     <div className="text-sm font-semibold tabular-nums">{numberFmt.format(stat.value)}</div>
-                    <div className="text-[0.62rem] uppercase tracking-wide text-zinc-500">{stat.label}</div>
+                    <div className="text-[0.62rem] uppercase tracking-wide text-muted">{stat.label}</div>
                   </div>
                 ))}
               </div>
@@ -1182,23 +1182,23 @@ function AlbumFolderCleanupPanel({
                 return (
                   <div key={issue.id ?? `${issue.artist}-${issue.album}-${canonical}`} className="grid gap-2 border-b border-graphite-800/70 px-3 py-2 text-xs last:border-b-0 xl:grid-cols-[1fr_1fr_1.1fr_1.1fr_0.8fr_0.9fr]">
                     <div className="min-w-0">
-                      <div className="truncate text-[0.68rem] uppercase tracking-wide text-zinc-600">{issueKind(issue)}</div>
+                      <div className="truncate text-[0.68rem] uppercase tracking-wide text-muted">{issueKind(issue)}</div>
                       <div className="truncate font-medium text-zinc-200">{issue.artist || 'Unknown artist'}</div>
-                      <div className="truncate text-zinc-500">{issue.album || 'Unknown album'}</div>
+                      <div className="truncate text-muted">{issue.album || 'Unknown album'}</div>
                     </div>
-                    <div className="min-w-0 text-zinc-500">
+                    <div className="min-w-0 text-muted">
                       {(current ?? []).slice(0, 3).map((folder) => <div key={folder} className="truncate">{folder}</div>)}
                     </div>
                     <div className="min-w-0">
-                      {canonical ? <div className="truncate text-zinc-600">{canonical}</div> : null}
-                      <div className="truncate font-mono text-[0.68rem] text-zinc-500">{issue.release_group_id || 'No RGID'}</div>
+                      {canonical ? <div className="truncate text-muted">{canonical}</div> : null}
+                      <div className="truncate font-mono text-[0.68rem] text-muted">{issue.release_group_id || 'No RGID'}</div>
                     </div>
                     <div className="min-w-0">
                       <div className="truncate text-zinc-300">{issue.proposed_action || 'Review issue'}</div>
-                      <div className="truncate text-zinc-500">
+                      <div className="truncate text-muted">
                         {numberFmt.format(asCount(issue.files_to_move))} move / {numberFmt.format(asCount(issue.files_to_safe_delete))} quarantine
                       </div>
-                      <div className="truncate text-zinc-600" title={issueReason(issue)}>{issueReason(issue)}</div>
+                      <div className="truncate text-muted" title={issueReason(issue)}>{issueReason(issue)}</div>
                     </div>
                     <div className="space-y-1">
                       <Chip
@@ -1207,7 +1207,7 @@ function AlbumFolderCleanupPanel({
                         size="small"
                         variant="outlined"
                       />
-                      <div className="text-[0.68rem] text-zinc-500">{issueStatus(issue)}</div>
+                      <div className="text-[0.68rem] text-muted">{issueStatus(issue)}</div>
                     </div>
                     <div className="flex flex-wrap gap-1">
                       <Button size="small" variant="outlined" onClick={() => setSelectedIssue(issue)}>Preview</Button>
@@ -1231,7 +1231,7 @@ function AlbumFolderCleanupPanel({
               })}
             </div>
           ) : (
-            <div className="px-3 py-4 text-xs text-zinc-500">No matching issue rows. Run a scan or open the latest cleanup report.</div>
+            <div className="px-3 py-4 text-xs text-muted">No matching issue rows. Run a scan or open the latest cleanup report.</div>
           )}
         </div>
       )}
@@ -1276,7 +1276,7 @@ function MaintenanceCard({
     <section className="space-y-3 rounded-lg border border-graphite-800 bg-graphite-900/45 p-4">
       <div>
         <h3 className="text-sm font-semibold text-zinc-100">{title}</h3>
-        <p className="mt-1 text-xs leading-relaxed text-zinc-500">{description}</p>
+        <p className="mt-1 text-xs leading-relaxed text-muted">{description}</p>
       </div>
       {children}
     </section>
@@ -1413,9 +1413,9 @@ function MaintenanceRunnerBar({
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-sm font-semibold text-zinc-100">Clean All</h2>
               <Chip color={statusColor} label={status} size="small" variant="outlined" />
-              <span className="text-xs text-zinc-500">{currentTask}</span>
+              <span className="text-xs text-muted">{currentTask}</span>
             </div>
-            <p className="mt-1 text-xs leading-relaxed text-zinc-500">
+            <p className="mt-1 text-xs leading-relaxed text-muted">
               Scan, identify, verify, repair, replace, and organize the entire music library.
             </p>
             <div className="mt-2 flex items-center gap-3">
@@ -1443,11 +1443,11 @@ function MaintenanceRunnerBar({
                 <div key={key} className="rounded border border-graphite-800 bg-graphite-900/55 px-2 py-1.5">
                   {/* No run to read counts from: unknown, not zero. */}
                   <div className="text-sm font-semibold tabular-nums text-zinc-100">{currentJob ? numberFmt.format(cleanAllCounts[key]) : '—'}</div>
-                  <div className="text-[0.62rem] uppercase tracking-wide text-zinc-500">{label}</div>
+                  <div className="text-[0.62rem] uppercase tracking-wide text-muted">{label}</div>
                 </div>
               ))}
             </div>
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.7rem] text-zinc-500">
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.7rem] text-muted">
               <span>Last run: {formatDateTime(lastRun?.finished_at ?? lastRun?.started_at)}</span>
               <span>Last heartbeat: {formatDateTime(lastHeartbeat)}</span>
               <span>Next scheduled run: Manual only</span>
@@ -1497,7 +1497,7 @@ function MaintenanceRunnerBar({
         <div className="mt-3">
           <button
             type="button"
-            className="text-[0.7rem] text-zinc-500 hover:text-zinc-300 underline"
+            className="text-[0.7rem] text-muted hover:text-zinc-300 underline"
             onClick={() => setShowTasks((v) => !v)}
           >
             {showTasks ? 'Hide technical checks' : `Show technical checks (${tasks.length})`}
@@ -1577,15 +1577,15 @@ function MaintenanceRunnerReportDialog({
               </div>
               <div className="grid gap-2 rounded-md border border-graphite-800 bg-graphite-950/50 p-3 text-xs text-zinc-400 sm:grid-cols-3">
                 <div>
-                  <div className="text-zinc-500">Updated</div>
+                  <div className="text-muted">Updated</div>
                   <div className="font-medium text-zinc-200">{formatDateTime(updatedAt)}</div>
                 </div>
                 <div>
-                  <div className="text-zinc-500">Last complete run</div>
+                  <div className="text-muted">Last complete run</div>
                   <div className="font-medium text-zinc-200">{formatDateTime(completedAt)}</div>
                 </div>
                 <div>
-                  <div className="text-zinc-500">Full file scan</div>
+                  <div className="text-muted">Full file scan</div>
                   <div className="font-medium text-zinc-200">{fileScanStarted ? 'Started' : 'Not started'}</div>
                 </div>
               </div>
@@ -1654,7 +1654,7 @@ function CommonActionsSection({
     <section className="space-y-3">
       <div>
         <h2 className="text-base font-semibold text-zinc-100">Library Cleanup</h2>
-        <p className="mt-1 text-sm text-zinc-500">One coordinated cleanup workflow for library scans, verification, safe repairs, cleanup reports, and submission review.</p>
+        <p className="mt-1 text-sm text-muted">One coordinated cleanup workflow for library scans, verification, safe repairs, cleanup reports, and submission review.</p>
       </div>
 
       <MaintenanceRunnerBar jobs={jobs} onStarted={onStarted} onSelectJob={onSelectJob} />
@@ -1723,7 +1723,7 @@ function JobHistorySection({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-base font-semibold text-zinc-100">Job History</h2>
-          <p className="mt-1 text-sm text-zinc-500">
+          <p className="mt-1 text-sm text-muted">
             Finished, failed, and cancelled jobs stay here. {runningCount ? `${numberFmt.format(runningCount)} running job${runningCount === 1 ? '' : 's'} shown in Current activity.` : 'No running jobs are repeated here.'}
           </p>
         </div>
@@ -1865,7 +1865,7 @@ function PathReference({ path }: { path: PathHit }) {
         <button className="shrink-0 text-red-300 hover:text-red-200" type="button" onClick={() => setExpanded((value) => !value)}>
           {expanded ? 'Hide' : 'Full path'}
         </button>
-        <button className="shrink-0 text-zinc-500 hover:text-zinc-300" type="button" onClick={() => void copyPath()}>
+        <button className="shrink-0 text-muted hover:text-zinc-300" type="button" onClick={() => void copyPath()}>
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
@@ -2045,7 +2045,7 @@ function JobSummaryHeader({
       <div className="flex flex-wrap items-start gap-2">
         <div className="min-w-0 flex-1">
           <h3 className="truncate text-sm font-semibold text-zinc-100">{summary.title}</h3>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
             <Chip color={statusChipColor(summary.status)} label={summary.statusLabel} size="small" variant="outlined" />
             <span>Current phase: <span className="text-zinc-300">{summary.currentPhase}</span></span>
           </div>
@@ -2058,17 +2058,17 @@ function JobSummaryHeader({
         ) : null}
       </div>
 
-      <div className="mt-3 grid gap-2 text-xs text-zinc-500 sm:grid-cols-4">
+      <div className="mt-3 grid gap-2 text-xs text-muted sm:grid-cols-4">
         <div className="rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5">
-          <div className="text-[0.62rem] uppercase tracking-wide text-zinc-600">Started</div>
+          <div className="text-[0.62rem] uppercase tracking-wide text-muted">Started</div>
           <div className="mt-0.5 text-zinc-200">{formatDateTime(job.started_at ?? job.created_at)}</div>
         </div>
         <div className="rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5">
-          <div className="text-[0.62rem] uppercase tracking-wide text-zinc-600">Elapsed</div>
+          <div className="text-[0.62rem] uppercase tracking-wide text-muted">Elapsed</div>
           <div className="mt-0.5 text-zinc-200">{formatDuration(job) || 'Working...'}</div>
         </div>
         <div className="rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5">
-          <div className="text-[0.62rem] uppercase tracking-wide text-zinc-600">Progress</div>
+          <div className="text-[0.62rem] uppercase tracking-wide text-muted">Progress</div>
           <div className="mt-0.5 text-zinc-200">
             {hasCount
               ? `${numberFmt.format(scanned!)} / ${numberFmt.format(total!)} (${pct}%)`
@@ -2076,7 +2076,7 @@ function JobSummaryHeader({
           </div>
         </div>
         <div className="rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5">
-          <div className="text-[0.62rem] uppercase tracking-wide text-zinc-600">Speed / ETA</div>
+          <div className="text-[0.62rem] uppercase tracking-wide text-muted">Speed / ETA</div>
           <div className="mt-0.5 text-zinc-200">
             {filesPerMin !== null ? (
               <span>
@@ -2093,13 +2093,13 @@ function JobSummaryHeader({
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
           {currentFile ? (
             <div className="truncate max-w-md">
-              <span className="text-[0.62rem] uppercase tracking-wide text-zinc-600 mr-1.5">Current file:</span>
+              <span className="text-[0.62rem] uppercase tracking-wide text-muted mr-1.5">Current file:</span>
               <span className="text-zinc-300 font-mono">{currentFile}</span>
             </div>
           ) : null}
           {found !== null && found >= 0 ? (
             <div>
-              <span className="text-[0.62rem] uppercase tracking-wide text-zinc-600 mr-1.5">Duplicates/candidates:</span>
+              <span className="text-[0.62rem] uppercase tracking-wide text-muted mr-1.5">Duplicates/candidates:</span>
               <span className="font-semibold text-amber-400">{found} found</span>
             </div>
           ) : null}
@@ -2132,7 +2132,7 @@ function JobSummaryHeader({
 
 function FeedTimeline({ items, groups, emptyText }: { items: JobFeedItem[]; groups: ReturnType<typeof buildJobFeed>['groups']; emptyText: string }) {
   if (!items.length) {
-    return <div className="rounded border border-graphite-800 bg-graphite-950/50 p-4 text-sm text-zinc-500">{emptyText}</div>;
+    return <div className="rounded border border-graphite-800 bg-graphite-950/50 p-4 text-sm text-muted">{emptyText}</div>;
   }
 
   return (
@@ -2153,14 +2153,14 @@ function FeedTimeline({ items, groups, emptyText }: { items: JobFeedItem[]; grou
                     <span className="mt-0.5 w-5 shrink-0 text-center text-xs">{statusIcon(item.status)}</span>
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                        {item.time ? <span className="text-[0.68rem] tabular-nums text-zinc-500">{formatClock(item.time)}</span> : null}
+                        {item.time ? <span className="text-[0.68rem] tabular-nums text-muted">{formatClock(item.time)}</span> : null}
                         <div className="min-w-0 flex-1 text-sm font-medium text-zinc-100">{item.title}</div>
                       </div>
                       {item.message ? <div className="mt-1 text-xs text-zinc-400">{item.message}</div> : null}
                       {item.detail ? <div className="mt-1 text-xs text-zinc-400">{item.detail}</div> : null}
                       {item.paths.map((path) => <PathReference key={`${item.id}-${path.full}`} path={path} />)}
                       {item.technical && Object.keys(item.technical).length ? (
-                        <details className="mt-2 rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5 text-[0.7rem] text-zinc-500">
+                        <details className="mt-2 rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5 text-[0.7rem] text-muted">
                           <summary className="cursor-pointer text-zinc-400">Technical details</summary>
                           <pre className="mt-1 overflow-x-auto whitespace-pre-wrap font-mono">{JSON.stringify(item.technical, null, 2)}</pre>
                         </details>
@@ -2170,7 +2170,7 @@ function FeedTimeline({ items, groups, emptyText }: { items: JobFeedItem[]; grou
                 </article>
               ))}
               {hiddenCount > 0 ? (
-                <div className="rounded border border-graphite-800 bg-graphite-950/50 px-3 py-2 text-xs text-zinc-500">
+                <div className="rounded border border-graphite-800 bg-graphite-950/50 px-3 py-2 text-xs text-muted">
                   {numberFmt.format(hiddenCount)} more update{hiddenCount === 1 ? '' : 's'} hidden. Show raw log for the full output.
                 </div>
               ) : null}
@@ -2230,7 +2230,7 @@ function SelectedJobView({
 }) {
   if (!job) {
     return (
-      <div className="flex h-full items-center justify-center text-xs text-zinc-600">
+      <div className="flex h-full items-center justify-center text-xs text-muted">
         Select a job to view details.
       </div>
     );
@@ -2315,7 +2315,7 @@ function ConsoleHistory({
       {/* Filter bar */}
       <div className="flex shrink-0 items-center gap-2 border-b border-graphite-800/70 px-2.5 py-1.5">
         <input
-          className="h-6 min-w-0 flex-1 bg-transparent text-xs text-zinc-300 outline-none placeholder:text-zinc-600"
+          className="h-6 min-w-0 flex-1 bg-transparent text-xs text-zinc-300 outline-none placeholder:text-muted"
           placeholder="Search jobs…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -2327,7 +2327,7 @@ function ConsoleHistory({
               type="button"
               className={cx(
                 'rounded px-1.5 py-0.5 text-[0.65rem] font-medium transition-colors',
-                status === opt.value ? 'bg-red-600/60 text-white' : 'text-zinc-600 hover:text-zinc-400',
+                status === opt.value ? 'bg-red-600/60 text-white' : 'text-muted hover:text-zinc-400',
               )}
               onClick={() => setStatus(opt.value)}
             >
@@ -2355,7 +2355,7 @@ function ConsoleHistory({
                   <Chip color={statusChipColor(summary.status)} label={summary.statusLabel} size="small" variant="outlined" />
                   <span className="min-w-0 flex-1 truncate font-medium text-zinc-200">{summary.title}</span>
                 </div>
-                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[0.68rem] text-zinc-500">
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[0.68rem] text-muted">
                   <span>Started {formatDateTime(job.started_at ?? job.created_at)}</span>
                   {job.finished_at ? <span>Finished {formatDateTime(job.finished_at)}</span> : null}
                   {formatDuration(job) ? <span>{formatDuration(job)}</span> : null}
@@ -2369,7 +2369,7 @@ function ConsoleHistory({
             </div>
           );
         })}
-        {!filtered.length && <div className="p-4 text-xs text-zinc-600">No jobs match filter.</div>}
+        {!filtered.length && <div className="p-4 text-xs text-muted">No jobs match filter.</div>}
       </div>
     </div>
   );
@@ -2434,7 +2434,7 @@ function StatTile({ label, value, tone }: { label: string; value: number; tone: 
   return (
     <div className={cx('rounded border bg-graphite-950/50 px-3 py-2', toneClass)}>
       <div className="text-lg font-semibold tabular-nums leading-tight">{value.toLocaleString()}</div>
-      <div className="mt-0.5 text-[0.68rem] uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="mt-0.5 text-[0.68rem] uppercase tracking-wide text-muted">{label}</div>
     </div>
   );
 }
@@ -2475,7 +2475,7 @@ function RunningJobCard({
         <div className="flex flex-wrap items-start gap-2">
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold text-zinc-100" title={summary.title}>{summary.title}</div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
               <Chip color={statusChipColor(summary.status)} label={summary.statusLabel} size="small" variant="outlined" />
               <span>Phase: <span className="text-zinc-300">{summary.currentPhase}</span></span>
               {formatDuration(job) ? <span>Elapsed {formatDuration(job)}</span> : null}
@@ -2505,7 +2505,7 @@ function RunningJobCard({
             <div className="flex items-start gap-2">
               <span className="mt-0.5 w-5 shrink-0 text-center text-xs">{statusIcon(currentStep.status)}</span>
               <div className="min-w-0">
-                <div className="text-xs uppercase tracking-wide text-zinc-500">Now</div>
+                <div className="text-xs uppercase tracking-wide text-muted">Now</div>
                 <div className="mt-0.5 text-sm font-medium text-zinc-100">{currentStep.title}</div>
                 {currentStep.detail ? <div className="mt-1 text-xs text-zinc-400">{currentStep.detail}</div> : null}
               </div>
@@ -2515,16 +2515,16 @@ function RunningJobCard({
         <div className="space-y-1.5">
           {latestItems.length ? latestItems.map((item) => (
             <div key={item.id} className="grid grid-cols-[4.5rem_1.25rem_minmax(0,1fr)] items-start gap-2 rounded border border-graphite-800/70 bg-graphite-950/45 px-2.5 py-2 text-xs">
-              <div className="pt-0.5 tabular-nums text-zinc-500">{formatClock(item.time)}</div>
+              <div className="pt-0.5 tabular-nums text-muted">{formatClock(item.time)}</div>
               <div className={cx('flex h-5 w-5 items-center justify-center rounded-full border text-[0.65rem]', toneClasses(item.status))}>{statusIcon(item.status)}</div>
               <div className="min-w-0">
                 <div className="truncate font-medium text-zinc-200" title={item.title}>{item.title}</div>
-                {item.message ? <div className="mt-0.5 truncate text-zinc-500" title={item.message}>{item.message}</div> : null}
-                {item.detail ? <div className="mt-0.5 truncate text-zinc-500" title={item.detail}>{item.detail}</div> : null}
+                {item.message ? <div className="mt-0.5 truncate text-muted" title={item.message}>{item.message}</div> : null}
+                {item.detail ? <div className="mt-0.5 truncate text-muted" title={item.detail}>{item.detail}</div> : null}
               </div>
             </div>
           )) : (
-            <div className="rounded border border-dashed border-graphite-800 bg-graphite-950/45 px-3 py-3 text-sm text-zinc-500">
+            <div className="rounded border border-dashed border-graphite-800 bg-graphite-950/45 px-3 py-3 text-sm text-muted">
               {job.status === 'running' ? 'Waiting for the next update...' : 'No readable feed activity was recorded.'}
             </div>
           )}
@@ -2584,13 +2584,13 @@ function CurrentJobFeedSection({
           <div
             className={cx(
               'mt-3 rounded border px-3 py-3 text-sm',
-              error ? 'border-red-900/50 bg-red-950/20 text-red-300' : 'border-dashed border-graphite-800 bg-graphite-950/45 text-zinc-500',
+              error ? 'border-red-900/50 bg-red-950/20 text-red-300' : 'border-dashed border-graphite-800 bg-graphite-950/45 text-muted',
             )}
           >
             {error ? error : loading ? 'Loading job activity...' : 'No job is running.'}
           </div>
           {latestJob && latestSummary ? (
-            <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-graphite-800 bg-graphite-950/50 px-3 py-2 text-xs text-zinc-500">
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-graphite-800 bg-graphite-950/50 px-3 py-2 text-xs text-muted">
               <span>Last finished:</span>
               <span className="min-w-0 flex-1 truncate text-zinc-300" title={latestSummary.title}>{latestSummary.title}</span>
               <Chip color={statusChipColor(latestSummary.status)} label={latestSummary.statusLabel} size="small" variant="outlined" />

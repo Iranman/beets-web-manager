@@ -154,20 +154,20 @@ export function AlbumCleanupModal({
                 <div className="rounded-md border border-graphite-800 bg-graphite-900/50 p-3">
                   <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
                     <div>
-                      <span className="text-zinc-500">Album:</span>{' '}
+                      <span className="text-muted">Album:</span>{' '}
                       <span className="font-medium text-zinc-200">{plan.album?.album || albumTitle}</span>
                     </div>
                     <div>
-                      <span className="text-zinc-500">Artist:</span>{' '}
+                      <span className="text-muted">Artist:</span>{' '}
                       <span className="font-medium text-zinc-200">{plan.album?.albumartist || artistName}</span>
                     </div>
                     <div>
-                      <span className="text-zinc-500">Beets Album ID:</span>{' '}
+                      <span className="text-muted">Beets Album ID:</span>{' '}
                       <span className="font-mono text-zinc-300">{albumId}</span>
                     </div>
                     {plan.album?.mb_releasegroupid || mbReleaseGroupId ? (
                       <div>
-                        <span className="text-zinc-500">MB Release Group ID:</span>{' '}
+                        <span className="text-muted">MB Release Group ID:</span>{' '}
                         <span className="font-mono text-zinc-300">{plan.album?.mb_releasegroupid || mbReleaseGroupId}</span>
                       </div>
                     ) : null}
@@ -212,7 +212,7 @@ export function AlbumCleanupModal({
                       <div>• Audio files kept on disk, unchanged</div>
                     </div>
                   </div>
-                  <p className="mt-2 text-[0.7rem] text-zinc-500">
+                  <p className="mt-2 text-[0.7rem] text-muted">
                     No files are deleted or moved. The album directory, its audio files, artwork,
                     and any other files in it stay where they are.
                   </p>
@@ -239,11 +239,11 @@ export function AlbumCleanupModal({
                         className="rounded bg-graphite-950 p-2 border border-graphite-800/80"
                       >
                         <div className="text-zinc-200">
-                          <span className="font-mono text-zinc-500">{trackLabel(item)}</span>{' '}
+                          <span className="font-mono text-muted">{trackLabel(item)}</span>{' '}
                           {item.title || `Item ${item.id ?? '?'}`}
                         </div>
                         {item.path ? (
-                          <div className="mt-0.5 font-mono text-zinc-500 break-all">{item.path}</div>
+                          <div className="mt-0.5 font-mono text-muted break-all">{item.path}</div>
                         ) : null}
                       </li>
                     ))}
@@ -311,7 +311,7 @@ export function AlbumCleanupModal({
                 {/* Rollback Section */}
                 <div className="rounded-md border border-graphite-800 bg-graphite-900/40 p-3 text-xs space-y-2">
                   <div className="font-semibold text-zinc-200">Rollback Status</div>
-                  <p className="text-zinc-500">
+                  <p className="text-muted">
                     Rollback is unavailable for this transaction: removed library rows cannot be restored automatically. The audio files are still on disk -- re-import them to add the album back.
                   </p>
                 </div>

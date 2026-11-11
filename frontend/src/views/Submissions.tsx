@@ -574,8 +574,8 @@ export default function Submissions() {
       <div className="mt-3 flex items-center gap-1 rounded-md border border-graphite-800 bg-graphite-900/70 px-3 py-2">
         {STEPS.map((label, index) => (
           <div key={label} className="flex flex-1 items-center gap-1">
-            <div className={['flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[0.68rem] font-semibold', index === activeStep ? 'bg-red-600 text-white' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-zinc-500'].join(' ')}>{index + 1}</div>
-            <span className={['truncate text-[0.7rem]', index === activeStep ? 'text-zinc-100' : 'text-zinc-500'].join(' ')}>{label}</span>
+            <div className={['flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[0.68rem] font-semibold', index === activeStep ? 'bg-red-600 text-white' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-muted'].join(' ')}>{index + 1}</div>
+            <span className={['truncate text-[0.7rem]', index === activeStep ? 'text-zinc-100' : 'text-muted'].join(' ')}>{label}</span>
             {index < STEPS.length - 1 ? <div className={['mx-1 h-px flex-1', index < activeStep ? 'bg-emerald-800' : 'bg-graphite-800'].join(' ')} /> : null}
           </div>
         ))}
@@ -600,14 +600,14 @@ export default function Submissions() {
               return (
                 <button key={id} type="button" onClick={() => selectItem(item)} className={['w-full rounded border px-3 py-2 text-left transition-colors', selected ? 'border-red-500 bg-red-950/35 text-zinc-100' : 'border-graphite-800 bg-graphite-950/40 text-zinc-300 hover:border-graphite-700 hover:bg-graphite-850'].join(' ')}>
                   <div className="truncate text-sm font-semibold">{itemTitle(item)}</div>
-                  <div className="mt-1 truncate text-xs text-zinc-500">{itemArtist(item) || 'unknown artist'}{item.year ? ` / ${item.year}` : ''}</div>
+                  <div className="mt-1 truncate text-xs text-muted">{itemArtist(item) || 'unknown artist'}{item.year ? ` / ${item.year}` : ''}</div>
                   <div className="mt-2 grid grid-cols-2 gap-1 text-[0.68rem] text-zinc-400">
                     <span>{trackCount} tracks</span>
                     <span>{item.album_id ? 'album' : 'singleton/folder'}</span>
                     <span className="truncate">{status}</span>
                     <span>{missing} missing</span>
                   </div>
-                  <div className="mt-1 truncate font-mono text-[0.65rem] text-zinc-600">{item.source_folder || item.path || item.folder || ''}</div>
+                  <div className="mt-1 truncate font-mono text-[0.65rem] text-muted">{item.source_folder || item.path || item.folder || ''}</div>
                 </button>
               );
             })}
@@ -650,13 +650,13 @@ export default function Submissions() {
                   <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-amber-400">Needs review</div>
                   {needsReviewFields.length ? (
                     <ul className="mt-1 space-y-1 text-xs text-zinc-300">{needsReviewFields.map(([key, label]) => <li key={key}>{label}</li>)}</ul>
-                  ) : <p className="mt-1 text-xs text-zinc-500">Nothing outstanding.</p>}
+                  ) : <p className="mt-1 text-xs text-muted">Nothing outstanding.</p>}
                 </div>
                 <div>
-                  <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-zinc-500">Optional</div>
+                  <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted">Optional</div>
                   {optionalMissingFields.length ? (
-                    <ul className="mt-1 space-y-1 text-xs text-zinc-500">{optionalMissingFields.map(([key, label]) => <li key={key}>{label}</li>)}</ul>
-                  ) : <p className="mt-1 text-xs text-zinc-500">Nothing to add.</p>}
+                    <ul className="mt-1 space-y-1 text-xs text-muted">{optionalMissingFields.map(([key, label]) => <li key={key}>{label}</li>)}</ul>
+                  ) : <p className="mt-1 text-xs text-muted">Nothing to add.</p>}
                 </div>
               </div>
             ) : null}
@@ -668,7 +668,7 @@ export default function Submissions() {
                 <div><div className="font-semibold text-zinc-300">AcoustID</div><ul className="mt-1 list-disc pl-4"><li>{tracks.filter((t) => t.file_available).length} Chromaprint fingerprints</li><li>{tracks.filter((t) => t.mb_trackid).length} MusicBrainz recording IDs</li></ul></div>
                 <div><div className="font-semibold text-zinc-300">Local changes</div><ul className="mt-1 list-disc pl-4"><li>Attach MusicBrainz IDs to Beets</li><li>Write verified IDs to file tags</li><li>Save selected artwork</li></ul></div>
               </div>
-              <p className="mt-3 text-zinc-500">Nothing above has been submitted yet — these are the actions the workflow below will take once you run them.</p>
+              <p className="mt-3 text-muted">Nothing above has been submitted yet — these are the actions the workflow below will take once you run them.</p>
             </details>
 
             <details className="mt-3 rounded border border-graphite-800 bg-graphite-950/35 p-3 text-xs text-zinc-400">
@@ -704,16 +704,16 @@ export default function Submissions() {
                     {(ref.artwork_candidates?.[0]?.url) ? <img src={ref.artwork_candidates[0].url} alt="Thumbnail" className="h-14 w-14 rounded border border-graphite-800 object-cover" /> : null}
                   </div>
                   {ref.status === 'error' ? <Alert severity="error" sx={{ mt: 1.5 }}>{ref.error}</Alert> : null}
-                  {ref.raw?.title ? <div className="mt-2 text-xs text-zinc-500">Raw title: <span className="text-zinc-300">{String(ref.raw.title)}</span></div> : null}
+                  {ref.raw?.title ? <div className="mt-2 text-xs text-muted">Raw title: <span className="text-zinc-300">{String(ref.raw.title)}</span></div> : null}
                   {ref.fields && ref.fields.length ? (
                     <div className="mt-2 overflow-auto rounded border border-graphite-800">
                       <table className="min-w-full text-left text-[0.7rem]">
-                        <thead className="bg-graphite-950 text-zinc-500"><tr><th className="px-2 py-1">Field</th><th className="px-2 py-1">Suggested value</th><th className="px-2 py-1">Source</th><th className="px-2 py-1">Confidence</th><th className="px-2 py-1" /></tr></thead>
+                        <thead className="bg-graphite-950 text-muted"><tr><th className="px-2 py-1">Field</th><th className="px-2 py-1">Suggested value</th><th className="px-2 py-1">Source</th><th className="px-2 py-1">Confidence</th><th className="px-2 py-1" /></tr></thead>
                         <tbody>{ref.fields.map((f) => (
                           <tr key={f.field} className="border-t border-graphite-800">
                             <td className="px-2 py-1 capitalize text-zinc-300">{f.field}</td>
                             <td className="px-2 py-1 text-zinc-200">{f.value}</td>
-                            <td className="px-2 py-1 text-zinc-500">{fieldSourceLabel(f.source)}</td>
+                            <td className="px-2 py-1 text-muted">{fieldSourceLabel(f.source)}</td>
                             <td className="px-2 py-1"><Chip size="small" label={f.confidence} color={f.confidence === 'high' ? 'success' : f.confidence === 'medium' ? 'warning' : 'default'} /></td>
                             <td className="px-2 py-1"><Button size="small" variant="outlined" onClick={() => applyReferenceField(f.field, f.value)}>Apply</Button></td>
                           </tr>
@@ -742,7 +742,7 @@ export default function Submissions() {
                   </div>
                 </div>
               ))}
-              {!references.length ? <p className="text-xs text-zinc-500">No reference URLs added yet.</p> : null}
+              {!references.length ? <p className="text-xs text-muted">No reference URLs added yet.</p> : null}
             </div>
           </section>
 
@@ -768,7 +768,7 @@ export default function Submissions() {
           {/* E. Track list, moved above the metadata editor */}
           <section id="submission-tracks" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
             <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between"><h2 className="text-sm font-semibold text-zinc-100">Track Submission Preview</h2><div className="flex flex-wrap gap-2"><Button size="small" variant="outlined" disabled={!tracks.length} onClick={() => void copyText(parserText, 'Track-parser text')}>Copy track-parser text</Button><Button size="small" variant="outlined" disabled={!tracks.length} onClick={() => void copyText(`${target?.summary.albumartist || ''} - ${target?.summary.title || ''}\n\n${parserText}`, 'Submission summary')}>Copy complete summary</Button></div></div>
-            {!tracks.length ? <p className="mt-3 text-sm text-zinc-500">{target ? 'No tracks were found for this review item.' : 'Select a review item to see its tracks.'}</p> : (
+            {!tracks.length ? <p className="mt-3 text-sm text-muted">{target ? 'No tracks were found for this review item.' : 'Select a review item to see its tracks.'}</p> : (
               <div className="mt-3 overflow-auto rounded border border-graphite-800">
                 <table className="min-w-full text-left text-xs"><thead className="bg-graphite-950 text-zinc-400"><tr><th className="px-2 py-2">Disc</th><th className="px-2 py-2">Track</th><th className="px-2 py-2">Title</th><th className="px-2 py-2">Artist credit</th><th className="px-2 py-2">Duration</th><th className="px-2 py-2">File</th><th className="px-2 py-2">AcoustID</th><th className="px-2 py-2">Recording MBID</th><th className="px-2 py-2">Validation</th></tr></thead>
                   <tbody>{tracks.map((track) => { const edit = draft.trackEdits[String(track.item_id)] || {}; return <tr key={track.item_id || track.file_path || track.index} className="border-t border-graphite-800"><td className="px-2 py-2"><TextField size="small" value={edit.disc ?? track.disc} onChange={(event) => updateTrack(track.item_id, 'disc', Number(event.target.value) || 1)} sx={{ width: 72 }} /></td><td className="px-2 py-2"><TextField size="small" value={edit.track ?? track.track} onChange={(event) => updateTrack(track.item_id, 'track', Number(event.target.value) || track.track)} sx={{ width: 72 }} /></td><td className="px-2 py-2 min-w-56"><TextField fullWidth size="small" value={edit.title ?? track.title} onChange={(event) => updateTrack(track.item_id, 'title', event.target.value)} /></td><td className="px-2 py-2 min-w-48"><TextField fullWidth size="small" value={edit.artist ?? track.artist} onChange={(event) => updateTrack(track.item_id, 'artist', event.target.value)} /></td><td className="px-2 py-2 text-zinc-300">{track.duration_display || 'Missing'}</td><td className="max-w-56 truncate px-2 py-2 text-zinc-400">{track.file_name}<div className={track.file_available ? 'text-emerald-400' : 'text-red-300'}>{track.file_available ? 'available' : 'missing'}</div></td><td className="px-2 py-2 text-zinc-300">{track.fingerprint_status}</td><td className="max-w-44 truncate px-2 py-2 font-mono text-zinc-400">{track.mb_trackid || 'Missing'}</td><td className="px-2 py-2 text-zinc-300">{track.validation_status}</td></tr>; })}</tbody></table>
@@ -815,7 +815,7 @@ export default function Submissions() {
               </div>
               <p className="mt-1 text-sm text-zinc-400">Likely existing releases from the current review evidence.</p>
               <div className="mt-3 space-y-2">
-                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-red-600" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-[0.68rem] text-zinc-500">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
+                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-red-600" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-[0.68rem] text-muted">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
                 {!selectedCandidateCount ? (discogsCandidate ? (
                   <Alert severity="info" action={<Button color="inherit" size="small" onClick={() => { markDuplicatesReviewed(); if (discogsCandidate.discogs_url) reprocessReferenceUrl(discogsCandidate.discogs_url); }}>Use as reference</Button>}>
                     No MusicBrainz match, but Discogs has a possible one: {discogsCandidate.artist || 'Unknown artist'} - {discogsCandidate.album || 'Unknown album'}{discogsCandidate.year ? ` (${discogsCandidate.year})` : ''}.
@@ -831,7 +831,7 @@ export default function Submissions() {
           ) : (
             <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
               <h2 className="text-sm font-semibold text-zinc-100">AcoustID Submission</h2>
-              <p className="mt-1 text-sm text-zinc-500">Available after MusicBrainz recording IDs are attached.</p>
+              <p className="mt-1 text-sm text-muted">Available after MusicBrainz recording IDs are attached.</p>
             </div>
           )}
           </>

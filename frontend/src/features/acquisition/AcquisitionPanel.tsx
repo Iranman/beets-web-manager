@@ -235,7 +235,7 @@ function AcquisitionRow({
         <div className="min-w-0 space-y-2">
           <div>
             <div className="whitespace-normal break-words text-base font-semibold leading-6 text-zinc-100">
-              {item.artist} - {item.album}{year ? <span className="text-zinc-500"> ({year})</span> : null}
+              {item.artist} - {item.album}{year ? <span className="text-muted"> ({year})</span> : null}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
               {!mbid ? <Chip color="error" label="No MB release ID" size="small" variant="filled" /> : null}
@@ -251,7 +251,7 @@ function AcquisitionRow({
               {local ? <span>{local.health?.imported ?? 0}/{local.health?.expected || local.expected_track_count || local.track_count || 0} local</span> : null}
             </div>
           </div>
-          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
             {mbid ? <span className="font-mono">{mbid}</span> : null}
             {local?.aldir ? <span className="max-w-3xl truncate font-mono">{local.aldir}</span> : null}
             {wanted?.mb_url ? (
@@ -292,7 +292,7 @@ function AcquisitionRow({
         </div>
       </div>
 
-      {!anyDirectDownloadMethodEnabled(ytdlpStatus) ? <div className="mt-2 text-xs text-zinc-500">Fallback unavailable: {ytdlpMessage}</div> : null}
+      {!anyDirectDownloadMethodEnabled(ytdlpStatus) ? <div className="mt-2 text-xs text-muted">Fallback unavailable: {ytdlpMessage}</div> : null}
       {error ? <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert> : null}
       {notice ? <Alert severity="info" sx={{ mt: 2 }} onClose={() => setNotice('')}>{notice}</Alert> : null}
       {jobId || jobError ? (
@@ -314,7 +314,7 @@ function AcquisitionRow({
                 variant="outlined"
               />
             ) : null}
-            {jobId ? <span className="font-mono text-xs text-zinc-500">{jobId}</span> : null}
+            {jobId ? <span className="font-mono text-xs text-muted">{jobId}</span> : null}
           </div>
           {running ? <LinearProgress sx={{ mt: 1.5, borderRadius: 1 }} /> : null}
           {jobError ? <div className="mt-2 text-xs text-red-300">{jobError}</div> : null}
@@ -689,7 +689,7 @@ export function AcquisitionPanel({
           <label className="flex items-center gap-2 rounded border border-graphite-700 px-2 py-1.5 text-sm text-zinc-400">
             <span>Method</span>
             <select
-              className="rounded border border-graphite-700 bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
+              className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
               value={batchMethod}
               onChange={(event) => setBatchMethod(event.target.value as BatchMethod)}
             >
@@ -753,7 +753,7 @@ export function AcquisitionPanel({
               {batchStarting ? 'Starting...' : primaryBatchLabel}
             </Button>
           ) : (
-            <span className="rounded border border-graphite-700 px-3 py-1.5 text-sm font-medium text-zinc-500">
+            <span className="rounded border border-graphite-700 px-3 py-1.5 text-sm font-medium text-muted">
               No downloadable rows
             </span>
           )}
@@ -775,7 +775,7 @@ export function AcquisitionPanel({
         {status && status.severity ? (
           <Alert role="presentation" severity={status.severity}>{status.text}</Alert>
         ) : status ? (
-          <p className="text-xs text-zinc-500">{status.text}</p>
+          <p className="text-xs text-muted">{status.text}</p>
         ) : null}
       </div>
       {error ? <Alert severity="error">{error}</Alert> : null}
@@ -821,8 +821,8 @@ export function AcquisitionPanel({
           <summary className="flex cursor-pointer flex-wrap items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:text-zinc-100">
             <span className="font-medium text-zinc-300">{batchTitle}</span>
             {batchStatus ? <Chip color={jobStatusColor(batchStatus)} label={batchStatusLabel} size="small" variant="outlined" /> : null}
-            {batchOutcome ? <span className="text-xs text-zinc-500">{batchOutcome}</span> : null}
-            {batchTime ? <span className="text-xs text-zinc-500">Finished {batchTime}</span> : null}
+            {batchOutcome ? <span className="text-xs text-muted">{batchOutcome}</span> : null}
+            {batchTime ? <span className="text-xs text-muted">Finished {batchTime}</span> : null}
             {retryableFailedItems.length ? (
               <button
                 className="rounded border border-rose-500/50 px-2 py-1 text-xs font-medium text-rose-200 hover:bg-rose-950/40"
@@ -836,33 +836,33 @@ export function AcquisitionPanel({
                 {`Retry ${retryableFailedItems.length} failed`}
               </button>
             ) : null}
-            <span className="ml-auto text-xs text-zinc-500">Details</span>
+            <span className="ml-auto text-xs text-muted">Details</span>
           </summary>
           <div className="border-t border-graphite-800 px-3 py-2">
             {batchLatest ? <div className="mb-2 text-xs text-zinc-400">Last update: {batchLatest}</div> : null}
-            {batchId ? <div className="mb-2 text-xs text-zinc-600">Job ID: <span className="font-mono">{batchId}</span></div> : null}
+            {batchId ? <div className="mb-2 text-xs text-muted">Job ID: <span className="font-mono">{batchId}</span></div> : null}
             {batchJobError ? <div className="text-xs text-red-300">{batchJobError}</div> : null}
             {currentFailures.length ? (
               <div className="space-y-1 text-xs text-zinc-400">
-                <div className="font-semibold uppercase text-zinc-500">Failures</div>
+                <div className="font-semibold uppercase text-muted">Failures</div>
                 {currentFailures.map((failure) => (
                   <div key={`${failure.key}-${failure.artist}-${failure.album}`}>
                     <span className="text-zinc-300">{failure.artist} - {failure.album}</span>
-                    {failure.error ? <span className="text-zinc-500">: {failure.error}</span> : null}
+                    {failure.error ? <span className="text-muted">: {failure.error}</span> : null}
                   </div>
                 ))}
               </div>
             ) : null}
             {(lastBatch?.log ?? []).length ? (
-              <div className="mt-2 space-y-1 text-xs text-zinc-500">
-                <div className="font-semibold uppercase text-zinc-600">Log excerpt</div>
+              <div className="mt-2 space-y-1 text-xs text-muted">
+                <div className="font-semibold uppercase text-muted">Log excerpt</div>
                 {(lastBatch?.log ?? []).filter(Boolean).slice(-6).map((line, index) => (
                   <div key={`${index}-${line}`} className="truncate" title={line}>{line}</div>
                 ))}
               </div>
             ) : null}
             {!currentFailures.length && !(lastBatch?.log ?? []).length && !batchJobError ? (
-              <div className="text-xs text-zinc-500">No detailed batch output recorded.</div>
+              <div className="text-xs text-muted">No detailed batch output recorded.</div>
             ) : null}
           </div>
         </details>
@@ -900,7 +900,7 @@ export function AcquisitionPanel({
             <label className="flex items-center gap-2 rounded border border-graphite-700 px-2 text-sm text-zinc-400">
               <span>Album type</span>
               <select
-                className="rounded border border-graphite-700 bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
+                className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
                 value={albumType}
                 onChange={(event) => { setAlbumType(event.target.value); setOffset(0); }}
               >
@@ -913,7 +913,7 @@ export function AcquisitionPanel({
             <label className="flex items-center gap-2 rounded border border-graphite-700 px-2 text-sm text-zinc-400">
               <span>Sort</span>
               <select
-                className="rounded border border-graphite-700 bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
+                className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
                 value={sort}
                 onChange={(event) => { setSort(event.target.value as AcquisitionQueueSort); setOffset(0); }}
               >
@@ -939,11 +939,11 @@ export function AcquisitionPanel({
 
           {!visibleItems.length ? (
             filtersActive ? (
-              <p className="text-sm text-zinc-500">No rows match these filters.</p>
+              <p className="text-sm text-muted">No rows match these filters.</p>
             ) : cacheState === 'ready' || cacheState === 'stale' ? (
               <Alert severity="success">No missing library music or monitored Lidarr wanted albums need download.</Alert>
             ) : (
-              <p className="text-sm text-zinc-500">The previous list had no rows. It may be out of date; see the status above.</p>
+              <p className="text-sm text-muted">The previous list had no rows. It may be out of date; see the status above.</p>
             )
           ) : (
             <div className="overflow-hidden rounded border border-graphite-800 bg-graphite-950">

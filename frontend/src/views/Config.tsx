@@ -67,10 +67,10 @@ function IntegrationRow({
       <StatusDot ok={ok} />
       <div className="flex-1">
         <div className="text-[0.82rem] font-medium text-zinc-200">{label}</div>
-        <div className="text-[0.72rem] text-zinc-500">{description}</div>
+        <div className="text-[0.72rem] text-muted">{description}</div>
       </div>
       <span
-        className={`text-[0.72rem] font-semibold ${ok ? 'text-emerald-400' : 'text-zinc-600'}`}
+        className={`text-[0.72rem] font-semibold ${ok ? 'text-emerald-400' : 'text-muted'}`}
       >
         {ok ? 'configured' : 'not set'}
       </span>
@@ -83,7 +83,7 @@ function IntegrationRow({
 function StatCard({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="flex flex-col gap-1 rounded border border-graphite-800 bg-graphite-900 px-5 py-4">
-      <div className="text-[0.72rem] font-semibold uppercase tracking-wide text-zinc-500">
+      <div className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted">
         {label}
       </div>
       <div className="text-2xl font-semibold text-zinc-100">
@@ -130,7 +130,7 @@ function HealthMetric({
   const color = tone === 'ok' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100';
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/35 px-3 py-2">
-      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-zinc-500">
+      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted">
         {label}
       </div>
       <div className={`mt-1 text-lg font-semibold tabular-nums ${color}`}>
@@ -347,7 +347,7 @@ export default function Config() {
 
       {/* Library stats */}
       <section className="space-y-3">
-        <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-500">Library</h2>
+        <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">Library</h2>
         {stats && (
           <div className="grid grid-cols-3 gap-3">
             <StatCard label="Artists" value={stats.artists} />
@@ -360,7 +360,7 @@ export default function Config() {
       {/* MusicBrainz coverage */}
       {mbStatus?.ok && (
         <section className="space-y-3">
-          <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-500">MusicBrainz</h2>
+          <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">MusicBrainz</h2>
           <div className="rounded border border-graphite-800 bg-graphite-900 px-5 py-4 space-y-4">
             <CoverageBar
               label="Albums with MB release ID"
@@ -385,7 +385,7 @@ export default function Config() {
       {/* Integration status */}
       {health && (
         <section className="space-y-3">
-          <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-500">Integrations</h2>
+          <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">Integrations</h2>
           <div className="grid gap-2 sm:grid-cols-2">
             {INTEGRATIONS.map(({ key, label, description }) => (
               <IntegrationRow key={key} label={label} description={description} ok={health.checks[key]} />
@@ -398,8 +398,8 @@ export default function Config() {
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-500">Music Format Preferences</h2>
-            <p className="mt-1 text-xs text-zinc-500">
+            <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">Music Format Preferences</h2>
+            <p className="mt-1 text-xs text-muted">
               Downloaded tracks are inspected before import. Files that do not match your selected format preferences are rejected or replaced.
             </p>
           </div>
@@ -435,7 +435,7 @@ export default function Config() {
               ))}
             </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <label className="text-xs text-zinc-500">
+              <label className="text-xs text-muted">
                 Custom max channel count
                 <TextField
                   fullWidth
@@ -485,7 +485,7 @@ export default function Config() {
                       {format.label}
                     </label>
                     {enabled ? (
-                      <div className="flex items-center gap-1 text-xs text-zinc-500">
+                      <div className="flex items-center gap-1 text-xs text-muted">
                         <span>#{rank + 1}</span>
                         <Button size="small" variant="text" onClick={() => moveFormat(format.key, -1)} disabled={rank <= 0}>Up</Button>
                         <Button size="small" variant="text" onClick={() => moveFormat(format.key, 1)} disabled={rank < 0 || rank >= formatPrefs.preferred_formats.length - 1}>Down</Button>
@@ -495,7 +495,7 @@ export default function Config() {
                 );
               })}
             </div>
-            <div className="mt-3 text-xs text-zinc-500">
+            <div className="mt-3 text-xs text-muted">
               Current order: {formatPrefs.preferred_formats.map(formatLabel).join(' -> ') || 'Select at least one format'}
             </div>
           </div>
@@ -505,10 +505,10 @@ export default function Config() {
           <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
             <div className="text-sm font-medium text-zinc-200">Rejected audio handling</div>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              <label className="text-xs text-zinc-500">
+              <label className="text-xs text-muted">
                 Rejected downloads
                 <select
-                  className="mt-1 w-full rounded border border-graphite-700 bg-graphite-950 px-2 py-2 text-sm text-zinc-200"
+                  className="mt-1 w-full rounded border border-field-border bg-graphite-950 px-2 py-2 text-sm text-zinc-200"
                   value={formatPrefs.rejected_download_handling}
                   onChange={(event) => setFormatPrefs((current) => ({ ...current, rejected_download_handling: event.target.value as MusicFormatPreferences['rejected_download_handling'] }))}
                 >
@@ -540,7 +540,7 @@ export default function Config() {
           <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-medium text-zinc-200">Replacement status</div>
-              <span className="text-xs text-zinc-500">{queuedReplacementCount.toLocaleString()} queued / {replacementRows.length.toLocaleString()} tracked</span>
+              <span className="text-xs text-muted">{queuedReplacementCount.toLocaleString()} queued / {replacementRows.length.toLocaleString()} tracked</span>
             </div>
             <div className="mt-3 space-y-2">
               {replacementRows.slice(0, 5).map((row) => (
@@ -549,9 +549,9 @@ export default function Config() {
                     <span className="font-medium text-zinc-200">{row.artist || 'Unknown artist'} - {row.title || 'Unknown track'}</span>
                     <span className="text-xs text-amber-300">{row.replacement_status || row.status}</span>
                   </div>
-                  {row.reason ? <div className="mt-1 text-xs text-zinc-500">{row.reason}</div> : null}
+                  {row.reason ? <div className="mt-1 text-xs text-muted">{row.reason}</div> : null}
                   {(row.failure_stage || row.attempt_count || row.next_retry_at) ? (
-                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[0.7rem] text-zinc-500">
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[0.7rem] text-muted">
                       {row.failure_stage ? <span>Stage: {row.failure_stage.replace(/_/g, ' ')}</span> : null}
                       {row.attempt_count ? <span>Attempts: {row.attempt_count}</span> : null}
                       {row.next_retry_at ? <span>Retry: {formatEpochDateTime(row.next_retry_at)}</span> : null}
@@ -559,7 +559,7 @@ export default function Config() {
                   ) : null}
                 </div>
               ))}
-              {replacementRows.length === 0 ? <div className="text-sm text-zinc-500">No tracks are marked Needs replacement.</div> : null}
+              {replacementRows.length === 0 ? <div className="text-sm text-muted">No tracks are marked Needs replacement.</div> : null}
             </div>
           </div>
         </div>
@@ -567,7 +567,7 @@ export default function Config() {
       </section>
       {/* Plugin controls */}
       <section className="space-y-3">
-        <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-500">Plugins</h2>
+        <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">Plugins</h2>
         <PluginsPanel />
       </section>
 
