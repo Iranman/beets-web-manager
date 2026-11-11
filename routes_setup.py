@@ -307,7 +307,10 @@ _SETTING_USER_TOKEN_RE = re.compile(r"[^\s@]@[^\s@]*/")
 
 
 def _is_secret_param_key(name: str) -> bool:
-    name = urllib.parse.unquote_plus(name).lower().replace("bypass", "")
+    # "cache_bypass"/"proxy-bypass" are not secrets, but a bare "bypass"
+    # still holds "pass" (as on main): only a prefixed bypass is dropped.
+    # ponytail: substring words; token matching is #601 F3.
+    name = re.sub(r"(?<=[a-z0-9])[_.-]?bypass", "", urllib.parse.unquote_plus(name).lower())
     return any(w in name for w in config_layers._SECRET_QUERY_KEYS + config_layers._SECRET_KEY_WORDS)
 
 

@@ -848,6 +848,7 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
             "user_only_enc": "fake-r26%40git.invalid/org/repo",
             "user_only_wide": "fake-r27＠git.invalid/org/repo",
             "free_words": "credential=fake-r28 bearer=fake-r29",
+            "bare_bypass": "https://h.invalid/?bypass=fake-r30 bypass=fake-r31",
             "proxy_bypass": "proxy_bypass=1",
             "cache_bypass": "https://h.invalid/?cache_bypass=1",
             "email": "someone@mail.invalid",
