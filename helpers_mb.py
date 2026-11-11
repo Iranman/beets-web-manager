@@ -944,26 +944,33 @@ def _resolve_mb_release_id(mb_input: str, log: list) -> str:
         return ""
     mb_uuid = m.group(0).lower()
 
-    if "release-group" in mb_input.lower():
+    if "release-group" not in mb_input.lower():
+        # A bare UUID may be a hand-typed Release Group id (#590): only a UUID
+        # MusicBrainz does not know as a Release is retried as a Release Group.
         try:
-            api_url = (f"https://musicbrainz.org/ws/2/release-group/{mb_uuid}"
-                       f"?inc=releases&fmt=json")
-            req = urllib.request.Request(api_url, headers={
-                "User-Agent": "BeetsWebControl/1.0 (beets-web@localhost)"})
-            with provider_boundary.opened("musicbrainz", req, timeout=15) as resp:
-                data = json.loads(resp.read())
-            releases = data.get("releases", [])
-            official = [r for r in releases if r.get("status") == "Official"]
-            chosen = (official or releases or [None])[0]
-            if chosen:
-                log.append(f"  Resolved release-group {mb_uuid} → release {chosen['id']}"
-                           f" ({chosen.get('title','?')} {chosen.get('date','')})")
-                return chosen["id"].lower()
-            log.append(f"  WARN: release-group {mb_uuid} has no releases")
-            return ""
-        except Exception as ex:
-            # A release-group UUID is not a release UUID: never hand it on as
-            # one (canonical identity rule). The caller sees "unresolved".
-            log.append(f"  WARN: release-group lookup failed ({ex}); release not resolved")
-            return ""
-    return mb_uuid
+            if _fetch_mb_release_group_strict(mb_uuid):
+                return mb_uuid
+        except Exception:
+            return mb_uuid  # outage: the caller's own release fetch fails closed
+        log.append(f"  {mb_uuid} is not a MusicBrainz release; trying it as a release group")
+    try:
+        api_url = (f"https://musicbrainz.org/ws/2/release-group/{mb_uuid}"
+                   f"?inc=releases&fmt=json")
+        req = urllib.request.Request(api_url, headers={
+            "User-Agent": "BeetsWebControl/1.0 (beets-web@localhost)"})
+        with provider_boundary.opened("musicbrainz", req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        releases = data.get("releases", [])
+        official = [r for r in releases if r.get("status") == "Official"]
+        chosen = (official or releases or [None])[0]
+        if chosen:
+            log.append(f"  Resolved release-group {mb_uuid} → release {chosen['id']}"
+                       f" ({chosen.get('title','?')} {chosen.get('date','')})")
+            return chosen["id"].lower()
+        log.append(f"  WARN: release-group {mb_uuid} has no releases")
+        return ""
+    except Exception as ex:
+        # A release-group UUID is not a release UUID: never hand it on as
+        # one (canonical identity rule). The caller sees "unresolved".
+        log.append(f"  WARN: release-group lookup failed ({ex}); release not resolved")
+        return ""

@@ -209,6 +209,14 @@ class ReviewQueueEdgeTests(_ClientCase):
         urls = {r["folder_name"]: r["mb_url"] for r in body["items"]}
         self.assertEqual(urls, {"A": "", "B": "https://musicbrainz.org/release/x"})
 
+    def test_pending_mb_releasegroupurl_outside_musicbrainz_is_dropped(self):
+        # #590: the Release Group URL gets the same allowlist as mb_url.
+        self.pending[0]["suggestion"]["mb_releasegroupurl"] = "javascript:alert(1)"
+        self.pending[1]["suggestion"]["mb_releasegroupurl"] = "https://musicbrainz.org/release-group/x"
+        _, body = self.get("?status=pending_ai")
+        urls = {r["folder_name"]: r["mb_releasegroupurl"] for r in body["items"]}
+        self.assertEqual(urls, {"A": "", "B": "https://musicbrainz.org/release-group/x"})
+
     def test_moved_stub_keeps_paging_fields(self):
         _, body = self.get("?status=library_no_mb&limit=7&offset=3")
         self.assertEqual((body["ok"], body["limit"], body["offset"]), (True, 7, 3))

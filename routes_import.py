@@ -615,6 +615,7 @@ def import_review_queue():
             blocked = _review_blocked_metadata(item_status, s.get("reason", ""), s, item.get("evidence") or {})
             # Same allowlist as Missing IDs: an older row can hold an AI-written URL (#580).
             mb_url = _s(s.get("mb_url"))
+            mb_rg_url = _s(s.get("mb_releasegroupurl"))
             rows.append({
                 "id": "pending:" + item.get("path", ""),
                 "type": "pending_ai",
@@ -633,7 +634,7 @@ def import_review_queue():
                 "reason": s.get("reason", ""),
                 "mb_albumid": s.get("mb_albumid", ""),
                 "mb_releasegroupid": s.get("mb_releasegroupid", ""),
-                "mb_releasegroupurl": s.get("mb_releasegroupurl", ""),
+                "mb_releasegroupurl": mb_rg_url if mb_rg_url.startswith("https://musicbrainz.org/") else "",
                 "mb_url": mb_url if mb_url.startswith("https://musicbrainz.org/") else "",
                 "mb_valid": bool(s.get("mb_valid")),
                 # ARCH-034: surface the same staleness the unattended import

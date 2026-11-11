@@ -469,6 +469,12 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
             return ""
 
         resolved = _resolve_mb_release_id(mb_input, log) or ""
+        if input_uuid_match and resolved != input_uuid_match.group(0).lower():
+            # The resolver turned a bare Release Group UUID into the group's
+            # first Official release (#590, for Match). Import must not treat
+            # that as a provided release: the elif branch below searches the
+            # whole group for a release that fits the folder.
+            resolved = input_uuid_match.group(0).lower()
         if resolved and _mb_release_has_tracks(resolved):
             accepted = _source_accepts_release(resolved, "Provided MusicBrainz release")
             if accepted:
