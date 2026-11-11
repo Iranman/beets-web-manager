@@ -2830,6 +2830,8 @@ export function ReviewCard({
   const isLibraryNoMb = item.type === 'library_no_mb' && Boolean(item.album_id);
   const matchBucket = itemMatchBucket(item);
   const selectedMatchActive = Boolean(selectedMatch);
+  // #584: an unresolved artist identity is never shown as auto-import ready.
+  const autoFixShown = Boolean(selectedMatch?.auto_fix_eligible && selectedMatch.identity_validated === true);
   const audioMismatchActive = hasAudioMismatchEvidence(item);
   const applyBlockedReason = applyBlockReason(item, mbid, selectedMatch, targetPreviewState);
   const upgradeRow = isQualityUpgrade(item.evidence);
@@ -2950,11 +2952,11 @@ export function ReviewCard({
               ) : item.confidence ? (
                 <span className={`text-xs font-semibold ${confidenceClass(item.confidence)}`}>{item.confidence}</span>
               ) : null}
-              {selectedMatch?.auto_fix_eligible ? (
+              {autoFixShown ? (
                 <Chip
                   size="small"
                   color="success"
-                  label={selectedMatch.is_partial_import ? 'Partial auto-import ready' : 'Auto-import eligible'}
+                  label={selectedMatch?.is_partial_import ? 'Partial auto-import ready' : 'Auto-import eligible'}
                 />
               ) : null}
               {selectedMatchActive && selectedMatch?.identity_validated === null ? (
@@ -3058,14 +3060,14 @@ export function ReviewCard({
                 <div className={`rounded border px-2 py-1.5 ${
                   selectedMatch.is_partial_import
                     ? 'border-sky-200 bg-sky-50 text-sky-900'
-                    : selectedMatch.auto_fix_eligible
+                    : autoFixShown
                       ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
                       : 'border-graphite-200 bg-graphite-50 text-zinc-600'
                 }`}>
                   <div className="font-semibold">
                     {selectedMatch.is_partial_import
                       ? 'Partial import ready'
-                      : selectedMatch.auto_fix_eligible
+                      : autoFixShown
                         ? 'Auto-import eligible'
                         : confidenceLabel(selectedMatch.confidence_level)}
                   </div>

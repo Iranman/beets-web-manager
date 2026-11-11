@@ -2732,8 +2732,10 @@ def library_import_all():
                         # already prefixed onto sug["reason"]; fall back to its error.
                         reason = (sug.get("candidate_identity_error")
                                   or ("Artist identity unresolved: the folder artist could not be "
-                                      "compared with the release." if sug and sug.get("identity_validated") is None
-                                      and _pf.get("ok") is not False else "")
+                                      "compared with the release." if sug.get("identity_validated") is None
+                                      and _import_all_discovery_accepted(
+                                          {**result, "suggestion": {**sug, "identity_validated": True}})
+                                      else "")
                                   or sug.get("reason")
                                   or (("Preflight failed: " + (_s(_pf.get("error"))
                                                                or "the folder does not match the release."))

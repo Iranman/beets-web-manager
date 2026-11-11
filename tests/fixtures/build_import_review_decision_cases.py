@@ -59,7 +59,10 @@ def preview(count=3, **overrides):
 
 CASES = [
     ("ready import", item(), RG, match(), preview()),
-    ("auto-fix eligible import", item(), RG, match(auto_fix_eligible=True), preview()),
+    ("auto-fix eligible import", item(), RG, match(auto_fix_eligible=True, identity_validated=True), preview()),
+    # #584: an unresolved artist identity is never labelled as verified.
+    ("auto-fix eligible, identity unresolved", item(), RG,
+     match(auto_fix_eligible=True, identity_validated=None), preview()),
     ("no ID entered, album", item(), "", match(), preview()),
     ("no ID entered, item target", item(type="library_no_mb", target_kind="item"), "  ", None, None),
     ("library album without ID", item(type="library_no_mb", target_kind="album"), RG, None, None),
@@ -106,7 +109,8 @@ CASES = [
      preview(count=2)),
     ("partial import of one track", item(), RG,
      match(is_partial_import=True, track_mapping=rows("matched", "missing")), preview(count=1)),
-    ("repair of an existing album", item(existing_album_id=42), RG, match(auto_fix_eligible=True), None),
+    ("repair of an existing album", item(existing_album_id=42), RG,
+     match(auto_fix_eligible=True, identity_validated=True), None),
     ("repair with failed preflight", item(existing_album_ids=[42]), RG, match(preflight_status="failed"), None),
     ("partial repair", item(existing_album_id=42), RG,
      match(is_partial_import=True, track_mapping=rows("matched", "missing")), preview(count=1)),

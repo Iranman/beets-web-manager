@@ -428,6 +428,9 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
     Never touches the live music library and never deletes real media outside the
     staging root. A folder younger than ``ORPHAN_MIN_AGE_S`` is left alone."""
     import backend.composite_workflows as composite_workflows
+    import backend.slskd as slskd
+    from backend.app_runtime import (DOWNLOADS_ALLOWED_ROOTS, PLAYLIST_DOWNLOAD_ALLOWED_ROOTS,
+                                     TORRENT_SOURCE_ROOTS)
     log = log if log is not None else []
     summary: Dict[str, Any] = {"scanned": 0, "adopted": 0, "removed": 0,
                                "kept": 0, "skipped": 0}
@@ -534,6 +537,16 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
                 continue
         except OSError:
             summary["skipped"] += 1
+            continue
+        # #583 (fail-closed): location is not ownership. Only a folder the app
+        # made (a valid APP_DOWNLOAD_MARKER, checked with a key no downloads,
+        # torrent or playlist root can hold, as _app_managed_download_path
+        # requires) may be removed; anything else is the user's and is kept.
+        if not (slskd.app_download_marker_valid(child) and not slskd.within_roots(
+                slskd.app_download_key_path(),
+                (*DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS, *PLAYLIST_DOWNLOAD_ALLOWED_ROOTS))):
+            summary["kept"] += 1
+            log.append(f"[recovery-reconcile] kept {entry.name} (no app ownership marker).")
             continue
         # C11: only actual deletes count against the bounded cap; defer the rest
         # to the next run rather than dragging the whole backlog into one sweep.
