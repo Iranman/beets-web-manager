@@ -1348,7 +1348,7 @@ export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
       {paths.length ? (
         <>
           <div className="mt-1 font-semibold">{title}</div>
-          <ul className="space-y-0.5 break-all font-mono text-[11px]">
+          <ul className="space-y-0.5 break-all font-mono text-xs">
             {paths.slice(0, BATCH_PATHS_SHOWN).map((path) => <li key={path}>{path}</li>)}
           </ul>
           {more > 0 ? <div>and {more} more</div> : null}
@@ -1449,7 +1449,7 @@ function EvidenceSummary({ item, evidence: evidenceOverride }: { item?: ReviewIt
             Track match examples
           </DisclosureButton>
           <DisclosurePanel>
-            <ul className="mt-1 space-y-1 rounded border border-graphite-700 bg-graphite-850 p-2 font-mono text-[11px] text-graphite-200">
+            <ul className="mt-1 space-y-1 rounded border border-graphite-700 bg-graphite-850 p-2 font-mono text-xs text-graphite-200">
               {examples.map((example) => (
                 <li key={example}>{example.trim()}</li>
               ))}
@@ -2140,7 +2140,7 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
             <div><span className="font-medium">Placeholder warnings:</span> {preview.placeholder_warning_count}</div>
             <div><span className="font-medium">Release-ID path warnings:</span> {preview.release_id_path_warning_count}</div>
           </div>
-          <div className="mt-2 truncate font-mono text-[11px] text-muted" title={preview.album_path}>
+          <div className="mt-2 truncate font-mono text-xs text-muted" title={preview.album_path}>
             {preview.album_path}
           </div>
           {preview.tracks?.length ? (
@@ -2150,7 +2150,7 @@ function TargetPathPreviewPanel({ state }: { state?: TargetPreviewState }) {
               </DisclosureButton>
               <DisclosurePanel>
                 <div className="mt-2 max-h-72 overflow-auto rounded border border-graphite-700 bg-graphite-900">
-                  <table className="min-w-full text-[11px]">
+                  <table className="min-w-full text-xs">
                     <thead>
                       <tr className="border-b border-graphite-700 bg-graphite-850 text-left text-muted">
                         <th className="px-2 py-1 font-semibold">#</th>
@@ -2881,7 +2881,7 @@ export function ReviewCard({
   // as a green success/ready state.
   const recoveryIdentity = getRecoveryIdentity(item);
   const lifecycleLabel = recoveryIdentity
-    ? 'Recovery · needs verification'
+    ? 'Recovery needs verification'
     : queueingImport
     ? 'Import enqueueing'
     : item.status === 'format_policy_rejected'
