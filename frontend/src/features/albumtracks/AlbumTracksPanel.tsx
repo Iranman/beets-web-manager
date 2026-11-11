@@ -53,7 +53,7 @@ function ProblemAlbum({ problem }: { problem: AlbumTrackProblem }) {
           <div className="font-medium text-zinc-200 text-sm">
             {problem.artist} — {problem.album}
           </div>
-          <div className="mt-1 text-xs text-zinc-500">
+          <div className="mt-1 text-xs text-muted">
             {problem.keep_count ?? 0}/{problem.actual_count ?? 0} local track(s) match selected MB release
             {problem.expected_count ? ` · ${problem.expected_count} MB track(s)` : ''}
           </div>
@@ -131,8 +131,8 @@ function ProblemAlbum({ problem }: { problem: AlbumTrackProblem }) {
                       <Chip color={color} label={label} size="small" variant="outlined" />
                       <div className="min-w-0">
                         <div className="truncate text-zinc-300">{item.title}</div>
-                        <div className="truncate font-mono text-zinc-600">{item.path}</div>
-                        {item.reason && <div className="italic text-zinc-600">{item.reason}</div>}
+                        <div className="truncate font-mono text-muted">{item.path}</div>
+                        {item.reason && <div className="italic text-muted">{item.reason}</div>}
                       </div>
                     </div>
                   )),
@@ -315,7 +315,7 @@ export function AlbumTracksPanel() {
       )}
       {batchJobId && batchJob && (
         <div className="rounded border border-graphite-800 bg-graphite-950 px-3 py-2">
-          <div className="mb-2 flex items-center justify-between gap-2 text-xs text-zinc-500">
+          <div className="mb-2 flex items-center justify-between gap-2 text-xs text-muted">
             <span>Batch remove job: {batchJob.status}</span>
             <Button size="small" variant="text" onClick={() => navigate(jobsUrl(batchJobId))}>
               Jobs

@@ -159,7 +159,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </div>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400"
                       onClick={() => void navigate('/config')}
                     >
                       Settings
@@ -167,7 +167,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </MenuItem>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400"
                       onClick={() => void navigate('/changes')}
                     >
                       Library Changes
@@ -175,7 +175,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </MenuItem>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400"
                       onClick={() => void navigate('/system')}
                     >
                       System
@@ -183,7 +183,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </MenuItem>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-950/30 hover:text-red-200 disabled:opacity-50"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-950/30 hover:text-red-200 data-[focus]:bg-red-950/30 data-[focus]:text-red-200 data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400 disabled:opacity-50"
                       disabled={restarting}
                       onClick={() => void handleRestart()}
                     >
@@ -192,7 +192,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </MenuItem>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white border-t border-zinc-800/80"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white data-[focus]:bg-zinc-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400 border-t border-zinc-800/80"
                       onClick={() => void handleLogoutClick()}
                     >
                       Sign Out

@@ -169,7 +169,7 @@ function DeleteFilesApproveDialog({ open, busy, onCancel, onConfirm }: {
               autoFocus
               autoComplete="off"
               spellCheck={false}
-              className="w-full rounded border border-graphite-700 bg-graphite-900 px-2 py-1 font-mono text-sm text-white"
+              className="w-full rounded border border-field-border bg-graphite-900 px-2 py-1 font-mono text-sm text-white"
               value={typed}
               onChange={(event) => setTyped(event.target.value)}
             />
@@ -212,15 +212,15 @@ function countText(tx: TransactionSummary) {
 
 function DiffRows({ change }: { change: TransactionChange }) {
   const rows = (change.metadata_diff || []).filter((row) => row.changed !== false);
-  if (!rows.length) return <div className="text-xs text-zinc-500">No field-level metadata diff captured.</div>;
+  if (!rows.length) return <div className="text-xs text-muted">No field-level metadata diff captured.</div>;
   return (
     <div className="space-y-2">
       {rows.map((row) => (
         <div key={row.field} className="rounded border border-graphite-700 bg-graphite-950 p-2 text-xs">
           <div className="font-semibold text-zinc-200">{row.field}</div>
           <div className="mt-1 grid gap-1 sm:grid-cols-2">
-            <div><span className="text-zinc-500">Old:</span> <span className="text-rose-200">{String(row.old ?? 'None')}</span></div>
-            <div><span className="text-zinc-500">New:</span> <span className="text-emerald-200">{String(row.new ?? 'None')}</span></div>
+            <div><span className="text-muted">Old:</span> <span className="text-rose-200">{String(row.old ?? 'None')}</span></div>
+            <div><span className="text-muted">New:</span> <span className="text-emerald-200">{String(row.new ?? 'None')}</span></div>
           </div>
         </div>
       ))}
@@ -230,7 +230,7 @@ function DiffRows({ change }: { change: TransactionChange }) {
 
 function FilesystemRows({ change }: { change: TransactionChange }) {
   const rows = change.filesystem || [];
-  if (!rows.length) return <div className="text-xs text-zinc-500">No filesystem diff captured.</div>;
+  if (!rows.length) return <div className="text-xs text-muted">No filesystem diff captured.</div>;
   return (
     <div className="space-y-2">
       {rows.map((row, index) => (
@@ -256,11 +256,11 @@ function ChangePreview({ change }: { change: TransactionChange }) {
       </div>
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
         <div>
-          <div className="mb-1 text-[0.68rem] font-semibold uppercase text-zinc-500">Metadata diff</div>
+          <div className="mb-1 text-[0.68rem] font-semibold uppercase text-muted">Metadata diff</div>
           <DiffRows change={change} />
         </div>
         <div>
-          <div className="mb-1 text-[0.68rem] font-semibold uppercase text-zinc-500">Filesystem diff</div>
+          <div className="mb-1 text-[0.68rem] font-semibold uppercase text-muted">Filesystem diff</div>
           <FilesystemRows change={change} />
         </div>
       </div>
@@ -447,12 +447,12 @@ export default function LibraryChanges() {
           </div>
 
           <div className="overflow-hidden rounded border border-graphite-700">
-            <div className="grid grid-cols-[1fr_auto] border-b border-graphite-700 bg-graphite-900 px-3 py-2 text-xs font-semibold uppercase text-zinc-500">
+            <div className="grid grid-cols-[1fr_auto] border-b border-graphite-700 bg-graphite-900 px-3 py-2 text-xs font-semibold uppercase text-muted">
               <span>{total} transaction{total === 1 ? '' : 's'}</span>
               <span>{offset + 1}-{Math.min(offset + pageSize, total || 0)}</span>
             </div>
             <div className="divide-y divide-graphite-800">
-              {rows.length === 0 && <div className="p-4 text-sm text-zinc-500">No transactions found.</div>}
+              {rows.length === 0 && <div className="p-4 text-sm text-muted">No transactions found.</div>}
               {rows.map((row) => (
                 <button
                   key={row.id}
@@ -464,7 +464,7 @@ export default function LibraryChanges() {
                     <Chip size="small" color={statusColor(row.status)} label={row.status} />
                   </div>
                   <div className="text-xs text-zinc-400">{formatDate(row.created_at)} - {countText(row)}</div>
-                  <div className="truncate text-xs text-zinc-500">{row.summary || row.reason || row.id}</div>
+                  <div className="truncate text-xs text-muted">{row.summary || row.reason || row.id}</div>
                 </button>
               ))}
             </div>
@@ -532,7 +532,7 @@ export default function LibraryChanges() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="text-sm font-semibold text-white">Preview changes</div>
-                  <div className="text-xs text-zinc-500">{detail.changes_total} captured</div>
+                  <div className="text-xs text-muted">{detail.changes_total} captured</div>
                 </div>
                 {detail.changes.length === 0 ? (
                   <Alert severity="info">This transaction has job-level history only. Item-level diffs have not been captured for this workflow yet.</Alert>

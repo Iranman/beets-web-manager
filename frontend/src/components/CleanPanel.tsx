@@ -43,7 +43,7 @@ export function CleanPanelHeader({
           <div className="min-w-0">
             <h2 className="text-base font-semibold text-zinc-100">{title}</h2>
             {description ? <div className="mt-1 text-sm leading-5 text-zinc-400">{description}</div> : null}
-            {meta ? <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">{meta}</div> : null}
+            {meta ? <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">{meta}</div> : null}
           </div>
           {actions ? <div className="flex shrink-0 flex-wrap gap-2">{actions}</div> : null}
         </div>
@@ -137,7 +137,7 @@ export function CleanMetricGrid({
     <div className="grid grid-cols-[repeat(auto-fit,minmax(9.5rem,1fr))] gap-2">
       {items.map((item) => (
         <div key={item.label} className="min-h-[4rem] rounded-md border border-graphite-700 bg-graphite-950/55 px-3 py-2.5">
-          <div className="text-[0.67rem] font-semibold uppercase text-zinc-500">{item.label}</div>
+          <div className="text-[0.67rem] font-semibold uppercase text-muted">{item.label}</div>
           <div className={cx('mt-1 text-lg font-semibold tabular-nums', toneText[item.tone ?? 'neutral'])}>
             {item.value}
           </div>

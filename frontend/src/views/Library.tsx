@@ -582,7 +582,7 @@ function StatusCards({
             type="button"
             onClick={() => onChange(filter.id)}
           >
-            <span className="block text-[0.68rem] font-semibold uppercase text-zinc-500">{filter.detail}</span>
+            <span className="block text-[0.68rem] font-semibold uppercase text-muted">{filter.detail}</span>
             <span className="mt-1 block text-sm font-semibold">{filter.label}</span>
             <span className="mt-1 block text-lg font-semibold tabular-nums text-zinc-100">{numberFmt.format(counts[filter.id] ?? 0)}</span>
           </button>
@@ -650,7 +650,7 @@ function SearchRow({
       {trackSearchLoading ? (
         <div className="lg:col-span-3">
           <LinearProgress sx={{ borderRadius: 1 }} />
-          <div className="mt-1 text-xs text-zinc-500">Loading track rows for track search...</div>
+          <div className="mt-1 text-xs text-muted">Loading track rows for track search...</div>
         </div>
       ) : null}
     </div>
@@ -680,7 +680,7 @@ function AlphabetIndex({
                 ? 'border-red-400 bg-red-500/15 text-red-100'
                 : enabled
                   ? 'border-graphite-700 text-zinc-300 hover:border-graphite-500 hover:bg-graphite-900'
-                  : 'cursor-not-allowed border-graphite-900 text-zinc-700',
+                  : 'cursor-not-allowed border-graphite-900 text-muted',
             )}
             disabled={!enabled}
             type="button"
@@ -1104,7 +1104,7 @@ function AlbumDetailsDialog({
                 <div className="rounded border border-graphite-800 bg-graphite-900/50">
                   <div className="flex items-center justify-between border-b border-graphite-800 px-3 py-2">
                     <h3 className="text-sm font-semibold text-zinc-200">Tracks</h3>
-                    <span className="text-xs text-zinc-500">{loading ? 'Loading...' : `${tracks.length} rows`}</span>
+                    <span className="text-xs text-muted">{loading ? 'Loading...' : `${tracks.length} rows`}</span>
                   </div>
                   {loading ? <LinearProgress /> : null}
                   {error ? <div className="p-3 text-sm text-rose-300">{error}</div> : null}
@@ -1116,7 +1116,7 @@ function AlbumDetailsDialog({
                           const canReplace = Boolean(track.id && track.path && !track.missing);
                           return (
                             <div key={`${track.id || index}-${track.title}`} className="grid grid-cols-[3rem_minmax(0,1fr)_8rem_auto] items-center gap-2 border-t border-graphite-800 px-3 py-2 text-sm">
-                              <span className="font-mono text-xs text-zinc-500">{track.disc && track.disc > 1 ? `${track.disc}.` : ''}{track.track || index + 1}</span>
+                              <span className="font-mono text-xs text-muted">{track.disc && track.disc > 1 ? `${track.disc}.` : ''}{track.track || index + 1}</span>
                               <span className="min-w-0 truncate text-zinc-200">{stripStamps(track.title) || 'Untitled track'}</span>
                               <span className={cx('truncate text-right text-xs', status.color)}>{status.label}</span>
                               {canReplace ? (
@@ -1129,7 +1129,7 @@ function AlbumDetailsDialog({
                         })}
                       </div>
                     ) : (
-                      <div className="p-3 text-sm text-zinc-500">No track rows loaded for this album.</div>
+                      <div className="p-3 text-sm text-muted">No track rows loaded for this album.</div>
                     )
                   ) : null}
                 </div>
@@ -1440,7 +1440,7 @@ export default function Library() {
               )}
             </div>
           </div>
-          <div className="flex flex-col gap-1 text-xs text-zinc-500 lg:items-end lg:text-right">
+          <div className="flex flex-col gap-1 text-xs text-muted lg:items-end lg:text-right">
             <span>{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
             {reconcilePollActive ? (
               <span className="flex items-center gap-1 text-amber-400/80 lg:justify-end" aria-live="polite">
@@ -1496,7 +1496,7 @@ export default function Library() {
             Clear filter
           </Button>
         ) : null}
-        <span className="text-xs text-zinc-500">
+        <span className="text-xs text-muted">
           {activeStatus === 'all'
             ? `${numberFmt.format(filteredArtists.length)} artists visible, ${numberFmt.format(attentionArtistCount)} with review items`
             : `${numberFmt.format(albumResults.length)} matching albums`}

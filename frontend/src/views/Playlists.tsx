@@ -177,7 +177,7 @@ function hostMatches(host: string, domain: string): boolean {
 }
 
 function platformLabel(value: string): { label: string; tone: string } {
-  if (!value.trim()) return { label: 'Paste a URL', tone: 'border-graphite-700 bg-graphite-900 text-zinc-500' };
+  if (!value.trim()) return { label: 'Paste a URL', tone: 'border-graphite-700 bg-graphite-900 text-muted' };
   const host = platformHost(value);
   if (hostMatches(host, 'music.youtube.com') || hostMatches(host, 'youtube.com') || hostMatches(host, 'youtu.be')) {
     return { label: 'YouTube', tone: 'border-red-900 bg-red-950 text-red-300' };
@@ -339,7 +339,7 @@ function metric(label: string, value: number | string, tone = 'text-zinc-100') {
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/60 px-3 py-2">
       <div className={`text-lg font-semibold tabular-nums ${tone}`}>{value}</div>
-      <div className="mt-0.5 text-[0.65rem] uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="mt-0.5 text-[0.65rem] uppercase tracking-wide text-muted">{label}</div>
     </div>
   );
 }
@@ -348,7 +348,7 @@ function compactStat(label: string, value: number | string, tone = 'text-zinc-30
   return (
     <span className={`inline-flex h-7 items-center rounded-full border border-graphite-800 bg-graphite-950/60 px-2.5 text-xs ${tone}`}>
       <span className="font-semibold tabular-nums text-zinc-100">{value}</span>
-      <span className="ml-1 text-zinc-500">{label}</span>
+      <span className="ml-1 text-muted">{label}</span>
     </span>
   );
 }
@@ -865,12 +865,12 @@ function SavedPlaylistRowContext({ summary }: { summary: SavedPlaylistSummary })
     <div className="mt-1 min-w-0 space-y-0.5 text-[0.68rem]">
       <div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
         <span className="min-w-0 truncate">
-          <span className="text-zinc-500">Next step: </span>
+          <span className="text-muted">Next step: </span>
           <span className={`font-medium ${savedTextTone(summary.nextStepTone)}`}>{summary.nextStep}</span>
         </span>
-        <span className="hidden text-zinc-700 sm:inline">/</span>
+        <span className="hidden text-muted sm:inline">/</span>
         <span className="min-w-0 truncate">
-          <span className="text-zinc-500">Last activity: </span>
+          <span className="text-muted">Last activity: </span>
           <span className={activityTone}>{activity}</span>
         </span>
       </div>
@@ -894,7 +894,7 @@ function SavedPlaylistDetailMetric({
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/50 px-3 py-2">
       <div className={`text-sm font-semibold tabular-nums ${tone}`}>{typeof value === 'number' ? value.toLocaleString() : value}</div>
-      <div className="mt-1 text-[0.65rem] uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="mt-1 text-[0.65rem] uppercase tracking-wide text-muted">{label}</div>
     </div>
   );
 }
@@ -998,7 +998,7 @@ function TrackList({
         {title}
       </div>
       <div className="max-h-80 overflow-auto rounded border border-graphite-800 bg-graphite-950/40">
-        {empty ? <div className="px-4 py-5 text-sm text-zinc-500">{children}</div> : children}
+        {empty ? <div className="px-4 py-5 text-sm text-muted">{children}</div> : children}
       </div>
     </div>
   );
@@ -1071,7 +1071,7 @@ function PlaylistJobProgress({
               ? 'Playlist job failed'
               : downloadState?.current || 'Playlist job running'}
         </div>
-        <div className="text-xs text-zinc-500">
+        <div className="text-xs text-muted">
           {detail}
         </div>
       </div>
@@ -1115,7 +1115,7 @@ function PlaylistJobProgress({
       ) : null}
       {trackStatuses.length ? (
         <div className="mb-3 max-h-52 overflow-auto rounded border border-graphite-800 bg-graphite-950/50">
-          <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] border-b border-graphite-800 px-3 py-2 text-[0.7rem] font-semibold uppercase tracking-wide text-zinc-500">
+          <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] border-b border-graphite-800 px-3 py-2 text-[0.7rem] font-semibold uppercase tracking-wide text-muted">
             <span>Track</span>
             <span>Source</span>
             <span>Status</span>
@@ -1125,7 +1125,7 @@ function PlaylistJobProgress({
               <div className="min-w-0">
                 <div className="truncate text-zinc-200">{[row.artist, row.title].filter(Boolean).join(' - ')}</div>
                 {canonicalNote(row) ? <div className="truncate text-sky-300">{canonicalNote(row)}</div> : null}
-                {row.message ? <div className="truncate text-zinc-500">{row.message}</div> : null}
+                {row.message ? <div className="truncate text-muted">{row.message}</div> : null}
               </div>
               <span className="truncate text-zinc-400">{row.method || '-'}</span>
               <span className={`rounded border px-2 py-0.5 text-center ${statusTone(row.status)}`}>
@@ -1135,7 +1135,7 @@ function PlaylistJobProgress({
           ))}
         </div>
       ) : null}
-      <div className="rounded border border-graphite-800 bg-graphite-950/40 px-3 py-2 text-xs text-zinc-500">
+      <div className="rounded border border-graphite-800 bg-graphite-950/40 px-3 py-2 text-xs text-muted">
         Live log output is shown in the top pipeline bar. Open Jobs for the full persisted job log.
       </div>
       {downloadState?.status === 'done' && playlistStatusMessage(downloadState.playlist) ? (
@@ -2358,7 +2358,7 @@ export default function Playlists() {
     <div className="min-w-0 space-y-6 overflow-x-hidden">
       <div>
         <h1 className="text-xl font-semibold text-zinc-100">Playlists</h1>
-        <p className="mt-0.5 text-sm text-zinc-500">
+        <p className="mt-0.5 text-sm text-muted">
           Source playlist → saved playlist → missing-track download → Beets import → MusicBrainz release-group placement → Plex.
         </p>
       </div>
@@ -2370,16 +2370,16 @@ export default function Playlists() {
               <span className="truncate font-medium text-zinc-100">
                 {savedPlaylistName || activePlaylist?.name || 'Select a saved playlist'}
               </span>
-              <span className="text-zinc-600">·</span>
+              <span className="text-muted">·</span>
               <span className="text-zinc-400">{pipelineAction.replace(/_/g, ' ')}</span>
-              <span className="text-zinc-600">·</span>
+              <span className="text-muted">·</span>
               <span className={pipelineStateLabel === 'interrupted' ? 'text-amber-300' : pipelineStateLabel === 'running' ? 'text-sky-300' : pipelineStateLabel === 'failed' ? 'text-rose-300' : 'text-zinc-400'}>
                 {pipelineStateLabel}
               </span>
               {lastCheckpointLabel !== '-' ? (
                 <>
-                  <span className="text-zinc-600">·</span>
-                  <span className="text-xs text-zinc-500">checkpoint {lastCheckpointLabel}</span>
+                  <span className="text-muted">·</span>
+                  <span className="text-xs text-muted">checkpoint {lastCheckpointLabel}</span>
                 </>
               ) : null}
             </div>
@@ -2430,7 +2430,7 @@ export default function Playlists() {
 
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-graphite-800 pt-2 text-xs">
           <div className="min-w-0 flex-1 truncate text-zinc-400" title={latestStatusLine}>
-            <span className="text-zinc-500">Now:</span> {latestStatusLine}
+            <span className="text-muted">Now:</span> {latestStatusLine}
           </div>
           <button
             type="button"
@@ -2468,11 +2468,11 @@ export default function Playlists() {
             <span className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-400">
               Add or Import Playlist
             </span>
-            <span className="rounded border border-graphite-800 px-1.5 py-0.5 text-[0.68rem] uppercase tracking-wide text-zinc-500">
+            <span className="rounded border border-graphite-800 px-1.5 py-0.5 text-[0.68rem] uppercase tracking-wide text-muted">
               {importExpanded ? 'Hide' : 'Show'}
             </span>
           </span>
-          <span className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-xs text-zinc-500">
+          <span className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-xs text-muted">
             {parseResult ? (
               <span>{matchedCount} matched · {missingCount} missing · {parseResult.total} total</span>
             ) : content ? (
@@ -2513,7 +2513,7 @@ export default function Playlists() {
             <select
               value={downloadMethod}
               onChange={(event) => setDownloadMethod(event.target.value)}
-              className="h-9 rounded border border-graphite-700 bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-red-400"
+              className="h-9 rounded border border-field-border bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-red-400"
             >
               {DOWNLOAD_METHOD_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -2540,11 +2540,11 @@ export default function Playlists() {
               </div>
             </div>
             {hostMatches(platformHost(url), 'spotify.com') ? (
-              <p className="text-xs text-zinc-500">
+              <p className="text-xs text-muted">
                 Spotify uses configured API credentials when available; public playlist fallback is handled by yt-dlp.
               </p>
             ) : null}
-            <p className="text-xs text-zinc-500">
+            <p className="text-xs text-muted">
               URL parsing uses the existing backend yt-dlp flow for supported playlist providers.
             </p>
           </div>
@@ -2627,7 +2627,7 @@ export default function Playlists() {
                 <h2 className="truncate text-sm font-semibold text-zinc-100">
                   {savedPlaylistName || name || 'Playlist Tracks'}
                 </h2>
-                <div className="mt-0.5 text-xs text-zinc-500">
+                <div className="mt-0.5 text-xs text-muted">
                   {matchedCount} matched · {missingCount} missing · {selectedPlaylistTotal} total · {pipelineStateLabel}
                 </div>
               </div>
@@ -2680,7 +2680,7 @@ export default function Playlists() {
                 }`}
                 onClick={() => setTrackGroup(group.id)}
               >
-                {group.label} <span className="tabular-nums text-zinc-500">{group.count}</span>
+                {group.label} <span className="tabular-nums text-muted">{group.count}</span>
               </button>
             ))}
           </div>
@@ -2703,7 +2703,7 @@ export default function Playlists() {
           {viewingSavedPlaylist && !savedDetailRowsLoaded ? (
             <div className="rounded border border-graphite-800 bg-graphite-950/45 p-3 text-sm text-zinc-300">
               <div className="font-medium text-zinc-100">Loaded playlist summary only.</div>
-              <div className="mt-1 text-xs text-zinc-500">
+              <div className="mt-1 text-xs text-muted">
                 Track rows load one page at a time so large playlists do not block the page.
               </div>
               <Button
@@ -2751,7 +2751,7 @@ export default function Playlists() {
                           <div className="truncate font-medium text-zinc-200">
                             {track.artist} - {track.title}
                           </div>
-                          <div className="truncate text-xs text-zinc-500">
+                          <div className="truncate text-xs text-muted">
                             {track.album || 'blank album'} · {track.path || 'no path'}
                           </div>
                         </div>
@@ -2898,14 +2898,14 @@ export default function Playlists() {
                           <div className="truncate font-medium text-zinc-200">
                             {track.artist} - {track.title}
                           </div>
-                          <div className="truncate text-xs text-zinc-500">
+                          <div className="truncate text-xs text-muted">
                             {queryLabel(track)}
                             {track.album ? ` · ${track.album}` : ''}
                           </div>
                           {canonicalNote(track) ? (
                             <div className="truncate text-xs text-sky-300">{canonicalNote(track)}</div>
                           ) : null}
-                          <div className="mt-1 flex flex-wrap gap-1 text-xs text-zinc-500">
+                          <div className="mt-1 flex flex-wrap gap-1 text-xs text-muted">
                             {track.pipeline_status ? (
                               <Chip label={statusLabel(track.pipeline_status)} size="small" variant="outlined" />
                             ) : null}
@@ -2959,8 +2959,8 @@ export default function Playlists() {
                             {canonicalNote(track) ? (
                               <div className="mt-0.5 truncate text-xs text-sky-300">{canonicalNote(track)}</div>
                             ) : null}
-                            {(track.local_path || track.path) ? <div className="mt-0.5 truncate text-xs text-zinc-600">{track.local_path || track.path}</div> : null}
-                            {track.translated_plex_path ? <div className="mt-0.5 truncate text-xs text-zinc-500">Plex path: {track.translated_plex_path}</div> : null}
+                            {(track.local_path || track.path) ? <div className="mt-0.5 truncate text-xs text-muted">{track.local_path || track.path}</div> : null}
+                            {track.translated_plex_path ? <div className="mt-0.5 truncate text-xs text-muted">Plex path: {track.translated_plex_path}</div> : null}
                             <div className="mt-1 flex flex-wrap gap-1">
                               {track.pipeline_status ? <Chip label={statusLabel(track.pipeline_status)} size="small" variant="outlined" /> : null}
                               {track.pipeline_source ? <Chip label={track.pipeline_source} size="small" variant="outlined" /> : null}
@@ -2969,7 +2969,7 @@ export default function Playlists() {
                               <div className={`mt-1 text-xs ${isPendingPlexTrack(track) ? 'text-amber-300' : 'text-rose-300'}`}>{track.plex_issue || track.reason || track.failure_reason || track.pipeline_message}</div>
                             ) : null}
                             {identityEvidenceLabel(track) ? (
-                              <div className="mt-1 text-xs text-zinc-500">{identityEvidenceLabel(track)}</div>
+                              <div className="mt-1 text-xs text-muted">{identityEvidenceLabel(track)}</div>
                             ) : null}
                             {suggestionRow?.suggestions?.length && !editing ? (
                               <div className="mt-2 flex flex-wrap gap-1.5">
@@ -3069,7 +3069,7 @@ export default function Playlists() {
                   <div key={`removed:${idx}:${trackKey(track)}:${track.pipeline_status}`} className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 text-sm">
                     <div className="min-w-0">
                       <div className="truncate text-zinc-200">{[track.artist, track.title].filter(Boolean).join(' - ')}</div>
-                      <div className="text-xs text-zinc-500">
+                      <div className="text-xs text-muted">
                         {statusLabel(track.pipeline_status || 'removed')}
                         {track.failure_reason ? ` · ${track.failure_reason}` : ''}
                       </div>
@@ -3101,10 +3101,10 @@ export default function Playlists() {
       <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-500">
+            <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-muted">
               Saved Playlists
             </h2>
-            <div className="mt-1 text-xs text-zinc-500">
+            <div className="mt-1 text-xs text-muted">
               M3U files, manifests, and resumable checkpoints from <code className="text-zinc-400">&lt;music root&gt;/playlists</code>
             </div>
           </div>
@@ -3130,7 +3130,7 @@ export default function Playlists() {
         </div>
 
         {playlistSyncStatus ? (
-          <div className="mb-3 text-xs text-zinc-500">
+          <div className="mb-3 text-xs text-muted">
             {playlistSyncStatusLabel(playlistSyncStatus)}
             {playlistSyncStatus.last_job_id ? (
               <>
@@ -3191,7 +3191,7 @@ export default function Playlists() {
                 })}
               </div>
             </div>
-            <div className="text-xs text-zinc-500">
+            <div className="text-xs text-muted">
               Showing {filteredSavedPlaylistRows.length.toLocaleString()} of {playlists.length.toLocaleString()} saved playlist(s).
             </div>
           </div>
@@ -3239,7 +3239,7 @@ export default function Playlists() {
                           <SavedBadge label={playlistCoverageNote(playlist)} tone="idle" />
                         ) : null}
                       </div>
-                      <div className="mt-0.5 truncate text-[0.68rem] text-zinc-500">
+                      <div className="mt-0.5 truncate text-[0.68rem] text-muted">
                         {summary.sourceLabel} · {summary.sourceStatus} · {summary.updatedLabel}
                       </div>
                       <SavedPlaylistRowContext summary={summary} />

@@ -142,7 +142,7 @@ function StatusCard({
   const color = tone === 'ok' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100';
   return (
     <div className="rounded border border-graphite-800 bg-graphite-900 px-4 py-3">
-      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted">{label}</div>
       <div className={`mt-1 text-sm font-semibold ${color}`}>{value}</div>
     </div>
   );
@@ -153,7 +153,7 @@ function PathRow({ label, path, ok }: { label: string; path: string; ok: boolean
     <div className="flex min-w-0 items-center justify-between gap-3 border-t border-graphite-800 py-2 first:border-t-0">
       <div className="min-w-0">
         <div className="text-[0.78rem] font-medium text-zinc-300">{label}</div>
-        <div className="truncate text-[0.72rem] text-zinc-500">{path || 'not configured'}</div>
+        <div className="truncate text-[0.72rem] text-muted">{path || 'not configured'}</div>
       </div>
       <span className={`shrink-0 text-[0.72rem] font-semibold ${ok ? 'text-emerald-300' : 'text-red-300'}`}>
         {ok ? 'ok' : 'check'}
@@ -254,7 +254,7 @@ function PasswordStrengthMeter({ value }: { value: string }) {
             <span
               key={req.label}
               className={`rounded px-1.5 py-0.5 text-[0.66rem] font-semibold ${
-                met ? 'bg-emerald-950/45 text-emerald-300' : 'bg-graphite-800 text-zinc-500'
+                met ? 'bg-emerald-950/45 text-emerald-300' : 'bg-graphite-800 text-muted'
               }`}
             >
               {met ? '✓' : '○'} {req.label}
@@ -288,7 +288,7 @@ function AuthTokenDialog({
           <div className="mt-3 break-all rounded border border-graphite-700 bg-graphite-950 p-3 font-mono text-[0.78rem] text-emerald-300">
             {token}
           </div>
-          <p className="mt-2 text-[0.72rem] text-zinc-500">
+          <p className="mt-2 text-[0.72rem] text-muted">
             Use this as a Bearer token (Authorization: Bearer &lt;token&gt;) for API/script clients. It replaces the
             previous token immediately.
           </p>
@@ -421,17 +421,17 @@ function EnvVariableRow({
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.72rem] text-zinc-400">
           {variable.container_path && (
             <span>
-              <span className="text-zinc-500">Container:</span> <code className="text-zinc-300">{variable.container_path}</code>
+              <span className="text-muted">Container:</span> <code className="text-zinc-300">{variable.container_path}</code>
             </span>
           )}
           {variable.host_path && (
             <span>
-              <span className="text-zinc-500">Host:</span> <code className="text-zinc-300">{variable.host_path}</code>
+              <span className="text-muted">Host:</span> <code className="text-zinc-300">{variable.host_path}</code>
             </span>
           )}
           {variable.default !== null && variable.default !== undefined && variable.default !== '' && (
             <span>
-              <span className="text-zinc-500">Default:</span> <code className="text-zinc-300">{variable.default}</code>
+              <span className="text-muted">Default:</span> <code className="text-zinc-300">{variable.default}</code>
             </span>
           )}
           {variable.description && (
@@ -447,7 +447,7 @@ function EnvVariableRow({
               <strong className="text-amber-200">{variable.effective_value || '(set in environment)'}</strong>
               {variable.saved_value && (
                 <>
-                  <span className="mx-1.5 text-zinc-600">|</span>
+                  <span className="mx-1.5 text-muted">|</span>
                   <span>Saved: </span>
                   <span className="text-zinc-400">{variable.saved_value}</span>
                 </>
@@ -942,7 +942,7 @@ export default function System() {
       <section className="flex flex-wrap items-start justify-between gap-3 border-b border-graphite-800 pb-4">
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">System</h1>
-          <div className="mt-1 text-sm text-zinc-500">
+          <div className="mt-1 text-sm text-muted">
             {status?.version ? versionLabel(status.version, status.revision) : 'Environment, readiness, and Beets configuration'}
           </div>
         </div>
@@ -1019,7 +1019,7 @@ export default function System() {
                 {Object.values(integrationTesting).some(Boolean) ? 'Testing...' : 'Test connections'}
               </Button>
             </div>
-            <div className="mb-2 text-[0.68rem] text-zinc-500">
+            <div className="mb-2 text-[0.68rem] text-muted">
               Each integration is tested independently — one failing does not disable the others.
             </div>
             {Object.entries(status.integrations).map(([name, integration]) => {
@@ -1027,13 +1027,13 @@ export default function System() {
               const test = integrationTests[key];
               const testing = Boolean(integrationTesting[key]);
               const badge = integrationBadge(integration, test, testing);
-              const toneClass = badge.tone === 'ok' ? 'text-emerald-300' : badge.tone === 'warn' ? 'text-amber-300' : 'text-zinc-500';
+              const toneClass = badge.tone === 'ok' ? 'text-emerald-300' : badge.tone === 'warn' ? 'text-amber-300' : 'text-muted';
               return (
                 <div key={name} className="border-t border-graphite-800 py-2 first:border-t-0">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-[0.78rem] font-medium capitalize text-zinc-300">
                       {name}
-                      {integration.required && <span className="ml-1.5 text-[0.65rem] font-semibold text-zinc-500">(required)</span>}
+                      {integration.required && <span className="ml-1.5 text-[0.65rem] font-semibold text-muted">(required)</span>}
                     </span>
                     <span className={`flex items-center gap-1 text-[0.72rem] font-semibold ${toneClass}`}>
                       <span aria-hidden="true">{badge.icon}</span>
@@ -1176,13 +1176,13 @@ export default function System() {
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:border-r sm:pr-3">
               <div className="text-[0.78rem] font-medium text-zinc-300">API token (Bearer)</div>
-              <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.token_configured ? 'text-emerald-300' : 'text-zinc-500'}`}>
+              <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.token_configured ? 'text-emerald-300' : 'text-muted'}`}>
                 {status.auth.token_configured
                   ? status.auth.token_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
                   : '✗ Not configured'}
               </div>
               {status.auth.token_auto_generated && (
-                <div className="mt-1 text-[0.68rem] text-zinc-500">
+                <div className="mt-1 text-[0.68rem] text-muted">
                   A secure token was generated automatically on first run and printed once to the server log.
                   Regenerate it here any time.
                 </div>
@@ -1190,12 +1190,12 @@ export default function System() {
             </div>
             <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:pl-3">
               <div className="text-[0.78rem] font-medium text-zinc-300">Browser Login (Basic Auth)</div>
-              <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.password_configured ? 'text-emerald-300' : 'text-zinc-500'}`}>
+              <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.password_configured ? 'text-emerald-300' : 'text-muted'}`}>
                 {status.auth.password_configured
                   ? status.auth.password_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
                   : '✗ Not configured'}
               </div>
-              <div className="mt-1 text-[0.68rem] text-zinc-500">
+              <div className="mt-1 text-[0.68rem] text-muted">
                 {status.auth.password_auto_generated
                   ? `Username: ${status.auth.username || 'admin'}. Initial password was generated on first boot in /web-manager-data/.initial_admin_password. Set BEETS_WEB_PASSWORD below to replace it.`
                   : `Username: ${status.auth.username || 'admin'}. Set BEETS_WEB_PASSWORD or BEETS_WEB_USERNAME below to change browser credentials.`}
@@ -1282,7 +1282,7 @@ export default function System() {
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-zinc-100">Environment variables</h2>
-            <div className="mt-1 break-all text-[0.72rem] text-zinc-500">
+            <div className="mt-1 break-all text-[0.72rem] text-muted">
               {env?.env_file ?? 'No env file'} {env?.exists ? '' : '(will be created)'}
             </div>
           </div>
@@ -1298,7 +1298,7 @@ export default function System() {
 
         {grouped.map(([section, variables]) => (
           <div key={section} className="space-y-2">
-            <div className="text-[0.72rem] font-semibold uppercase tracking-wide text-zinc-500">{section}</div>
+            <div className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted">{section}</div>
             {variables.map((variable) => (
               <EnvVariableRow
                 key={variable.name}
@@ -1338,7 +1338,7 @@ export default function System() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-zinc-100">config.yaml</h2>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
               <code className="text-zinc-400">/config/config.yaml</code>
               <span>{formatBackupTime(configMeta?.backup_ts)}</span>
               {configDirty && <span className="font-semibold text-amber-400">Unsaved</span>}

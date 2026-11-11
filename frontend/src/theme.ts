@@ -6,6 +6,8 @@ const graphite = {
   surface2: '#252b35',
   surface3: '#2d3440',
   border: '#414a58',
+  // >= 3:1 against bg..surface-3 (#606).
+  fieldBorder: '#7c8594',
   borderSoft: 'rgba(255,255,255,0.13)',
   text: '#f4f4f5',
   muted: '#b8bdc7',
@@ -93,6 +95,17 @@ export const theme = createTheme({
         body: { backgroundColor: graphite.bg, minHeight: '100vh' },
       },
     },
+    // Solid 2px ring on keyboard focus for every ButtonBase (buttons, icon buttons, tabs, menu items).
+    MuiButtonBase: {
+      styleOverrides: {
+        root: {
+          '&.Mui-focusVisible': {
+            outline: `2px solid ${button.focusRing}`,
+            outlineOffset: 2,
+          },
+        },
+      },
+    },
     MuiAlert: {
       styleOverrides: {
         root: {
@@ -127,7 +140,7 @@ export const theme = createTheme({
         root: {
           color: graphite.text,
           backgroundColor: graphite.surface,
-          '& .MuiOutlinedInput-notchedOutline': { borderColor: graphite.border },
+          '& .MuiOutlinedInput-notchedOutline': { borderColor: graphite.fieldBorder },
           '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: graphite.muted2 },
           '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: red.main },
           '&.Mui-disabled': { backgroundColor: alpha(graphite.surface3, 0.72) },
@@ -152,9 +165,6 @@ export const theme = createTheme({
           borderRadius: 6,
           textTransform: 'none',
           fontWeight: 650,
-          '&.Mui-focusVisible': {
-            boxShadow: `0 0 0 3px ${alpha(button.focusRing, 0.45)}`,
-          },
           '&.Mui-disabled': {
             opacity: 1,
           },

@@ -94,7 +94,7 @@ export default function Login({ onSuccess }: LoginProps) {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"
+                className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white placeholder:text-muted focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"
                 required
                 autoFocus
               />
@@ -113,7 +113,7 @@ export default function Login({ onSuccess }: LoginProps) {
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-700 bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"
+                  className="w-full rounded-lg border border-field-border bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white placeholder:text-muted focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"
                   required
                 />
                 <button
@@ -132,7 +132,7 @@ export default function Login({ onSuccess }: LoginProps) {
                   type="checkbox"
                   checked={remember}
                   onChange={(e) => setRemember(e.target.checked)}
-                  className="size-4 rounded border-zinc-700 bg-graphite-950 text-red-600 focus:ring-red-500 focus:ring-offset-graphite-900"
+                  className="size-4 rounded border-field-border bg-graphite-950 text-red-600 focus:ring-red-500 focus:ring-offset-graphite-900"
                 />
                 Remember me
               </label>
@@ -148,7 +148,7 @@ export default function Login({ onSuccess }: LoginProps) {
           </div>
         </form>
 
-        <p className="text-center text-xs text-zinc-500">
+        <p className="text-center text-xs text-muted">
           Beets Web Manager &bull; Administrator Access Only
         </p>
       </div>
