@@ -224,7 +224,7 @@ function DupGroupRow({
                 {al.mb_releasegroupid ? ` · Release Group ${al.mb_releasegroupid.slice(0, 8)}…` : ' · no Release Group ID'}
                 {al.mb_albumid ? ` · representative release ${al.mb_albumid.slice(0, 8)}…` : ''}
                 {al.year ? ` · ${al.year}` : ''}
-                {al.aldir ? <span className="block pl-12 font-mono text-[0.65rem] text-muted">{al.aldir}</span> : null}
+                {al.aldir ? <span className="block pl-12 font-mono text-xs text-muted">{al.aldir}</span> : null}
               </span>
             ))}
           </div>
@@ -434,7 +434,7 @@ function RgidDetailPanel({
             disabled={busyAction === 'undo-resolution'}
             size="small"
             variant="text"
-            sx={{ fontSize: '0.65rem', ml: 1, py: 0, minWidth: 0 }}
+            sx={{ fontSize: '0.75rem', ml: 1, py: 0, minWidth: 0 }}
             onClick={() => void handleUndoResolution()}
           >
             Undo
@@ -444,7 +444,7 @@ function RgidDetailPanel({
 
       {/* Merge duplicate rows */}
       <div className="space-y-1">
-        <div className="text-[0.68rem] font-semibold uppercase text-blue-400">Merge duplicate rows</div>
+        <div className="text-xs font-semibold text-blue-400">Merge duplicate rows</div>
         {detail?.merge_safe ? (
           <Button
             color="warning"
@@ -467,7 +467,7 @@ function RgidDetailPanel({
       {/* Keep separate / mark valid editions */}
       {!detail?.resolution && (
         <div className="space-y-1">
-          <div className="text-[0.68rem] font-semibold uppercase text-blue-400">Keep separate / valid editions</div>
+          <div className="text-xs font-semibold text-blue-400">Keep separate / valid editions</div>
           <div className="flex flex-wrap items-center gap-1.5">
             <input
               type="text"
@@ -491,7 +491,7 @@ function RgidDetailPanel({
 
       {/* Choose representative release / Relink / Repair partial import, per album row */}
       <div className="space-y-2">
-        <div className="text-[0.68rem] font-semibold uppercase text-blue-400">Per-row actions</div>
+        <div className="text-xs font-semibold text-blue-400">Per-row actions</div>
         {albums.map((al) => {
           const isPartial = al.track_count > 0 && al.track_count <= 2 && !al.mb_albumid;
           return (
@@ -507,7 +507,7 @@ function RgidDetailPanel({
                     <select
                       value={releaseChoice[al.album_id] ?? ''}
                       onChange={(e) => setReleaseChoice((prev) => ({ ...prev, [al.album_id]: e.target.value }))}
-                      className="rounded border border-field-border bg-zinc-900 px-1 py-0.5 text-[0.68rem] text-zinc-200"
+                      className="rounded border border-field-border bg-zinc-900 px-1 py-0.5 text-xs text-zinc-200"
                     >
                       <option value="">Choose representative release…</option>
                       {detail!.candidate_releases.map((c) => (
@@ -520,7 +520,7 @@ function RgidDetailPanel({
                       size="small"
                       variant="text"
                       disabled={!releaseChoice[al.album_id] || busyAction === `assign-${al.album_id}`}
-                      sx={{ fontSize: '0.65rem', py: 0.1, minWidth: 0 }}
+                      sx={{ fontSize: '0.75rem', py: 0.1, minWidth: 0 }}
                       onClick={() => void handleAssign(al.album_id)}
                     >
                       Assign
@@ -532,13 +532,13 @@ function RgidDetailPanel({
                   placeholder="Relink: paste MB release URL/UUID (blank = search)"
                   value={relinkInput[al.album_id] ?? ''}
                   onChange={(e) => setRelinkInput((prev) => ({ ...prev, [al.album_id]: e.target.value }))}
-                  className="min-w-[220px] flex-1 rounded border border-field-border bg-zinc-900 px-2 py-0.5 text-[0.68rem] text-zinc-200"
+                  className="min-w-[220px] flex-1 rounded border border-field-border bg-zinc-900 px-2 py-0.5 text-xs text-zinc-200"
                 />
                 <Button
                   size="small"
                   variant="text"
                   disabled={busyAction === `relink-${al.album_id}`}
-                  sx={{ fontSize: '0.65rem', py: 0.1, minWidth: 0 }}
+                  sx={{ fontSize: '0.75rem', py: 0.1, minWidth: 0 }}
                   onClick={() => void handleRelink(al.album_id)}
                 >
                   {busyAction === `relink-${al.album_id}` ? 'Relinking…' : 'Relink'}
@@ -549,7 +549,7 @@ function RgidDetailPanel({
                     variant="text"
                     color="warning"
                     disabled={busyAction === `repair-${al.album_id}`}
-                    sx={{ fontSize: '0.65rem', py: 0.1, minWidth: 0 }}
+                    sx={{ fontSize: '0.75rem', py: 0.1, minWidth: 0 }}
                     onClick={() => void handleRepairPartial(al.album_id)}
                     title="Route this low-track-count partial import through MBID repair"
                   >
@@ -591,11 +591,11 @@ function RgidDupGroupRow({
                 {` · ${al.track_count} track(s)`}
                 {group.mb_releasegroupid ? ` · Release Group ${group.mb_releasegroupid.slice(0, 8)}…` : ' · no Release Group ID'}
                 {al.mb_albumid ? ` · representative release ${al.mb_albumid.slice(0, 8)}…` : ''}
-                {al.aldir ? <span className="block pl-8 font-mono text-[0.65rem] text-muted">{al.aldir}</span> : null}
+                {al.aldir ? <span className="block pl-8 font-mono text-xs text-muted">{al.aldir}</span> : null}
               </span>
             ))}
           </div>
-          <p className="text-[0.68rem] text-muted">
+          <p className="text-xs text-muted">
             Same MusicBrainz Release Group ID — likely the same album identity, but different representative releases, formats, or split imports still need review before merging.
           </p>
         </div>
@@ -612,7 +612,7 @@ function RgidDupGroupRow({
             href={mbUrl}
             target="_blank"
             rel="noreferrer"
-            className="text-[0.65rem] text-blue-400 underline decoration-blue-800 hover:text-blue-300"
+            className="text-xs text-blue-400 underline decoration-blue-800 hover:text-blue-300"
           >
             MusicBrainz
           </a>
@@ -620,7 +620,7 @@ function RgidDupGroupRow({
             color="inherit"
             size="small"
             variant="text"
-            sx={{ fontSize: '0.65rem', py: 0.25, color: 'text.secondary' }}
+            sx={{ fontSize: '0.75rem', py: 0.25, color: 'text.secondary' }}
             onClick={() => navigate(`/library?artist=${encodeURIComponent(group.albums[0]?.albumartist ?? '')}`)}
           >
             Open in Library
@@ -1264,7 +1264,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
             <JobStatusCard job={mbFixJob} runningLabel="Fixing MB ID gaps…" logLines={3} className="mt-2" />
             {mbFixJob?.status === 'success' && ((mbFixJob.result as MbidStickingRepairResult | undefined)?.unresolved_albums?.length ?? 0) > 0 && (
               <div className="mt-2 space-y-1 rounded border border-amber-900/50 bg-amber-950/20 p-2">
-                <div className="text-[0.68rem] font-semibold uppercase text-amber-500">Needs manual review</div>
+                <div className="text-xs font-semibold text-amber-500">Needs manual review</div>
                 {(mbFixJob.result as MbidStickingRepairResult).unresolved_albums!.slice(0, 8).map((u) => (
                   <div key={u.album_id} className="text-xs text-zinc-400">
                     {u.label} <span className="text-muted">id={u.album_id}</span> — {u.reason}
@@ -1289,7 +1289,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
                 )}
                 {mbStatus.missing_album_mb > 0 && (mbStatus.examples?.length ?? 0) > 0 && (
                   <div className="space-y-1">
-                    <div className="text-[0.68rem] font-semibold uppercase text-muted">Albums missing Beets compatibility ID (first {mbStatus.examples.length})</div>
+                    <div className="text-xs font-semibold text-muted">Albums missing Beets compatibility ID (first {mbStatus.examples.length})</div>
                     {mbStatus.examples.slice(0, 6).map((ex) => (
                       <div key={ex.album_id} className="text-xs text-muted">
                         {ex.artist} — {ex.album} {ex.year ? `(${ex.year})` : ''} <span className="text-muted">id={ex.album_id}</span>

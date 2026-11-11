@@ -32,7 +32,7 @@ function FolderRow({ folder }: { folder: PreflightFolder }) {
     <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 border-t border-graphite-800 px-3 py-2.5 text-sm sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center">
       <div className="min-w-0">
         <div className="truncate font-medium text-zinc-200">{folder.name}</div>
-        <div className="truncate font-mono text-[0.68rem] text-muted">{folder.path}</div>
+        <div className="truncate font-mono text-xs text-muted">{folder.path}</div>
       </div>
       <span className="shrink-0 tabular-nums text-xs text-muted">
         {folder.audio_files} file{folder.audio_files !== 1 ? 's' : ''}
@@ -62,7 +62,7 @@ function StatCard({
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/70 px-3 py-3">
       <div className={cx('text-xl font-semibold tabular-nums', toneClass)}>{value.toLocaleString()}</div>
-      <div className="mt-1 text-[0.7rem] uppercase tracking-wide text-muted">{label}</div>
+      <div className="mt-1 text-[0.7rem] text-muted">{label}</div>
     </div>
   );
 }
@@ -232,7 +232,7 @@ export function SourceReportSummary({ report, missing, folders = [] }: { report:
   const missingFolders = folders.filter((folder) => folder.status === 'source_missing').slice(0, 8);
   return (
     <section aria-label="qBittorrent source summary" className="rounded border border-graphite-800 bg-graphite-950/50 p-3 text-sm">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted">qBittorrent source</div>
+      <div className="text-xs font-semibold text-muted">qBittorrent source</div>
       <div className="mt-1 text-xs text-zinc-400">{sourceFilterText(report.filter)}</div>
       <div className="mt-2 grid grid-cols-2 gap-2 lg:grid-cols-4">
         <BatchMetric label="Ownership verified" value={`${report.ownership_verified_pct ?? 0}%`} tone="text-sky-200" />
@@ -472,7 +472,7 @@ function BatchMetric({ label, value, tone = 'text-zinc-100' }: { label: string; 
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/60 px-3 py-2">
       <div className={cx('text-lg font-semibold tabular-nums', tone)}>{value}</div>
-      <div className="mt-0.5 text-[0.68rem] uppercase tracking-wide text-muted">{label}</div>
+      <div className="mt-0.5 text-xs text-muted">{label}</div>
     </div>
   );
 }
@@ -858,7 +858,7 @@ function JobLog({
             </div>
             {attentionFolders.length ? (
               <div className="mt-3 space-y-2">
-                <div className="text-xs font-semibold uppercase tracking-wide text-muted">Needs attention</div>
+                <div className="text-xs font-semibold text-muted">Needs attention</div>
                 {attentionFolders.map((folder: AiBatchFolderState) => (
                   <div key={folder.folder_id} className="grid gap-2 rounded border border-graphite-800 px-2 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                     <div className="min-w-0">
@@ -925,7 +925,7 @@ function JobLog({
         ) : (
           <div className="grid gap-3 lg:grid-cols-2">
             <div className="rounded border border-graphite-800 bg-graphite-950/50 p-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-muted">
+              <div className="text-xs font-semibold text-muted">
                 {staleWorker ? 'Stale folder claims' : 'Current folders'}
               </div>
               {activeFolders.length ? (
@@ -953,7 +953,7 @@ function JobLog({
               )}
             </div>
             <div className="rounded border border-graphite-800 bg-graphite-950/50 p-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-muted">Recent folder state</div>
+              <div className="text-xs font-semibold text-muted">Recent folder state</div>
               <div className="mt-2 space-y-2 text-sm">
                 <div className="min-w-0">
                   <div className="text-muted">Last completed</div>
@@ -976,7 +976,7 @@ function JobLog({
 
         {done ? (
           <details className="rounded border border-graphite-800 bg-graphite-950/40 p-3">
-            <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-muted">Activity log</summary>
+            <summary className="cursor-pointer text-xs font-semibold text-muted">Activity log</summary>
             <LogViewer
               className="mt-3 max-h-[18rem]"
               emptyText="(no activity recorded)"
@@ -1208,7 +1208,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
           </div>
 
           <fieldset className="flex flex-wrap gap-4 text-sm text-zinc-200" disabled={Boolean(jobId) || importing}>
-            <legend className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Source</legend>
+            <legend className="mb-1 text-xs font-semibold text-muted">Source</legend>
             {([['local', 'Local folder'], ['qbittorrent', 'qBittorrent']] as const).map(([value, label]) => (
               <label key={value} className="flex cursor-pointer items-center gap-2">
                 <input
@@ -1357,7 +1357,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
           {preflight.folders.length > 0 ? (
             <div className="rounded border border-graphite-800 bg-graphite-950/30">
               <div className="flex items-center justify-between border-b border-graphite-800 px-3 py-2">
-                <span className="text-[0.75rem] font-semibold uppercase tracking-wide text-muted">
+                <span className="text-[0.75rem] font-semibold text-muted">
                   Folders ({preflight.folders.length})
                 </span>
                 {preflight.folders.length === 100 ? (

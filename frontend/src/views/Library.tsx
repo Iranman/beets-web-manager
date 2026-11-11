@@ -521,7 +521,7 @@ function NextRepairPanel({
             src={albumArtUrl(album, libraryVersion)}
           />
           <div className="min-w-0">
-            <div className="text-xs font-semibold uppercase text-amber-300">Next repair</div>
+            <div className="text-xs font-semibold text-amber-300">Next repair</div>
             <h2 className="mt-1 line-clamp-1 text-base font-semibold text-zinc-100">{title}</h2>
             <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-zinc-400">
               <span>{artistName}</span>
@@ -583,7 +583,7 @@ function StatusCards({
             type="button"
             onClick={() => onChange(filter.id)}
           >
-            <span className="block text-[0.68rem] font-semibold uppercase text-muted">{filter.detail}</span>
+            <span className="block text-xs font-semibold text-muted">{filter.detail}</span>
             <span className="mt-1 block text-sm font-semibold">{filter.label}</span>
             <span className="mt-1 block text-lg font-semibold tabular-nums text-zinc-100">{numberFmt.format(counts[filter.id] ?? 0)}</span>
           </button>
@@ -728,14 +728,14 @@ function ArtistCard({
         </span>
         <span className="mt-1 flex flex-wrap gap-1.5">
           {needsAttention ? (
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[0.68rem] font-medium text-amber-200">
+            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-200">
               {attentionAlbums ? `${attentionAlbums} need review` : 'Needs attention'}
             </span>
           ) : (
-            <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[0.68rem] font-medium text-emerald-200">Clean</span>
+            <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs font-medium text-emerald-200">Clean</span>
           )}
           {artist.empty_artist_folder ? (
-            <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-[0.68rem] font-medium text-sky-200">Empty folder</span>
+            <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs font-medium text-sky-200">Empty folder</span>
           ) : null}
         </span>
       </span>
@@ -1440,8 +1440,7 @@ export default function Library() {
       <section className="rounded-md border border-graphite-800 bg-graphite-950/45 p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase text-red-400">Library</p>
-            <h1 className="mt-1 text-2xl font-semibold text-zinc-100">Browse music library</h1>
+            <h1 className="text-2xl font-semibold text-zinc-100">Browse music library</h1>
             <div className="mt-2 flex flex-wrap gap-2">
               {/* No library loaded yet, or the load failed: counts are unknown, not zero. */}
               <Chip label={`${data ? numberFmt.format(data.stats.artists) : '—'} artists`} size="small" variant="outlined" />

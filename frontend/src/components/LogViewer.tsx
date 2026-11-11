@@ -93,7 +93,7 @@ export function LogViewer({
           <ol className="space-y-1">
             {activityLines.map((line, index) => (
               <li key={`${index}-${line}`} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-2 rounded px-1.5 py-1 text-[0.74rem] leading-5 text-zinc-300 hover:bg-graphite-850/70">
-                <span className="pt-px text-right font-mono text-[0.62rem] text-muted">{index + 1}</span>
+                <span className="pt-px text-right font-mono text-xs text-muted">{index + 1}</span>
                 <span className="min-w-0 break-words font-mono text-zinc-300">{line}</span>
               </li>
             ))}

@@ -7,6 +7,7 @@
 // (UUID + entity) before a link is built, and an UNVERIFIED id is NEVER
 // labelled as a confirmed match.
 import { useState } from 'react';
+import { WarningIcon } from '../../components/WarningIcon';
 import type { ReviewItem, RecoveryCarrierIdentity, RecoveryExpectedTrack, RecoveryStage } from '../../api/types';
 
 export type MbEntity = 'release-group' | 'release' | 'recording' | 'artist';
@@ -333,7 +334,7 @@ export function RecoveryStageIndicator({ item }: { item: ReviewItem }) {
           role="status"
           className={`inline-flex items-center gap-2 rounded border px-2 py-1 text-xs font-semibold ${tone}`}
         >
-          <span aria-hidden="true">{failed ? '✕' : '⚠'}</span>
+          <span aria-hidden="true">{failed ? '✕' : <WarningIcon />}</span>
           <span>Recovery {failed ? 'failed' : 'needs review'}: {stage.label}</span>
         </p>
         {note ? (

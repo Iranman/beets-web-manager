@@ -137,7 +137,7 @@ export function CleanMetricGrid({
     <div className="grid grid-cols-[repeat(auto-fit,minmax(9.5rem,1fr))] gap-2">
       {items.map((item) => (
         <div key={item.label} className="min-h-[4rem] rounded-md border border-graphite-700 bg-graphite-950/55 px-3 py-2.5">
-          <div className="text-[0.67rem] font-semibold uppercase text-muted">{item.label}</div>
+          <div className="text-xs font-semibold text-muted">{item.label}</div>
           <div className={cx('mt-1 text-lg font-semibold tabular-nums', toneText[item.tone ?? 'neutral'])}>
             {item.value}
           </div>

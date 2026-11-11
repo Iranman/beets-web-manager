@@ -1,6 +1,7 @@
 import { errorMessage } from '../lib/errors';
 import { DEFAULT_AI_BASE_URL, aiSetupEnv, effectiveAiBaseUrl } from '../lib/aiSetup';
 import { useEffect, useState } from 'react';
+import { WarningIcon } from './WarningIcon';
 import {
   completeSetup,
   getPluginsStatus,
@@ -19,7 +20,7 @@ import type { BeetsPluginsReport, SetupStatusResponse } from '../api/types';
 function BeetsLogo() {
   return (
     <span className="flex size-12 items-center justify-center rounded-xl bg-red-700 text-white shadow-lg shadow-red-950/50 ring-1 ring-red-400/40">
-      <svg className="size-7" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg aria-hidden="true" className="size-7" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M12 7.4c3.5 0 6.1 2.9 5.5 6.3-.5 3.4-2.8 6.2-5.5 6.2s-5-2.8-5.5-6.2c-.6-3.4 2-6.3 5.5-6.3Z" fill="currentColor" />
         <path d="M12 7.9c-.2-2.5.8-4.1 3-4.8.3 2.3-.8 3.9-3 4.8Z" fill="#fca5a5" />
         <path d="M11.8 7.9c-2.4-.2-3.9-1.3-4.6-3.2 2.3-.1 3.9.9 4.6 3.2Z" fill="#fecaca" />
@@ -288,7 +289,7 @@ export default function FirstRunSetup() {
                 }}
                 disabled={!isDone}
                 title={s.title}
-                className={`flex size-7 items-center justify-center rounded-lg text-xs font-bold transition-all ${
+                className={`flex size-7 items-center justify-center rounded-lg text-xs font-bold transition-colors ${
                   isCurrent
                     ? 'bg-red-700 text-white shadow-md ring-2 ring-red-500/50'
                     : isDone
@@ -316,8 +317,8 @@ export default function FirstRunSetup() {
 
               {/* Architecture Representation */}
               <div className="my-6 rounded-xl border border-zinc-800 bg-graphite-950/80 p-5 text-center">
-                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-3">
-                  System Architecture
+                <p className="text-xs font-semibold text-zinc-400 mb-3">
+                  System architecture
                 </p>
                 <div className="flex items-center justify-center gap-3 text-sm font-mono text-zinc-200">
                   <span className="rounded-lg bg-zinc-800 px-3 py-1.5 border border-zinc-700">Browser</span>
@@ -332,7 +333,7 @@ export default function FirstRunSetup() {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(2)}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md transition-all hover:bg-red-600"
+                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md transition-colors hover:bg-red-600"
                 >
                   Get Started &rarr;
                 </button>
@@ -352,7 +353,7 @@ export default function FirstRunSetup() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                  <label className="block text-xs font-semibold text-zinc-300">
                     Username
                   </label>
                   <input
@@ -365,7 +366,7 @@ export default function FirstRunSetup() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                  <label className="block text-xs font-semibold text-zinc-300">
                     Password
                   </label>
                   <div className="relative mt-1.5">
@@ -387,8 +388,8 @@ export default function FirstRunSetup() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                    Confirm Password
+                  <label className="block text-xs font-semibold text-zinc-300">
+                    Confirm password
                   </label>
                   <input
                     type="password"
@@ -428,7 +429,7 @@ export default function FirstRunSetup() {
                   type="button"
                   onClick={() => setCurrentStep(3)}
                   disabled={!adminFormValid}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md transition-all hover:bg-red-600 disabled:opacity-50"
+                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md transition-colors hover:bg-red-600 disabled:opacity-50"
                 >
                   Continue &rarr;
                 </button>
@@ -449,11 +450,11 @@ export default function FirstRunSetup() {
               <div className="rounded-xl border border-zinc-800 bg-graphite-950 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 block">Runtime</span>
+                    <span className="text-xs font-semibold text-zinc-400 block">Runtime</span>
                     <span className="text-sm font-mono text-white">in-process</span>
                   </div>
                   <div>
-                    <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 block">Status</span>
+                    <span className="text-xs font-semibold text-zinc-400 block">Status</span>
                     {beetsStatus.testing ? (
                       <span className="text-xs font-medium text-amber-400">Checking...</span>
                     ) : beetsStatus.ok ? (
@@ -651,8 +652,8 @@ export default function FirstRunSetup() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                    AcoustID Application API Key
+                  <label className="block text-xs font-semibold text-zinc-300">
+                    AcoustID application API key
                   </label>
                   <input
                     type="text"
@@ -728,8 +729,8 @@ export default function FirstRunSetup() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                    API Key
+                  <label className="block text-xs font-semibold text-zinc-300">
+                    API key
                   </label>
                   <input
                     type="password"
@@ -742,7 +743,7 @@ export default function FirstRunSetup() {
 
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                    <label className="block text-xs font-semibold text-zinc-300">
                       Base URL
                     </label>
                     <input
@@ -753,7 +754,7 @@ export default function FirstRunSetup() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                    <label className="block text-xs font-semibold text-zinc-300">
                       Model
                     </label>
                     <input
@@ -839,7 +840,7 @@ export default function FirstRunSetup() {
                     <span className={`flex size-8 shrink-0 items-center justify-center rounded-lg font-bold text-sm ${
                       pluginsReport.all_required_healthy ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
                     }`}>
-                      {pluginsReport.all_required_healthy ? '✓' : '⚠'}
+                      {pluginsReport.all_required_healthy ? '✓' : <WarningIcon />}
                     </span>
                     <div>
                       <div className="text-sm font-bold">
@@ -880,8 +881,8 @@ export default function FirstRunSetup() {
               {/* Group 1: Required Core Plugins */}
               <div>
                 <div className="flex items-center justify-between pb-1 mb-2 border-b border-zinc-800">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                    Required Core Plugins ({pluginsReport?.categories?.required?.length || 0})
+                  <h3 className="text-xs font-bold text-zinc-300">
+                    Required core plugins ({pluginsReport?.categories?.required?.length || 0})
                   </h3>
                   <span className="text-[11px] text-muted">Auto-configured for Web Manager</span>
                 </div>
@@ -900,7 +901,7 @@ export default function FirstRunSetup() {
                           ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                           : 'bg-amber-950/80 text-amber-400 border border-amber-800'
                       }`}>
-                        {plugin.healthy ? '✓ Ready' : '⚠ Action Required'}
+                        {plugin.healthy ? '✓ Ready' : <><WarningIcon /> Action required</>}
                       </span>
                     </div>
                   ))}
@@ -910,8 +911,8 @@ export default function FirstRunSetup() {
               {/* Group 2: Web Manager Bundled Extensions */}
               <div>
                 <div className="flex items-center justify-between pb-1 mb-2 border-b border-zinc-800">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                    Bundled Web Manager Extensions
+                  <h3 className="text-xs font-bold text-zinc-300">
+                    Bundled Web Manager extensions
                   </h3>
                   <span className="text-[11px] text-muted">Shared /config/beetsplug</span>
                 </div>
@@ -927,7 +928,7 @@ export default function FirstRunSetup() {
                       ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                       : 'bg-amber-950/80 text-amber-400 border border-amber-800'
                   }`}>
-                    {pluginsReport?.categories?.required?.find((p) => p.name === 'discpath')?.healthy ? '✓ Loaded' : '⚠ Not loaded'}
+                    {pluginsReport?.categories?.required?.find((p) => p.name === 'discpath')?.healthy ? '✓ Loaded' : <><WarningIcon /> Not loaded</>}
                   </span>
                 </div>
               </div>
@@ -935,8 +936,8 @@ export default function FirstRunSetup() {
               {/* Group 3: Optional & Integration Plugins */}
               <div>
                 <div className="flex items-center justify-between pb-1 mb-2 border-b border-zinc-800">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                    Optional & Integration Plugins ({((pluginsReport?.categories?.optional?.length || 0) + (pluginsReport?.categories?.integration?.length || 0))})
+                  <h3 className="text-xs font-bold text-zinc-300">
+                    Optional & integration plugins ({((pluginsReport?.categories?.optional?.length || 0) + (pluginsReport?.categories?.integration?.length || 0))})
                   </h3>
                   <span className="text-[11px] text-muted">Enabled on demand via settings / token</span>
                 </div>
@@ -993,7 +994,7 @@ export default function FirstRunSetup() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                  <label className="block text-xs font-semibold text-zinc-300">
                     Plex URL
                   </label>
                   <input
@@ -1006,8 +1007,8 @@ export default function FirstRunSetup() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                    Plex Token
+                  <label className="block text-xs font-semibold text-zinc-300">
+                    Plex token
                   </label>
                   <input
                     type="password"
@@ -1090,7 +1091,7 @@ export default function FirstRunSetup() {
               {finishSuccess ? (
                 <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/40 p-6 text-center shadow-lg backdrop-blur">
                   <div className="mx-auto flex size-12 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
-                    <svg className="size-6" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <svg aria-hidden="true" className="size-6" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
                     </svg>
                   </div>

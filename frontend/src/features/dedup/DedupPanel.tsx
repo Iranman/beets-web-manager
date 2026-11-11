@@ -65,11 +65,11 @@ function DupRow({
             variant="outlined"
           />
         </div>
-        <div className="truncate font-mono text-[0.68rem] text-red-400" title="This file will be deleted">
+        <div className="truncate font-mono text-xs text-red-400" title="This file will be deleted">
           {dup.source_path}
         </div>
         {dup.lib_path && dup.lib_path !== dup.source_path && (
-          <div className="truncate font-mono text-[0.68rem] text-emerald-600" title="Kept — library copy">
+          <div className="truncate font-mono text-xs text-emerald-600" title="Kept — library copy">
             ↳ {dup.lib_path}
           </div>
         )}

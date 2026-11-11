@@ -25,7 +25,7 @@ const TABS: Tab[] = [
 function BeetsLogo() {
   return (
     <span className="flex size-8 items-center justify-center rounded-md bg-red-700 text-white shadow-sm shadow-red-950/40 ring-1 ring-red-400/35" aria-hidden="true">
-      <svg className="size-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg aria-hidden="true" className="size-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M12 7.4c3.5 0 6.1 2.9 5.5 6.3-.5 3.4-2.8 6.2-5.5 6.2s-5-2.8-5.5-6.2c-.6-3.4 2-6.3 5.5-6.3Z" fill="currentColor" />
         <path d="M12 7.9c-.2-2.5.8-4.1 3-4.8.3 2.3-.8 3.9-3 4.8Z" fill="#fca5a5" />
         <path d="M11.8 7.9c-2.4-.2-3.9-1.3-4.6-3.2 2.3-.1 3.9.9 4.6 3.2Z" fill="#fecaca" />
@@ -38,14 +38,14 @@ function BeetsLogo() {
 function JobsBadge({ running, failed }: { running: number; failed: number }) {
   if (running > 0) {
     return (
-      <span className="ml-1.5 rounded-full bg-amber-500/90 px-1.5 py-px text-[0.62rem] font-bold leading-none text-zinc-950">
+      <span className="ml-1.5 rounded-full bg-amber-500/90 px-1.5 py-px text-xs font-bold leading-none text-zinc-950">
         {running}
       </span>
     );
   }
   if (failed > 0) {
     return (
-      <span className="ml-1.5 rounded-full bg-red-700 px-1.5 py-px text-[0.62rem] font-bold leading-none text-white">
+      <span className="ml-1.5 rounded-full bg-red-700 px-1.5 py-px text-xs font-bold leading-none text-white">
         {failed}
       </span>
     );
@@ -105,7 +105,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
           <div className="mx-auto flex h-[var(--bw-header-h)] max-w-full items-center gap-x-1 px-3 sm:px-4 lg:max-w-screen-2xl">
             <span className="mr-1 flex shrink-0 select-none items-center gap-2 sm:mr-5">
               <BeetsLogo />
-              <span className="hidden text-sm font-black uppercase tracking-widest text-red-300 sm:inline">
+              <span className="hidden text-sm font-black text-red-300 sm:inline">
                 Beets
               </span>
             </span>
@@ -140,7 +140,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
               )}
               {!restartMsg && running > 0 && (
                 <span className="hidden items-center sm:flex gap-1.5 text-[0.72rem] text-amber-300">
-                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-300" />
+                  <span className="inline-block h-1.5 w-1.5 motion-safe:animate-pulse rounded-full bg-amber-300" />
                   {running} running
                 </span>
               )}
@@ -150,7 +150,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   className="flex items-center rounded-md px-1.5 py-1 text-red-300 transition-colors hover:bg-red-950/35 hover:text-white disabled:opacity-40"
                   title="System"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <circle cx="12" cy="12" r="3" />
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                   </svg>
