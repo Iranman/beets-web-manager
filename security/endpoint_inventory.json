@@ -393,7 +393,7 @@
       "route": "/<path:spa_path>",
       "endpoint": "react_spa_fallback",
       "source_file": "app.py",
-      "line": 511,
+      "line": 512,
       "auth_required": false,
       "public_pre_setup_only": false,
       "changes_state": false,

@@ -73,7 +73,7 @@ from backend.matching_service import (  # noqa: E402
     _ALBUM_MB_SUGGESTIONS_FILE,
 )
 from backend.transaction_service import (  # noqa: E402
-    _install_transaction_job_hooks,
+    _install_transaction_job_hooks, start_transaction_reconcile_schedule,
 )
 from backend.maintenance_service import (  # noqa: E402
     _FULL_SCAN_INTERVAL, start_auto_scan_schedule,
@@ -459,6 +459,7 @@ def start_background_schedules():
     ARCH-030 F6: the missing-track recovery advancer runs automatically so a
     downloaded/stuck carrier advances without a manual POST (no-op if disabled
     via env)."""
+    start_transaction_reconcile_schedule()  # #631: was registered at import
     if _legacy_local_scan_enabled():
         start_auto_scan_schedule()  # jobs.every: stopped by jobs.close()
     _recovery_service.start_recovery_advance_schedule()

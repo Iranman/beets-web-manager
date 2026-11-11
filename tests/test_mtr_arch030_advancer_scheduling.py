@@ -223,29 +223,63 @@ class FallbackCasRaceTests(_CarrierStateMixin):
 
 
 class ScheduleStartsOnlyUnderServerEntrypointTests(unittest.TestCase):
-    """#626: importing app (every test process does) must not register the
-    recurring schedules; the server entrypoint (app.py ``__main__``) must."""
+    """#626/#631: importing app (every test process does) must not register any
+    recurring schedule; the server entrypoint (app.py ``__main__``) must."""
 
     def test_importing_app_registers_no_schedule(self):
         import app  # noqa: F401
         from backend.app_runtime import jobs
         self.assertNotIn(recovery_service.ADVANCER_SCHEDULE_NAME, jobs._schedules)
         self.assertNotIn("legacy-auto-scan", jobs._schedules)
+        self.assertNotIn("transaction-reconcile", jobs._schedules)
 
-    def test_server_startup_registers_the_advancer(self):
+    def test_fresh_import_of_app_registers_no_schedule_at_all(self):
+        """#631: in a clean process (no other test registering anything),
+        ``import app`` leaves the app-wide job store with zero schedules."""
+        import json
+        import subprocess
+        import sys
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        code = ("import json, app\nfrom backend.app_runtime import jobs\n"
+                "print(json.dumps(sorted(jobs._schedules)))\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, WEB_MANAGER_DATA_DIR=tmp, SETUP_ENV_FILE=os.path.join(tmp, "setup.env"),
+                       PYTHONPATH=str(root), BEETS_CONFIG=os.path.join(tmp, "config.yaml"), BEETSDIR=tmp,
+                       BEETS_LOG=os.path.join(tmp, "b.log"), MUSIC_ROOT=tmp, DOWNLOADS_ROOT=tmp)
+            done = subprocess.run([sys.executable, "-c", code], cwd=str(root), env=env, text=True,
+                                  capture_output=True, timeout=300)
+        self.assertEqual(done.returncode, 0, done.stderr[-1500:])
+        self.assertEqual(json.loads(done.stdout.strip().splitlines()[-1]), [])
+
+    def test_server_startup_registers_every_schedule(self):
         import app
-        with mock.patch.object(app, "_legacy_local_scan_enabled", return_value=False),              mock.patch.object(recovery_service, "jobs") as mjobs:
+        import backend.transaction_service as ts
+        tick = object()
+        with mock.patch.object(app, "_legacy_local_scan_enabled", return_value=False), \
+             mock.patch.object(recovery_service, "jobs") as mjobs, \
+             mock.patch.object(ts, "jobs") as tjobs:
+            tjobs._transaction_reconcile_tick = tick
             app.start_background_schedules()
         mjobs.every.assert_called_once()
         self.assertEqual(mjobs.every.call_args.args[0], recovery_service.ADVANCER_SCHEDULE_NAME)
         self.assertEqual(mjobs.every.call_args.kwargs["initial_delay"],
                          recovery_service.ADVANCER_STARTUP_DELAY)
+        # Same name, interval and (zero) delay as the old import-time registration.
+        tjobs.every.assert_called_once_with("transaction-reconcile", ts._RECONCILE_RETRY_SECONDS, tick)
 
-    def test_main_block_calls_startup_before_serving(self):
+    def test_main_block_starts_schedules_before_self_test_and_serving(self):
+        """Parsed, not string-matched: a commented-out or nested call fails."""
+        import ast
         from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8")
-        main = src[src.rindex('if __name__ == "__main__":'):]
-        self.assertLess(main.index("start_background_schedules()"), main.index("_waitress_serve("))
+        tree = ast.parse((Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8"))
+        mains = [n for n in tree.body
+                 if isinstance(n, ast.If) and ast.unparse(n.test) == "__name__ == '__main__'"]
+        calls = [ast.unparse(st.value.func) for st in mains[-1].body
+                 if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call)]
+        self.assertIn("start_background_schedules", calls)
+        self.assertLess(calls.index("start_background_schedules"), calls.index("beets_embedded.status"))
+        self.assertLess(calls.index("beets_embedded.status"), calls.index("_waitress_serve"))
 
 
 if __name__ == "__main__":

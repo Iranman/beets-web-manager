@@ -396,6 +396,10 @@ class ReconcileTests(_Sync):
         p.start()
         self.addCleanup(p.stop)
 
+    def install(self, jobs):
+        super().install(jobs)
+        ts.start_transaction_reconcile_schedule()  # the server entrypoint's step (#631)
+
     def stored_status(self, tx_id, want):
         deadline = time.time() + 5
         while time.time() < deadline and self.store.get(tx_id)["status"] != want:
