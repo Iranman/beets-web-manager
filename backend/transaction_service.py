@@ -278,6 +278,9 @@ def _running_rows(store) -> List[Dict[str, Any]]:
                 return rows
 
 
+TRANSACTION_RECONCILE_SCHEDULE_NAME = "transaction-reconcile"
+
+
 def _install_transaction_job_hooks() -> None:
     if getattr(jobs, "_transaction_hooks_installed", False):
         return
@@ -440,8 +443,22 @@ def _install_transaction_job_hooks() -> None:
 
     jobs.start_python = start_python_with_transaction
     jobs._transaction_hooks_installed = True
-    # A job the last process died in never reaches its done callback.
-    jobs.every("transaction-reconcile", _RECONCILE_RETRY_SECONDS, reconcile_tick)
+    # Scheduled by start_transaction_reconcile_schedule (the server entrypoint),
+    # never at import (#631).
+    jobs._transaction_reconcile_tick = reconcile_tick
+
+
+def start_transaction_reconcile_schedule():
+    """Register the transaction-reconcile sweep: a job the last process died
+    in never reaches its done callback. Needs _install_transaction_job_hooks
+    first; a second call is a no-op."""
+    tick = getattr(jobs, "_transaction_reconcile_tick", None)
+    if tick is None:
+        return None
+    try:
+        return jobs.every(TRANSACTION_RECONCILE_SCHEDULE_NAME, _RECONCILE_RETRY_SECONDS, tick)
+    except ValueError:
+        return None
 
 
 #: Statuses POST /api/transactions/<id>/cancel cancels outright (compare-and-set).
