@@ -38,20 +38,16 @@ class ImportAllRequiresProvenIdentity(unittest.TestCase):
     def test_proven_identity_is_accepted(self):
         self.assertTrue(_accepted(identity_validated=True))
 
-    def test_route_queues_unresolved_identity_for_review(self):
+    def _route_review_reason(self, sug):
         import app as app_module
         jobs = []
-        sug = {"mb_albumid": REL, "mb_valid": True, "confidence": "high", "album": "X",
-               "albumartist": "A", "identity_validated": None, "candidate_identity_error": "",
-               "preflight": {"ok": True}, "reason": "AI picked this release."}
 
         def start_job(fn, **_kw):
             jobs.append(fn)
             return {"ok": True}, 200
 
         queue, reimport = mock.Mock(return_value=True), mock.Mock(return_value="child")
-        with mock.patch.object(app_module, "_security_auth_disabled", return_value=True), \
-                mock.patch.multiple(
+        with mock.patch.object(app_module, "_security_auth_disabled", return_value=True),                 mock.patch.multiple(
                     routes_library,
                     _start_job=start_job,
                     _queue_folder_for_manual_review=queue,
@@ -66,7 +62,19 @@ class ImportAllRequiresProvenIdentity(unittest.TestCase):
                 json={"albums": [{"aldir": "/downloads/x", "artist": "A"}]})
             jobs[0]([])
         reimport.assert_not_called()
-        self.assertIn("Artist identity unresolved", queue.call_args.args[2])
+        return queue.call_args.args[2]
+
+    def test_route_queues_unresolved_identity_for_review(self):
+        sug = {"mb_albumid": REL, "mb_valid": True, "confidence": "high", "album": "X",
+               "albumartist": "A", "identity_validated": None, "candidate_identity_error": "",
+               "preflight": {"ok": True}, "reason": "AI picked this release."}
+        self.assertIn("Artist identity unresolved", self._route_review_reason(sug))
+
+    def test_route_keeps_the_real_reason_when_identity_is_not_the_blocker(self):
+        # QA B1: a refusal for another cause must not be relabelled as unresolved identity.
+        reason = "No MusicBrainz release candidates were found for this folder."
+        sug = {"mb_albumid": "", "mb_valid": False, "confidence": "low", "reason": reason}
+        self.assertEqual(self._route_review_reason(sug), reason)
 
 
 class RevalidationKeepsUnresolvedIdentity(unittest.TestCase):
