@@ -926,7 +926,7 @@ def _import_review_payload_from_pending_item(item: Dict[str, Any]) -> Dict[str, 
 
 def _import_review_stored_item_for_path(path: Any) -> Optional[Dict[str, Any]]:
     """#604: the stored pending Review item for ``path``, or None. Auto-enqueue
-    builds eligibility from this, never from identity or confidence the
+    builds eligibility from this, never from identity or scores the
     request body asserts."""
     path = _review_path_text(path)
     if not path.strip():

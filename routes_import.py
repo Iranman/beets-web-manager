@@ -914,7 +914,7 @@ def import_reconciliation_resolve(review_id: str):
 
 @app.post("/api/import-review/auto-enqueue")
 def import_review_auto_enqueue():
-    # #604: only the folder path comes from the client; identity, confidence
+    # #604: only the folder path comes from the client; identity, scores
     # and track mapping come from the stored pending Review item.
     item = _import_review_stored_item_for_path((request.get_json(silent=True) or {}).get("path"))
     if item is None:
