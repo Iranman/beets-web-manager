@@ -1264,7 +1264,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
               <Button
                 disabled={scanning || Boolean(jobId) || !downloadsRoot}
                 title={downloadsRoot ? `Use the configured downloads folder (${downloadsRoot})` : 'Configured downloads folder not available'}
-                variant="outlined"
+                variant="text"
                 onClick={() => {
                   setPath(downloadsRoot);
                   setPreflight(null);
@@ -1275,7 +1275,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
               <Button
                 disabled={scanning || Boolean(jobId) || !failedImportsPath}
                 title={failedImportsPath ? `Preview ${failedImportsPath}` : 'Configured downloads folder not available'}
-                variant="outlined"
+                variant="text"
                 onClick={() => {
                   setPath(failedImportsPath);
                   setPreflight(null);
