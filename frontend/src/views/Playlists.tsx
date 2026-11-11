@@ -2366,7 +2366,7 @@ export default function Playlists() {
         </p>
       </div>
 
-      <section className="sticky top-0 z-30 rounded border border-graphite-800 bg-graphite-900/95 px-3 py-2.5 backdrop-blur">
+      <section className="sticky top-[var(--bw-header-h)] z-[15] rounded border border-graphite-800 bg-graphite-900/95 px-3 py-2.5 backdrop-blur">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
@@ -2624,7 +2624,7 @@ export default function Playlists() {
 
       {parseResult ? (
         <section className="space-y-3 rounded border border-graphite-800 bg-graphite-900 p-3">
-          <div className="sticky top-0 z-20 -mx-3 -mt-3 border-b border-graphite-800 bg-graphite-900/95 px-3 py-2 backdrop-blur">
+          <div className="sticky top-[var(--bw-header-h)] z-10 -mx-3 -mt-3 border-b border-graphite-800 bg-graphite-900/95 px-3 py-2 backdrop-blur">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
                 <h2 className="truncate text-sm font-semibold text-zinc-100">

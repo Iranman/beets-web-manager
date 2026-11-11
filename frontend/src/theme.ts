@@ -165,6 +165,8 @@ export const theme = createTheme({
           borderRadius: 6,
           textTransform: 'none',
           fontWeight: 650,
+          // Labels stay on one line at phone widths (#607); containers wrap instead.
+          whiteSpace: 'nowrap',
           '&.Mui-disabled': {
             opacity: 1,
           },
