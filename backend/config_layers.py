@@ -595,7 +595,7 @@ SECRET_CONFIG_KEYS = frozenset({
     "google_key", "lastfm_key",
 })
 _SECRET_KEY_WORDS = ("password", "passwd", "passphrase", "secret", "token", "bearer", "credential")
-_SECRET_QUERY_KEYS = ("token", "key", "secret", "pass", "auth", "signature", "sig")
+_SECRET_QUERY_KEYS = ("token", "key", "secret", "pass", "pwd", "session", "auth", "signature", "sig")
 
 
 def is_secret_config_key(key: str) -> bool:

@@ -756,6 +756,51 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(self.module._load_settings()["servers"], list(reversed(servers)))
 
+    def test_schemeless_userinfo_masked_when_token_embeds_a_url(self):
+        # #593 QA F1: a "://" later in the token skipped scheme-less redaction.
+        stored_in = {"db": "fakeu:fake-pw-20@db.invalid/x?next=http://y.invalid https://a:fake-pw-21@c.invalid"}
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        self.assertEqual(got["db"], f"{mask}@db.invalid/x?next=http://y.invalid https://{mask}@c.invalid")
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings(), stored_in)
+
+    def test_encoded_at_in_second_url_fails_closed_per_token(self):
+        # #593 security review: the fail-closed check ran only on the whole string.
+        stored_in = {
+            "two_wide": "https://a:fake-p1@h1.invalid https://b:fake-p2＠h2.invalid",
+            "two_enc": "https://a:fake-p3@h1.invalid https://b:fake-p4%40h2.invalid",
+            "q": "https://h.invalid/x?pwd=fake-p5&session=fake-p6",
+        }
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        body = json.dumps(got, ensure_ascii=False)
+        for leaked in ("fake-p1", "fake-p2", "fake-p3", "fake-p4", "fake-p5", "fake-p6"):
+            self.assertNotIn(leaked, body)
+        self.assertEqual(got["two_wide"], f"https://{mask}@h1.invalid {mask}")
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings(), stored_in)
+
+    def test_ambiguous_masked_list_entry_is_refused(self):
+        # #593 QA F2: entries identical once masked were paired by position.
+        urls = ["https://alice:fake-pw-a@h.invalid", "https://bob:fake-pw-b@h.invalid"]
+        r = self.client.post("/api/setup/settings", json={"urls": urls})
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        self.assertEqual(got["urls"][0], got["urls"][1])
+        r = self.client.post("/api/setup/settings", json={"urls": got["urls"][1:], "expected_revision": rev})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.get_json()["code"], "settings_unmatched_mask")
+        self.assertEqual(self.module._load_settings()["urls"], urls)
+        # An unchanged round trip still restores both exactly.
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings()["urls"], urls)
+
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
         self.assertEqual(r.status_code, 400)

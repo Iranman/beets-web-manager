@@ -288,15 +288,27 @@ def _is_secret_setting_key(name: str) -> bool:
 _SETTING_QUERY_PARAM_RE = re.compile(r"([?&;#]([^=&#;?\s]+)=)([^&#;\s]+)")
 
 
+_URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
+
+
 def _redact_schemeless_userinfo(token: str) -> str:
     # "user:pass@host" with no "://" (#585). An "@" seen only after
     # %-decoding or NFKC (%40, U+FF20) leaves no exact span: mask the token.
-    if "://" in token:
+    # Only the part before any "://" can be this token's userinfo; a token
+    # that starts with "scheme://" is left to the span scan (#593 QA F1).
+    head = token.split("://", 1)[0]
+    if head != token and _URL_SCHEME_RE.fullmatch(head):
+        # Per-token fail-closed: an encoded or lookalike "@" (%40, U+FF20)
+        # the span scan cannot cut, even when another URL in the same
+        # string was redacted (#593 security review).
+        if "@" not in token and config_layers.url_has_userinfo(token):
+            return _SECRET_MASK
         return token
-    userinfo, at, host = token.rpartition("@")
+    tail = token[len(head):]
+    userinfo, at, host = head.rpartition("@")
     if at and ":" in userinfo:
-        return _SECRET_MASK + at + host
-    userinfo = unicodedata.normalize("NFKC", urllib.parse.unquote(token)).rpartition("@")[0]
+        return _SECRET_MASK + at + host + tail
+    userinfo = unicodedata.normalize("NFKC", urllib.parse.unquote(head)).rpartition("@")[0]
     return _SECRET_MASK if ":" in userinfo else token
 
 
@@ -356,11 +368,18 @@ def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> A
         # equal to the GET form of a stored entry is that entry. A mask in any
         # other entry cannot be tied to a stored secret, so it is refused.
         base = stored if isinstance(stored, list) else []
+        masked_base = [_mask_setting_value(b) for b in base]
+        if posted == masked_base:
+            return list(base)  # unchanged round trip
         unclaimed = list(range(len(base)))
         out_list = []
         for i, v in enumerate(posted):
-            match = next((j for j in sorted(unclaimed, key=lambda j: j != i)
-                          if _mask_setting_value(base[j]) == v), None)
+            candidates = [j for j in sorted(unclaimed, key=lambda j: j != i) if masked_base[j] == v]
+            if len({json.dumps(base[j], sort_keys=True) for j in candidates}) > 1:
+                # Stored entries that differ only in masked parts (#593 QA
+                # F2): which one the client means is unknowable.
+                raise ValueError("a masked list entry matches several stored entries; re-enter it")
+            match = candidates[0] if candidates else None
             if match is not None:
                 unclaimed.remove(match)
                 out_list.append(base[match])
