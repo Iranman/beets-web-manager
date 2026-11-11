@@ -81,7 +81,7 @@ export default function FirstRunSetup() {
         setPluginsReport(status.plugins);
       }
       if (status.beets?.version) {
-        setBeetsStatus({ testing: false, ok: true, message: `Connected — Beets ${status.beets.version}` });
+        setBeetsStatus({ testing: false, ok: true, message: `Embedded Beets ${status.beets.version}` });
       }
     }).catch(() => {
       // Ignore
@@ -100,12 +100,12 @@ export default function FirstRunSetup() {
     try {
       const res = await testSetupBeets();
       if (res.ok) {
-        setBeetsStatus({ testing: false, ok: true, message: res.message || `Connected — Beets ${res.beets_version || res.version}` });
+        setBeetsStatus({ testing: false, ok: true, message: res.message || `Embedded Beets ${res.beets_version || res.version}` });
       } else {
-        setBeetsStatus({ testing: false, ok: false, error: res.error || 'Could not execute Beets. Check the Docker service and configuration.' });
+        setBeetsStatus({ testing: false, ok: false, error: res.error || 'Embedded Beets failed its check. Review the Beets config.yaml and the /config, /music and /downloads mounts.' });
       }
     } catch (err: unknown) {
-      const msg = errorMessage(err, 'Could not reach Beets engine.');
+      const msg = errorMessage(err, 'Could not run the embedded Beets check.');
       setBeetsStatus({ testing: false, ok: false, error: msg });
     }
   };
@@ -251,7 +251,7 @@ export default function FirstRunSetup() {
   const steps = [
     { num: 1, title: 'Welcome' },
     { num: 2, title: 'Admin' },
-    { num: 3, title: 'Beets Engine' },
+    { num: 3, title: 'Beets' },
     { num: 4, title: 'Library Paths' },
     { num: 5, title: 'MusicBrainz' },
     { num: 6, title: 'AcoustID' },
@@ -310,7 +310,7 @@ export default function FirstRunSetup() {
               <div>
                 <h2 className="text-xl font-bold text-white">Welcome to Beets Web Manager</h2>
                 <p className="mt-2 text-sm leading-relaxed text-zinc-300">
-                  This application manages an existing Beets engine and provides a browser-based interface for importing, matching, reviewing, cleaning, and managing your music library.
+                  This application runs Beets in-process (embedded in the same container) against your existing Beets library and configuration, and provides a browser-based interface for importing, matching, reviewing, cleaning, and managing your music library.
                 </p>
               </div>
 
@@ -324,7 +324,7 @@ export default function FirstRunSetup() {
                   <span className="text-red-500 font-bold">&rarr;</span>
                   <span className="rounded-lg bg-red-950/80 px-3 py-1.5 border border-red-800/80 text-red-200 font-semibold">beets-web-manager</span>
                   <span className="text-red-500 font-bold">&rarr;</span>
-                  <span className="rounded-lg bg-zinc-800 px-3 py-1.5 border border-zinc-700">Beets Engine</span>
+                  <span className="rounded-lg bg-zinc-800 px-3 py-1.5 border border-zinc-700">Beets (embedded)</span>
                 </div>
               </div>
 
@@ -436,21 +436,21 @@ export default function FirstRunSetup() {
             </div>
           )}
 
-          {/* STEP 3: Beets Engine Connection */}
+          {/* STEP 3: Embedded Beets check */}
           {currentStep === 3 && (
             <div className="space-y-5">
               <div>
-                <h2 className="text-xl font-bold text-white">Beets Engine Connection</h2>
+                <h2 className="text-xl font-bold text-white">Embedded Beets Check</h2>
                 <p className="mt-1 text-sm text-zinc-400">
-                  Verify that Web Manager can communicate with the background Beets engine container.
+                  Verify that the Beets library embedded in Web Manager loads your Beets config.yaml and opens its library database. There is no separate Beets container.
                 </p>
               </div>
 
               <div className="rounded-xl border border-zinc-800 bg-graphite-950 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 block">Service Name</span>
-                    <span className="text-sm font-mono text-white">beets</span>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 block">Runtime</span>
+                    <span className="text-sm font-mono text-white">in-process</span>
                   </div>
                   <div>
                     <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 block">Status</span>
@@ -458,11 +458,11 @@ export default function FirstRunSetup() {
                       <span className="text-xs font-medium text-amber-400">Checking...</span>
                     ) : beetsStatus.ok ? (
                       <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-400">
-                        <span>✓</span> Connected
+                        <span>✓</span> Ready
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 text-xs font-bold text-red-400">
-                        <span>✕</span> Not Connected
+                        <span>✕</span> Not Ready
                       </span>
                     )}
                   </div>
@@ -486,8 +486,8 @@ export default function FirstRunSetup() {
                     </button>
                     {showBeetsDetails && (
                       <div className="font-mono text-[11px] text-zinc-400 bg-black/50 p-2 rounded border border-zinc-800">
-                        Engine: {setupStatus?.beets?.path || 'Beets inside Web Manager'}<br />
-                        Reachable: {setupStatus?.beets?.available ? 'Yes' : 'No'}
+                        Beets: {setupStatus?.beets?.path || 'Beets inside Web Manager'}<br />
+                        Available: {setupStatus?.beets?.available ? 'Yes' : 'No'}
                       </div>
                     )}
                   </div>
@@ -499,7 +499,7 @@ export default function FirstRunSetup() {
                   disabled={beetsStatus.testing}
                   className="rounded-lg bg-zinc-800 px-4 py-2 text-xs font-bold text-white hover:bg-zinc-700 disabled:opacity-50"
                 >
-                  {beetsStatus.testing ? 'Testing...' : 'Test Connection'}
+                  {beetsStatus.testing ? 'Checking...' : 'Run Check'}
                 </button>
               </div>
 
@@ -1107,7 +1107,7 @@ export default function FirstRunSetup() {
                       <span className="font-semibold text-white">{username} (Configured)</span>
                     </div>
                     <div className="py-2 flex justify-between items-center">
-                      <span className="text-zinc-400">Beets Engine</span>
+                      <span className="text-zinc-400">Embedded Beets</span>
                       <span className={`font-semibold ${beetsStatus.ok ? 'text-emerald-400' : 'text-amber-400'}`}>
                         {beetsStatus.ok ? beetsStatus.message : 'Checking/Unverified'}
                       </span>
