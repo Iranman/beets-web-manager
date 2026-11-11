@@ -29,7 +29,7 @@ function CopyCell({ copy, role, review }: { copy: DuplicateProposalCopy; role: '
       <div className="text-xs text-zinc-400">
         {copy.format ? `${copy.format} · ` : ''}{formatSize(copy.size)} · item {copy.item_id ?? '—'} · album {copy.album_id ?? '—'} · disc {copy.disc ?? '—'} track {copy.track ?? '—'}
       </div>
-      <div className="break-all font-mono text-xs text-zinc-500">embedded Recording ID: {copy.recording_id || '—'}</div>
+      <div className="break-all font-mono text-xs text-muted">embedded Recording ID: {copy.recording_id || '—'}</div>
     </div>
   );
 }
@@ -117,7 +117,7 @@ export function UnattendedDuplicateReview({ onMusicRoot }: { onMusicRoot?: (root
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="text-sm font-semibold text-zinc-100">Scheduled duplicate cleanup</h3>
         <Chip size="small" color={enabled ? 'error' : 'default'} label={enabled ? 'Unattended deletion ENABLED' : 'Unattended deletion disabled'} />
-        <span className="text-xs text-zinc-500">library root {status?.music_root ?? '…'}</span>
+        <span className="text-xs text-muted">library root {status?.music_root ?? '…'}</span>
         <div className="ml-auto flex gap-2">
           <Button size="small" variant="outlined" disabled={busy} onClick={() => void run()}>Run duplicate check</Button>
           <Button size="small" variant="text" disabled={busy} onClick={() => void load()}>Refresh</Button>

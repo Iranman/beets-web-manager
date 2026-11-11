@@ -449,15 +449,19 @@ except Exception as _ai_migration_ex:
     _app_logger.warning("AI batch state migration failed unexpectedly: %s", _ai_migration_ex)
 
 
-if _legacy_local_scan_enabled():
-    start_auto_scan_schedule()  # jobs.every: stopped by jobs.close()
-
-
-# ARCH-030 F6: run the missing-track recovery advancer automatically on the job
-# scheduler so a downloaded/stuck carrier advances without a manual POST
-# (jobs.every; stopped by jobs.close()). No-op if disabled via env.
 import backend.recovery_service as _recovery_service  # noqa: E402
-_recovery_service.start_recovery_advance_schedule()
+
+
+def start_background_schedules():
+    """Register the app's recurring jobs.every schedules (stopped by
+    jobs.close()). Called by the server entrypoint (``__main__`` below), never
+    at import, so a test process that imports app gets no live sweeper (#626).
+    ARCH-030 F6: the missing-track recovery advancer runs automatically so a
+    downloaded/stuck carrier advances without a manual POST (no-op if disabled
+    via env)."""
+    if _legacy_local_scan_enabled():
+        start_auto_scan_schedule()  # jobs.every: stopped by jobs.close()
+    _recovery_service.start_recovery_advance_schedule()
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
@@ -615,6 +619,7 @@ for _route_module_name in ROUTE_MODULES:
 
 
 if __name__ == "__main__":
+    start_background_schedules()
     beets_embedded.status()  # start Beets now so its self-test is logged at boot, not on first use
     # ARCH-004: finish engine-backed transactions a previous process left
     # Running, from engine evidence (never by replaying them).

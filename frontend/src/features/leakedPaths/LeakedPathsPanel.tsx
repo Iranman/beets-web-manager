@@ -60,21 +60,21 @@ function LeakedRow({ row, selected, onToggle }: {
               ? <Chip size="small" color="success" label="safe to fix" />
               : <Chip size="small" color="warning" label="needs review" />}
           </div>
-          <div className="text-zinc-500">
+          <div className="text-muted">
             <span className="font-medium">item</span> {row.item_id}
             {row.album_id ? <> · <span className="font-medium">album</span> {row.album_id}</> : null}
           </div>
           <div>
-            <span className="font-medium text-zinc-500">Old DB path: </span>
+            <span className="font-medium text-muted">Old DB path: </span>
             <span className="font-mono text-rose-700 break-all">{row.db_path}</span>
           </div>
           {row.resolved_path ? (
             <div>
-              <span className="font-medium text-zinc-500">Proposed fix: </span>
+              <span className="font-medium text-muted">Proposed fix: </span>
               <span className="font-mono text-emerald-700 break-all">{row.resolved_path}</span>
             </div>
           ) : null}
-          <div className="flex flex-wrap gap-3 text-zinc-500">
+          <div className="flex flex-wrap gap-3 text-muted">
             <span>
               Source exists:{' '}
               <span className={row.file_exists_at_db_path ? 'text-amber-600' : 'text-zinc-400'}>
@@ -104,7 +104,7 @@ function LeakedRow({ row, selected, onToggle }: {
         {row.safe ? (
           <label className="flex cursor-pointer items-center gap-1.5 select-none shrink-0 pt-0.5">
             <input type="checkbox" checked={selected} onChange={onToggle} className="h-4 w-4" />
-            <span className="text-zinc-500">Include</span>
+            <span className="text-muted">Include</span>
           </label>
         ) : null}
       </div>
@@ -341,10 +341,10 @@ export function LeakedPathsPanel() {
                 </Button>
               ))}
             </div>
-            <label className="flex min-w-[160px] flex-col gap-1 text-[0.68rem] font-medium uppercase tracking-wide text-zinc-500">
+            <label className="flex min-w-[160px] flex-col gap-1 text-[0.68rem] font-medium uppercase tracking-wide text-muted">
               Sort
               <select
-                className="rounded border border-graphite-700 bg-graphite-950 px-2 py-2 text-sm normal-case tracking-normal text-zinc-200"
+                className="rounded border border-field-border bg-graphite-950 px-2 py-2 text-sm normal-case tracking-normal text-zinc-200"
                 value={sort}
                 onChange={(event) => setSort(event.target.value as LeakedSort)}
               >
@@ -360,7 +360,7 @@ export function LeakedPathsPanel() {
             <Button size="small" variant="text" onClick={toggleAll}>
               {selectedIds.size === safeRows.length ? 'Deselect all' : 'Select all'}
             </Button>
-            <span className="text-xs text-zinc-500">{selectedIds.size} of {safeRows.length} selected</span>
+            <span className="text-xs text-muted">{selectedIds.size} of {safeRows.length} selected</span>
           </div>
           <div className="mt-2 space-y-2">
             {visibleRows.map((row) => (

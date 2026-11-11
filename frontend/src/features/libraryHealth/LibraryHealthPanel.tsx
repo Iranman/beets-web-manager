@@ -224,7 +224,7 @@ function DupGroupRow({
                 {al.mb_releasegroupid ? ` · Release Group ${al.mb_releasegroupid.slice(0, 8)}…` : ' · no Release Group ID'}
                 {al.mb_albumid ? ` · representative release ${al.mb_albumid.slice(0, 8)}…` : ''}
                 {al.year ? ` · ${al.year}` : ''}
-                {al.aldir ? <span className="block pl-12 font-mono text-[0.65rem] text-zinc-600">{al.aldir}</span> : null}
+                {al.aldir ? <span className="block pl-12 font-mono text-[0.65rem] text-muted">{al.aldir}</span> : null}
               </span>
             ))}
           </div>
@@ -259,7 +259,7 @@ function DupGroupRow({
         </div>
       </div>
       {mergeJob?.status === 'running' && (
-        <div className="mt-1 text-xs text-zinc-500">
+        <div className="mt-1 text-xs text-muted">
           {mergeJob.log?.filter(Boolean).slice(-1)[0] ?? 'Merging…'}
         </div>
       )}
@@ -421,7 +421,7 @@ function RgidDetailPanel({
 
   return (
     <div className="mt-2 space-y-3 rounded border border-blue-900/40 bg-blue-950/10 p-2">
-      {loading && <div className="text-xs text-zinc-500">Loading cluster details…</div>}
+      {loading && <div className="text-xs text-muted">Loading cluster details…</div>}
       {loadError && <Alert severity="error" sx={{ fontSize: '0.72rem' }}>{loadError}</Alert>}
       {actionMsg && <p className="text-xs text-zinc-400">{actionMsg}</p>}
 
@@ -474,7 +474,7 @@ function RgidDetailPanel({
               placeholder="Optional reason (e.g. deluxe vs. standard edition)"
               value={reasonInput}
               onChange={(e) => setReasonInput(e.target.value)}
-              className="min-w-[220px] flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200"
+              className="min-w-[220px] flex-1 rounded border border-field-border bg-zinc-900 px-2 py-1 text-xs text-zinc-200"
             />
             <Button
               size="small"
@@ -507,7 +507,7 @@ function RgidDetailPanel({
                     <select
                       value={releaseChoice[al.album_id] ?? ''}
                       onChange={(e) => setReleaseChoice((prev) => ({ ...prev, [al.album_id]: e.target.value }))}
-                      className="rounded border border-zinc-700 bg-zinc-900 px-1 py-0.5 text-[0.68rem] text-zinc-200"
+                      className="rounded border border-field-border bg-zinc-900 px-1 py-0.5 text-[0.68rem] text-zinc-200"
                     >
                       <option value="">Choose representative release…</option>
                       {detail!.candidate_releases.map((c) => (
@@ -532,7 +532,7 @@ function RgidDetailPanel({
                   placeholder="Relink: paste MB release URL/UUID (blank = search)"
                   value={relinkInput[al.album_id] ?? ''}
                   onChange={(e) => setRelinkInput((prev) => ({ ...prev, [al.album_id]: e.target.value }))}
-                  className="min-w-[220px] flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[0.68rem] text-zinc-200"
+                  className="min-w-[220px] flex-1 rounded border border-field-border bg-zinc-900 px-2 py-0.5 text-[0.68rem] text-zinc-200"
                 />
                 <Button
                   size="small"
@@ -591,11 +591,11 @@ function RgidDupGroupRow({
                 {` · ${al.track_count} track(s)`}
                 {group.mb_releasegroupid ? ` · Release Group ${group.mb_releasegroupid.slice(0, 8)}…` : ' · no Release Group ID'}
                 {al.mb_albumid ? ` · representative release ${al.mb_albumid.slice(0, 8)}…` : ''}
-                {al.aldir ? <span className="block pl-8 font-mono text-[0.65rem] text-zinc-600">{al.aldir}</span> : null}
+                {al.aldir ? <span className="block pl-8 font-mono text-[0.65rem] text-muted">{al.aldir}</span> : null}
               </span>
             ))}
           </div>
-          <p className="text-[0.68rem] text-zinc-500">
+          <p className="text-[0.68rem] text-muted">
             Same MusicBrainz Release Group ID — likely the same album identity, but different representative releases, formats, or split imports still need review before merging.
           </p>
         </div>
@@ -1173,12 +1173,12 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
             {data.orphaned_items.length > 0 && (
               <div className="mt-3 space-y-1">
                 {data.orphaned_items.slice(0, 8).map((item) => (
-                  <div key={item.id} className="text-xs text-zinc-500">
+                  <div key={item.id} className="text-xs text-muted">
                     {item.artist} — {item.title} <span className="text-rose-400">({item.path})</span>
                   </div>
                 ))}
                 {data.orphaned_item_count > 8 && (
-                  <div className="text-xs text-zinc-600">…and {data.orphaned_item_count - 8} more</div>
+                  <div className="text-xs text-muted">…and {data.orphaned_item_count - 8} more</div>
                 )}
               </div>
             )}
@@ -1215,12 +1215,12 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
             {data.empty_albums.length > 0 && (
               <div className="mt-3 space-y-1">
                 {data.empty_albums.slice(0, 8).map((al) => (
-                  <div key={al.album_id} className="text-xs text-zinc-500">
-                    {al.albumartist} — {al.album} {al.year ? `(${al.year})` : ''} <span className="text-zinc-600">id={al.album_id}</span>
+                  <div key={al.album_id} className="text-xs text-muted">
+                    {al.albumartist} — {al.album} {al.year ? `(${al.year})` : ''} <span className="text-muted">id={al.album_id}</span>
                   </div>
                 ))}
                 {data.empty_album_count > 8 && (
-                  <div className="text-xs text-zinc-600">…and {data.empty_album_count - 8} more</div>
+                  <div className="text-xs text-muted">…and {data.empty_album_count - 8} more</div>
                 )}
               </div>
             )}
@@ -1267,7 +1267,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
                 <div className="text-[0.68rem] font-semibold uppercase text-amber-500">Needs manual review</div>
                 {(mbFixJob.result as MbidStickingRepairResult).unresolved_albums!.slice(0, 8).map((u) => (
                   <div key={u.album_id} className="text-xs text-zinc-400">
-                    {u.label} <span className="text-zinc-600">id={u.album_id}</span> — {u.reason}
+                    {u.label} <span className="text-muted">id={u.album_id}</span> — {u.reason}
                   </div>
                 ))}
               </div>
@@ -1289,14 +1289,14 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
                 )}
                 {mbStatus.missing_album_mb > 0 && (mbStatus.examples?.length ?? 0) > 0 && (
                   <div className="space-y-1">
-                    <div className="text-[0.68rem] font-semibold uppercase text-zinc-500">Albums missing Beets compatibility ID (first {mbStatus.examples.length})</div>
+                    <div className="text-[0.68rem] font-semibold uppercase text-muted">Albums missing Beets compatibility ID (first {mbStatus.examples.length})</div>
                     {mbStatus.examples.slice(0, 6).map((ex) => (
-                      <div key={ex.album_id} className="text-xs text-zinc-500">
-                        {ex.artist} — {ex.album} {ex.year ? `(${ex.year})` : ''} <span className="text-zinc-600">id={ex.album_id}</span>
+                      <div key={ex.album_id} className="text-xs text-muted">
+                        {ex.artist} — {ex.album} {ex.year ? `(${ex.year})` : ''} <span className="text-muted">id={ex.album_id}</span>
                       </div>
                     ))}
                     {mbStatus.missing_album_mb > 6 && (
-                      <div className="text-xs text-zinc-600">…and {mbStatus.missing_album_mb - 6} more</div>
+                      <div className="text-xs text-muted">…and {mbStatus.missing_album_mb - 6} more</div>
                     )}
                   </div>
                 )}
@@ -1306,7 +1306,7 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
               </div>
             )}
             {!mbStatus && !mbLoading && (
-              <p className="text-xs text-zinc-600">Click "Check Coverage" to scan the library.</p>
+              <p className="text-xs text-muted">Click "Check Coverage" to scan the library.</p>
             )}
           </CleanSection>
 
@@ -1361,14 +1361,14 @@ export function LibraryHealthPanel({ active = true, autoLoad = true }: LibraryHe
             {tokenResult && tokenResult.items.length > 0 && (
               <div className="mt-3 space-y-1">
                 {tokenResult.items.slice(0, 10).map((item) => (
-                  <div key={item.path} className="text-xs text-zinc-500">
+                  <div key={item.path} className="text-xs text-muted">
                     <span className="text-amber-400">{item.filename}</span>
-                    <span className="text-zinc-600"> → </span>
+                    <span className="text-muted"> → </span>
                     <span className="text-zinc-300">{item.new_filename}</span>
                   </div>
                 ))}
                 {tokenResult.items.length > 10 && (
-                  <div className="text-xs text-zinc-600">…and {tokenResult.items.length - 10} more</div>
+                  <div className="text-xs text-muted">…and {tokenResult.items.length - 10} more</div>
                 )}
               </div>
             )}

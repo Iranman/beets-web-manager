@@ -36,7 +36,7 @@ function PluginSection({
               {title}
               {badges}
             </span>
-            <span className="text-xs text-zinc-500">{open ? 'Hide' : 'Show'}</span>
+            <span className="text-xs text-muted">{open ? 'Hide' : 'Show'}</span>
           </DisclosureButton>
           <DisclosurePanel className="space-y-3 border-t border-graphite-800 p-3">
             {children}
@@ -310,7 +310,7 @@ function YtImportPlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }
         {statusChip(job?.status)}
         {error && <span className="text-xs text-red-400">{error}</span>}
       </div>
-      <p className="text-xs text-zinc-500">Requires <code>/config/ytmusicapi.json</code> (OAuth or headers from ytmusicapi).</p>
+      <p className="text-xs text-muted">Requires <code>/config/ytmusicapi.json</code> (OAuth or headers from ytmusicapi).</p>
       <JobLog job={job} />
     </PluginSection>
   );
@@ -454,7 +454,7 @@ function YtUpdatePlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }
   return (
     <PluginSection title="YouTube View Counts (ytupdate)" badges={<PluginBadges status={pluginStatus} />}>
       <PluginUnavailable status={pluginStatus} />
-      <p className="text-xs text-zinc-500">
+      <p className="text-xs text-muted">
         Requires <code>/config/oauth.json</code> from ytmusicapi OAuth.
       </p>
       <div className="flex flex-wrap items-center gap-2">
@@ -512,7 +512,7 @@ export function PluginsPanel() {
       </div>
       {statusError && <Alert severity="error">{statusError}</Alert>}
       {installLog.length > 0 ? (
-        <LogViewer className="max-h-24 text-xs text-zinc-500" text={installLog.join('\n')} />
+        <LogViewer className="max-h-24 text-xs text-muted" text={installLog.join('\n')} />
       ) : null}
       <PlexPlugin />
       <LastgenrePlugin />

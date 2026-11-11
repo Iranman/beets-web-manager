@@ -40,12 +40,12 @@ function HistoryRow({ entry }: { entry: RecentImport }) {
           <span className="font-medium text-zinc-200">
             {entry.artist || '—'}{entry.album ? ` — ${entry.album}` : ''}
           </span>
-          {entry.year ? <span className="text-zinc-500">({entry.year})</span> : null}
+          {entry.year ? <span className="text-muted">({entry.year})</span> : null}
         </div>
         {entry.reason && (
-          <div className="text-[0.72rem] italic text-zinc-500">{entry.reason}</div>
+          <div className="text-[0.72rem] italic text-muted">{entry.reason}</div>
         )}
-        <div className="truncate font-mono text-[0.68rem] text-zinc-600">
+        <div className="truncate font-mono text-[0.68rem] text-muted">
           {entry.original_folder || entry.original_path || entry.aldir}
         </div>
       </div>
@@ -59,7 +59,7 @@ function HistoryRow({ entry }: { entry: RecentImport }) {
             variant="outlined"
           />
         )}
-        <span className="text-[0.7rem] tabular-nums text-zinc-600">
+        <span className="text-[0.7rem] tabular-nums text-muted">
           {timeAgo(entryTimestamp(entry))}
         </span>
         {mbUrl && (
@@ -89,7 +89,7 @@ function HistorySection({
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950">
       <div className="flex items-center justify-between border-b border-graphite-800 px-3 py-2">
-        <span className="text-[0.75rem] font-semibold uppercase tracking-wide text-zinc-500">
+        <span className="text-[0.75rem] font-semibold uppercase tracking-wide text-muted">
           {title} ({entries.length})
         </span>
         {onClear && entries.length > 0 && (
@@ -99,7 +99,7 @@ function HistorySection({
         )}
       </div>
       {entries.length === 0 ? (
-        <div className="px-3 py-4 text-sm text-zinc-600">No entries yet.</div>
+        <div className="px-3 py-4 text-sm text-muted">No entries yet.</div>
       ) : (
         entries.map((entry, i) => (
           <HistoryRow

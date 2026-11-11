@@ -81,7 +81,7 @@ export default function FirstRunSetup() {
         setPluginsReport(status.plugins);
       }
       if (status.beets?.version) {
-        setBeetsStatus({ testing: false, ok: true, message: `Connected — Beets ${status.beets.version}` });
+        setBeetsStatus({ testing: false, ok: true, message: `Embedded Beets ${status.beets.version}` });
       }
     }).catch(() => {
       // Ignore
@@ -100,12 +100,12 @@ export default function FirstRunSetup() {
     try {
       const res = await testSetupBeets();
       if (res.ok) {
-        setBeetsStatus({ testing: false, ok: true, message: res.message || `Connected — Beets ${res.beets_version || res.version}` });
+        setBeetsStatus({ testing: false, ok: true, message: res.message || `Embedded Beets ${res.beets_version || res.version}` });
       } else {
-        setBeetsStatus({ testing: false, ok: false, error: res.error || 'Could not execute Beets. Check the Docker service and configuration.' });
+        setBeetsStatus({ testing: false, ok: false, error: res.error || 'Embedded Beets failed its check. Review the Beets config.yaml and the /config, /music and /downloads mounts.' });
       }
     } catch (err: unknown) {
-      const msg = errorMessage(err, 'Could not reach Beets engine.');
+      const msg = errorMessage(err, 'Could not run the embedded Beets check.');
       setBeetsStatus({ testing: false, ok: false, error: msg });
     }
   };
@@ -251,7 +251,7 @@ export default function FirstRunSetup() {
   const steps = [
     { num: 1, title: 'Welcome' },
     { num: 2, title: 'Admin' },
-    { num: 3, title: 'Beets Engine' },
+    { num: 3, title: 'Beets' },
     { num: 4, title: 'Library Paths' },
     { num: 5, title: 'MusicBrainz' },
     { num: 6, title: 'AcoustID' },
@@ -293,7 +293,7 @@ export default function FirstRunSetup() {
                     ? 'bg-red-700 text-white shadow-md ring-2 ring-red-500/50'
                     : isDone
                     ? 'bg-zinc-800 text-emerald-400 hover:bg-zinc-700 cursor-pointer'
-                    : 'bg-graphite-950 text-zinc-600'
+                    : 'bg-graphite-950 text-muted'
                 }`}
               >
                 {isDone ? '✓' : s.num}
@@ -310,7 +310,7 @@ export default function FirstRunSetup() {
               <div>
                 <h2 className="text-xl font-bold text-white">Welcome to Beets Web Manager</h2>
                 <p className="mt-2 text-sm leading-relaxed text-zinc-300">
-                  This application manages an existing Beets engine and provides a browser-based interface for importing, matching, reviewing, cleaning, and managing your music library.
+                  This application runs Beets in-process (embedded in the same container) against your existing Beets library and configuration, and provides a browser-based interface for importing, matching, reviewing, cleaning, and managing your music library.
                 </p>
               </div>
 
@@ -324,7 +324,7 @@ export default function FirstRunSetup() {
                   <span className="text-red-500 font-bold">&rarr;</span>
                   <span className="rounded-lg bg-red-950/80 px-3 py-1.5 border border-red-800/80 text-red-200 font-semibold">beets-web-manager</span>
                   <span className="text-red-500 font-bold">&rarr;</span>
-                  <span className="rounded-lg bg-zinc-800 px-3 py-1.5 border border-zinc-700">Beets Engine</span>
+                  <span className="rounded-lg bg-zinc-800 px-3 py-1.5 border border-zinc-700">Beets (embedded)</span>
                 </div>
               </div>
 
@@ -359,7 +359,7 @@ export default function FirstRunSetup() {
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                     required
                   />
                 </div>
@@ -373,7 +373,7 @@ export default function FirstRunSetup() {
                       type={showPassword ? 'text' : 'password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full rounded-lg border border-zinc-700 bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="w-full rounded-lg border border-field-border bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white focus:border-red-500 focus:outline-none"
                       required
                     />
                     <button
@@ -394,7 +394,7 @@ export default function FirstRunSetup() {
                     type="password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                     required
                   />
                   {confirmPassword && !passwordsMatch && (
@@ -409,7 +409,7 @@ export default function FirstRunSetup() {
                     <li className={`flex items-center gap-1.5 ${hasLength ? 'text-emerald-400 font-medium' : ''}`}>
                       <span>{hasLength ? '✓' : '•'}</span> At least {minLength} characters
                     </li>
-                    <li className="flex items-center gap-1.5 text-zinc-500">
+                    <li className="flex items-center gap-1.5 text-muted">
                       Long passphrases are supported; uppercase, numbers, and symbols are not mandatory.
                     </li>
                   </ul>
@@ -436,21 +436,21 @@ export default function FirstRunSetup() {
             </div>
           )}
 
-          {/* STEP 3: Beets Engine Connection */}
+          {/* STEP 3: Embedded Beets check */}
           {currentStep === 3 && (
             <div className="space-y-5">
               <div>
-                <h2 className="text-xl font-bold text-white">Beets Engine Connection</h2>
+                <h2 className="text-xl font-bold text-white">Embedded Beets Check</h2>
                 <p className="mt-1 text-sm text-zinc-400">
-                  Verify that Web Manager can communicate with the background Beets engine container.
+                  Verify that the Beets library embedded in Web Manager loads your Beets config.yaml and opens its library database. There is no separate Beets container.
                 </p>
               </div>
 
               <div className="rounded-xl border border-zinc-800 bg-graphite-950 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 block">Service Name</span>
-                    <span className="text-sm font-mono text-white">beets</span>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 block">Runtime</span>
+                    <span className="text-sm font-mono text-white">in-process</span>
                   </div>
                   <div>
                     <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400 block">Status</span>
@@ -458,11 +458,11 @@ export default function FirstRunSetup() {
                       <span className="text-xs font-medium text-amber-400">Checking...</span>
                     ) : beetsStatus.ok ? (
                       <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-400">
-                        <span>✓</span> Connected
+                        <span>✓</span> Ready
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 text-xs font-bold text-red-400">
-                        <span>✕</span> Not Connected
+                        <span>✕</span> Not Ready
                       </span>
                     )}
                   </div>
@@ -486,8 +486,8 @@ export default function FirstRunSetup() {
                     </button>
                     {showBeetsDetails && (
                       <div className="font-mono text-[11px] text-zinc-400 bg-black/50 p-2 rounded border border-zinc-800">
-                        Engine: {setupStatus?.beets?.path || 'Beets inside Web Manager'}<br />
-                        Reachable: {setupStatus?.beets?.available ? 'Yes' : 'No'}
+                        Beets: {setupStatus?.beets?.path || 'Beets inside Web Manager'}<br />
+                        Available: {setupStatus?.beets?.available ? 'Yes' : 'No'}
                       </div>
                     )}
                   </div>
@@ -499,7 +499,7 @@ export default function FirstRunSetup() {
                   disabled={beetsStatus.testing}
                   className="rounded-lg bg-zinc-800 px-4 py-2 text-xs font-bold text-white hover:bg-zinc-700 disabled:opacity-50"
                 >
-                  {beetsStatus.testing ? 'Testing...' : 'Test Connection'}
+                  {beetsStatus.testing ? 'Checking...' : 'Run Check'}
                 </button>
               </div>
 
@@ -659,7 +659,7 @@ export default function FirstRunSetup() {
                     value={acoustidKey}
                     onChange={(e) => setAcoustidKey(e.target.value)}
                     placeholder="Optional application key"
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>
 
@@ -736,7 +736,7 @@ export default function FirstRunSetup() {
                     value={aiApiKey}
                     onChange={(e) => setAiApiKey(e.target.value)}
                     placeholder="sk-..."
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>
 
@@ -749,7 +749,7 @@ export default function FirstRunSetup() {
                       type="text"
                       value={aiBaseUrl}
                       onChange={(e) => setAiBaseUrl(e.target.value)}
-                      className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                     />
                   </div>
                   <div>
@@ -760,7 +760,7 @@ export default function FirstRunSetup() {
                       type="text"
                       value={aiModel}
                       onChange={(e) => setAiModel(e.target.value)}
-                      className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                     />
                   </div>
                 </div>
@@ -883,7 +883,7 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
                     Required Core Plugins ({pluginsReport?.categories?.required?.length || 0})
                   </h3>
-                  <span className="text-[11px] text-zinc-500">Auto-configured for Web Manager</span>
+                  <span className="text-[11px] text-muted">Auto-configured for Web Manager</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {(pluginsReport?.categories?.required || []).map((plugin) => (
@@ -913,7 +913,7 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
                     Bundled Web Manager Extensions
                   </h3>
-                  <span className="text-[11px] text-zinc-500">Shared /config/beetsplug</span>
+                  <span className="text-[11px] text-muted">Shared /config/beetsplug</span>
                 </div>
                 <div className="rounded-lg border border-zinc-800 bg-graphite-950 p-3 flex items-center justify-between text-xs">
                   <div>
@@ -938,7 +938,7 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
                     Optional & Integration Plugins ({((pluginsReport?.categories?.optional?.length || 0) + (pluginsReport?.categories?.integration?.length || 0))})
                   </h3>
-                  <span className="text-[11px] text-zinc-500">Enabled on demand via settings / token</span>
+                  <span className="text-[11px] text-muted">Enabled on demand via settings / token</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {[...(pluginsReport?.categories?.optional || []), ...(pluginsReport?.categories?.integration || [])].map((plugin) => (
@@ -1001,7 +1001,7 @@ export default function FirstRunSetup() {
                     value={plexUrl}
                     onChange={(e) => setPlexUrl(e.target.value)}
                     placeholder="http://plex.local:32400"
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>
 
@@ -1014,7 +1014,7 @@ export default function FirstRunSetup() {
                     value={plexToken}
                     onChange={(e) => setPlexToken(e.target.value)}
                     placeholder="Token"
-                    className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
                   />
                 </div>
 
@@ -1107,7 +1107,7 @@ export default function FirstRunSetup() {
                       <span className="font-semibold text-white">{username} (Configured)</span>
                     </div>
                     <div className="py-2 flex justify-between items-center">
-                      <span className="text-zinc-400">Beets Engine</span>
+                      <span className="text-zinc-400">Embedded Beets</span>
                       <span className={`font-semibold ${beetsStatus.ok ? 'text-emerald-400' : 'text-amber-400'}`}>
                         {beetsStatus.ok ? beetsStatus.message : 'Checking/Unverified'}
                       </span>

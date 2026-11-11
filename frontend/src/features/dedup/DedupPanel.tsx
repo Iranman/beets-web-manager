@@ -74,7 +74,7 @@ function DupRow({
           </div>
         )}
         {dup.reason && (
-          <div className="text-[0.7rem] italic text-zinc-600">{dup.reason}</div>
+          <div className="text-[0.7rem] italic text-muted">{dup.reason}</div>
         )}
       </div>
     </label>
@@ -87,7 +87,7 @@ function ScanProgress({ scanned, total }: { scanned: number; total: number }) {
   const pct = total > 0 ? Math.round((scanned / total) * 100) : 0;
   return (
     <div className="space-y-1">
-      <div className="flex justify-between text-xs text-zinc-500">
+      <div className="flex justify-between text-xs text-muted">
         <span>Scanning…</span>
         <span>{scanned} / {total}</span>
       </div>
@@ -296,9 +296,9 @@ export function DedupPanel() {
               <Chip color={scanStatusColor} label={scanStatusLabel} size="small" variant="outlined" />
               <Chip label={scanKindLabel(scanKind)} size="small" variant="outlined" />
               <Chip label={scanScope} size="small" variant="outlined" />
-              <span className="font-mono text-xs text-zinc-500" title={scanJid}>{shortScanId(scanJid)}</span>
+              <span className="font-mono text-xs text-muted" title={scanJid}>{shortScanId(scanJid)}</span>
             </div>
-            <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-zinc-500">
+            <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-muted">
               <span>
                 {scan ? `${scan.scanned.toLocaleString()} / ${scan.total.toLocaleString()} scanned · ${scan.found.toLocaleString()} found` : 'Starting scan'}
               </span>
@@ -328,7 +328,7 @@ export function DedupPanel() {
             ]}
           />
           <CleanActionBar>
-            <div className="min-w-0 flex-1 text-xs text-zinc-500">
+            <div className="min-w-0 flex-1 text-xs text-muted">
               {scanFailed
                 ? 'Scan job failed. Open Jobs for the full log.'
                 : scanKind === 'ai'
@@ -358,7 +358,7 @@ export function DedupPanel() {
             <div className="flex-1" />
             <div className="flex flex-wrap items-center justify-end gap-2">
               {selected.size === 0 && (
-                <span className="text-xs text-zinc-500">Select duplicate rows to enable cleanup.</span>
+                <span className="text-xs text-muted">Select duplicate rows to enable cleanup.</span>
               )}
                 <Button
                   disabled={cleaning || selected.size === 0}

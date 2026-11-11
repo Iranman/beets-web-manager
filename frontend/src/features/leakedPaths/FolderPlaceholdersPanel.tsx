@@ -228,12 +228,12 @@ function ReviewDetailPanel({
           {/* Path comparison */}
           <div className="space-y-1.5">
             <div>
-              <div className="font-medium uppercase tracking-wide text-zinc-500 text-[0.65rem]">Source path</div>
+              <div className="font-medium uppercase tracking-wide text-muted text-[0.65rem]">Source path</div>
               <div className="mt-0.5 font-mono text-rose-400 break-all">{review.source_path}</div>
             </div>
             {review.proposed_path ? (
               <div>
-                <div className="font-medium uppercase tracking-wide text-zinc-500 text-[0.65rem]">
+                <div className="font-medium uppercase tracking-wide text-muted text-[0.65rem]">
                   Proposed canonical path
                   {review.target_folder_rgid
                     ? <span className="ml-1 normal-case text-emerald-600">(has Release Group ID)</span>
@@ -302,7 +302,7 @@ function ReviewDetailPanel({
           {(review.source_only_files.length > 0 || review.target_only_files.length > 0 ||
             review.matching_files.length > 0 || review.conflicting_files.length > 0) && (
             <div className="space-y-2">
-              <div className="font-medium uppercase tracking-wide text-zinc-500 text-[0.65rem]">File comparison</div>
+              <div className="font-medium uppercase tracking-wide text-muted text-[0.65rem]">File comparison</div>
               <div className="grid grid-cols-2 gap-2 text-[0.68rem]">
                 <div>
                   <div className="font-medium text-zinc-400">
@@ -314,10 +314,10 @@ function ReviewDetailPanel({
                         <li key={f} className="font-mono truncate text-emerald-700" title={f}>+ {f}</li>
                       ))}
                       {review.source_only_files.length > 12 && (
-                        <li className="text-zinc-500">…and {review.source_only_files.length - 12} more</li>
+                        <li className="text-muted">…and {review.source_only_files.length - 12} more</li>
                       )}
                     </ul>
-                  ) : <div className="text-zinc-600 mt-1">No source-only files.</div>}
+                  ) : <div className="text-muted mt-1">No source-only files.</div>}
                 </div>
                 <div>
                   <div className="font-medium text-zinc-400">
@@ -329,10 +329,10 @@ function ReviewDetailPanel({
                         <li key={f} className="font-mono truncate text-zinc-400" title={f}>{f}</li>
                       ))}
                       {review.target_only_files.length > 12 && (
-                        <li className="text-zinc-500">…and {review.target_only_files.length - 12} more</li>
+                        <li className="text-muted">…and {review.target_only_files.length - 12} more</li>
                       )}
                     </ul>
-                  ) : <div className="text-zinc-600 mt-1">No target-only files.</div>}
+                  ) : <div className="text-muted mt-1">No target-only files.</div>}
                 </div>
               </div>
               {review.conflicting_files.length > 0 && (
@@ -348,7 +348,7 @@ function ReviewDetailPanel({
                 </div>
               )}
               {review.matching_files.length > 0 && review.conflicting_files.length === 0 && (
-                <div className="text-zinc-500 text-[0.68rem]">
+                <div className="text-muted text-[0.68rem]">
                   {review.matching_files.length} file(s) exist in both folders with matching size.
                 </div>
               )}
@@ -379,7 +379,7 @@ function ReviewDetailPanel({
                         {m.from.split('/').at(-1)} → target
                       </li>
                     ))}
-                    {preview.moves.length > 10 && <li className="text-zinc-500">…and {preview.moves.length - 10} more</li>}
+                    {preview.moves.length > 10 && <li className="text-muted">…and {preview.moves.length - 10} more</li>}
                   </ul>
                 </div>
               )}
@@ -593,12 +593,12 @@ function FolderRow({
           </div>
 
           {/* Issue + proposed */}
-          <div className="text-zinc-500">
+          <div className="text-muted">
             <span className="font-medium text-zinc-400">Issue: </span>{folderIssue(row)}
           </div>
           {row.proposed_folder ? (
             <div>
-              <span className="font-medium text-zinc-500">Proposed: </span>
+              <span className="font-medium text-muted">Proposed: </span>
               <span className="font-mono text-emerald-700 break-all">
                 {row.proposed_folder.split('/').at(-1)}
               </span>
@@ -613,7 +613,7 @@ function FolderRow({
           )}
 
           {/* Compact stats */}
-          <div className="flex flex-wrap gap-3 text-zinc-500">
+          <div className="flex flex-wrap gap-3 text-muted">
             <span>Files: <strong className={row.file_count > 0 ? 'text-zinc-300' : ''}>{fmt(row.file_count)}</strong></span>
             <span>Audio: <strong className={row.audio_count > 0 ? 'text-zinc-300' : ''}>{fmt(row.audio_count)}</strong></span>
             {row.db_item_count > 0 && <span>DB items: <strong className="text-amber-600">{row.db_item_count}</strong></span>}
@@ -664,14 +664,14 @@ function FolderRow({
             {expanded ? 'Hide details' : 'Review details'}
           </button>
           <button
-            className="text-[0.68rem] text-zinc-500 hover:text-zinc-300 whitespace-nowrap"
+            className="text-[0.68rem] text-muted hover:text-zinc-300 whitespace-nowrap"
             onClick={onMarkReviewed}
           >
             {reviewed ? 'Unmark reviewed' : 'Mark reviewed'}
           </button>
           {bucket === 'safe_rename' && !renameResult && (
             <button
-              className="text-[0.68rem] text-zinc-600 hover:text-zinc-400 whitespace-nowrap"
+              className="text-[0.68rem] text-muted hover:text-zinc-400 whitespace-nowrap"
               onClick={onMarkReviewed}
             >
               Skip
@@ -998,10 +998,10 @@ export function FolderPlaceholdersPanel() {
                 </Button>
               ))}
             </div>
-            <label className="flex min-w-[180px] flex-col gap-1 text-[0.68rem] font-medium uppercase tracking-wide text-zinc-500">
+            <label className="flex min-w-[180px] flex-col gap-1 text-[0.68rem] font-medium uppercase tracking-wide text-muted">
               Sort
               <select
-                className="rounded border border-graphite-700 bg-graphite-950 px-2 py-2 text-sm normal-case tracking-normal text-zinc-200"
+                className="rounded border border-field-border bg-graphite-950 px-2 py-2 text-sm normal-case tracking-normal text-zinc-200"
                 value={sort}
                 onChange={(event) => setSort(event.target.value as FolderSort)}
               >
@@ -1012,7 +1012,7 @@ export function FolderPlaceholdersPanel() {
 
           {/* Bulk selection controls */}
           {safeRenameRows.length > 0 && (
-            <div className="mt-2 flex items-center gap-3 text-xs text-zinc-500">
+            <div className="mt-2 flex items-center gap-3 text-xs text-muted">
               <button className="text-zinc-400 hover:text-zinc-200 underline" onClick={selectAllSafe}>
                 Select all safe renames ({safeRenameRows.length})
               </button>
@@ -1028,7 +1028,7 @@ export function FolderPlaceholdersPanel() {
           )}
 
           {reviewed.size > 0 && (
-            <div className="mt-2 flex items-center gap-2 text-xs text-zinc-500">
+            <div className="mt-2 flex items-center gap-2 text-xs text-muted">
               <span>{reviewed.size} row(s) marked reviewed.</span>
               <button className="text-zinc-400 hover:text-zinc-200 underline" onClick={() => setReviewed(new Set())}>
                 Clear all

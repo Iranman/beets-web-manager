@@ -87,7 +87,7 @@ class ImportReviewButtonContrastTests(unittest.TestCase):
         self.assertIn("&.MuiButton-outlinedError", THEME_SOURCE)
         self.assertIn("&.MuiButton-containedError", THEME_SOURCE)
         self.assertIn("&.Mui-focusVisible", THEME_SOURCE)
-        self.assertIn("boxShadow: `0 0 0 3px", THEME_SOURCE)
+        self.assertIn("outline: `2px solid ${button.focusRing}`", THEME_SOURCE)
 
     def test_import_review_dark_queue_controls_stay_readable(self):
         self.assertIn("text-zinc-200", IMPORT_REVIEW_SOURCE)

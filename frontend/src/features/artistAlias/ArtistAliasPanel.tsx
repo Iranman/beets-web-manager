@@ -72,11 +72,11 @@ function GroupRow({
             />
             <span className="min-w-0">
               <span className="font-medium text-zinc-100">{variant.name}</span>
-              <span className="ml-2 text-xs text-zinc-500">
+              <span className="ml-2 text-xs text-muted">
                 {variant.album_count} albums · {variant.track_count} tracks
               </span>
               {variant.credits.length > 0 && (
-                <span className="ml-2 text-xs text-zinc-600">
+                <span className="ml-2 text-xs text-muted">
                   +{variant.credits.reduce((s, c) => s + c.count, 0)} credits
                 </span>
               )}
@@ -106,7 +106,7 @@ function GroupRow({
         {jobStatus === 'success' && <Chip color="success" label="Done" size="small" variant="outlined" />}
         {(jobStatus === 'failed' || jobStatus === 'killed') && <Chip color="error" label="Failed" size="small" variant="outlined" />}
         {jobStatus === 'running' && lastLine ? (
-          <span className="max-w-xs truncate text-xs text-zinc-500">{lastLine}</span>
+          <span className="max-w-xs truncate text-xs text-muted">{lastLine}</span>
         ) : null}
       </div>
     </div>
@@ -365,7 +365,7 @@ export function ArtistAliasPanel({ active = true, autoLoad = true, onRefreshLibr
             <Chip color="error" label="Failed" size="small" variant="outlined" />
           )}
           {confirmJob?.status === 'running' && (
-            <span className="max-w-xs truncate text-xs text-zinc-500">
+            <span className="max-w-xs truncate text-xs text-muted">
               {confirmJob.log?.filter(Boolean).slice(-1)[0] ?? ''}
             </span>
           )}

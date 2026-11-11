@@ -15,6 +15,9 @@
   --color-graphite-950: #13161b;
   --color-accent-red: #b91c1c;
   --color-accent-red-bright: #ef4444;
+  /* Contrast-safe tokens (#606): muted >= 4.5:1 and field-border >= 3:1 on bg..surface-3. */
+  --color-muted: #9aa1ad;
+  --color-field-border: #7c8594;
 }
 
 :root {
@@ -29,6 +32,7 @@
   --bw-muted-2: #8e95a3;
   --bw-red: #b91c1c;
   --bw-red-hover: #ef4444;
+  --bw-focus: #f87171;
   color: var(--bw-text);
   background: var(--bw-bg);
   font-family:
@@ -65,6 +69,6 @@ input {
 }
 
 :focus-visible {
-  outline: 2px solid var(--bw-red-hover);
+  outline: 2px solid var(--bw-focus);
   outline-offset: 2px;
 }
