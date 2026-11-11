@@ -2956,7 +2956,7 @@ export function ReviewCard({
                 <Chip
                   size="small"
                   color="success"
-                  label={selectedMatch.is_partial_import ? 'Partial auto-import ready' : 'Auto-import eligible'}
+                  label={selectedMatch?.is_partial_import ? 'Partial auto-import ready' : 'Auto-import eligible'}
                 />
               ) : null}
               {selectedMatchActive && selectedMatch?.identity_validated === null ? (
