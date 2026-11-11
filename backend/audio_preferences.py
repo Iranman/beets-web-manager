@@ -2,11 +2,13 @@
 from __future__ import annotations
 from backend.json_state import atomic_write_json
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import unicodedata
 import uuid
@@ -145,10 +147,31 @@ def load_music_format_preferences(path: Optional[str] = None) -> Dict[str, Any]:
         return _copy_defaults()
 
 
-def save_music_format_preferences(payload: Dict[str, Any], path: Optional[str] = None) -> Dict[str, Any]:
+class MusicFormatRevisionConflict(Exception):
+    """The stored preferences changed since the caller loaded them."""
+
+
+# ponytail: in-process lock; a second app process could interleave check and
+# write. Use a file lock if the app ever runs multiple worker processes.
+_SAVE_LOCK = threading.Lock()
+
+
+def music_format_preferences_revision(prefs: Dict[str, Any]) -> str:
+    """Content hash of normalized preferences, used as the optimistic-concurrency token."""
+    return hashlib.sha256(json.dumps(prefs, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def save_music_format_preferences(payload: Dict[str, Any], path: Optional[str] = None,
+                                  expected_revision: Optional[str] = None) -> Dict[str, Any]:
+    """Save preferences. With expected_revision, refuse (MusicFormatRevisionConflict)
+    unless it matches the currently stored preferences' revision."""
     prefs = normalize_music_format_preferences(payload)
     prefs_path = _settings_path(path)
-    atomic_write_json(prefs_path, prefs, indent=2, sort_keys=True)
+    with _SAVE_LOCK:
+        if expected_revision is not None and expected_revision != music_format_preferences_revision(
+                load_music_format_preferences(path)):
+            raise MusicFormatRevisionConflict()
+        atomic_write_json(prefs_path, prefs, indent=2, sort_keys=True)
     return prefs
 
 

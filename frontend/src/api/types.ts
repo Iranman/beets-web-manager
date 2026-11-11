@@ -2931,6 +2931,8 @@ export interface MusicFormatPreferences {
 
 export interface MusicFormatPreferencesResponse extends ApiOkResponse {
   preferences: MusicFormatPreferences;
+  /** Optimistic-concurrency token; send it back as expected_revision on save. */
+  revision: string;
 }
 
 export interface MusicFormatReplacementTrack {
