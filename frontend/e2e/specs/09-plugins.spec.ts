@@ -17,7 +17,7 @@ test('Recheck plugins asks the backend and the report matches the page', async (
   expect(response.ok()).toBeTruthy();
   const report = await response.json();
   expect(JSON.stringify(report)).toContain('ftintitle');
-  await expect(page.getByRole('main')).toContainText(`${report.required_healthy_count} of ${report.required_count} Healthy`);
+  await expect(page.getByRole('main')).toContainText(`${report.required_healthy_count} of ${report.required_count} healthy`);
 });
 
 test('Plugin Controls: runtime install stays blocked and a panel opens to its actions', async ({ page }) => {
