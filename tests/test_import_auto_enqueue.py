@@ -191,7 +191,7 @@ class ImportAutoEnqueueTests(unittest.TestCase):
         self.assertIn('resume_statuses = {"remaining_files_review", "auto_enqueue_failed", "import_job_missing", "import_status_unknown"}', APP)
         self.assertIn('active_statuses = {"import_enqueueing", "import_queued"}', APP)
         self.assertIn('status_key not in (active_statuses | resume_statuses)', APP)
-        self.assertIn('Import enqueue did not create an active job; retry enqueue.', APP)
+        self.assertIn('Import enqueue did not create an active job; revalidate this Review item to queue it again.', APP)
         self.assertIn('@app.post("/api/import-review/auto-enqueue/reconcile")', APP)
 
     def test_frontend_resets_per_item_state_when_review_item_changes(self):

@@ -332,7 +332,7 @@ export default function FirstRunSetup() {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(2)}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md transition-all hover:bg-red-600 focus:outline-none"
+                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md transition-all hover:bg-red-600"
                 >
                   Get Started &rarr;
                 </button>
