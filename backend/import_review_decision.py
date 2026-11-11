@@ -255,7 +255,7 @@ def action_label(item: Dict[str, Any], match: Optional[Dict[str, Any]] = None,
         n = int(max(0, min(selected_count or preview_count, preview_count)))
         plural = "" if n == 1 else "s"
         return f"Repair {n} matched track{plural}" if existing else f"Import {n} matched track{plural}"
-    if match and match.get("auto_fix_eligible"):
+    if match and match.get("auto_fix_eligible") and match.get("identity_validated") is True:
         return "Complete Verified Repair" if existing else "Complete Verified Import"
     return "Repair with ID" if existing else "Import with ID"
 

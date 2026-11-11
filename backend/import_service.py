@@ -2005,8 +2005,10 @@ def start_reimport_disk(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             mb_albumid = _resolved_mbid
 
         if existing_album_id or source_is_music_library:
+            # #574: the same wanted_tracks evidence Import All discovery used.
             preflight = _folder_release_preflight(
-                aldir, mb_albumid, existing_album_id=existing_album_id, log=log)
+                aldir, mb_albumid, existing_album_id=existing_album_id, log=log,
+                wanted_tracks=wanted_tracks)
             _reimport_log_preflight(log, preflight, existing_album_id)
             staged_missing_import_ok = False
             if replace_existing and existing_album_id and wanted_tracks and not source_is_music_library:
@@ -3140,7 +3142,9 @@ def evaluate_import_eligibility(payload: Dict[str, Any]) -> Dict[str, Any]:
         "existing_album_id": payload.get("existing_album_id") or payload.get("album_id") or 0,
         "track_mapping": track_mapping,
         "selected_source_files": [str(path) for path in selected_files],
-        "identity_validated": False if identity_invalid else True,
+        # #584: an unresolved identity (None) stays unresolved, never True.
+        "identity_validated": False if identity_invalid else (
+            True if True in (payload.get("identity_validated"), selected_match.get("identity_validated")) else None),
         "candidate_identity_error": candidate_identity_error,
     }
     preview = _cached_import_target_preview(preview_payload)
@@ -3952,7 +3956,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
         # #567: a moved hardlinked file shares its inode with the other link
         # (e.g. a seeding torrent), so tag writes would rewrite that copy too.
-        keep_hardlinked_folder = (use_move and not selected_subset_import and not preserve_torrent_source
+        # #586: checked in copy mode too, so cleanup, artwork moves and the
+        # rejected-file rule leave a hardlinked source alone.
+        keep_hardlinked_folder = (not selected_subset_import and not preserve_torrent_source
                                   and _has_hardlinked_file(folder_path))
         if keep_hardlinked_folder:
             log.append("[import] A source file is hardlinked; using --copy and keeping the source folder.")

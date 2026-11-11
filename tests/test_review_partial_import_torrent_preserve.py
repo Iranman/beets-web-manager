@@ -159,7 +159,8 @@ class QbitReviewRowWholeFolderImportTests(ReviewPartialImportSourceSafetyTests):
         prs._AI_PENDING_FILE.write_text(json.dumps(self.rows))
         before = os.stat(self.selected)
         body, code = isvc.start_folder_import_with_id(
-            {"path": str(self.src), "mb_albumid": REL, "mb_releasegroupid": RG, "move": True})
+            {"path": str(self.src), "mb_albumid": REL, "mb_releasegroupid": RG,
+             "move": getattr(self, "move", True)})
         self.assertEqual(code, 200, body)
         self.assertEqual(self.result.get("status"), "completed", self.result)
         return before
@@ -220,6 +221,26 @@ class WholeFolderHardlinkImportTests(QbitReviewRowWholeFolderImportTests):
         self._run()
         self.assertEqual([p["use_move"] for p in self.plan_payloads], [True])
         self.assertIs(self.validate.call_args.kwargs.get("preserve_source"), False)
+
+    def _run_copy_mode_with_link(self, linked):
+        # #586: move:false must still check for hardlinks.
+        link = self.src.parent / f"seeding-{linked.name}"
+        try:
+            os.link(linked, link)
+        except OSError as ex:  # pragma: no cover - filesystem without hardlinks
+            self.skipTest(f"hardlinks unsupported: {ex}")
+        self.move = False
+        before = self._run()
+        self._assert_copied_and_untouched(before)  # cleanup (and its artwork move) never runs
+        self.assertIs(self.validate.call_args.kwargs.get("preserve_source"), True)
+        self.assertEqual(link.read_bytes(), linked.read_bytes())
+
+    def test_copy_mode_hardlinked_audio_keeps_sources(self):
+        self._run_copy_mode_with_link(self.selected)
+
+    def test_copy_mode_hardlinked_cover_is_not_moved(self):
+        self._run_copy_mode_with_link(self.src / "cover.jpg")
+        self.assertEqual((self.src / "cover.jpg").read_bytes(), b"torrent-art")
 
     test_qbittorrent_row_is_copied_and_kept_with_move_allowed = None
     test_row_without_qbittorrent_origin_still_moves = None

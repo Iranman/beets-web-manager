@@ -8,6 +8,7 @@ F15: DELETE /api/ai-pending-review with no path must not clear the queue.
 """
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -155,6 +156,33 @@ class SourceDeletionProofGateTests(unittest.TestCase):
         self.assertTrue(ev["proven"])
         self.assertFalse(ev["deleted"])
         self.assertTrue((self.src / "late.flac").exists())
+        self.assertTrue(any("changed since proof" in line for line in log))
+
+    def _link(self, target, link):
+        try:
+            os.link(target, link)
+        except OSError as ex:  # pragma: no cover - filesystem without hardlinks
+            self.skipTest(f"hardlinks unsupported: {ex}")
+
+    def test_hardlinked_source_is_kept_even_with_byte_proof(self):
+        # #586: a seeding download's name is hardlinked to the library file.
+        for item in self.items:
+            dst = self.src / Path(item["path"]).name
+            dst.unlink()
+            self._link(item["path"], dst)
+        ev, log = self._run()
+        self.assertEqual((ev["deleted"], ev["reason"]), (False, "hardlinked_file"))
+        self.assertTrue(all((self.src / Path(i["path"]).name).exists() for i in self.items))
+        self.assertTrue(any("hardlinked" in line for line in log))
+
+    def test_hardlink_added_during_proof_keeps_the_folder(self):
+        def proof(drop, keep, rid=""):
+            if not (self.src.parent / "seed.flac").exists():
+                self._link(self.src / "01 Song One.flac", self.src.parent / "seed.flac")
+            return self._fingerprint_all(drop, keep, rid)
+        ev, log = self._run(proof)
+        self.assertFalse(ev["deleted"])
+        self.assertTrue(self.src.exists())
         self.assertTrue(any("changed since proof" in line for line in log))
 
     def test_fingerprint_unavailable_keeps_the_folder(self):
