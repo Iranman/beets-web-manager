@@ -289,27 +289,33 @@ def _is_secret_setting_key(name: str) -> bool:
 # run of non-separator characters is a key when "=" follows it), so the scan
 # is linear and a non-secret value is rescanned: a nested "?access_token="
 # is matched on its own (#593).
-_SETTING_PARAM_KEY_RE = re.compile(r"([^=&#;?\s]+)(=?)")
+# Spaces around "=" are allowed, as in a libpq DSN ("password = 'x'").
+_SETTING_PARAM_KEY_RE = re.compile(r"([^=&#;?\s]+)(?:(\s*=\s*))?")
 # A secret value runs to "&", "#" or whitespace; a raw "?" or ";" is part of
-# it (#599 N1). A quoted DSN value runs to its closing quote, or to the end
-# when unclosed (fail closed).
-_SETTING_SECRET_VALUE_RE = re.compile(r"'(?:\\.|[^'\\])*'?|\"(?:\\.|[^\"\\])*\"?|[^&#\s]+")
+# it (#599 N1). A quoted part may hold spaces and runs to its closing quote,
+# or to the end when unclosed (fail closed); text right after it continues
+# the value. The three alternatives start on different characters: linear.
+_SETTING_SECRET_VALUE_RE = re.compile(r"(?:'(?:\\.|[^'\\])*'?|\"(?:\\.|[^\"\\])*\"?|[^&#\s'\"])+")
 
-# Stands in for each cut until the fail-closed check has run, so a literal
+# Stand in for each cut until the fail-closed check has run, so a literal
 # "********" in the stored value is never mistaken for a cut (#599 N2).
-_CUT = "\x00"
+# _CUT is dropped with its "@"; _CUT_USER (a user-only token) keeps the "@"
+# so "https://u:pass word@h/x" still trips the check.
+_CUT, _CUT_USER = "\x00", "\x01"
+# After the cuts: a user-only "TOKEN@host/path" written with %40 or U+FF20.
+_SETTING_USER_TOKEN_RE = re.compile(r"[^\s@]@[^\s@]*/")
 
 
 def _is_secret_param_key(name: str) -> bool:
     name = urllib.parse.unquote_plus(name).lower().replace("bypass", "")
-    return any(w in name for w in config_layers._SECRET_QUERY_KEYS)
+    return any(w in name for w in config_layers._SECRET_QUERY_KEYS + config_layers._SECRET_KEY_WORDS)
 
 
 def _redact_secret_params(text: str) -> str:
     out, done, pos = [], 0, 0
     while (m := _SETTING_PARAM_KEY_RE.search(text, pos)):
         pos = m.end()
-        if m.group(2) and _is_secret_param_key(m.group(1)):
+        if m.group(2) is not None and _is_secret_param_key(m.group(1)):
             v = _SETTING_SECRET_VALUE_RE.match(text, pos)
             if v:
                 out.append(text[done:pos] + _CUT)
@@ -330,12 +336,12 @@ def _redact_schemeless_userinfo(token: str) -> str:
         return token
     userinfo, at, host = head.rpartition("@")
     if userinfo and (":" in userinfo or "/" in host):
-        return _CUT + at + host + token[len(head):]
+        return (_CUT if ":" in userinfo else _CUT_USER) + at + host + token[len(head):]
     return token
 
 
 def _redact_setting_url(value: str) -> str:
-    if _CUT in value:
+    if _CUT in value or _CUT_USER in value:
         return _SECRET_MASK
     redacted = config_layers.redact_url_userinfo_in_text(value, _CUT)
     redacted = re.sub(r"\S+", lambda m: _redact_schemeless_userinfo(m.group(0)), redacted)
@@ -344,10 +350,14 @@ def _redact_setting_url(value: str) -> str:
     # Fail closed (#593): an "@" left after the cuts, once %-decoded and
     # NFKC-normalized (%40, U+FF20), with a ":" before it may still be
     # userinfo the cuts missed; mask the whole value. A plain email stays.
-    # Only the real cuts are dropped first (#599 N2).
-    check = unicodedata.normalize("NFKC", urllib.parse.unquote(redacted.replace(_CUT + "@", "").replace(_CUT, "")))
+    # Only the real cuts are dropped first (#599 N2). An encoded user-only
+    # token with a path also masks the whole value.
+    check = unicodedata.normalize("NFKC", urllib.parse.unquote(
+        redacted.replace(_CUT + "@", "").replace(_CUT, "").replace(_CUT_USER, "")))
     at = check.rfind("@")
-    return _SECRET_MASK if at > 0 and ":" in check[:at] else redacted.replace(_CUT, _SECRET_MASK)
+    if (at > 0 and ":" in check[:at]) or _SETTING_USER_TOKEN_RE.search(check):
+        return _SECRET_MASK
+    return redacted.replace(_CUT, _SECRET_MASK).replace(_CUT_USER, _SECRET_MASK)
 
 
 def _mask_setting_value(value: Any, secret: bool = False) -> Any:
@@ -380,6 +390,10 @@ def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> A
     if secret and posted == _SECRET_MASK:
         return stored
     if isinstance(posted, dict):
+        if stored is not _MISSING and not isinstance(stored, dict) and _SECRET_MASK in json.dumps(posted):
+            # An object posted over a stored scalar or list has no stored
+            # entries to restore a mask from (#599).
+            raise ValueError("a masked value was edited; re-enter the secret in full")
         base = stored if isinstance(stored, dict) else {}
         out = {}
         for k, v in posted.items():

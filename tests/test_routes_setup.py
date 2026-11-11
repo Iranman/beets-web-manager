@@ -840,6 +840,14 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
             "n1_semi": "https://h.invalid/?token=a;fake-r11&page=2",
             "n2": "fakeu:fake-r12 x********@db.invalid",
             "n2_enc": "https://a:fake-r13@h1.invalid x:fake-r14********%40h2.invalid",
+            # Independent review of this fix (#599):
+            "spaced_scheme": "https://u:fake-r19 fake-r20@h.invalid/repo",
+            "q_quoted": "https://h.invalid/?token='fake-r21'fake-r22&page=2",
+            "dsn_spaces": "host=db.invalid password = 'fake-r23 fake-r24' user=x",
+            "dsn_space_after": "password= fake-r25",
+            "user_only_enc": "fake-r26%40git.invalid/org/repo",
+            "user_only_wide": "fake-r27＠git.invalid/org/repo",
+            "free_words": "credential=fake-r28 bearer=fake-r29",
             "proxy_bypass": "proxy_bypass=1",
             "cache_bypass": "https://h.invalid/?cache_bypass=1",
             "email": "someone@mail.invalid",
@@ -874,7 +882,9 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         mask = self.module._SECRET_MASK
         for edit in ({"feed_url": got["feed_url"].replace("/a", "/b")},
                      {"urls": mask},
-                     {"ai_api_key": mask + "x"}):
+                     {"ai_api_key": mask + "x"},
+                     {"ai_api_key": {"value": mask}},
+                     {"feed_url": {"url": got["feed_url"]}}):
             r = self.client.post("/api/setup/settings", json={**edit, "expected_revision": rev})
             self.assertEqual(r.status_code, 400, edit)
             self.assertEqual(r.get_json()["code"], "settings_unmatched_mask")
