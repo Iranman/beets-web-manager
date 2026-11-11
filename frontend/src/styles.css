@@ -33,6 +33,7 @@
   --bw-red: #b91c1c;
   --bw-red-hover: #ef4444;
   --bw-focus: #f87171;
+  --bw-header-h: 3.5rem;
   color: var(--bw-text);
   background: var(--bw-bg);
   font-family:
@@ -42,6 +43,13 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Backstop only (#607): overflowing elements are fixed at their source. `clip`
+   (unlike `hidden`) creates no scroll container, so position: sticky still works. */
+html,
+body {
+  overflow-x: clip;
 }
 
 body {
@@ -68,6 +76,7 @@ input {
   scrollbar-color: #56606e #1c2027;
 }
 
+/* Unlayered on purpose: it must beat `outline-none` utilities. A utility that must override it needs `!` (#607). */
 :focus-visible {
   outline: 2px solid var(--bw-focus);
   outline-offset: 2px;
