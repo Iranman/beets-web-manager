@@ -924,6 +924,19 @@ def _import_review_payload_from_pending_item(item: Dict[str, Any]) -> Dict[str, 
     }
 
 
+def _import_review_stored_item_for_path(path: Any) -> Optional[Dict[str, Any]]:
+    """#604: the stored pending Review item for ``path``, or None. Auto-enqueue
+    builds eligibility from this, never from identity or confidence the
+    request body asserts."""
+    path = _review_path_text(path)
+    if not path.strip():
+        return None
+    for item in _load_pending_reviews(prune_resolved=False):
+        if _review_paths_equal(_review_path_text((item or {}).get("path")), path):
+            return item
+    return None
+
+
 def _pending_item_is_ready_for_backend_auto_import(item: Dict[str, Any]) -> bool:
     status_key = _review_status_key((item or {}).get("status") or "ready_to_import")
     if status_key in {
