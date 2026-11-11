@@ -222,5 +222,31 @@ class FallbackCasRaceTests(_CarrierStateMixin):
         self.assertEqual(rc.get_carrier(cid)["state"], "verifying")
 
 
+class ScheduleStartsOnlyUnderServerEntrypointTests(unittest.TestCase):
+    """#626: importing app (every test process does) must not register the
+    recurring schedules; the server entrypoint (app.py ``__main__``) must."""
+
+    def test_importing_app_registers_no_schedule(self):
+        import app  # noqa: F401
+        from backend.app_runtime import jobs
+        self.assertNotIn(recovery_service.ADVANCER_SCHEDULE_NAME, jobs._schedules)
+        self.assertNotIn("legacy-auto-scan", jobs._schedules)
+
+    def test_server_startup_registers_the_advancer(self):
+        import app
+        with mock.patch.object(app, "_legacy_local_scan_enabled", return_value=False),              mock.patch.object(recovery_service, "jobs") as mjobs:
+            app.start_background_schedules()
+        mjobs.every.assert_called_once()
+        self.assertEqual(mjobs.every.call_args.args[0], recovery_service.ADVANCER_SCHEDULE_NAME)
+        self.assertEqual(mjobs.every.call_args.kwargs["initial_delay"],
+                         recovery_service.ADVANCER_STARTUP_DELAY)
+
+    def test_main_block_calls_startup_before_serving(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8")
+        main = src[src.rindex('if __name__ == "__main__":'):]
+        self.assertLess(main.index("start_background_schedules()"), main.index("_waitress_serve("))
+
+
 if __name__ == "__main__":
     unittest.main()
