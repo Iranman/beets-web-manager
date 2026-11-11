@@ -1,5 +1,5 @@
 import { formatEpochDateTime } from '../lib/dates';
-import { errorMessage } from '../lib/errors';
+import { errorMessage, sentences } from '../lib/errors';
 import { Description, Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -99,7 +99,7 @@ function approveErrorMessage(ex: unknown) {
     return 'Approval refused: this transaction is no longer in Preview (it changed state, for example in another tab or job). Nothing was approved by this request. Review its current status below before acting.';
   }
   const detail = errorMessage(ex);
-  return `Approval failed: ${detail}. Review the transaction status below before retrying.`;
+  return sentences(`Approval failed: ${detail}`, 'Review the transaction status below before retrying.');
 }
 
 // Only claim "nothing changed" when the response proves the request was
@@ -289,6 +289,8 @@ export default function LibraryChanges() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  // The list failed to load: its count and emptiness are unknown, not zero.
+  const [listFailed, setListFailed] = useState(false);
 
   const selected = useMemo(() => rows.find((row) => row.id === selectedId) || null, [rows, selectedId]);
 
@@ -299,8 +301,10 @@ export default function LibraryChanges() {
       const response = await getTransactions({ status, operation, q: query, offset, limit: pageSize });
       setRows(response.transactions);
       setTotal(response.total);
+      setListFailed(false);
       if (!selectedId && response.transactions[0]) setSelectedId(response.transactions[0].id);
     } catch (ex) {
+      setListFailed(true);
       setError(errorMessage(ex));
     } finally {
       setLoading(false);
@@ -341,7 +345,7 @@ export default function LibraryChanges() {
       setSettings(response.settings);
     } catch (ex) {
       setSettings(previous);
-      setError(`Setting not saved: ${errorMessage(ex)} The previous value is kept.`);
+      setError(sentences(`Setting not saved: ${errorMessage(ex)}`, 'The previous value is kept.'));
     }
   };
 
@@ -448,11 +452,17 @@ export default function LibraryChanges() {
 
           <div className="overflow-hidden rounded border border-graphite-700">
             <div className="grid grid-cols-[1fr_auto] border-b border-graphite-700 bg-graphite-900 px-3 py-2 text-xs font-semibold uppercase text-zinc-500">
-              <span>{total} transaction{total === 1 ? '' : 's'}</span>
-              <span>{offset + 1}-{Math.min(offset + pageSize, total || 0)}</span>
+              {listFailed ? (
+                <span>Transactions unknown</span>
+              ) : (
+                <>
+                  <span>{total} transaction{total === 1 ? '' : 's'}</span>
+                  <span>{total ? `${offset + 1}-${Math.min(offset + pageSize, total)}` : '—'}</span>
+                </>
+              )}
             </div>
             <div className="divide-y divide-graphite-800">
-              {rows.length === 0 && <div className="p-4 text-sm text-zinc-500">No transactions found.</div>}
+              {rows.length === 0 && !loading && !listFailed && <div className="p-4 text-sm text-zinc-500">No transactions found.</div>}
               {rows.map((row) => (
                 <button
                   key={row.id}

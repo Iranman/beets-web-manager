@@ -1,7 +1,7 @@
 // Library > Missing IDs: batch fix of proven matches (#399). The server proves
 // each row and decides what may be written; this panel only selects rows, shows
 // that decision, asks for confirmation and follows the jobs.
-import { errorMessage } from '../../lib/errors';
+import { errorMessage, sentences } from '../../lib/errors';
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
@@ -113,7 +113,7 @@ export function previewErrorMessage(err: unknown) {
   if (code === 'ENGINE_UNAVAILABLE') return 'Nothing was previewed: Beets is unavailable. Check the Beets status on the System page, then try again.';
   if (code === 'ENGINE_AUTH_ERROR') return 'Nothing was previewed: Web Manager could not sign in to Beets. Check the Beets connection on the System page.';
   if (code === 'ENGINE_ERROR') return 'Nothing was previewed: Beets returned an error. Check the Beets status on the System page, then try again.';
-  return `Nothing was previewed: ${detail}. Try again, or check the Jobs page.`;
+  return sentences(`Nothing was previewed: ${detail}`, 'Try again, or check the Jobs page.');
 }
 
 /** Error text for a refused apply (start refusal or the job's own not_preview answer). */
@@ -226,7 +226,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
         if (cancelled) return;
         failures += 1;
         if (failures >= 3) {
-          setError(`Could not check the ${job.kind} job (${job.job_id}): ${errorMessage(err)}. It may still be running; check the Jobs page.`);
+          setError(sentences(`Could not check the ${job.kind} job (${job.job_id}): ${errorMessage(err)}`, 'It may still be running; check the Jobs page.'));
           finish();
         }
       } finally {
@@ -319,7 +319,7 @@ export function MissingIdsBatchPanel({ rows, onWritten }: { rows: ReviewItem[]; 
         ? 'Cancel requested: the batch stops after the row it is writing now.'
         : 'Cancel requested: the preview stops; nothing was written.');
     } catch (err) {
-      setError(`Could not cancel the ${job.kind} job: ${errorMessage(err)}. Check the Jobs page.`);
+      setError(sentences(`Could not cancel the ${job.kind} job: ${errorMessage(err)}`, 'Check the Jobs page.'));
     }
   };
 

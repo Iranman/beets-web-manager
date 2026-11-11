@@ -1,4 +1,4 @@
-import { errorMessage } from '../../lib/errors';
+import { errorMessage, sentences } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -111,7 +111,7 @@ export const UntrackedRecoverySection: React.FC = () => {
     } catch (err) {
       setRollbackState({
         allowed: false,
-        reason: `Could not check whether this plan can be rolled back: ${errorMessage(err, 'request failed')}. Open it in Library Changes to review its status.`,
+        reason: sentences(`Could not check whether this plan can be rolled back: ${errorMessage(err, 'request failed')}`, 'Open it in Library Changes to review its status.'),
       });
     }
   };

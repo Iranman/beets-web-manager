@@ -1,5 +1,5 @@
 import { normaliseEpochSeconds } from '../../lib/dates';
-import { errorMessage } from '../../lib/errors';
+import { errorMessage, sentences } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -145,7 +145,7 @@ export function HistoryPanel() {
     try {
       await clearRecentImports();
     } catch (err) {
-      setError(`Could not clear the recently imported list: ${errorMessage(err)}. Click Refresh to see the current list, then try again.`);
+      setError(sentences(`Could not clear the recently imported list: ${errorMessage(err)}`, 'Click Refresh to see the current list, then try again.'));
       return;
     }
     void load();

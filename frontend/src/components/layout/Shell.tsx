@@ -2,7 +2,8 @@ import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router';
 import { getHealth, logout, restartApp } from '../../api/client';
-import { useGlobalJobs } from '../../lib/hooks';
+import { useEngineProbe, useGlobalJobs } from '../../lib/hooks';
+import { EngineOfflineBanner, EngineOfflineContext } from '../EngineOfflineBanner';
 
 interface Tab {
   to: string;
@@ -54,6 +55,7 @@ function JobsBadge({ running, failed }: { running: number; failed: number }) {
 
 export default function Shell({ username, onLogout }: ShellProps) {
   const { running, failed } = useGlobalJobs();
+  const engineOffline = useEngineProbe();
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState('');
   const navigate = useNavigate();
@@ -206,7 +208,10 @@ export default function Shell({ username, onLogout }: ShellProps) {
       </header>
 
       <main className="mx-auto w-full min-w-0 max-w-screen-2xl flex-1 px-3 py-4 sm:px-4 sm:py-5">
-        <Outlet />
+        <EngineOfflineContext.Provider value={engineOffline}>
+          <EngineOfflineBanner />
+          <Outlet />
+        </EngineOfflineContext.Provider>
       </main>
     </div>
   );
