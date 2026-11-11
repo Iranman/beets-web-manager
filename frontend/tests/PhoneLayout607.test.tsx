@@ -12,12 +12,25 @@ describe('#607 phone layout', () => {
     const nav = shell.match(/<nav aria-label="Primary"[^>]*className="([^"]+)"/)?.[1] ?? '';
     expect(nav.split(' ')).toEqual(expect.arrayContaining(['flex', 'min-w-0', 'overflow-x-auto']));
     expect(shell).not.toMatch(/flex-wrap items-center gap-x-1/);
-    expect(shell).toContain('focus-visible:-outline-offset-2');
     expect(shell).toContain('h-[var(--bw-header-h)]');
+  });
+
+  it('the tab inset focus ring actually overrides the unlayered global ring', () => {
+    const css = src('styles.css');
+    // The global rule is unlayered (so it beats `outline-none` utilities), and an unlayered rule beats
+    // every non-important Tailwind v4 utility. Without `!` the inset offset never applies and the
+    // nav scroller clips the ring.
+    const unlayered = css.replace(/@layer\s+\w+\s*\{[\s\S]*?\n\}/g, '');
+    expect(unlayered).toMatch(/:focus-visible\s*\{\s*outline: 2px solid var\(--bw-focus\);\s*outline-offset: 2px;/);
+    const link = src('components/layout/Shell.tsx').match(/'flex shrink-0 items-center whitespace-nowrap[^']*'/)?.[0] ?? '';
+    expect(link.split(/[' ]/)).toContain('focus-visible:-outline-offset-2!');
   });
 
   it('Playlists sticky bars sit below the app header, under its z-index', () => {
     const playlists = src('views/Playlists.tsx');
+    // overflow-x-hidden would make the root a scroll container and stop the bars sticking.
+    expect(playlists).toContain('<div className="min-w-0 space-y-6 overflow-x-clip">');
+    expect(playlists).not.toContain('overflow-x-hidden');
     expect(playlists).not.toMatch(/sticky top-0/);
     expect(playlists.match(/sticky top-\[var\(--bw-header-h\)\]/g)).toHaveLength(2);
     expect(playlists).not.toMatch(/sticky[^"]*\bz-(?:[2-9]\d)\b/);

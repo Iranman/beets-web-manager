@@ -76,6 +76,7 @@ input {
   scrollbar-color: #56606e #1c2027;
 }
 
+/* Unlayered on purpose: it must beat `outline-none` utilities. A utility that must override it needs `!` (#607). */
 :focus-visible {
   outline: 2px solid var(--bw-focus);
   outline-offset: 2px;

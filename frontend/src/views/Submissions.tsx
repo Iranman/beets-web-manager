@@ -685,7 +685,7 @@ export default function Submissions() {
           <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
             <h2 className="text-sm font-semibold text-zinc-100">Reference URLs</h2>
             <p className="mt-1 text-xs text-zinc-400">Paste a YouTube, MusicBrainz, Discogs, Bandcamp, or SoundCloud link to help identify this release. Metadata is retrieved without downloading any audio or video.</p>
-            <div className="mt-2 flex gap-2">
+            <div className="mt-2 flex flex-wrap gap-2 sm:flex-nowrap">
               <TextField fullWidth size="small" placeholder="https://www.youtube.com/watch?v=..." value={refUrlInput} onChange={(event) => setRefUrlInput(event.target.value)} disabled={!target} />
               <Button size="small" variant="contained" disabled={!target || !refUrlInput.trim() || refUrlBusy} onClick={() => void addReferenceUrl()}>{refUrlBusy ? 'Parsing…' : 'Add reference'}</Button>
             </div>

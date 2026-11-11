@@ -2358,7 +2358,7 @@ export default function Playlists() {
   ];
 
   return (
-    <div className="min-w-0 space-y-6 overflow-x-hidden">
+    <div className="min-w-0 space-y-6 overflow-x-clip">
       <div>
         <h1 className="text-xl font-semibold text-zinc-100">Playlists</h1>
         <p className="mt-0.5 text-sm text-muted">

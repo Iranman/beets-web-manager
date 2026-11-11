@@ -120,7 +120,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   to={to}
                   className={({ isActive }) =>
                     [
-                      'flex shrink-0 items-center whitespace-nowrap border-b-2 px-2.5 text-[0.82rem] font-medium transition-colors focus-visible:-outline-offset-2 sm:px-3',
+                      'flex shrink-0 items-center whitespace-nowrap border-b-2 px-2.5 text-[0.82rem] font-medium transition-colors focus-visible:-outline-offset-2! sm:px-3',
                       isActive
                         ? 'border-red-500 bg-red-950/35 text-white shadow-[inset_0_-1px_0_rgba(239,68,68,0.35)]'
                         : 'border-transparent text-zinc-300 hover:border-red-700/70 hover:bg-red-950/18 hover:text-white',
