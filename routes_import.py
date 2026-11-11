@@ -18,7 +18,7 @@ from backend.ai_service import _AI_BATCH_AI_TIMEOUT, _AI_MATCH_HISTORY_FILE, _AI
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, LOG_FILE, MUSIC_ROOT, _app_logger, _extract_mb_uuid, _path_is_under, _redact_security_text, _s, jobs
 from backend.artwork_service import _ART_EXTS, _album_art_status
 from backend.import_reconciliation_service import _ai_batch_reconcile_state, _import_review_reconcile_job_lookup, _review_status_key
-from backend.import_review_service import _candidate_track_comparison_payload, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _import_review_suggestion_is_stale, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _compact_revalidation_summary, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
+from backend.import_review_service import _STALE_STORED_SUGGESTION, _candidate_track_comparison_payload, _import_review_payload_from_pending_item, _import_review_stored_item_for_path, _import_review_auto_job_for_submission, _import_review_build_revalidated_match, _import_review_job_last_line, _import_review_revalidation_preflight, _import_review_start_auto_import, _import_review_suggestion_is_stale, _manual_review_validate_album_identifier, _manual_review_validate_recording_identifier, _resolve_import_review_folder_path, _review_blocked_metadata, _review_item_origin_type, _review_queue_status_matches, _run_import_review_auto_enqueue_ready_batch, _run_import_review_revalidation, _compact_revalidation_summary, _update_pending_review_revalidation, IMPORT_REVIEW_REVALIDATE_JOB_TYPE, IMPORT_REVIEW_REVALIDATE_SYNC_MAX
 from backend.import_service import _cached_import_target_preview, _delete_staged_import_folder, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _import_skipped_items, _read_log_tail, _record_import_skips, _resolve_import_source_path, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import MISSING_MB_MOVED_TO, _delete_review_source_folder, _library_no_mb_album_matches_folder, _preserve_torrent_source_path, _review_torrent_files_protected, _scan_artist_folder_groups
 from backend.matching_service import _ai_api_key, _invalidate_lib_cache
@@ -914,7 +914,14 @@ def import_reconciliation_resolve(review_id: str):
 
 @app.post("/api/import-review/auto-enqueue")
 def import_review_auto_enqueue():
-    payload = request.get_json(silent=True) or {}
+    # #604: only the folder path comes from the client; identity, scores
+    # and track mapping come from the stored pending Review item.
+    item = _import_review_stored_item_for_path((request.get_json(silent=True) or {}).get("path"))
+    if item is None:
+        return jsonify({"ok": False, "queued": False, "error": "No pending Review item for this folder."}), 404
+    if _import_review_suggestion_is_stale(item):
+        return jsonify({"ok": False, "queued": False, "error": _STALE_STORED_SUGGESTION}), 409
+    payload = _import_review_payload_from_pending_item(item)
     eligibility = evaluate_import_eligibility(payload)
     if QUALITY_UPGRADE_INFORMATIONAL["error"] in (eligibility.get("blocking_reasons") or []):
         return jsonify({**QUALITY_UPGRADE_INFORMATIONAL, "queued": False, "eligibility": eligibility}), 409
