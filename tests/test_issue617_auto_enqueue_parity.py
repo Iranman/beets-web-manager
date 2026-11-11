@@ -48,9 +48,9 @@ class _Base(unittest.TestCase):
         self.addCleanup(env.stop)
         self.client = app_module.app.test_client()
 
-    def write_item(self, status="review_required", mb_valid=True):
+    def write_item(self, status="review_required", mb_valid=True, **extra):
         self.store.write_text(json.dumps([{
-            "path": str(self.folder), "status": status,
+            **extra, "path": str(self.folder), "status": status,
             "suggestion": {"mb_releasegroupid": RG, "mb_albumid": REL, "mb_valid": mb_valid,
                            "confidence_score": 0.95, "identity_validated": True},
             "evidence": {}}]))
@@ -106,7 +106,8 @@ class ReconcileResolvesStoredItemTests(_Base):
         update.assert_not_called()
 
     def test_client_idempotency_key_is_ignored(self):
-        self.write_item(status="blocked")  # ineligible, so no computed key
+        # Ineligible, so no computed key; a stored key keeps it reconcilable (#623).
+        self.write_item(status="blocked", auto_import_idempotency_key="stored-key")
         with mock.patch.object(routes_import, "_mark_pending_review_status") as mark, \
                 mock.patch.object(routes_import, "_import_review_auto_job_for_submission",
                                   return_value=None) as lookup:
