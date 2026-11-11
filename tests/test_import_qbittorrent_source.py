@@ -576,6 +576,22 @@ class QaFindingsTests(_Batch):
         self.assertNotEqual(row_folder, src)
         self.assertEqual(self.staged_names(row_folder), ["01.flac", "02.flac"])
 
+    def test_mixed_unit_under_upgrade_row_is_refused_without_a_failure_row(self):  # #569 F1
+        import json
+        import backend.pending_review_store as prs
+        src = self.mixed_album()
+        store = self.tmp / "ai_pending_review.json"
+        store.write_text(json.dumps([{"path": str(src), "status": "review_required", "evidence": {
+            "origin_step": "quality_upgrade", "duplicate_rule": "quality_upgrade", "source_mode": "qbittorrent"}}]))
+        with mock.patch.object(prs, "_AI_PENDING_FILE", new=store):
+            out, folders = self.run_batch()
+        state = folders[str(src)]
+        self.assertEqual((state["status"], state["failure_reason"]),
+                         ("import_failed", "quality_upgrade_informational"), self.log)
+        self.reimport.assert_not_called()
+        # No ai_batch_failure row at the staged copy, which Review could import.
+        self.queued.assert_not_called()
+
     def test_skipped_mixed_unit_review_row_points_at_the_staged_copy(self):  # B2
         src = self.mixed_album()
         ai._ai_batch_control(self.batch_id)["skip_folder_ids"].add(ai._ai_batch_folder_id(str(src)))

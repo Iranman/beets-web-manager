@@ -628,14 +628,15 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
 
 
 def _in_app_private_root(path: Path) -> bool:
-    """Whether ``path`` is written under ``<downloads>/_beets_missing_import`` or a
-    playlist download root. Location only, never ownership (#566): callers may
-    use it to leave a folder OUT of a user scan, never to move or delete it."""
+    """Whether ``path`` is under ``<downloads>/_beets_missing_import`` or a
+    playlist download root, as written or once resolved (#583: a root reached
+    through a symlink). Location only, never ownership (#566): callers may use
+    it to leave a folder OUT of a user scan, never to move or delete it."""
     roots = [r / "_beets_missing_import" for r in DOWNLOADS_ALLOWED_ROOTS]
     roots += list(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS)
-    lexical = os.path.abspath(path)
-    return any(lexical == os.path.abspath(r) or lexical.startswith(os.path.abspath(r).rstrip(os.sep) + os.sep)
-               for r in roots)
+    pairs = [(os.path.abspath(path), os.path.abspath(r)) for r in roots]
+    pairs += [(os.path.realpath(path), os.path.realpath(r)) for r in roots]
+    return any(p == r or p.startswith(r.rstrip(os.sep) + os.sep) for p, r in pairs)
 
 
 def _app_managed_download_path(path: Path) -> bool:
@@ -713,7 +714,9 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
     if not roots:
         # No safe download root (DOWNLOADS_ROOT unsafe): copy, never move (#251 N1).
         return True
-    return any(_path_is_under(path, root) for root in roots)
+    # #583: an unproven folder under a playlist root (even one outside the
+    # downloads roots) is copied and kept, like any other unproven download.
+    return any(_path_is_under(path, root) for root in (*roots, *PLAYLIST_DOWNLOAD_ALLOWED_ROOTS))
 
 
 def _preserve_torrent_source_file(path_value: str | Path) -> bool:
