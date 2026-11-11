@@ -1107,8 +1107,9 @@ _AI_ARTIST_REJECTION_PREFIX = "Rejected: artist mismatch."
 
 
 def _revalidated_artist_rejection(item: Dict[str, Any], suggestion: Dict[str, Any],
-                                  comparison: Dict[str, Any]) -> str:
-    """The AI artist gate's verdict for a revalidated match ("" = passes).
+                                  comparison: Dict[str, Any]) -> Optional[str]:
+    """The AI artist gate's verdict for a revalidated match ("" = passes,
+    ``None`` = artists could not be compared and nothing was stored, #584).
 
     Release Group membership never clears it (#521 P1): with both artists
     known the gate re-runs on the revalidated release, otherwise a stored
@@ -1122,7 +1123,7 @@ def _revalidated_artist_rejection(item: Dict[str, Any], suggestion: Dict[str, An
     stored = _s(suggestion.get("candidate_identity_error")).strip()
     if suggestion.get("identity_validated") is False and stored.startswith(_AI_ARTIST_REJECTION_PREFIX):
         return stored
-    return ""
+    return None
 
 
 def _import_review_build_revalidated_match(
@@ -1137,7 +1138,7 @@ def _import_review_build_revalidated_match(
     representative_release_id = _extract_mb_uuid(
         _s(comparison.get("representative_release_id") or comparison.get("mb_albumid") or suggestion.get("representative_mb_albumid") or suggestion.get("mb_albumid"))
     )
-    identity_validated = comparison.get("identity_validated") is not False
+    identity_validated: Optional[bool] = comparison.get("identity_validated") is not False
     candidate_identity_error = _s(comparison.get("candidate_identity_error")).strip()
     # Run the gate even when membership already fails: the artist verdict must
     # lead the stored error, or the next revalidation can no longer see it.
@@ -1147,6 +1148,11 @@ def _import_review_build_revalidated_match(
             artist_rejection = f"{artist_rejection} {candidate_identity_error}"
         identity_validated = False
         candidate_identity_error = artist_rejection
+    elif artist_rejection is None and identity_validated and suggestion.get("identity_validated") is None:
+        # #584: Release Group membership does not resolve the artist; an
+        # unresolved identity stays None (not a rejection, not proof).
+        identity_validated = None
+    identity_ok = identity_validated is not False
     mapping = comparison.get("comparison") if isinstance(comparison.get("comparison"), list) else []
     importable_count = sum(
         1 for row in mapping
@@ -1157,7 +1163,7 @@ def _import_review_build_revalidated_match(
     local_tracks = int(comparison.get("local_track_count") or 0)
     matched = int(comparison.get("matched_count") or 0)
     missing = max(0, total_tracks - importable_count)
-    preflight_status = "passed" if identity_validated and importable_count > 0 and not preflight.get("acoustid_mismatch") else "failed"
+    preflight_status = "passed" if identity_ok and importable_count > 0 and not preflight.get("acoustid_mismatch") else "failed"
     is_release_group_usable = bool(release_group_id and _MB_UUID_RE.match(release_group_id))
     has_representative = bool(representative_release_id and _MB_UUID_RE.match(representative_release_id))
     # SEC-002 Wave 14: the shared MatchingDecision (build_album_matching_decision,
@@ -1172,7 +1178,7 @@ def _import_review_build_revalidated_match(
     matching_decision = preflight.get("matching_decision") if isinstance(preflight.get("matching_decision"), dict) else {}
     matching_decision_blocks = bool(matching_decision) and not matching_decision.get("action_allowed", True)
     is_importable = bool(
-        identity_validated
+        identity_ok
         and is_release_group_usable
         and has_representative
         and importable_count > 0
@@ -1182,7 +1188,7 @@ def _import_review_build_revalidated_match(
     confidence_score = _import_review_revalidation_confidence_score(suggestion, comparison, preflight)
     confidence_level = _import_review_confidence_level(confidence_score, is_importable, preflight_status)
     extra_count = int(comparison.get("extra_count") or 0)
-    if not identity_validated:
+    if not identity_ok:
         reason = candidate_identity_error or "Representative Release ID rejected: it does not belong to selected Release Group."
     elif matching_decision_blocks:
         reason = _s(matching_decision.get("explanation") or matching_decision.get("reason")) or "Candidate requires review before import (deterministic identity not verified)."

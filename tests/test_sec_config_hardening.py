@@ -174,7 +174,7 @@ class SecretKeyPredicateTests(unittest.TestCase):
         self.assertIs(beets_plugins._is_secret_key, config_layers.is_secret_config_key)
         for key in ("token", "user_key", "Api-Key", "'password'", "authorization", "bearer_value", "smtp_pass"):
             self.assertTrue(config_layers.is_secret_config_key(key), key)
-        for key in ("directory", "plugins", "url", "user"):
+        for key in ("directory", "plugins", "url", "user", "cache_bypass", "proxy_bypass"):
             self.assertFalse(config_layers.is_secret_config_key(key), key)
 
 

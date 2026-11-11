@@ -634,14 +634,15 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
 
 
 def _in_app_private_root(path: Path) -> bool:
-    """Whether ``path`` is written under ``<downloads>/_beets_missing_import`` or a
-    playlist download root. Location only, never ownership (#566): callers may
-    use it to leave a folder OUT of a user scan, never to move or delete it."""
+    """Whether ``path`` is under ``<downloads>/_beets_missing_import`` or a
+    playlist download root, as written or once resolved (#583: a root reached
+    through a symlink). Location only, never ownership (#566): callers may use
+    it to leave a folder OUT of a user scan, never to move or delete it."""
     roots = [r / "_beets_missing_import" for r in DOWNLOADS_ALLOWED_ROOTS]
     roots += list(PLAYLIST_DOWNLOAD_ALLOWED_ROOTS)
-    lexical = os.path.abspath(path)
-    return any(lexical == os.path.abspath(r) or lexical.startswith(os.path.abspath(r).rstrip(os.sep) + os.sep)
-               for r in roots)
+    pairs = [(os.path.abspath(path), os.path.abspath(r)) for r in roots]
+    pairs += [(os.path.realpath(path), os.path.realpath(r)) for r in roots]
+    return any(p == r or p.startswith(r.rstrip(os.sep) + os.sep) for p, r in pairs)
 
 
 def _app_managed_download_path(path: Path) -> bool:
@@ -719,7 +720,9 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
     if not roots:
         # No safe download root (DOWNLOADS_ROOT unsafe): copy, never move (#251 N1).
         return True
-    return any(_path_is_under(path, root) for root in roots)
+    # #583: an unproven folder under a playlist root (even one outside the
+    # downloads roots) is copied and kept, like any other unproven download.
+    return any(_path_is_under(path, root) for root in (*roots, *PLAYLIST_DOWNLOAD_ALLOWED_ROOTS))
 
 
 def _preserve_torrent_source_file(path_value: str | Path) -> bool:
@@ -770,7 +773,7 @@ def _source_tree_snapshot(folder_path: str) -> Dict[str, tuple]:
         for name in dirnames + filenames:
             full = os.path.join(dirpath, name)
             st = os.lstat(full)
-            snap[os.path.relpath(full, root)] = (st.st_mode, st.st_ino, st.st_size, st.st_mtime_ns)
+            snap[os.path.relpath(full, root)] = (st.st_mode, st.st_ino, st.st_size, st.st_mtime_ns, st.st_nlink)
     return snap
 
 
@@ -858,6 +861,10 @@ def _delete_source_if_proven_in_library(src_path: str, album_id: int, target_rel
     except OSError as ex:
         ev = {"proven": False, "reason": f"evidence_unavailable: {type(ex).__name__}", "files": []}
     else:
+        # #586: a hardlinked name may be a seeding download's; never delete it.
+        if any(stat.S_ISREG(st[0]) and st[4] > 1 for st in snapshot.values()):
+            log.append(f"  [cleanup] Source kept (hardlinked file): {Path(src_path).name}")
+            return {"proven": False, "reason": "hardlinked_file", "files": [], "deleted": False}
         ev = _source_proven_in_library(src_path, album_id, target_releasegroupid)
     ev["deleted"] = False
     if not ev["proven"]:

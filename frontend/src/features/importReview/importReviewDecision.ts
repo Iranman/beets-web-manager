@@ -67,7 +67,7 @@ export type SelectedMatch = {
   missing_track_count: number;
   match_count: number | null;
   preflight_ok: boolean | null;
-  identity_validated?: boolean;
+  identity_validated?: boolean | null;
   candidate_identity_error?: string;
   representative_release_group_id?: string;
   rejected_representative_release_id?: string;
@@ -175,7 +175,7 @@ export function actionLabel(item: ReviewItem, selectedMatch?: SelectedMatch, pre
       ? `Repair ${n} matched track${n === 1 ? '' : 's'}`
       : `Import ${n} matched track${n === 1 ? '' : 's'}`;
   }
-  if (selectedMatch?.auto_fix_eligible) {
+  if (selectedMatch?.auto_fix_eligible && selectedMatch.identity_validated === true) {
     return existingAlbumId(item) ? 'Complete Verified Repair' : 'Complete Verified Import';
   }
   return existingAlbumId(item) ? 'Repair with ID' : 'Import with ID';
@@ -222,7 +222,7 @@ const AI_ARTIST_REJECTION_PREFIX = 'Rejected: artist mismatch.';
 
 /** The identity fields of a suggestion that may have rejected a candidate. */
 export type IdentityRejectionSource = {
-  identity_validated?: boolean;
+  identity_validated?: boolean | null;
   candidate_identity_error?: string;
   mb_releasegroupid?: string;
   representative_mb_albumid?: string;

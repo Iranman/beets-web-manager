@@ -2464,7 +2464,7 @@ export interface AiSuggestion {
   track_match_count?: number | null;
   mb_track_count?: number | null;
   local_track_count?: number | null;
-  identity_validated?: boolean;
+  identity_validated?: boolean | null;
   candidate_identity_error?: string;
   representative_release_group_id?: string;
   rejected_representative_release_id?: string;
@@ -2569,7 +2569,7 @@ export interface ImportReviewSelectedMatch {
   missing_track_count: number;
   match_count: number | null;
   preflight_ok: boolean | null;
-  identity_validated?: boolean;
+  identity_validated?: boolean | null;
   candidate_identity_error?: string;
   representative_release_group_id?: string;
   rejected_representative_release_id?: string;
@@ -2818,7 +2818,7 @@ export interface ImportTargetPreviewPayload {
     source_path?: string;
   }>;
   selected_source_files?: string[];
-  identity_validated?: boolean;
+  identity_validated?: boolean | null;
   candidate_identity_error?: string;
 }
 

@@ -528,6 +528,28 @@ class PrivateRootOwnershipTests(_Roots):
             self.assertFalse(self.managed(root / "key"), root)
         self.assertTrue(lib._preserve_torrent_source_path(self.pl_in / "key" / "downloads"))
 
+    def test_unmarked_folder_under_a_playlist_root_outside_downloads_is_kept(self):
+        """#583: unproven there too, so copied and kept, never moved."""
+        folder = self.audio(self.pl_out / "key" / "downloads")
+        self.assertTrue(lib._preserve_torrent_source_path(folder))
+        self.assertTrue(lib._preserve_torrent_source_file(folder / "01.flac"))
+
+    def test_resolved_staging_path_under_a_linked_downloads_root_gets_no_name_bridge(self):
+        """#583: DOWNLOADS_ROOT set through a symlink; the resolved spelling of a
+        legacy-named folder under _beets_missing_import is still private."""
+        real = self.tmp / "real-dl"
+        real.mkdir()
+        alias = self.tmp / "dl-alias"
+        _symlink(real, alias, True)
+        name = slskd.direct_download_folder_name("A", "ytdlp", "1793260626691")
+        folder = self.audio(real / "_beets_missing_import" / name)
+        with mock.patch.object(lib, "DOWNLOADS_ALLOWED_ROOTS", [alias]), \
+                mock.patch.object(lib, "TORRENT_SOURCE_ROOTS", [alias]):
+            self.assertTrue(lib._in_app_private_root(folder))
+            self.assertFalse(self.managed(folder))
+            self.assertTrue(lib._preserve_torrent_source_path(folder))
+            self.assertTrue(self.managed(real / "Artist" / name))  # the bridge holds elsewhere
+
     def test_private_roots_still_stay_out_of_a_user_scan(self):
         """Skipping moves nothing, so the location alone still excludes."""
         user = self.audio(self.dl / "Artist" / "User Album")

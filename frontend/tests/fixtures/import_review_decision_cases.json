@@ -136,7 +136,8 @@
     "is_importable": true,
     "is_partial_import": false,
     "auto_fix_eligible": true,
-    "source": "candidate"
+    "source": "candidate",
+    "identity_validated": true
    },
    "target_preview_state": {
     "status": "ready",
@@ -162,6 +163,92 @@
    "block_reason": "",
    "next_action": "",
    "action_label": "Complete Verified Import",
+   "selected_source_files": [
+    "/downloads/a/01.flac",
+    "/downloads/a/02.flac",
+    "/downloads/a/03.flac"
+   ]
+  }
+ },
+ {
+  "name": "auto-fix eligible, identity unresolved",
+  "input": {
+   "item": {
+    "id": "review-1",
+    "type": "pending_ai",
+    "status": "Needs review",
+    "reason": "",
+    "path": "/downloads/a",
+    "mb_valid": true,
+    "mb_albumid": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "existing_album_ids": []
+   },
+   "mbid": "11111111-2222-3333-4444-555555555555",
+   "selected_match": {
+    "release_group_id": "11111111-2222-3333-4444-555555555555",
+    "representative_release_id": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "artist": "A",
+    "album": "B",
+    "year": "2000",
+    "track_mapping": [
+     {
+      "num": 1,
+      "local_title": "t1",
+      "mb_title": "T1",
+      "mb_trackid": "",
+      "status": "matched",
+      "source_path": "/downloads/a/01.flac"
+     },
+     {
+      "num": 2,
+      "local_title": "t2",
+      "mb_title": "T2",
+      "mb_trackid": "",
+      "status": "verified_match",
+      "source_path": "/downloads/a/02.flac"
+     },
+     {
+      "num": 3,
+      "local_title": "t3",
+      "mb_title": "T3",
+      "mb_trackid": "",
+      "status": "fuzzy",
+      "source_path": "/downloads/a/03.flac"
+     }
+    ],
+    "preflight_status": "passed",
+    "preflight_reason": "",
+    "is_release_group_usable": true,
+    "is_importable": true,
+    "is_partial_import": false,
+    "auto_fix_eligible": true,
+    "source": "candidate",
+    "identity_validated": null
+   },
+   "target_preview_state": {
+    "status": "ready",
+    "key": "k",
+    "preview": {
+     "ok": true,
+     "safe": true,
+     "status": "safe",
+     "blocked_reasons": [],
+     "warnings": [],
+     "tracks_to_import_count": 3,
+     "real_conflict_count": 0,
+     "tracks": []
+    }
+   }
+  },
+  "expected": {
+   "match_bucket": "ready",
+   "blocked": false,
+   "ready": true,
+   "can_apply": true,
+   "apply_block_reason": "",
+   "block_reason": "",
+   "next_action": "",
+   "action_label": "Import with ID",
    "selected_source_files": [
     "/downloads/a/01.flac",
     "/downloads/a/02.flac",
@@ -2825,7 +2912,8 @@
     "is_importable": true,
     "is_partial_import": false,
     "auto_fix_eligible": true,
-    "source": "candidate"
+    "source": "candidate",
+    "identity_validated": true
    },
    "target_preview_state": null
   },

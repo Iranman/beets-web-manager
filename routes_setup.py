@@ -26,6 +26,7 @@ import secrets
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -283,12 +284,42 @@ def _is_secret_setting_key(name: str) -> bool:
     return _is_secret_env(name) or config_layers.is_secret_config_key(name)
 
 
+# A query or fragment parameter (#access_token=... too).
+# The value stops at "?" so a nested "?access_token=" is matched on its own (#593).
+_SETTING_QUERY_PARAM_RE = re.compile(r"([?&;#]([^=&#;?\s]+)=)([^&#;?\s]+)")
+
+
+_URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
+
+
+def _redact_schemeless_userinfo(token: str) -> str:
+    # "user:pass@host" with no "://" (#585). Only the part before any "://"
+    # can be this token's userinfo; a token that starts with "scheme://" is
+    # left to the span scan (#593 QA F1).
+    head = token.split("://", 1)[0]
+    if head != token and _URL_SCHEME_RE.fullmatch(head):
+        return token
+    userinfo, at, host = head.rpartition("@")
+    if at and ":" in userinfo:
+        return _SECRET_MASK + at + host + token[len(head):]
+    return token
+
+
 def _redact_setting_url(value: str) -> str:
     redacted = config_layers.redact_url_userinfo_in_text(value, _SECRET_MASK)
-    if redacted == value and "://" in value and config_layers.url_has_userinfo(value):
-        # Encoded or lookalike "@" (%40, U+FF20) that the span scan misses: fail closed.
-        return _SECRET_MASK
-    return redacted
+    redacted = re.sub(r"\S+", lambda m: _redact_schemeless_userinfo(m.group(0)), redacted)
+    # Secret-named query parameters (?api_key=..., #585), by the config editor's rule.
+    redacted = _SETTING_QUERY_PARAM_RE.sub(
+        lambda m: m.group(1) + _SECRET_MASK
+        if any(w in urllib.parse.unquote_plus(m.group(2)).lower() for w in config_layers._SECRET_QUERY_KEYS)
+        else m.group(0),
+        redacted)
+    # Fail closed (#593): an "@" left after the cuts, once %-decoded and
+    # NFKC-normalized (%40, U+FF20), with a ":" before it may still be
+    # userinfo the cuts missed; mask the whole value. A plain email stays.
+    check = unicodedata.normalize("NFKC", urllib.parse.unquote(redacted)).replace(_SECRET_MASK + "@", "")
+    at = check.rfind("@")
+    return _SECRET_MASK if at > 0 and ":" in check[:at] else redacted
 
 
 def _mask_setting_value(value: Any, secret: bool = False) -> Any:
@@ -329,12 +360,29 @@ def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> A
                 out[k] = restored
         return out
     if isinstance(posted, list):
+        # Entries are matched by identity, not position (#585): a posted entry
+        # equal to the GET form of a stored entry is that entry. A mask in any
+        # other entry cannot be tied to a stored secret, so it is refused.
         base = stored if isinstance(stored, list) else []
+        masked_base = [_mask_setting_value(b) for b in base]
+        if posted == masked_base:
+            return list(base)  # unchanged round trip
+        unclaimed = list(range(len(base)))
         out_list = []
         for i, v in enumerate(posted):
-            restored = _restore_masked_setting(v, base[i] if i < len(base) else _MISSING)
-            if restored is not _MISSING:
-                out_list.append(restored)
+            candidates = [j for j in sorted(unclaimed, key=lambda j: j != i) if masked_base[j] == v]
+            if len({json.dumps(base[j], sort_keys=True) for j in candidates}) > 1:
+                # Stored entries that differ only in masked parts (#593 QA
+                # F2): which one the client means is unknowable.
+                raise ValueError("a masked list entry matches several stored entries; re-enter it")
+            match = candidates[0] if candidates else None
+            if match is not None:
+                unclaimed.remove(match)
+                out_list.append(base[match])
+            elif _SECRET_MASK in json.dumps(v):
+                raise ValueError("a masked value in a list entry does not match a stored entry; re-enter it")
+            else:
+                out_list.append(v)
         return out_list
     if (isinstance(posted, str) and isinstance(stored, str) and posted != stored
             and posted == _redact_setting_url(stored)):
@@ -3453,7 +3501,10 @@ def setup_save_settings():
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "settings_missing_revision"}), 428
     settings = dict(json.loads(record.get("content") or "{}"))
     # GET masks secret fields; a round-tripped mask keeps the stored value (#522).
-    settings.update(_restore_masked_setting(payload, settings))
+    try:
+        settings.update(_restore_masked_setting(payload, settings))
+    except ValueError as ex:
+        return jsonify({"ok": False, "error": str(ex), "code": "settings_unmatched_mask"}), 400
     try:
         result = store.save_json(relative_name, settings, is_secret=False, expected_revision=expected_revision)
     except WebManagerConfigStoreConflictError:
