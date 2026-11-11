@@ -8,6 +8,7 @@ the rest of the application's side effects.
 """
 import importlib
 import json
+import re
 import os
 import subprocess
 import sys
@@ -780,10 +781,47 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         body = json.dumps(got, ensure_ascii=False)
         for leaked in ("fake-p1", "fake-p2", "fake-p3", "fake-p4", "fake-p5", "fake-p6"):
             self.assertNotIn(leaked, body)
-        self.assertEqual(got["two_wide"], f"https://{mask}@h1.invalid {mask}")
+        self.assertEqual(got["two_wide"], mask)
         r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
         self.assertTrue(r.get_json()["ok"])
         self.assertEqual(self.module._load_settings(), stored_in)
+
+    def test_url_secret_variants_never_leak_and_round_trip(self):
+        # #593 QA re-check: separators other than whitespace, encoded or
+        # lookalike "@" anywhere, and nested "?" query parameters.
+        cases = {
+            "f1": "fakeu:fake-s01@db.invalid/x?next=http://y.invalid",
+            "f1_enc": "fakeu:fake-s02%40db.invalid/x?next=http://y.invalid",
+            "f1_wide": "fakeu:fake-s03＠db.invalid/x?next=http://y.invalid",
+            "f1_two": "fakeu:fake-s04@db.invalid/x?n=http://y.invalid/z?m=https://q.invalid",
+            "f3_space": "https://a:fake-s05@h1.invalid https://b:fake-s06%40h2.invalid",
+            "f3_comma": "https://a:fake-s07@h1.invalid,https://b:fake-s08%40h2.invalid",
+            "f3_comma_wide": "https://a:fake-s09@h1.invalid,https://b:fake-s10＠h2.invalid",
+            "f3_rev_comma": "https://b:fake-s11%40h2.invalid,https://a:fake-s12@h1.invalid",
+            "f3_quote": 'https://a:fake-s13@h1.invalid"https://b:fake-s14%40h2.invalid',
+            "f3_newline": "https://a:fake-s15@h1.invalid\nhttps://b:fake-s16%40h2.invalid",
+            "url_then_schemeless_enc": "https://a:fake-s17@h1.invalid,u:fake-s18%40h2.invalid",
+            "sl": "fakedbuser:fake-s19@db.invalid:5432",
+            "sl_enc_colon": "fakedbuser%3Afake-s20@db.invalid",
+            "sl_two": "u:fake-s21@h1.invalid,v:fake-s22@h2.invalid",
+            "sl_quoted": '"u:fake-s23@h.invalid"',
+            "q": "https://feed.invalid/x?api_key=fake-s24&page=2",
+            "q_frag": "https://a.invalid/cb#access_token=fake-s25",
+            "q_nested": "https://a.invalid/login?next=https://b.invalid/cb?access_token=fake-s26",
+            "q_schemeless": "db.invalid/x?password=fake-s27",
+            "q_upper": "https://a.invalid/?API-KEY=fake-s28",
+            "email": "someone@mail.invalid",
+        }
+        r = self.client.post("/api/setup/settings", json=cases)
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        body = json.dumps(got, ensure_ascii=False)
+        for value in cases.values():
+            for secret in re.findall(r"fake-s\d\d", value):
+                self.assertNotIn(secret, body)
+        self.assertEqual(got["email"], "someone@mail.invalid")
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings(), cases)
 
     def test_ambiguous_masked_list_entry_is_refused(self):
         # #593 QA F2: entries identical once masked were paired by position.
