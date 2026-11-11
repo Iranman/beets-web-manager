@@ -869,7 +869,7 @@ function AlbumFolderIssueDialog({
                 <Button disabled={busy || blocked} size="small" variant="contained" onClick={() => onApply(issue)}>
                   {busy ? 'Applying...' : 'Apply fix'}
                 </Button>
-                <Button disabled={busy || blocked} size="small" variant="contained" onClick={() => onApply(issue)}>
+                <Button disabled={busy || blocked} size="small" variant="outlined" onClick={() => onApply(issue)}>
                   Apply selected fixes
                 </Button>
                 <Button size="small" variant="text" onClick={onClose}>Close</Button>
@@ -1092,7 +1092,7 @@ function AlbumFolderCleanupPanel({
       {shownError ? <Alert severity="error" sx={{ fontSize: '0.75rem', py: 0.5 }}>{shownError}</Alert> : null}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="small" variant="contained" disabled={busy} onClick={() => void doScan()}>
+        <Button size="small" variant="outlined" disabled={busy} onClick={() => void doScan()}>
           Refresh Folder Report
         </Button>
         {summary && safeCount > 0 && (
