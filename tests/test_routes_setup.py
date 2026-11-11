@@ -910,11 +910,13 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
             "q_enc_eq": "https://h.invalid/?api_key%3Dfake-t19",
             "q_wide_eq": "https://h.invalid/?api_key＝fake-t20",
             "q_wide_q": "https://h.invalid/x？token=fake-t21",
+            "name_forms": "tokens=fake-t23 key2=fake-t24 oauth=fake-t25 apisig=fake-t26",
         }
         # #601 F3, #595 item 3: not secrets, so shown as stored.
         plain = {
             "path": "/music/monkey=banana/album",
             "words": "design=a author=b keyboard=c session_count=3 auth_bypass=1 password_bypass=1",
+            "plurals": "authors=a monkeys=b keywords=c designs=d",
             "q_words": "https://h.invalid/?author=x&keyword=y&sort_key=z",
             "mailto": "mailto:someone@mail.invalid",
             "digest": "ghcr.invalid/org/img@sha256:" + "ab" * 32,

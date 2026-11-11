@@ -314,10 +314,11 @@ _SETTING_MAILTO_RE = re.compile(r"(?i)\bmailto:")
 
 # Parameter names are matched by whole words (#601 F3, #595): "api_key",
 # "X-API-Token", "pwd", and run-together words ending in a secret word
-# ("apikey", "authToken"). "monkey", "author", "design", "keyword" are not.
+# ("apikey", "authToken"), with a plural or number ("tokens", "key2").
+# "monkey", "author", "design", "keyword" are not.
 _SECRET_PARAM_WORDS = frozenset(config_layers._SECRET_QUERY_KEYS + config_layers._SECRET_KEY_WORDS + (
     "authorization", "credentials", "sessionid"))
-_SECRET_PARAM_SUFFIXES = ("key", "token", "secret", "pass", "pwd", "password", "passwd")
+_SECRET_PARAM_SUFFIXES = ("key", "token", "secret", "pass", "pwd", "password", "passwd", "auth", "sig")
 _NOT_SECRET_PARAM_WORDS = frozenset((
     "monkey", "donkey", "turkey", "hockey", "jockey", "whiskey", "sortkey",
     "compass", "surpass", "overpass", "underpass", "trespass"))
@@ -331,9 +332,13 @@ def _is_secret_param_key(name: str) -> bool:
     words = [w for w in re.split(r"[^a-z0-9]+", name) if w]
     if len(words) > 1 and _NOT_SECRET_PARAM_QUALIFIERS.intersection(words):
         return False
+    forms = set()
+    for w in words:
+        w = w.rstrip("0123456789")
+        forms.update((w, w[:-1]) if w.endswith("s") else (w,))
     return any(w in _SECRET_PARAM_WORDS
                or (w.endswith(_SECRET_PARAM_SUFFIXES) and w not in _NOT_SECRET_PARAM_WORDS)
-               for w in words)
+               for w in forms)
 
 
 def _secret_value_end(text: str, pos: int) -> int:
