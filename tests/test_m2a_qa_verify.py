@@ -42,6 +42,7 @@ class _Sync(_RouteEnv):
             p.start()
             self.addCleanup(p.stop)
         ts._install_transaction_job_hooks()
+        ts.start_transaction_reconcile_schedule()  # the server entrypoint's step (#631)
 
     def wait(self, job):
         deadline = time.time() + 5
@@ -395,10 +396,6 @@ class ReconcileTests(_Sync):
         p = mock.patch.object(ts, "_RECONCILE_RETRY_SECONDS", 0.02)
         p.start()
         self.addCleanup(p.stop)
-
-    def install(self, jobs):
-        super().install(jobs)
-        ts.start_transaction_reconcile_schedule()  # the server entrypoint's step (#631)
 
     def stored_status(self, tx_id, want):
         deadline = time.time() + 5
