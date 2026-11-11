@@ -767,7 +767,7 @@ def _source_tree_snapshot(folder_path: str) -> Dict[str, tuple]:
         for name in dirnames + filenames:
             full = os.path.join(dirpath, name)
             st = os.lstat(full)
-            snap[os.path.relpath(full, root)] = (st.st_mode, st.st_ino, st.st_size, st.st_mtime_ns)
+            snap[os.path.relpath(full, root)] = (st.st_mode, st.st_ino, st.st_size, st.st_mtime_ns, st.st_nlink)
     return snap
 
 
@@ -855,6 +855,10 @@ def _delete_source_if_proven_in_library(src_path: str, album_id: int, target_rel
     except OSError as ex:
         ev = {"proven": False, "reason": f"evidence_unavailable: {type(ex).__name__}", "files": []}
     else:
+        # #586: a hardlinked name may be a seeding download's; never delete it.
+        if any(stat.S_ISREG(st[0]) and st[4] > 1 for st in snapshot.values()):
+            log.append(f"  [cleanup] Source kept (hardlinked file): {Path(src_path).name}")
+            return {"proven": False, "reason": "hardlinked_file", "files": [], "deleted": False}
         ev = _source_proven_in_library(src_path, album_id, target_releasegroupid)
     ev["deleted"] = False
     if not ev["proven"]:
