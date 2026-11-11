@@ -81,6 +81,7 @@ class KeptFolderSurvivesSweep(_Env):
             shutil.rmtree(path)
             return {"deleted": True}
         with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                mock.patch("backend.slskd.app_download_marker_valid", return_value=True), \
                 mock.patch("backend.composite_workflows.delete_file", side_effect=_delete):
             recovery_service.reconcile_orphan_staging_folders(log=[])
         return removed

@@ -3956,7 +3956,9 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             )
         # #567: a moved hardlinked file shares its inode with the other link
         # (e.g. a seeding torrent), so tag writes would rewrite that copy too.
-        keep_hardlinked_folder = (use_move and not selected_subset_import and not preserve_torrent_source
+        # #586: checked in copy mode too, so cleanup, artwork moves and the
+        # rejected-file rule leave a hardlinked source alone.
+        keep_hardlinked_folder = (not selected_subset_import and not preserve_torrent_source
                                   and _has_hardlinked_file(folder_path))
         if keep_hardlinked_folder:
             log.append("[import] A source file is hardlinked; using --copy and keeping the source folder.")
