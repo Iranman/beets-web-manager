@@ -235,6 +235,13 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - This is the Library's one authored motion. Nothing animates on load or at rest.
 - The Library is browse-only, a simple overview: counts, search, scope, sort, A to Z and the artist/album navigation. No fix links or buttons to Import, Jobs or Missing IDs, no review pills, badges, stamps or notes. The background disk check polls silently; there is no status line for it. The one issue marker anywhere on the page is a missing track on the back cover: struck through in the soft ink with a small "missing" mark (`.is-missing`, `.sleeve-track-note`).
 
+### Playlists: mixtapes
+- The page has two jobs, making playlists and syncing them, and is built around them. The focal point is the bench where a playlist is made: a mixtape J-card on the left takes the playlist's name as it is typed, and the add/import form sits beside it. Syncing to Plex has its own titled band with its status line, last-sync link and the Sync All button. Saved playlists stand in the walnut crate, one J-card per playlist.
+- The J-card (`.mixtape`) is authored CSS: sleeve paper (`--color-brass-200` with the paper grain), two strips of tape colour across the top third, and the name lettered in the display serif (initials at row size). The tape tone comes from a hash of the name, from four token pairs. It is always `aria-hidden`; the name is printed beside it. Playlists carry no album ids, so there is no cover art to draw from; a cover mosaic needs that field from the backend first.
+- Size the J-card in rem, never in percentages: percentage padding resolves against the row, not the card.
+- Filters and track states are crate tabs (`.crate-tab`) with `aria-pressed`. Figures sit in runs of text, never in stat tiles or pills; state is a word in a state colour.
+- No motion of its own: the Library's sleeve flip stays the app's one authored motion.
+
 ## Do's and Don'ts
 
 ### Do:
