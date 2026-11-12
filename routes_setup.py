@@ -1832,12 +1832,21 @@ _REDACTED = "[redacted]"
 # bracket, appending an extra `]` on every additional pass.
 _SECRET_KV_RE = re.compile(
     r"""(?ix)
-    \b([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|passwd|passphrase|secret|authorization|auth
+    # Start only where a name run starts, never inside one: "\b" let each
+    # "a" of "a-a-a-..." start a scan to the end of the run, O(n^2) (#524).
+    (?<![a-z0-9_-])
+    ([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|passwd|passphrase|secret|authorization|auth|cookie
         |(?<![a-z0-9])(?:pass|pwd)))  # whole word or suffix only: not bypass, compass
     (["']?\s*[:=]\s*)
-    (?!['"]?(?:(?:bearer|basic)\s+)?\[redacted\]['"]?)
-    (?:(?:bearer|basic)\s+)?
-    (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\s,;}\]&]+)
+    # Already redacted only when the placeholder ends the value: in
+    # "[REDACTED],y" the ",y" is still part of the secret (#524).
+    (?!['"]?(?:(?:bearer|basic)\s+)?\[redacted\]['"]?(?:\s|$))
+    ((?:(?:bearer|basic)\s+)?)
+    # The value runs to ASCII whitespace (an NBSP may be part of it); a quoted
+    # part may hold spaces and runs to its closing quote, or to the end when
+    # unclosed (#524). The alternatives start on different characters, so
+    # matching stays linear.
+    (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\ \t\r\n\f\v"'])+
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -1857,7 +1866,9 @@ _SECRET_NAME_KV_RE = re.compile(
 
 # Authorization / Proxy-Authorization headers, with or without a Bearer/Basic
 # scheme prefix (the scheme itself is not secret and is kept for context).
-_AUTH_HEADER_RE = re.compile(r"(?i)\b(Authorization|Proxy-Authorization)(\s*:\s*)(?:(Bearer|Basic)(\s+))?(\S+)")
+# The value runs to the end of the line: another scheme, or a quoted value,
+# may hold spaces (#524).
+_AUTH_HEADER_RE = re.compile(r"(?i)\b(Authorization|Proxy-Authorization)(\s*:\s*)(?:(Bearer|Basic)(\s+))?[^\r\n]*")
 
 # Cookie / Set-Cookie header values -- redact the entire header value through
 # end-of-line (not just the first token) so multi-value headers like
@@ -1870,7 +1881,9 @@ _AUTH_HEADER_RE = re.compile(r"(?i)\b(Authorization|Proxy-Authorization)(\s*:\s*
 _COOKIE_HEADER_RE = re.compile(r"(?im)\b(Set-Cookie|Cookie)(\s*:\s*)[^\r\n]*")
 
 # Credentials embedded in a URL's userinfo, e.g. https://user:password@host/
-_URL_CREDENTIAL_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@]+@")
+# Anchored on "://" for any scheme: a "\b[a-z][a-z0-9+.-]*" scheme scan was
+# O(n^2) on "a-a-a-..." (#524).
+_URL_CREDENTIAL_RE = re.compile(r"(://)[^\s/@]+@")
 
 # Defense-in-depth cleanup: collapses a `[redacted]`/`[REDACTED]` marker
 # followed by one or more stray `]` characters back down to a single clean
@@ -1898,26 +1911,28 @@ def _redact_diagnostic_text(text: str) -> str:
     payloads, so it must be idempotent: calling it again on its own output
     must return that output unchanged, with no accumulation of stray `]`
     characters and no corruption of an existing placeholder."""
-    # First: the shorter generic patterns would stop at a comma and hide the
-    # rest of the value from this one.
+    # Every pass here masks a whole value. The shorter generic patterns would
+    # stop at a comma and hide the rest of the value from the later passes.
     redacted = _SECRET_NAME_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", str(text or ""))
-    try:
-        # Reuse app.py's generic secret-assignment/control-char sanitizer
-        # (added for CodeQL exception sanitization) as a first pass when the
-        # real app module is importable. routes_setup is also exercised in
-        # tests against a bare stub `app` module (see test_routes_setup.py),
-        # so this must degrade gracefully rather than raise.
-        from app import _redact_security_text
-        redacted = _redact_security_text(redacted)
-    except Exception:
-        pass
+    redacted = _COOKIE_HEADER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
     redacted = _AUTH_HEADER_RE.sub(
         lambda m: f"{m.group(1)}{m.group(2)}{m.group(3) or ''}{m.group(4) or ''}{_REDACTED}",
         redacted,
     )
-    redacted = _COOKIE_HEADER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
+    redacted = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{_REDACTED}", redacted)
     redacted = _URL_CREDENTIAL_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}@", redacted)
-    redacted = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
+    try:
+        # Then app.py's generic secret-assignment/control-char sanitizer
+        # (added for CodeQL exception sanitization), when the real app module
+        # is importable. It runs last: it stops a value at a space or comma,
+        # and run first it left the rest of the value behind its placeholder
+        # (#524). routes_setup is also exercised in tests against a bare stub
+        # `app` module (see test_routes_setup.py), so this must degrade
+        # gracefully rather than raise.
+        from app import _redact_security_text
+        redacted = _redact_security_text(redacted)
+    except Exception:
+        pass
     redacted = _STRAY_REDACTED_BRACKET_RE.sub(lambda m: m.group(1), redacted)
     return redacted
 
