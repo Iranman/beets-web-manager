@@ -471,6 +471,18 @@ export function albumPrimaryAction(album: LibraryAlbum, artRepairItemMap: Map<nu
   return null;
 }
 
+// Library is browse-only: repair actions live on their owning page, so these render as links that
+// name where they lead, never as action buttons.
+function ActionLinkLabel({ action }: { action: AlbumAction }) {
+  const page = action.path.startsWith('/jobs') ? 'Jobs' : action.path.startsWith('/library/missing-ids') ? 'Missing IDs' : 'Import';
+  return (
+    // One span: MUI buttons are inline-flex, which would drop the spaces between bare text nodes.
+    <span>
+      {action.label} <span className="sr-only">on</span><span aria-hidden="true">→</span> {page}
+    </span>
+  );
+}
+
 function albumIssueDetails(album: LibraryAlbum, artRepairAlbumIds: Set<number>) {
   const health = getAlbumHealth(album);
   const details: string[] = [];
@@ -603,12 +615,13 @@ function NextRepairPanel({
           {action ? (
             <Button
               size="small"
-              variant="contained"
+              variant="text"
               color={action.variant === 'warning' ? 'warning' : 'primary'}
               title={action.title}
+              sx={{ textDecoration: 'underline', textUnderlineOffset: '0.2em' }}
               onClick={() => onNavigate(action.path)}
             >
-              {action.label}
+              <ActionLinkLabel action={action} />
             </Button>
           ) : null}
           <Button aria-haspopup="dialog" size="small" variant="outlined" onClick={() => onDetails(row)}>
@@ -659,7 +672,7 @@ function StatusCards({
           >
             <span className="block text-xs text-muted">{filter.detail}</span>{' '}
             <span className="flex items-baseline justify-between gap-2">
-              <span className="truncate text-sm font-semibold">{filter.label}</span>{' '}
+              <span className="text-sm font-semibold">{filter.label}</span>{' '}
               <span className={cx('text-base font-semibold tabular-nums', count ? 'text-zinc-100' : 'text-muted')}>
                 {numberFmt.format(count)}
               </span>
@@ -745,11 +758,11 @@ function AlphabetIndex({
   available: Set<ArtistLetter>;
   onChange: (letter: ArtistLetter) => void;
 }) {
-  // Crate divider tabs standing on the bin's edge, one per initial; the row scrolls sideways on a phone.
+  // Crate divider tabs standing on the bin's edge, one per initial; they wrap onto more rows on a phone.
   return (
     <div
       aria-label="Artists by initial"
-      className="crate-tabs flex gap-1 overflow-x-auto"
+      className="crate-tabs flex flex-wrap gap-1"
       role="group"
     >
       {ARTIST_LETTERS.map((letter) => {
@@ -789,21 +802,23 @@ function ArtistCard({
   const attentionAlbums = countAttentionAlbums(artist);
   const artUrl = useArtistArtUrl(artist, libraryVersion);
 
-  // An index row, not a card: the portrait, the name, and one line of counts and state.
+  // A record in the crate: the artist's art as a sleeve, the name and one line of counts under it.
   return (
     <button
-      className="grid min-h-13 w-full grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-3 border-b border-walnut-700 px-1 py-1.5 text-left transition-colors hover:bg-walnut-800 active:bg-walnut-700"
+      className="group flex w-[calc(50%-1.5rem)] min-w-0 flex-col gap-2 rounded-sm p-1 text-left transition-colors hover:bg-walnut-800 active:bg-walnut-700 sm:w-40"
       type="button"
       onClick={() => onSelect(artist)}
     >
-      <Artwork
-        className="h-10 w-10 rounded-sm"
-        fallback={initials(name) || 'A'}
-        label={`${name} artwork`}
-        src={artUrl}
-      />
+      <span className="sleeve block aspect-square w-full">
+        <Artwork
+          className="sleeve-face h-full w-full"
+          fallback={initials(name) || 'A'}
+          label={`${name} artwork`}
+          src={artUrl}
+        />
+      </span>
       <span className="min-w-0">
-        <span className="block truncate text-sm font-semibold text-zinc-100">{name}</span>
+        <span className="block truncate text-sm font-semibold text-zinc-100 group-hover:text-brass-200">{name}</span>
         <span className="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-400">
           <span className="tabular-nums">
             {numberFmt.format(artist.albums.length)} albums - {numberFmt.format(countTracks(artist))} tracks
@@ -854,8 +869,6 @@ function ArtistBrowser({
     }
     return runs;
   }, [grouped, visibleArtists]);
-  // Letter groups flow down newspaper-style columns, so short groups pack instead of leaving holes.
-  const groupColumns = grouped ? 'gap-x-6 md:columns-2 xl:columns-3 2xl:columns-4' : '';
 
   return (
     <section className="space-y-2">
@@ -867,26 +880,24 @@ function ArtistBrowser({
         {loading ? (
           <div className="p-4 text-sm text-zinc-300">Loading library…</div>
         ) : visibleArtists.length ? (
-          <div className={groupColumns}>
-            {groups.map((group, groupIndex) => (
-              <div key={`${group.letter ?? 'run'}-${groupIndex}`} className="mb-5 break-inside-avoid">
-                {group.letter ? (
-                  <div className="crate-group">
-                    <h3 className="crate-divider">{group.letter}</h3>
-                  </div>
-                ) : null}
-                <div className={grouped ? undefined : 'grid gap-x-6 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4'}>
-                  {group.artists.map((artist, index) => (
-                    <ArtistCard
-                      key={`${artist.name}::${artist.path ?? index}`}
-                      artist={artist}
-                      libraryVersion={libraryVersion}
-                      onSelect={onSelectArtist}
-                    />
-                  ))}
+          // One run of sleeves; when sorted A to Z a walnut divider card stands before each initial,
+          // the way dividers stand between records in a crate.
+          <div className="flex flex-wrap gap-x-3 gap-y-5">
+            {groups.flatMap((group, groupIndex) => [
+              group.letter ? (
+                <div key={`divider-${group.letter}-${groupIndex}`} className="crate-divider-card">
+                  <h3 className="crate-divider">{group.letter}</h3>
                 </div>
-              </div>
-            ))}
+              ) : null,
+              ...group.artists.map((artist, index) => (
+                <ArtistCard
+                  key={`${artist.name}::${artist.path ?? `${groupIndex}-${index}`}`}
+                  artist={artist}
+                  libraryVersion={libraryVersion}
+                  onSelect={onSelectArtist}
+                />
+              )),
+            ])}
           </div>
         ) : (
           <div className="p-4 text-sm text-zinc-300">No matching artists.</div>
@@ -969,7 +980,7 @@ function AlbumCard({
                 title={action.title}
                 onClick={() => onNavigate(action.path)}
               >
-                {action.label}
+                <ActionLinkLabel action={action} />
               </Button>
             ) : (
               <Button
@@ -980,7 +991,7 @@ function AlbumCard({
                 title={action.title}
                 onClick={() => onNavigate(action.path)}
               >
-                {action.label}
+                <ActionLinkLabel action={action} />
               </Button>
             )
           ) : null}
@@ -1138,6 +1149,7 @@ function AlbumDetailsDialog({
   libraryVersion,
   onClose,
   onCleanAlbum,
+  onNavigate,
   onReplaceTrack,
 }: {
   row: AlbumRow | null;
@@ -1149,6 +1161,7 @@ function AlbumDetailsDialog({
   libraryVersion?: number;
   onClose: () => void;
   onCleanAlbum?: (row: AlbumRow) => void;
+  onNavigate?: (path: string) => void;
   onReplaceTrack?: (track: LibraryTrack) => void;
 }) {
   const album = row?.album ?? null;
@@ -1208,7 +1221,7 @@ function AlbumDetailsDialog({
                       {album.album_id ? (
                         <Button
                           size="small"
-                          variant="contained"
+                          variant="outlined"
                           color="warning"
                           onClick={() => {
                             onClose();
@@ -1269,6 +1282,19 @@ function AlbumDetailsDialog({
                         <li key={detail}>{detail}</li>
                       ))}
                     </ul>
+                    {/* Library is for browsing; changes to an album are made on the Import workbench. */}
+                    {onNavigate ? (
+                      <button
+                        className="mt-3 inline-flex min-h-8 items-center text-sm text-brass-300 underline underline-offset-2 hover:text-brass-200 active:text-brass-400"
+                        type="button"
+                        onClick={() => {
+                          onClose();
+                          onNavigate('/import');
+                        }}
+                      >
+                        Manage on Import
+                      </button>
+                    ) : null}
                   </section>
                 </div>
               </div>
@@ -1634,13 +1660,14 @@ export default function Library() {
               </button>
             </div>
           </div>
-          <CoverShelf urls={shelfCovers} />
+          {/* Inside an artist the shelf steps aside so the artist's own header leads. */}
+          {selectedArtist ? null : <CoverShelf urls={shelfCovers} />}
         </div>
         {loading ? <LinearProgress sx={{ mt: 2, borderRadius: 1 }} /> : null}
       </div>
 
       <NextRepairPanel
-        row={nextRepairRow}
+        row={selectedArtist ? null : nextRepairRow}
         artRepairAlbumIds={artRepairAlbumIds}
         artRepairItemMap={artRepairItemMap}
         libraryVersion={libraryVersion}
@@ -1740,6 +1767,7 @@ export default function Library() {
         libraryVersion={libraryVersion}
         onClose={() => setDetailsRow(null)}
         onCleanAlbum={setCleanupTarget}
+        onNavigate={handleNavigate}
         onReplaceTrack={setReplacementTarget}
       />
 

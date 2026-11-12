@@ -90,6 +90,21 @@ describe('Hallmark Library', () => {
     expect(within(dialog).getByRole('button', { name: 'Close' })).toBeTruthy();
   });
 
+  it('shows repair actions only as links naming the page that owns them', async () => {
+    vi.mocked(apiGet).mockResolvedValue({
+      ok: true,
+      reconciled: true,
+      artists: [{ name: 'Radiohead', albums: [album({ album_id: 5, album: 'OK Computer', aldir: '/music/a' })] }],
+      stats: { artists: 1, albums: 1, tracks: 12 },
+      library_version: 3,
+    } as LibraryResponse);
+    render(<MemoryRouter><Library /></MemoryRouter>);
+    await act(async () => {});
+    const links = screen.getAllByRole('button', { name: /^Fix missing IDs on\s*Missing IDs$/ });
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) expect(link.className).not.toMatch(/MuiButton-contained/);
+  });
+
   it('runs the flip on transform only and drops the rotation under reduced motion', () => {
     expect(styles).toMatch(/\.flip-inner\s*\{[^}]*transform-style: preserve-3d/);
     expect(styles).toMatch(/@keyframes sleeve-flip\s*\{\s*from \{ transform: rotateY\(0deg\); \}\s*to \{ transform: rotateY\(180deg\); \}/);
