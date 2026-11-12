@@ -683,15 +683,41 @@ EDITABLE_FIELDS = [
 # Extent of a secret value, shared with routes_setup's diagnostic redactor
 # (#524, #647). The value runs to ASCII whitespace (an NBSP may be part of
 # it); a quoted part may hold spaces and runs to its closing quote, honoring
-# backslash escapes, or to the end when unclosed. Trailing punctuation is
-# over-masked rather than leaked. Nothing follows it in a pattern and the
-# alternatives start on different characters, so matching stays linear.
-SECRET_VALUE_PATTERN = r"""(?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^ \t\r\n\f\v"'])+"""
+# backslash escapes. A '"' part spans newlines (a PEM block) and stops at
+# the end of the line only when unclosed; a "'" part always stops there, so
+# a "can't" does not hide the traceback below it (#654). Trailing
+# punctuation is over-masked rather than leaked. Nothing follows it in a
+# pattern, so a closed '"' is never re-scanned; the one unclosed '"' left in
+# a text is scanned twice, so matching stays linear.
+SECRET_VALUE_PATTERN = (
+    r"""(?:"(?:[^"\\]|\\.)*"|"(?:[^"\\\r\n]|\\.)*|'(?:[^'\\\r\n]|\\.)*'?|[^ \t\r\n\f\v"'])+"""
+)
 
-# The key may close its own quote before the separator ({"password": ...}).
+# A secret-bearing name, shared with routes_setup's diagnostic redactor
+# (#654): any prefix ("access_token", "db_password"), "pass"/"pwd" only as a
+# whole word or suffix (not "bypass", "compass"). Use it case-insensitively
+# after a "(?<![a-z0-9_-])" start, so a scan starts only where a name run
+# starts and stays linear (#524).
+SECRET_NAME_PATTERN = (
+    r"[a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|passwd|passphrase|secret"
+    r"|authorization|auth|cookie|credentials?|sig(?:nature)?|(?<![a-z0-9])(?:pass|pwd))"
+)
+
+# One pass, three forms (#654); the leftmost match wins, so each span is
+# masked once and the output is a fixed point:
+# - a query parameter ("?access_token=x&keep=1"): the value stops at "&",
+#   "#" or whitespace outside quotes, so the following parameters survive;
+# - an Authorization or Cookie header with an unquoted value: masked to the
+#   end of the line (Digest/Token parameters, several cookie pairs), the
+#   scheme word included, as before;
+# - any other "name: value" / "name=value", the key possibly closing its own
+#   quote first ({"password": ...}).
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
-    r"([\"']?\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?" + SECRET_VALUE_PATTERN,
+    r"(?i)(?<![a-z0-9_-])(?:"
+    r"(?<=[?&])(?P<qk>" + SECRET_NAME_PATTERN + r")(?P<qs>=)(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&#\s\"'])*"
+    r"|(?P<hk>[a-z0-9_-]*?(?:authorization|cookie))(?P<hs>[ \t]*[:=][ \t]*)(?![ \t]*[\"'])[^\r\n]*"
+    r"|(?P<k>" + SECRET_NAME_PATTERN + r")(?P<s>[\"']?\s*[:=]\s*)"
+    r"(?:(?:Bearer|Basic|Digest|Token|Negotiate)\s+)?" + SECRET_VALUE_PATTERN + r")",
     re.DOTALL,
 )
 
@@ -703,7 +729,10 @@ _REDACTED_SECRET = "[REDACTED]"
 
 
 def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
-    return f"{match.group(1)}{match.group(2)}{_REDACTED_SECRET}"
+    for key, sep in (("qk", "qs"), ("hk", "hs"), ("k", "s")):
+        if match.group(key) is not None:
+            return f"{match.group(key)}{match.group(sep)}{_REDACTED_SECRET}"
+    return match.group(0)
 
 
 # Matches userinfo credentials embedded directly in a URL, e.g.
@@ -716,11 +745,13 @@ def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
 # and rules out the polynomial-time backtracking CodeQL flagged originally.
 # A length cap on top of that would only make matching fail (and therefore
 # fail to redact) for any credential longer than the cap, so neither
-# segment is length-limited here.
+# segment is length-limited here. The username may hold "@" and the password
+# runs to the last "@" before a "/" or whitespace (#654: "u:p@ss@host"
+# showed "ss"); each scan stops at the "/" of the next "://", so it is linear.
 #
 # It is anchored on "://" for any scheme: a "\b[a-z][a-z0-9+.-]*" scheme scan
 # let each "a" of "a-a-a-..." start a scan to the end of the run, O(n^2) (#524).
-_URL_CREDENTIALS_RE = re.compile(r"(://)[^\s/@:]+:[^\s/@]+@")
+_URL_CREDENTIALS_RE = re.compile(r"(://)[^\s/:]*:[^\s/]*@")
 
 
 def _redact_security_text(value: Any) -> str:

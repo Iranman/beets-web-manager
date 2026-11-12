@@ -29,7 +29,61 @@ class SecurityTextRedactionTests(unittest.TestCase):
         self.assert_masked("password=[REDACTED],S tail", "password=[REDACTED] tail")
 
     def test_bearer_header(self):
-        self.assert_masked("Authorization: Bearer abc tail", "Authorization: [REDACTED] tail")
+        # #654: a header value runs to the end of the line; the scheme word is masked too.
+        self.assert_masked("Authorization: Bearer abc tail\nnext", "Authorization: [REDACTED]\nnext")
+
+    def test_digest_and_token_authorization(self):
+        # #654: only the scheme word was masked.
+        self.assert_masked('Authorization: Digest username="u", response="fake-s1"\nnext',
+                           "Authorization: [REDACTED]\nnext")
+        self.assert_masked("Proxy-Authorization: Token fake-s2 more", "Proxy-Authorization: [REDACTED]")
+        self.assert_masked("authorization=Token fake-s3 more", "authorization=[REDACTED]")
+
+    def test_multi_pair_cookie_header(self):
+        # #654: pairs after the first one were shown.
+        self.assert_masked("Cookie: a=fake-s4; session=fake-s5\nnext", "Cookie: [REDACTED]\nnext")
+        self.assert_masked("Set-Cookie: sid=fake-s6; Path=/; HttpOnly", "Set-Cookie: [REDACTED]")
+
+    def test_quoted_header_value_in_json(self):
+        self.assert_masked('{"authorization": "Bearer fake-s7", "x": 1}', '{"authorization": [REDACTED] "x": 1}')
+
+    def test_prefixed_secret_names(self):
+        # #654: "\b" and a narrow key list missed these.
+        self.assert_masked("access_token=fake-s8 db_password=fake-s9 passwd=fake-s10 pwd=fake-s11 x",
+                           "access_token=[REDACTED] db_password=[REDACTED] passwd=[REDACTED] pwd=[REDACTED] x")
+
+    def test_query_value_stops_at_ampersand(self):
+        # #654: following parameters survive (test_recover_uploads needs "&keep=1").
+        self.assert_masked("GET https://h.invalid/x?oauth_token=fake-s12&keep=1#f failed",
+                           "GET https://h.invalid/x?oauth_token=[REDACTED]&keep=1#f failed")
+        self.assert_masked("https://h.invalid/?a=1&db_password=fake-s13&b=2",
+                           "https://h.invalid/?a=1&db_password=[REDACTED]&b=2")
+        self.assert_masked('?token="fake-s16 fake-s17"&x=1', "?token=[REDACTED]&x=1")
+
+    def test_url_password_with_at_sign(self):
+        # #654: the part after the first "@" was shown.
+        self.assert_masked("GET https://u:p@fake-s14@example.test/x failed",
+                           "GET https://[REDACTED]@example.test/x failed")
+        self.assert_masked("https://u@x:fake-s15@example.test/", "https://[REDACTED]@example.test/")
+
+    def test_unclosed_quote_stops_at_newline(self):
+        # #654: an unclosed quote hid the rest of a traceback.
+        self.assert_masked("token: can't parse\nTraceback (most recent call last):\n  File x",
+                           "token: [REDACTED]\nTraceback (most recent call last):\n  File x")
+        self.assert_masked('password="unclosed fake-s18\nnext line', "password=[REDACTED]\nnext line")
+
+    def test_closed_double_quote_spans_newlines(self):
+        # PR #659 QA: a closed quoted value with a raw newline leaked its tail.
+        self.assert_masked('password="QQSEC\nRETZZ" tail', "password=[REDACTED] tail")
+        self.assert_masked('client_secret: "-----BEGIN\nQQSECRETZZ\n-----END" tail',
+                           "client_secret: [REDACTED] tail")
+
+    def test_negotiate_scheme_in_assignment(self):
+        self.assert_masked("token=Negotiate fake-s19 tail", "token=[REDACTED] tail")
+
+    def test_non_secret_names_untouched(self):
+        for text in ("bypass=1 compass=2 author=x sort_key=a", "https://h.invalid/?page=2&keep=1"):
+            self.assertEqual(redact(text), text)
 
     def test_url_userinfo_masked(self):
         self.assert_masked("GET https://user:pw@example.test/x failed", "GET https://[REDACTED]@example.test/x failed")
@@ -39,7 +93,9 @@ class SecurityTextRedactionTests(unittest.TestCase):
             self.assertEqual(redact(text), text)
 
     def test_linear_time(self):
-        for text in ("a-" * 50000, "password=" + '"\\' * 50000, "token=" + "'a" * 50000):
+        for text in ("a-" * 50000, "password=" + '"\\' * 50000, "token=" + "'a" * 50000,
+                     "&token" * 30000, "?" + "a" * 100000, "://a:" + "@" * 100000,
+                     "Cookie" * 30000, "x_" * 50000 + "="):
             start = time.perf_counter()
             redact(text)
             self.assertLess(time.perf_counter() - start, 1.0)
