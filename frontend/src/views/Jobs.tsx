@@ -2819,7 +2819,7 @@ export default function Jobs() {
   return (
     <>
       <div className="space-y-3">
-        <h1 className="font-display text-2xl font-semibold text-zinc-100">Jobs</h1>
+        <h1 className="font-display text-2xl font-semibold text-zinc-100">Jobs &amp; Cleanup</h1>
         <JobStatusBar
           autoRefresh={autoRefresh}
           counts={listFailed ? null : counts}

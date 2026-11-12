@@ -188,7 +188,7 @@ describe('Missing IDs batch fix (#399)', () => {
     expect(within(results).getByText('Written')).toBeTruthy();
     expect(within(results).getByText('Written and verified.')).toBeTruthy();
     expect(within(results).getByText('Evidence changed')).toBeTruthy();
-    expect(within(results).getByRole('link', { name: 'Transaction op-9' }).getAttribute('href')).toBe('/changes?tx=op-9');
+    expect(within(results).getByRole('link', { name: 'Transaction op-9' }).getAttribute('href')).toBe('/import?tab=changes&tx=op-9');
     expect(onWritten).toHaveBeenCalled();
     expect(localStorage.getItem(MISSING_IDS_BATCH_STORAGE_KEY)).toBeNull();
     expect(document.body.textContent).not.toContain(TOKEN);
@@ -260,7 +260,7 @@ describe('Missing IDs batch fix (#399)', () => {
 
     done = true;
     const link = await screen.findByRole('link', { name: 'Open the batch transaction' }, { timeout: 5000 });
-    expect(link.getAttribute('href')).toBe('/changes?tx=tx-2');
+    expect(link.getAttribute('href')).toBe('/import?tab=changes&tx=tx-2');
     expect(screen.getByText('Recovery required')).toBeTruthy();
     expect(screen.getByText('Not attempted because an earlier row failed.')).toBeTruthy();
     expect(localStorage.getItem(MISSING_IDS_BATCH_STORAGE_KEY)).toBeNull();

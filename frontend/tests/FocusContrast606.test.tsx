@@ -44,7 +44,8 @@ describe('#606 focus and contrast tokens', () => {
 
   it('gear menu items style the Headless UI keyboard focus state', () => {
     const shell = src('components/layout/Shell.tsx');
-    expect(shell.match(/data-\[focus\]:outline-brass-300/g)).toHaveLength(5);
+    // One per cog item: Settings, System, Restart app, Sign Out (Library Changes moved to the Workbench).
+    expect(shell.match(/data-\[focus\]:outline-brass-300/g)).toHaveLength(4);
   });
 
   it('no zinc-500/600/700 text utilities remain outside the light-surface review panels', () => {

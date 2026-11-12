@@ -23,7 +23,7 @@ This project exists because the Beets web plugin didn't cover enough on its own:
 
 ## Screenshots
 
-See [SCREENSHOTS.md](SCREENSHOTS.md) for a tour of the app (Library, Import, Playlists, Jobs, Submissions, Settings, Library Changes).
+See [SCREENSHOTS.md](SCREENSHOTS.md) for a tour of the app (Library, Workbench with its Library Changes and Missing IDs tabs, Playlists, Jobs & Cleanup, Submissions, Settings).
 
 ## Installation & Deployment
 

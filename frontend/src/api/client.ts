@@ -1000,12 +1000,6 @@ export function confirmArtistAlias(
   );
 }
 
-// ── Plugin runner ─────────────────────────────────────────────────────────────
-
-export function runPlugin(args: string[], label: string): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>('/api/plugins/run', jsonRequest('POST', { args, label }));
-}
-
 export function getPluginStatus(): Promise<PluginStatusResponse> {
   return apiJson<PluginStatusResponse>('/api/plugins/installed');
 }
