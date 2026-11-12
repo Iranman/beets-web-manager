@@ -592,6 +592,31 @@ class LidarrWantedTests(_BoundaryCase):
             with self.subTest(reason=reason):
                 self.assertEqual(self._fetch(effects), ([], reason))
 
+    def test_secure_urlopen_dns_failure_is_unreachable_not_a_block(self):  # QA F2
+        from backend import security
+        def resolves_to(ip):
+            return lambda host, port, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+        cases = [(mock.Mock(side_effect=socket.gaierror(-2, "Name or service not known")), "Could not reach Lidarr"),
+                 # A real allowlist denial keeps its outbound-block message.
+                 (resolves_to("10.0.0.5"), "Lidarr is blocked by the outbound network policy."),
+                 # A refusal no entry can fix is still not "unreachable".
+                 (resolves_to("169.254.169.254"), "Lidarr returned an unexpected response")]
+        with mock.patch.object(urllib.request, "urlopen", security.secure_urlopen):
+            for lookup, reason in cases:
+                with self.subTest(reason=reason), mock.patch.object(security.socket, "getaddrinfo", lookup),                         self.assertLogs("beets_web.security", level="WARNING"):
+                    rows, error = acq._acq_fetch_lidarr_wanted()
+                self.assertEqual(rows, [])
+                self.assertTrue(error.startswith(reason), error)
+                self.assertNotIn("lidarr.test", error)
+
+    def test_wanted_route_passes_the_timeout_text_through(self):  # QA F1
+        import routes_lidarr
+        reason = "Lidarr did not respond in time (wanted list)"
+        with mock.patch.object(routes_lidarr, "_lidarr_config_error", return_value=""),                 mock.patch.object(routes_lidarr, "_acq_fetch_lidarr_wanted", return_value=([], reason)),                 app_module.app.test_request_context("/api/wanted/lidarr"):
+            response, status = routes_lidarr.wanted_lidarr()
+        self.assertEqual(status, 502)
+        self.assertEqual(response.get_json()["error"], reason)
+
     def test_a_failed_later_page_is_not_a_partial_success(self):
         full = [dict(_WANTED, id=i) for i in range(1, _PAGE + 1)]
         self.assertEqual(self._fetch([_wanted_page(full, total=_PAGE + 1)] + [socket.timeout("slow")] * 2),
@@ -944,8 +969,15 @@ class LidarrRouteHelperTests(_BoundaryCase):  # QA F-5
     def test_failure_modes(self):
         self.assertEqual(self._message([http_error(401)]), ("Lidarr rejected the API key", 502))
         self.assertEqual(self._message([http_error(429)] * 2), ("Lidarr returned HTTP 429", 502))
-        self.assertEqual(self._message([socket.timeout("slow")] * 2), ("Could not reach Lidarr", 502))
+        self.assertEqual(self._message([socket.timeout("slow")] * 2), ("Lidarr did not respond in time", 504))
+        self.assertEqual(self._message([urllib.error.URLError(TimeoutError("connect"))] * 2),
+                         ("Could not reach Lidarr", 502))
         self.assertEqual(self._message([_Resp(b"<html>")]), ("Lidarr returned an unexpected response", 502))
+
+    def test_secure_urlopen_dns_failure_is_unreachable(self):  # QA F2
+        from backend import security
+        with mock.patch.object(security.socket, "getaddrinfo", side_effect=socket.gaierror(-2, "unknown")),                 self.assertLogs("beets_web.security", level="WARNING"):
+            self.assertEqual(self._message(security.secure_urlopen), ("Could not reach Lidarr", 502))
 
 
 # -- download root: BA-12-------------------------------------------------------------
