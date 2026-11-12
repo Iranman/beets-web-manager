@@ -107,6 +107,8 @@ export default function CoverFlow({
   label,
   onIndexChange,
   onActivate,
+  onBack,
+  autoFocus = false,
 }: {
   count: number;
   /** Built only for the covers in the window, so a long list costs nothing off-screen. */
@@ -115,6 +117,10 @@ export default function CoverFlow({
   label: string;
   onIndexChange: (index: number) => void;
   onActivate: (index: number) => void;
+  /** Escape or Backspace on the focused flow: up one level (the parent decides where). */
+  onBack?: () => void;
+  /** Take focus when mounted, so a keyboard drill-in or back lands on the flow. */
+  autoFocus?: boolean;
 }) {
   const centre = clampIndex(index, count);
   const reduced = useReducedMotion();
@@ -139,6 +145,12 @@ export default function CoverFlow({
     });
     observer.observe(stage);
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (autoFocus) stageRef.current?.focus();
+    // Mount only: a later prop change must not steal focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Wheel needs a non-passive listener to keep the page still while the flow moves.
@@ -168,6 +180,11 @@ export default function CoverFlow({
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (event.target !== event.currentTarget) return;
+    if (onBack && (event.key === 'Escape' || event.key === 'Backspace')) {
+      event.preventDefault();
+      onBack();
+      return;
+    }
     if (event.key === 'Enter' || event.key === ' ') {
       if (!count) return;
       event.preventDefault();

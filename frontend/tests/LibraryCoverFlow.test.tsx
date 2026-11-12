@@ -1,6 +1,6 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useNavigate } from 'react-router';
 import Library from '../src/views/Library';
 import { apiGet } from '../src/lib/api';
 import {
@@ -77,7 +77,13 @@ const album = (overrides: Partial<LibraryAlbum>): LibraryAlbum => ({
   ...overrides,
 });
 
-async function renderLibrary() {
+// Stands in for the browser's Back button / a phone's swipe-back.
+function HistoryBack() {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate(-1)}>history back</button>;
+}
+
+async function renderLibrary(entries: string[] = ['/library']) {
   vi.mocked(apiGet).mockResolvedValue({
     ok: true,
     reconciled: true,
@@ -95,8 +101,18 @@ async function renderLibrary() {
     stats: { artists: 3, albums: 4, tracks: 12 },
     library_version: 1,
   } as LibraryResponse);
-  render(<MemoryRouter><Library /></MemoryRouter>);
+  render(<MemoryRouter initialEntries={entries}><Library /><HistoryBack /></MemoryRouter>);
   await act(async () => {});
+}
+
+const centred = (region: string) =>
+  screen.getByRole('region', { name: region }).querySelector('[aria-current="true"]')?.getAttribute('aria-label');
+
+async function openGammaRay() {
+  const artists = screen.getByRole('region', { name: 'Artists' });
+  fireEvent.keyDown(artists, { key: 'End' });
+  fireEvent.keyDown(artists, { key: 'Enter' });
+  return screen.getByRole('region', { name: 'Albums' });
 }
 
 beforeEach(() => localStorage.clear());
@@ -151,5 +167,46 @@ describe('Library Cover Flow', () => {
     cleanup();
     await renderLibrary();
     expect(screen.getByRole('button', { name: 'Grid' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('All artists, Escape and Backspace go back to the artist flow centred on the artist you came from', async () => {
+    await renderLibrary();
+    await openGammaRay();
+    fireEvent.click(screen.getByRole('button', { name: /All artists/ }));
+    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+    expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Artists' }));
+
+    for (const key of ['Escape', 'Backspace']) {
+      const albums = await openGammaRay();
+      expect(document.activeElement).toBe(albums);
+      fireEvent.keyDown(albums, { key });
+      expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
+      expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+    }
+  });
+
+  it('browser Back leaves the artist for the artist flow, and a link to an artist opens it', async () => {
+    await renderLibrary();
+    await openGammaRay();
+    fireEvent.click(screen.getByRole('button', { name: 'history back' }));
+    expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
+    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+
+    cleanup();
+    await renderLibrary(['/library', '/library?artist=Beta%20Choir']);
+    expect(centred('Albums')).toBe('Album Loose by Beta Choir, 1 of 1');
+    fireEvent.click(screen.getByRole('button', { name: 'history back' }));
+    expect(centred('Artists')).toBe('Artist Beta Choir, 2 of 3');
+  });
+
+  it('Escape while the back cover is open closes only the dialog', async () => {
+    await renderLibrary();
+    const albums = await openGammaRay();
+    fireEvent.keyDown(albums, { key: 'Enter' });
+    const dialog = await screen.findByRole('dialog', { name: 'One' });
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull(), { timeout: 2000 });
+    expect(screen.getByRole('region', { name: 'Albums' })).toBeTruthy();
+    expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
   });
 });

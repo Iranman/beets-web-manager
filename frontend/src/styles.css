@@ -877,6 +877,20 @@ body {
     font-size: 0.8125rem;
     font-variant-numeric: tabular-nums;
   }
+  /* Back to the artists: a brass text link on the shelf, not a button slab. */
+  .cf-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    min-height: 2rem;
+    padding: 0 0.5rem 0 0;
+    color: var(--color-brass-300);
+    font-size: 0.875rem;
+    font-weight: 600;
+  }
+  .cf-back:hover {
+    color: var(--color-brass-200);
+  }
   .cf-scrubber {
     display: block;
     width: min(100%, 36rem);

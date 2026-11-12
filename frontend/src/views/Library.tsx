@@ -12,6 +12,7 @@ import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { getAlbumTracks, getArtistImageUrl } from '../api/client';
 import { apiGet } from '../lib/api';
+import { useSearchParams } from 'react-router';
 import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
@@ -680,6 +681,7 @@ function ArtistFlow({
   centerKey,
   libraryVersion,
   loading,
+  autoFocus,
   onCenterKeyChange,
   onSelectArtist,
 }: {
@@ -687,6 +689,7 @@ function ArtistFlow({
   centerKey: string;
   libraryVersion?: number;
   loading: boolean;
+  autoFocus: boolean;
   onCenterKeyChange: (key: string) => void;
   onSelectArtist: (artist: LibraryArtist) => void;
 }) {
@@ -727,6 +730,7 @@ function ArtistFlow({
           count={n}
           index={index}
           item={item}
+          autoFocus={autoFocus}
           label="Artists"
           onActivate={(i) => onSelectArtist(artists[i])}
           onIndexChange={(i) => onCenterKeyChange(artists[i].name)}
@@ -746,14 +750,18 @@ function AlbumFlow({
   rows,
   centerKey,
   libraryVersion,
+  autoFocus,
   onCenterKeyChange,
   onDetails,
+  onBack,
 }: {
   rows: AlbumRow[];
   centerKey: string;
   libraryVersion?: number;
+  autoFocus: boolean;
   onCenterKeyChange: (key: string) => void;
   onDetails: (row: AlbumRow) => void;
+  onBack: () => void;
 }) {
   const index = Math.max(0, rows.findIndex((row) => albumRowKey(row) === centerKey));
   const n = rows.length;
@@ -779,17 +787,23 @@ function AlbumFlow({
 
   return (
     <section className="space-y-3">
+      {/* Navigation only: back to the artist flow, centred on this artist. Escape or Backspace on the flow does the same. */}
+      <button className="cf-back" type="button" onClick={onBack}>
+        <span aria-hidden="true">←</span> All artists
+      </button>
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-graphite-800 pb-2">
         <h2 className="font-display text-lg font-semibold text-zinc-100">Albums</h2>
         <p className="text-sm text-zinc-400">{countLabel(n, 'album')}</p>
       </div>
       {n ? (
         <CoverFlow
+          autoFocus={autoFocus}
           count={n}
           index={index}
           item={item}
           label="Albums"
           onActivate={(i) => onDetails(rows[i])}
+          onBack={onBack}
           onIndexChange={(i) => onCenterKeyChange(albumRowKey(rows[i]))}
         />
       ) : (
@@ -805,6 +819,7 @@ function ArtistDetail({
   libraryVersion,
   view,
   albumKey,
+  autoFocus,
   onAlbumKeyChange,
   onBack,
   onDetails,
@@ -813,6 +828,7 @@ function ArtistDetail({
   rows: AlbumRow[];
   libraryVersion?: number;
   view: LibraryView;
+  autoFocus: boolean;
   albumKey: string;
   onAlbumKeyChange: (key: string) => void;
   onBack: () => void;
@@ -820,6 +836,7 @@ function ArtistDetail({
 }) {
   const name = displayArtistName(artist);
   const artUrl = useArtistArtUrl(artist, libraryVersion);
+  const flow = view === 'coverflow';
 
   return (
     <section className="space-y-3">
@@ -832,16 +849,29 @@ function ArtistDetail({
       </div>
 
       {/* The artist's own art, blown up behind the header and bleeding to the frame's edges. */}
-      <div className="relative isolate -mx-3 flex flex-col gap-4 overflow-hidden px-3 py-6 sm:-mx-4 sm:flex-row sm:items-end sm:px-4 sm:py-8">
+      {/* In Cover Flow the header is one compact row, so the flow sits high enough on a phone. */}
+      <div
+        className={cx(
+          'relative isolate -mx-3 flex overflow-hidden px-3 sm:-mx-4 sm:px-4',
+          flow ? 'flex-row items-center gap-3 py-3' : 'flex-col gap-4 py-6 sm:flex-row sm:items-end sm:py-8',
+        )}
+      >
         <CoverBackdrop src={artUrl} />
         <Artwork
-          className="h-28 w-28 rounded-sm ring-1 ring-black/40 sm:h-36 sm:w-36"
+          className={cx('rounded-sm ring-1 ring-black/40', flow ? 'h-14 w-14 sm:h-20 sm:w-20' : 'h-28 w-28 sm:h-36 sm:w-36')}
           fallback={initials(name) || 'A'}
           label={`${name} artwork`}
           src={artUrl}
         />
         <div className="min-w-0 flex-1">
-          <h2 className="font-display text-3xl font-semibold text-zinc-50 [overflow-wrap:anywhere] sm:text-4xl">{name}</h2>
+          <h2
+            className={cx(
+              'font-display font-semibold text-zinc-50 [overflow-wrap:anywhere]',
+              flow ? 'text-xl sm:text-3xl' : 'text-3xl sm:text-4xl',
+            )}
+          >
+            {name}
+          </h2>
           {/* The same catalogue line as the page header, scoped to this artist. */}
           <p className="lib-catalog">
             <span>{countLabel(artist.albums.length, 'album')}</span>
@@ -852,9 +882,11 @@ function ArtistDetail({
 
       {view === 'coverflow' ? (
         <AlbumFlow
+          autoFocus={autoFocus}
           centerKey={albumKey}
           libraryVersion={libraryVersion}
           rows={rows}
+          onBack={onBack}
           onCenterKeyChange={onAlbumKeyChange}
           onDetails={onDetails}
         />
@@ -1079,7 +1111,18 @@ export default function Library() {
   const [artistSort, setArtistSort] = useState<ArtistSort>('alpha');
   const [albumSort, setAlbumSort] = useState<AlbumSort>('artist');
   const [artistLetterFilter, setArtistLetterFilter] = useState<ArtistLetter>('all');
-  const [selectedArtistName, setSelectedArtistName] = useState('');
+  // The open artist lives in the URL (?artist=<name>): drilling in pushes a history entry, so browser
+  // Back and phone swipe-back return to the artists, and a link to an artist opens it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedArtistName = searchParams.get('artist') ?? '';
+  const setSelectedArtistName = useCallback((name: string, replace = false) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (name) next.set('artist', name);
+      else next.delete('artist');
+      return next;
+    }, { replace });
+  }, [setSearchParams]);
   const [trackSearchLoading, setTrackSearchLoading] = useState(false);
   const [trackSearchError, setTrackSearchError] = useState('');
   const [trackSearchTried, setTrackSearchTried] = useState(false);
@@ -1089,7 +1132,10 @@ export default function Library() {
   const [detailsError, setDetailsError] = useState('');
   const [view, setView] = useState<LibraryView>(readLibraryView);
   // The flows remember their centred sleeve by key, so a background reload never yanks them back.
-  const [artistKey, setArtistKey] = useState('');
+  // Seeded from the URL, so leaving a deep-linked artist (button or browser Back) centres that artist.
+  const [artistKey, setArtistKey] = useState(() => searchParams.get('artist') ?? '');
+  // Focus follows an in-page drill-in or back, so the keyboard keeps working; a page load does not grab focus.
+  const [flowFocus, setFlowFocus] = useState(false);
   const [albumKey, setAlbumKey] = useState('');
   // A new search or sort sends both flows to the first match.
   function resetFlows() {
@@ -1246,8 +1292,9 @@ export default function Library() {
   );
 
   useEffect(() => {
-    if (selectedArtistName && !selectedArtist) setSelectedArtistName('');
-  }, [selectedArtist, selectedArtistName]);
+    // Only once the library has loaded: before that every artist is "missing".
+    if (data && selectedArtistName && !selectedArtist) setSelectedArtistName('', true);
+  }, [data, selectedArtist, selectedArtistName, setSelectedArtistName]);
 
   const sortAlbumRows = useCallback((rows: AlbumRow[]) => {
     const sorted = [...rows];
@@ -1273,6 +1320,12 @@ export default function Library() {
     setSelectedArtistName(artist.name);
     setArtistKey(artist.name);
     setAlbumKey('');
+    setFlowFocus(true);
+  }
+  function backToArtists() {
+    if (selectedArtistName) setArtistKey(selectedArtistName);
+    setFlowFocus(true);
+    setSelectedArtistName('');
   }
 
   const loadFailed = !data && Boolean(error);
@@ -1345,8 +1398,9 @@ export default function Library() {
           libraryVersion={libraryVersion}
           view={view}
           albumKey={albumKey}
+          autoFocus={flowFocus}
           onAlbumKeyChange={setAlbumKey}
-          onBack={() => setSelectedArtistName('')}
+          onBack={backToArtists}
           onDetails={setDetailsRow}
         />
       ) : view === 'coverflow' ? (
@@ -1355,6 +1409,7 @@ export default function Library() {
           centerKey={artistKey}
           libraryVersion={libraryVersion}
           loading={loading && !data}
+          autoFocus={flowFocus}
           onCenterKeyChange={setArtistKey}
           onSelectArtist={handleSelectArtist}
         />
