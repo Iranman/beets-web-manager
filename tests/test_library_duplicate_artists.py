@@ -84,6 +84,33 @@ class DuplicateArtistTests(unittest.TestCase):
         self.assertEqual(sorted(a["album"] for a in foo["albums"]), ["A", "B"])
         self.assertEqual(foo["total"], 7)
 
+    @staticmethod
+    def _entry(path, albums):
+        return {"name": "Foo", "path": path, "total": 0, "imported": 0,
+                "not_imported": 0, "missing": 0, "empty_artist_folder": not albums,
+                "albums": [{"album": f"{path}-{i}", "album_id": i + 1, "track_count": 1,
+                            "mb_albumartistid": m} for i, m in enumerate(albums)]}
+
+    def test_folder_stamps_with_different_mbids_are_never_merged(self):
+        # QA #682: the stamp MBID counts even when the stamped folder's albums are untagged.
+        result = [self._entry(f"/m/Foo ({_MBID_X})", [""]),
+                  self._entry(f"/m/Foo ({_MBID_Y})", [_MBID_Y])]
+        ls._merge_same_name_artists(result)
+        self.assertEqual(len(result), 2)
+        # ...and when both stamped folders are empty.
+        result = [self._entry(f"/m/Foo ({_MBID_X})", []),
+                  self._entry(f"/m/Foo ({_MBID_Y})", [])]
+        ls._merge_same_name_artists(result)
+        self.assertEqual(len(result), 2)
+
+    def test_merged_empty_folder_keeps_its_empty_signal(self):
+        result = [self._entry("/m/Foo", [_MBID_X]),
+                  self._entry(f"/m/Foo ({_MBID_X})", [])]
+        ls._merge_same_name_artists(result)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["empty_artist_folder"])
+        self.assertEqual(len(result[0]["albums"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

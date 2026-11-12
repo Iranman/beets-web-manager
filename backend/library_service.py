@@ -29,7 +29,7 @@ from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_ite
 from backend.artwork_service import _album_dir_for_art, _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_guess_from_name
 from backend.slskd import APP_DOWNLOAD_LEGACY_NAME_UNTIL, APP_DOWNLOAD_MARKER, APP_DOWNLOAD_NAME_RE, app_download_key_path, app_download_marker_valid
-from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
+from backend.matching_service import _ai_api_key, _album_mb_completeness, _album_title_match, _artist_folder_name_without_mbid, _STAMP_UUID_IN_NAME_RE, _audio_position_from_path, _best_album_track_match, _fast_album_mb_health_fields, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _preflight_oversized_subset_complete, _preflight_rejection_reason, _stamp_artist_folder_album_mbid_counts
 from backend.app_runtime import jobs
 from job_engine import DuplicateJobError
 from backend.musicbrainz_service import _artist_album_index, _artist_folder_key, _mb_artist_lookup_by_id, _mb_artist_search_one, _mb_canonical_for_artist_entries, _mb_release_has_tracks, _mb_release_search_by_folder_tracks
@@ -1472,6 +1472,12 @@ def _merge_same_name_artists(result: List[Dict[str, Any]]) -> None:
             _s(album.get("mb_albumartistid")).strip().lower()
             for entry in entries for album in entry.get("albums", [])
         } - {""}
+        # A folder stamp is an MBID too; the display key strips it, so count it here.
+        for entry in entries:
+            for text in (_s(entry.get("path")).replace("\\", "/").rsplit("/", 1)[-1], _s(entry.get("name"))):
+                stamp = _STAMP_UUID_IN_NAME_RE.search(text)
+                if stamp:
+                    mbids.add(stamp.group(0).strip(" {}()").lower())
         if len(entries) < 2 or len(mbids) > 1:
             merged.extend(entries)
             continue
@@ -1481,7 +1487,9 @@ def _merge_same_name_artists(result: List[Dict[str, Any]]) -> None:
             bool(e.get("path")),
         )))
         primary["albums"] = [album for entry in entries for album in entry.get("albums", [])]
-        primary["empty_artist_folder"] = not primary["albums"]
+        # Keep an empty stamped/duplicate folder's health signal after the merge.
+        primary["empty_artist_folder"] = any(
+            e.get("empty_artist_folder") or not e.get("albums") for e in entries)
         _recompute_artist_totals(primary)
         merged.append(primary)
     result[:] = merged
