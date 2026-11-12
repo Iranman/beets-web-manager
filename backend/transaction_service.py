@@ -586,11 +586,15 @@ def _start_metadata_apply_transaction(transaction_id: str):
     parts = [f"{k}={v}" for k, v in fields.items()]
 
     def _do(log, cancel_event=None):
+        from backend.resource_locks import attempt_owner, locks as resource_locks
         try:
-            # #318: from here Beets may store the edit even if the tag write
-            # fails (WRITE_FAILED), so a Failed apply keeps its rollback.
-            transactions.update(transaction_id, metadata={"engine_result": {"mutation_started": True}})
-            result = composite_workflows.update_item_metadata(item_id, fields, within_transaction=True)
+            # The item lock every other item write takes (#555 item 3), so this
+            # write cannot land between another apply's capture and its write.
+            with resource_locks().hold([f"item:{item_id}"], attempt_owner(transaction_id), timeout=10):
+                # #318: from here Beets may store the edit even if the tag write
+                # fails (WRITE_FAILED), so a Failed apply keeps its rollback.
+                transactions.update(transaction_id, metadata={"engine_result": {"mutation_started": True}})
+                result = composite_workflows.update_item_metadata(item_id, fields, within_transaction=True)
             _require_attach_stage_success(result, "metadata update")
             _invalidate_lib_cache()
             transactions.update(transaction_id, status="Completed", logs=list(log)[-500:], counts={"items": 1, "changes": len(changed_fields)})

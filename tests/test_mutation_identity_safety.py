@@ -100,6 +100,43 @@ class MbTrackRepairTests(_IdentityEnv):
         self.assertEqual(ad.writes(), [])
         self.assertEqual(self.store.get(op)["status"], "Failed")
 
+    def test_live_recheck_and_write_run_under_the_album_and_item_locks(self):
+        """#555 item 2: no writer can slip between the re-check and the write."""
+        from backend import resource_locks
+        ad = self.adapter()
+        op = self.plan(ad, track_mbids={"11": REC_1})["operation_id"]
+        seen = {}
+        real_find, real_modify = ad.find_all_items_by_album_id, ad.modify
+
+        def keys():
+            return {r["key"] for r in resource_locks.locks().held()}
+
+        def find(aid):
+            seen.setdefault("recheck", keys())
+            return real_find(aid)
+
+        def modify(*a, **kw):
+            seen.setdefault("write", keys())
+            return real_modify(*a, **kw)
+
+        with mock.patch.object(ad, "find_all_items_by_album_id", side_effect=find),                 mock.patch.object(ad, "modify", side_effect=modify):
+            self.assertTrue(cw.apply_album_mb_track_repair(op, adapter=ad, store=self.store)["ok"])
+        self.assertLessEqual({"album:1", "item:11"}, seen["recheck"])
+        self.assertLessEqual({"album:1", "item:11"}, seen["write"])
+        self.assertEqual(resource_locks.locks().held(), [])
+
+    def test_busy_album_lock_refuses_without_writes(self):
+        from backend import resource_locks
+        from backend.resource_locks import ResourceLockConflictError
+        ad = self.adapter()
+        op = self.plan(ad)["operation_id"]
+        busy = ResourceLockConflictError("album:1", {"owner": "other"}, "me")
+        with mock.patch.object(resource_locks.ResourceLocks, "acquire", side_effect=busy):
+            res = cw.apply_album_mb_track_repair(op, adapter=ad, store=self.store)
+        self.assertEqual(res.get("code"), "resource_busy", res)
+        self.assertEqual(ad.writes(), [])
+        self.assertEqual(self.store.get(op)["status"], "Preview")
+
     def test_cancelled_transaction_is_never_applied(self):
         ad = self.adapter()
         op = self.plan(ad)["operation_id"]

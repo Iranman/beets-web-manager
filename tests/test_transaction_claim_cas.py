@@ -101,6 +101,20 @@ class ClaimRacesCancelTests(_RouteEnv):
         ts.composite_workflows.update_item_metadata.assert_called_once()
         self.assertEqual(self.store.get(op)["status"], "Completed")
 
+    def test_metadata_update_writes_under_the_item_lock(self):
+        """#555 item 3: the manual apply holds item:<id> across its write."""
+        op, started = self._metadata_tx(), {}
+        ts, patches = self._metadata_env(started)
+        self._start(patches)
+        held = []
+        ts.composite_workflows.update_item_metadata.side_effect = lambda *a, **kw: (
+            held.extend(r["key"] for r in resource_locks.locks().held()) or {"ok": True})
+        ts._start_metadata_apply_transaction(op)
+        started["fn"]([])
+        self.assertIn("item:3", held)
+        self.assertEqual(resource_locks.locks().held(), [])
+        self.assertEqual(self.store.get(op)["status"], "Completed")
+
     def test_metadata_update_cancel_before_claim_wins(self):
         op, started = self._metadata_tx(), {}
         ts, patches = self._metadata_env(started)
