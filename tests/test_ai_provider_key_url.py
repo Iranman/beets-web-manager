@@ -138,14 +138,12 @@ class PlainHttpAndTrailingDotTests(unittest.TestCase):
                 key, _ = _resolve(_env(KEYS, url))
                 self.assertEqual(key, "")
 
-    def test_legacy_openai_key_not_sent_to_a_custom_http_url(self):
-        key, _ = _resolve({"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": "http://llm.example/v1"})
-        self.assertEqual(key, "")
-
-    def test_generic_key_still_reaches_a_custom_http_url(self):
-        # Local LLM servers (no TLS) take AI_API_KEY; that is not a provider key.
-        key, _ = _resolve(_env(KEYS, "http://llm.example/v1"))
-        self.assertEqual(key, "k-generic")
+    def test_custom_http_url_is_unchanged(self):
+        # Custom URLs keep their keys, legacy OPENAI_API_KEY fallback included
+        # (#535 item 1 is a separate policy decision).
+        self.assertEqual(_resolve(_env(KEYS, "http://llm.example/v1"))[0], "k-generic")
+        self.assertEqual(_resolve({"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": "http://llm.example/v1"})[0],
+                         "k-openai")
 
     def test_trailing_dot_host_is_the_provider(self):
         for url, want in (("https://api.openai.com./v1", "k-openai"), ("https://openrouter.ai./api/v1", "k-openrouter"),
