@@ -37,7 +37,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from .models import AcoustIDStatus, ConfidenceState
 from .normalize import similarity as _default_similarity
-from .track_alignment import _acoustid_status_for_target, _hit_recording_id, _hit_score
+from .track_alignment import _acoustid_status_for_target, _hit_recording_id, _hit_score, strong_only_agrees
 
 SimilarityFn = Callable[[str, str], float]
 
@@ -594,6 +594,29 @@ def evaluate_recording_candidate(
 
 
 def verify_audio_against_request(
+    hits: Optional[Sequence[Mapping[str, Any]]],
+    *,
+    expected_title: str = "",
+    expected_artist: str = "",
+    expected_recording_id: str = "",
+    similarity_fn: Optional[SimilarityFn] = None,
+) -> Dict[str, Any]:
+    """See ``_verify_audio_against_hits``. A weakly sourced AcoustID
+    recording can neither accept nor reject on its own: a decision that
+    holds only because of it becomes review (``strong_only_agrees``)."""
+    def run(rows):
+        return _verify_audio_against_hits(rows, expected_title=expected_title, expected_artist=expected_artist,
+                                          expected_recording_id=expected_recording_id, similarity_fn=similarity_fn)
+    if hits is None:
+        return run(None)
+    rows = [h for h in hits if isinstance(h, Mapping)]
+    full = run(rows)
+    default = {**full, "decision": "review", "status": AcoustIDStatus.AMBIGUOUS.value, "conflicts": [],
+               "reason": "Only a weakly sourced AcoustID link supports this result; review."}
+    return strong_only_agrees(run, rows, default, key=lambda verdict: verdict["decision"])
+
+
+def _verify_audio_against_hits(
     hits: Optional[Sequence[Mapping[str, Any]]],
     *,
     expected_title: str = "",
