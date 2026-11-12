@@ -124,7 +124,11 @@ class CleanAllWorkflowStaticTests(unittest.TestCase):
         self.assertIn('href="/import?tab=review"', JOBS_SOURCE)
         self.assertIn('@app.post("/api/albums/<int:aid>/mbsubmit")', APP_SOURCE)
         self.assertIn('@app.post("/api/items/<int:iid>/mbsubmit")', APP_SOURCE)
-        self.assertIn('Generate MusicBrainz submission text for this album', IMPORT_REVIEW_SOURCE)
+        # mbsubmit has one home (owner decision): the review row links to Submissions, which runs it.
+        self.assertIn('navigate(`/submissions?${params.toString()}`)', IMPORT_REVIEW_SOURCE)
+        self.assertNotIn('albumMbsubmit', IMPORT_REVIEW_SOURCE)
+        submissions_source = (ROOT / 'frontend' / 'src' / 'views' / 'Submissions.tsx').read_text(encoding='utf-8')
+        self.assertIn('albumMbsubmit(activeAlbumId)', submissions_source)
         self.assertIn('submittedItemIdsRef', IMPORT_REVIEW_SOURCE)
 
     def test_replacement_and_identity_guardrails_remain_fingerprint_based(self):

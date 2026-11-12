@@ -22,7 +22,6 @@ import { Link, useNavigate } from 'react-router';
 import { apiGet } from '../../lib/api';
 import {
   albumAddMbids,
-  albumMbsubmit,
   apiErrorBody,
   attachRecording,
   cleanupReviewFiles,
@@ -2559,84 +2558,6 @@ function AiSuggestionPanel({
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function MbsubmitDialog({
-  albumId,
-  albumTitle,
-  onClose,
-}: {
-  albumId: number;
-  albumTitle: string;
-  onClose: () => void;
-}) {
-  const [status, setStatus] = useState<'loading' | 'done' | 'error'>('loading');
-  const [output, setOutput] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    albumMbsubmit(albumId)
-      .then(async (started) => {
-        for (let i = 0; i < 30; i++) {
-          await wait(2000);
-          if (cancelled) return;
-          const job = await getJob(started.job_id);
-          if (job.status === 'success' || job.status === 'failed') {
-            if (!cancelled) {
-              setOutput((job.log ?? []).join('\n'));
-              setStatus(job.status === 'success' ? 'done' : 'error');
-            }
-            return;
-          }
-        }
-        if (!cancelled) { setOutput('Timed out waiting for job'); setStatus('error'); }
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) { setOutput(String(e)); setStatus('error'); }
-      });
-    return () => { cancelled = true; };
-  }, [albumId]);
-
-  return (
-    <Dialog open onClose={onClose}>
-      <DialogBackdrop className="fixed inset-0 bg-black/40" />
-      <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-2xl rounded-xl bg-graphite-900 p-6 shadow-xl">
-          <DialogTitle className="mb-3 text-base font-semibold text-graphite-50">
-            MusicBrainz Submission — {albumTitle}
-          </DialogTitle>
-          {status === 'loading' ? (
-            <LinearProgress />
-          ) : (
-            <pre className="max-h-96 overflow-auto rounded border border-graphite-700 bg-graphite-850 p-3 text-xs text-graphite-100 whitespace-pre-wrap">
-              {output || '(no output)'}
-            </pre>
-          )}
-          {status === 'done' ? (
-            <p className="mt-3 text-xs text-muted">
-              Copy the text above and submit at{' '}
-              <a href="https://musicbrainz.org/release/add" target="_blank" rel="noreferrer" className="underline">
-                musicbrainz.org/release/add
-              </a>
-              . Once published, use "Add MBIDs" to attach the new IDs.
-            </p>
-          ) : null}
-          <div className="mt-4 flex justify-end gap-2">
-            {status === 'done' ? (
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={() => navigator.clipboard.writeText(output).catch(() => undefined)}
-              >
-                Copy
-              </Button>
-            ) : null}
-            <Button size="small" variant="contained" onClick={onClose}>Close</Button>
-          </div>
-        </DialogPanel>
-      </div>
-    </Dialog>
-  );
-}
-
 function AddMbidsDialog({
   albumId,
   albumTitle,
@@ -2810,7 +2731,6 @@ export function ReviewCard({
     : item.mb_url || musicBrainzUrl(item.mb_albumid);
   const itemReleaseGroupId = item.mb_releasegroupid || item.evidence?.preflight?.release_group || '';
   const busy = actionState?.status === 'running';
-  const [mbsubmitOpen, setMbsubmitOpen] = useState(false);
   const [addMbidsOpen, setAddMbidsOpen] = useState(false);
   const navigate = useNavigate();
   const isLibraryNoMb = item.type === 'library_no_mb' && Boolean(item.album_id);
@@ -3262,15 +3182,6 @@ export function ReviewCard({
                 <Button
                   size="small"
                   variant="outlined"
-                  onClick={() => setMbsubmitOpen(true)}
-                  disabled={busy}
-                  title="Generate MusicBrainz submission text for this album"
-                >
-                  Prepare MB Submission
-                </Button>
-                <Button
-                  size="small"
-                  variant="outlined"
                   onClick={() => setAddMbidsOpen(true)}
                   disabled={busy}
                   title="Attach MusicBrainz IDs once you have them and move to stamped path"
@@ -3283,13 +3194,6 @@ export function ReviewCard({
         </div>
       </CardContent>
 
-      {mbsubmitOpen && item.album_id ? (
-        <MbsubmitDialog
-          albumId={item.album_id}
-          albumTitle={itemTitle(item)}
-          onClose={() => setMbsubmitOpen(false)}
-        />
-      ) : null}
       {addMbidsOpen && item.album_id ? (
         <AddMbidsDialog
           albumId={item.album_id}
