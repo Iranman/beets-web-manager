@@ -36,6 +36,8 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
+- **Test-only: the linear-time redaction test no longer fails on slow CI runners.** `test_crafted_input_is_linear` allowed 1.0 s per 1M-character input. On shared runners the `a-a-a-...` case took 1.05 to 1.10 s and failed PRs that do not touch redaction. The budget is now 5 s, which still catches backtracking: that would take minutes.
+
 - **Reviewed duplicate cleanup re-checks the keeper before quarantining (#530).** The preview now records the keeper file's size and mtime. Under the apply locks, before the engine call, every keeper must still be in the library at the planned path with that size and mtime. If a keeper was deleted, moved or replaced since the review, the whole cleanup is refused with a per-keeper reason, marked Failed, and nothing is removed. Previews made before this change have no keeper record and must be re-planned.
 
 - **Remaining generated-looking UI labels removed (#612).** The album folder issue tag on Jobs starts with a capital letter ("Duplicate folder, missing art"); the setup wizard's plugin readiness labels use sentence case without a leading check mark; the last 11px labels in setup, Import Review and the recovery card are 12px; and fixed copy no longer uses a decorative " · " join ("Recovery needs verification", "Target exists, needs review", "AcoustID is available after ..."). Data lines joined with " · " are unchanged.
