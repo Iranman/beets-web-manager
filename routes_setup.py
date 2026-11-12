@@ -478,6 +478,17 @@ def _mask_secret_settings(settings: dict) -> dict:
 _MISSING = object()
 
 
+def _url_origin(value: Any) -> Any:
+    """(scheme, host, port) of a URL string, else None (#641)."""
+    if not isinstance(value, str) or "://" not in value:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(value.strip())
+        return (parts.scheme.lower(), parts.hostname, parts.port) if parts.netloc else None
+    except ValueError:
+        return value.strip()  # an unparsable port: compare the raw text
+
+
 def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> Any:
     """POST inverse of _mask_setting_value: wherever ``posted`` is exactly
     what GET returned for ``stored``, keep ``stored`` (#522, #570). A mask
@@ -498,6 +509,12 @@ def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> A
             restored = _restore_masked_setting(v, base.get(k, _MISSING), _is_secret_setting_key(str(k)))
             if restored is not _MISSING:
                 out[k] = restored
+        # #641: a URL moved to another scheme, host or port must not carry the
+        # stored credential beside it; the mask is refused, a new one is taken.
+        moved = any(_url_origin(v) not in (None, _url_origin(base.get(k))) for k, v in out.items())
+        if moved and any(_is_secret_setting_key(str(k)) and _SECRET_MASK in json.dumps(v)
+                         for k, v in posted.items()):
+            raise ValueError("a URL's host, scheme or port changed; re-enter its credential in full")
         return out
     if isinstance(posted, list):
         # Entries are matched by identity, not position (#585): a posted entry
