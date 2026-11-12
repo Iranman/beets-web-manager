@@ -683,11 +683,15 @@ EDITABLE_FIELDS = [
 # Extent of a secret value, shared with routes_setup's diagnostic redactor
 # (#524, #647). The value runs to ASCII whitespace (an NBSP may be part of
 # it); a quoted part may hold spaces and runs to its closing quote, honoring
-# backslash escapes, or to the end of the line when unclosed (#654: a
-# "can't" must not hide the traceback below it). Trailing punctuation is
-# over-masked rather than leaked. Nothing follows it in a pattern and the
-# alternatives start on different characters, so matching stays linear.
-SECRET_VALUE_PATTERN = r"""(?:"(?:[^"\\\r\n]|\\.)*"?|'(?:[^'\\\r\n]|\\.)*'?|[^ \t\r\n\f\v"'])+"""
+# backslash escapes. A '"' part spans newlines (a PEM block) and stops at
+# the end of the line only when unclosed; a "'" part always stops there, so
+# a "can't" does not hide the traceback below it (#654). Trailing
+# punctuation is over-masked rather than leaked. Nothing follows it in a
+# pattern, so a closed '"' is never re-scanned; the one unclosed '"' left in
+# a text is scanned twice, so matching stays linear.
+SECRET_VALUE_PATTERN = (
+    r"""(?:"(?:[^"\\]|\\.)*"|"(?:[^"\\\r\n]|\\.)*|'(?:[^'\\\r\n]|\\.)*'?|[^ \t\r\n\f\v"'])+"""
+)
 
 # A secret-bearing name, shared with routes_setup's diagnostic redactor
 # (#654): any prefix ("access_token", "db_password"), "pass"/"pwd" only as a
@@ -714,7 +718,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"|(?P<hk>[a-z0-9_-]*?(?:authorization|cookie))(?P<hs>[ \t]*[:=][ \t]*(?![ \t]*[\"'])"
     r"(?:(?:Bearer|Basic|Digest|Token|Negotiate)[ \t]+)?)[^\r\n]*"
     r"|(?P<k>" + SECRET_NAME_PATTERN + r")(?P<s>[\"']?\s*[:=]\s*)"
-    r"(?:(?:Bearer|Basic|Digest|Token)\s+)?" + SECRET_VALUE_PATTERN + r")",
+    r"(?:(?:Bearer|Basic|Digest|Token|Negotiate)\s+)?" + SECRET_VALUE_PATTERN + r")",
     re.DOTALL,
 )
 

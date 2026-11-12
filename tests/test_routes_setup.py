@@ -1120,6 +1120,7 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
             "at_enc": "u:fake-v04%40sha256:abcd",
             "at_wide": "u:fake-v05＠sha256:abcd",
             "double_enc": "u%253Afake-v06@sha256:abcd",
+            "deep_enc": "u%2525253Afake-v10@sha256:abcd",  # still encoded after 3 rounds: fail closed
             "q_count_param": "https://h.invalid/?token_count=fake-v07",
             "token_count": "fake-v08",
             "password_bypass": "fake-v09",

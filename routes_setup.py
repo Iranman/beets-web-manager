@@ -408,7 +408,8 @@ _URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
 
 def _decode_setting_text(text: str) -> str:
     """``text`` %-decoded (double encoding too) and NFKC-normalized (#657)."""
-    # ponytail: three decode rounds; a deeper encoding is not decoded.
+    # Three decode rounds; a value still encoded after them is masked whole
+    # by _cut_setting_text (#657).
     for _ in range(3):
         decoded = urllib.parse.unquote(text)
         if decoded == text:
@@ -475,6 +476,8 @@ def _cut_setting_text(value: str) -> Optional[str]:
     # so "u:S%40sha256:..." and "u:S＠sha256:..." leave an "@" (#657).
     check = _SETTING_DIGEST_RE.sub("", redacted.replace(_CUT + "@", "").replace(_CUT, "").replace(_CUT_USER, ""))
     check = _SETTING_MAILTO_RE.sub("", _decode_setting_text(check))
+    if urllib.parse.unquote(check) != check:
+        return None  # encoded deeper than _decode_setting_text decodes: fail closed
     at = check.rfind("@")
     if (at > 0 and ":" in check[:at]) or _SETTING_USER_TOKEN_RE.search(check):
         return None

@@ -70,6 +70,16 @@ class SecurityTextRedactionTests(unittest.TestCase):
         # #654: an unclosed quote hid the rest of a traceback.
         self.assert_masked("token: can't parse\nTraceback (most recent call last):\n  File x",
                            "token: [REDACTED]\nTraceback (most recent call last):\n  File x")
+        self.assert_masked('password="unclosed fake-s18\nnext line', "password=[REDACTED]\nnext line")
+
+    def test_closed_double_quote_spans_newlines(self):
+        # PR #659 QA: a closed quoted value with a raw newline leaked its tail.
+        self.assert_masked('password="QQSEC\nRETZZ" tail', "password=[REDACTED] tail")
+        self.assert_masked('client_secret: "-----BEGIN\nQQSECRETZZ\n-----END" tail',
+                           "client_secret: [REDACTED] tail")
+
+    def test_negotiate_scheme_in_assignment(self):
+        self.assert_masked("token=Negotiate fake-s19 tail", "token=[REDACTED] tail")
 
     def test_non_secret_names_untouched(self):
         for text in ("bypass=1 compass=2 author=x sort_key=a", "https://h.invalid/?page=2&keep=1"):

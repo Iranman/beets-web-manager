@@ -62,7 +62,9 @@ class DiagnosticRedactionTests(unittest.TestCase):
 
     def test_issue_654_residuals(self):
         for text in ("https://u:FAKEX@FAKEY@host/p", "access_token=FAKEX db_password=FAKEY",
-                     "Cookie: a=FAKEX; b=FAKEY", "Authorization: Digest username=u, response=FAKEX"):
+                     "Cookie: a=FAKEX; b=FAKEY", "Authorization: Digest username=u, response=FAKEX",
+                     # PR #659 QA: a closed quote spans newlines.
+                     'password="FAKEX\nFAKEY" tail', 'client_secret: "-----BEGIN\nFAKEX\n-----END"'):
             for real, redact in self.redactors.items():
                 out = redact(text)
                 self.assertNotIn("FAKE", out, (real, text))
