@@ -549,7 +549,7 @@
     "_ai_batch_albums_missing_release_group",
     "_ai_batch_duplicate_verdict"
    ],
-   "caller_count": 694,
+   "caller_count": 696,
    "dependencies": []
   },
   {
@@ -7909,10 +7909,10 @@
    "module": "backend/matching_service.py",
    "lines": [
     1521,
-    1566
+    1559
    ],
-   "size": 46,
-   "body_lines": 31,
+   "size": 39,
+   "body_lines": 25,
    "route": null,
    "mutation_capable": false,
    "domain": "AI",
@@ -7929,8 +7929,8 @@
    "name": "_ai_api_key",
    "module": "backend/matching_service.py",
    "lines": [
-    1576,
-    1582
+    1569,
+    1575
    ],
    "size": 7,
    "body_lines": 4,
@@ -7958,8 +7958,8 @@
    "name": "_ai_model_and_endpoint",
    "module": "backend/matching_service.py",
    "lines": [
-    1585,
-    1604
+    1578,
+    1597
    ],
    "size": 20,
    "body_lines": 3,
@@ -7984,8 +7984,8 @@
    "name": "_compact_preflight",
    "module": "backend/matching_service.py",
    "lines": [
-    1607,
-    1637
+    1600,
+    1630
    ],
    "size": 31,
    "body_lines": 30,
@@ -8008,8 +8008,8 @@
    "name": "_album_preflight_folder",
    "module": "backend/matching_service.py",
    "lines": [
-    1640,
-    1661
+    1633,
+    1654
    ],
    "size": 22,
    "body_lines": 21,
@@ -8031,8 +8031,8 @@
    "name": "_match_tracks_from_mb",
    "module": "backend/matching_service.py",
    "lines": [
-    1664,
-    1679
+    1657,
+    1672
    ],
    "size": 16,
    "body_lines": 7,
@@ -8055,8 +8055,8 @@
    "name": "_match_tracks_from_mb_shared",
    "module": "backend/matching_service.py",
    "lines": [
-    1682,
-    1764
+    1675,
+    1757
    ],
    "size": 83,
    "body_lines": 56,
@@ -8075,8 +8075,8 @@
    "name": "_album_track_feature_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1790,
-    1796
+    1783,
+    1789
    ],
    "size": 7,
    "body_lines": 5,
@@ -8095,8 +8095,8 @@
    "name": "_album_track_parenthetical_alias_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1799,
-    1805
+    1792,
+    1798
    ],
    "size": 7,
    "body_lines": 5,
@@ -8115,8 +8115,8 @@
    "name": "_album_track_path_prefixes",
    "module": "backend/matching_service.py",
    "lines": [
-    1808,
-    1873
+    1801,
+    1866
    ],
    "size": 66,
    "body_lines": 64,
@@ -8139,8 +8139,8 @@
    "name": "_album_track_title_variants",
    "module": "backend/matching_service.py",
    "lines": [
-    1876,
-    1936
+    1869,
+    1929
    ],
    "size": 61,
    "body_lines": 60,
@@ -8167,8 +8167,8 @@
    "name": "_mb_release_tracklist_cache_path",
    "module": "backend/matching_service.py",
    "lines": [
-    1939,
-    1956
+    1932,
+    1949
    ],
    "size": 18,
    "body_lines": 4,
@@ -8191,8 +8191,8 @@
    "name": "_mb_release_tracklist_read_disk",
    "module": "backend/matching_service.py",
    "lines": [
-    1959,
-    1976
+    1952,
+    1969
    ],
    "size": 18,
    "body_lines": 17,
@@ -8213,8 +8213,8 @@
    "name": "_mb_release_tracklist_write_disk",
    "module": "backend/matching_service.py",
    "lines": [
-    1979,
-    1994
+    1972,
+    1987
    ],
    "size": 16,
    "body_lines": 15,
@@ -8235,8 +8235,8 @@
    "name": "_fetch_mb_release_tracklist",
    "module": "backend/matching_service.py",
    "lines": [
-    1997,
-    2080
+    1990,
+    2073
    ],
    "size": 84,
    "body_lines": 83,
@@ -8281,8 +8281,8 @@
    "name": "_album_track_score",
    "module": "backend/matching_service.py",
    "lines": [
-    2083,
-    2088
+    2076,
+    2081
    ],
    "size": 6,
    "body_lines": 5,
@@ -8301,8 +8301,8 @@
    "name": "_best_album_track_match",
    "module": "backend/matching_service.py",
    "lines": [
-    2091,
-    2096
+    2084,
+    2089
    ],
    "size": 6,
    "body_lines": 5,
@@ -8330,8 +8330,8 @@
    "name": "_ai_review_album_track_candidates",
    "module": "backend/matching_service.py",
    "lines": [
-    2099,
-    2201
+    2092,
+    2194
    ],
    "size": 103,
    "body_lines": 99,
@@ -8355,8 +8355,8 @@
    "name": "_scan_album_track_integrity",
    "module": "backend/matching_service.py",
    "lines": [
-    2209,
-    2415
+    2202,
+    2408
    ],
    "size": 207,
    "body_lines": 202,
@@ -8383,8 +8383,8 @@
    "name": "_album_mb_match_plan",
    "module": "backend/matching_service.py",
    "lines": [
-    2418,
-    2493
+    2411,
+    2486
    ],
    "size": 76,
    "body_lines": 74,
@@ -8410,8 +8410,8 @@
    "name": "_album_mb_completeness",
    "module": "backend/matching_service.py",
    "lines": [
-    2496,
-    2601
+    2489,
+    2594
    ],
    "size": 106,
    "body_lines": 104,
@@ -8441,8 +8441,8 @@
    "name": "_remove_album_track_items",
    "module": "backend/matching_service.py",
    "lines": [
-    2604,
-    2649
+    2597,
+    2642
    ],
    "size": 46,
    "body_lines": 32,
@@ -8467,8 +8467,8 @@
    "name": "_artist_folder_name_without_mbid",
    "module": "backend/matching_service.py",
    "lines": [
-    2658,
-    2659
+    2651,
+    2652
    ],
    "size": 2,
    "body_lines": 1,
@@ -8480,6 +8480,7 @@
    "callers": [
     "_album_download_request",
     "_album_track_path_prefixes",
+    "_artist_display_key",
     "_artist_folder_merge_key",
     "_build_import_target_preview",
     "_build_library_payload",
@@ -8489,7 +8490,7 @@
     "_stamp_artist_folder_scan",
     "start_reimport_disk"
    ],
-   "caller_count": 10,
+   "caller_count": 11,
    "dependencies": [
     "_s"
    ]
@@ -8498,8 +8499,8 @@
    "name": "_stamp_folder_for_item_path",
    "module": "backend/matching_service.py",
    "lines": [
-    2662,
-    2689
+    2655,
+    2682
    ],
    "size": 28,
    "body_lines": 22,
@@ -8520,8 +8521,8 @@
    "name": "_artist_folder_album_rows",
    "module": "backend/matching_service.py",
    "lines": [
-    2692,
-    2700
+    2685,
+    2693
    ],
    "size": 9,
    "body_lines": 4,
@@ -8542,8 +8543,8 @@
    "name": "_stamp_artist_folder_album_mbid_counts",
    "module": "backend/matching_service.py",
    "lines": [
-    2703,
-    2744
+    2696,
+    2737
    ],
    "size": 42,
    "body_lines": 37,
@@ -8567,8 +8568,8 @@
    "name": "_playlist_artist_credit_info",
    "module": "backend/matching_service.py",
    "lines": [
-    2750,
-    2776
+    2743,
+    2769
    ],
    "size": 27,
    "body_lines": 26,
@@ -9591,10 +9592,11 @@
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
     "_artist_alias_group_reject_key",
+    "_artist_display_key",
     "_cleanup_artist_alias_source_dirs",
     "_run_artist_folder_reconcile_for_alias_merge"
    ],
-   "caller_count": 3,
+   "caller_count": 4,
    "dependencies": [
     "_normalize_name",
     "_s"
@@ -22828,19 +22830,70 @@
    "desired_owner": "backend/library_service.py",
    "migration_status": "EXTRACTED",
    "callers": [
-    "_apply_collaboration_album_views"
+    "_apply_collaboration_album_views",
+    "_merge_same_name_artists"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": [
     "albums"
+   ]
+  },
+  {
+   "name": "_artist_display_key",
+   "module": "backend/library_service.py",
+   "lines": [
+    1449,
+    1453
+   ],
+   "size": 5,
+   "body_lines": 2,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_apply_collaboration_album_views",
+    "_merge_same_name_artists"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_artist_alias_key",
+    "_artist_folder_name_without_mbid",
+    "_s"
+   ]
+  },
+  {
+   "name": "_merge_same_name_artists",
+   "module": "backend/library_service.py",
+   "lines": [
+    1456,
+    1487
+   ],
+   "size": 32,
+   "body_lines": 22,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "LIBRARY",
+   "desired_owner": "backend/library_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_build_library_payload",
+    "_build_library_payload_fast"
+   ],
+   "caller_count": 2,
+   "dependencies": [
+    "_artist_display_key",
+    "_recompute_artist_totals",
+    "_s"
    ]
   },
   {
    "name": "_apply_collaboration_album_views",
    "module": "backend/library_service.py",
    "lines": [
-    1449,
-    1529
+    1490,
+    1570
    ],
    "size": 81,
    "body_lines": 75,
@@ -22855,6 +22908,7 @@
    ],
    "caller_count": 2,
    "dependencies": [
+    "_artist_display_key",
     "_artist_names_for_album",
     "_recompute_artist_totals",
     "_s"
@@ -22864,8 +22918,8 @@
    "name": "_library_no_mb_album_matches_folder",
    "module": "backend/library_service.py",
    "lines": [
-    1536,
-    1597
+    1577,
+    1638
    ],
    "size": 62,
    "body_lines": 60,
@@ -22887,8 +22941,8 @@
    "name": "_delete_review_source_folder",
    "module": "backend/library_service.py",
    "lines": [
-    1600,
-    1640
+    1641,
+    1681
    ],
    "size": 41,
    "body_lines": 37,
@@ -22909,8 +22963,8 @@
    "name": "_representative_tracktotal",
    "module": "backend/library_service.py",
    "lines": [
-    1643,
-    1648
+    1684,
+    1689
    ],
    "size": 6,
    "body_lines": 5,
@@ -22930,8 +22984,8 @@
    "name": "_expected_track_count_from_library_rows",
    "module": "backend/library_service.py",
    "lines": [
-    1651,
-    1662
+    1692,
+    1703
    ],
    "size": 12,
    "body_lines": 10,
@@ -22953,8 +23007,8 @@
    "name": "_library_album_is_disk_only",
    "module": "backend/library_service.py",
    "lines": [
-    1665,
-    1670
+    1706,
+    1711
    ],
    "size": 6,
    "body_lines": 5,
@@ -22973,8 +23027,8 @@
    "name": "_library_recompute_artist_counts",
    "module": "backend/library_service.py",
    "lines": [
-    1673,
-    1684
+    1714,
+    1725
    ],
    "size": 12,
    "body_lines": 11,
@@ -22995,8 +23049,8 @@
    "name": "_library_payload_for_response",
    "module": "backend/library_service.py",
    "lines": [
-    1687,
-    1731
+    1728,
+    1772
    ],
    "size": 45,
    "body_lines": 42,
@@ -23019,8 +23073,8 @@
    "name": "_library_stats_for_artists",
    "module": "backend/library_service.py",
    "lines": [
-    1734,
-    1801
+    1775,
+    1842
    ],
    "size": 68,
    "body_lines": 42,
@@ -23039,8 +23093,8 @@
    "name": "_library_track_dict",
    "module": "backend/library_service.py",
    "lines": [
-    1804,
-    1831
+    1845,
+    1872
    ],
    "size": 28,
    "body_lines": 27,
@@ -23062,8 +23116,8 @@
    "name": "_library_reconcile_job",
    "module": "backend/library_service.py",
    "lines": [
-    1834,
-    1847
+    1875,
+    1888
    ],
    "size": 14,
    "body_lines": 8,
@@ -23085,8 +23139,8 @@
    "name": "_schedule_library_reconcile",
    "module": "backend/library_service.py",
    "lines": [
-    1850,
-    1865
+    1891,
+    1906
    ],
    "size": 16,
    "body_lines": 11,
@@ -23107,11 +23161,11 @@
    "name": "_build_library_payload_fast",
    "module": "backend/library_service.py",
    "lines": [
-    1868,
-    2039
+    1909,
+    2081
    ],
-   "size": 172,
-   "body_lines": 156,
+   "size": 173,
+   "body_lines": 157,
    "route": null,
    "mutation_capable": false,
    "domain": "LIBRARY",
@@ -23127,6 +23181,7 @@
     "_attach_artist_image_cache_urls",
     "_expected_track_count_from_library_rows",
     "_fast_album_mb_health_fields",
+    "_merge_same_name_artists",
     "_s",
     "albums"
    ]
@@ -23135,8 +23190,8 @@
    "name": "get_library_payload",
    "module": "backend/library_service.py",
    "lines": [
-    2042,
-    2079
+    2084,
+    2121
    ],
    "size": 38,
    "body_lines": 22,
@@ -23161,8 +23216,8 @@
    "name": "_refresh_library_cache",
    "module": "backend/library_service.py",
    "lines": [
-    2082,
-    2094
+    2124,
+    2136
    ],
    "size": 13,
    "body_lines": 3,
@@ -23186,11 +23241,11 @@
    "name": "_build_library_payload",
    "module": "backend/library_service.py",
    "lines": [
-    2107,
-    2718
+    2149,
+    2761
    ],
-   "size": 612,
-   "body_lines": 602,
+   "size": 613,
+   "body_lines": 603,
    "route": null,
    "mutation_capable": false,
    "domain": "LIBRARY",
@@ -23207,6 +23262,7 @@
     "_expected_track_count_from_library_rows",
     "_fast_album_mb_health_fields",
     "_load_pending_reviews",
+    "_merge_same_name_artists",
     "_s",
     "albums"
    ]
@@ -23215,8 +23271,8 @@
    "name": "_album_db_folder_from_item_paths",
    "module": "backend/library_service.py",
    "lines": [
-    2721,
-    2735
+    2764,
+    2778
    ],
    "size": 15,
    "body_lines": 14,
@@ -23238,8 +23294,8 @@
    "name": "_target_preview_year",
    "module": "backend/library_service.py",
    "lines": [
-    2738,
-    2740
+    2781,
+    2783
    ],
    "size": 3,
    "body_lines": 2,
@@ -23261,8 +23317,8 @@
    "name": "_target_preview_artist_folder",
    "module": "backend/library_service.py",
    "lines": [
-    2743,
-    2760
+    2786,
+    2803
    ],
    "size": 18,
    "body_lines": 17,
@@ -23287,8 +23343,8 @@
    "name": "_legacy_local_scan_enabled",
    "module": "backend/library_service.py",
    "lines": [
-    2768,
-    2771
+    2811,
+    2814
    ],
    "size": 4,
    "body_lines": 3,
@@ -23308,8 +23364,8 @@
    "name": "_get_last_scan",
    "module": "backend/library_service.py",
    "lines": [
-    2774,
-    2779
+    2817,
+    2822
    ],
    "size": 6,
    "body_lines": 4,
@@ -23329,8 +23385,8 @@
    "name": "_record_scan",
    "module": "backend/library_service.py",
    "lines": [
-    2782,
-    2794
+    2825,
+    2837
    ],
    "size": 13,
    "body_lines": 12,
@@ -23352,8 +23408,8 @@
    "name": "_album_genre_value_by_id",
    "module": "backend/library_service.py",
    "lines": [
-    2797,
-    2817
+    2840,
+    2860
    ],
    "size": 21,
    "body_lines": 19,
@@ -23376,8 +23432,8 @@
    "name": "_album_genre_value",
    "module": "backend/library_service.py",
    "lines": [
-    2820,
-    2825
+    2863,
+    2868
    ],
    "size": 6,
    "body_lines": 5,
@@ -23401,8 +23457,8 @@
    "name": "_apply_genre_to_album",
    "module": "backend/library_service.py",
    "lines": [
-    2828,
-    2840
+    2871,
+    2883
    ],
    "size": 13,
    "body_lines": 10,
@@ -23424,8 +23480,8 @@
    "name": "start_library_fix_genres",
    "module": "backend/library_service.py",
    "lines": [
-    2845,
-    2943
+    2888,
+    2986
    ],
    "size": 99,
    "body_lines": 96,
@@ -23453,8 +23509,8 @@
    "name": "_artist_alias_group_reject_key",
    "module": "backend/library_service.py",
    "lines": [
-    2952,
-    2960
+    2995,
+    3003
    ],
    "size": 9,
    "body_lines": 8,
@@ -23476,8 +23532,8 @@
    "name": "_artist_alias_rejected_map",
    "module": "backend/library_service.py",
    "lines": [
-    2963,
-    2976
+    3006,
+    3019
    ],
    "size": 14,
    "body_lines": 13,
@@ -23496,8 +23552,8 @@
    "name": "_artist_id_alias_groups",
    "module": "backend/library_service.py",
    "lines": [
-    2979,
-    2997
+    3022,
+    3040
    ],
    "size": 19,
    "body_lines": 18,
@@ -23520,8 +23576,8 @@
    "name": "_resolve_artist_alias_mbid",
    "module": "backend/library_service.py",
    "lines": [
-    3000,
-    3038
+    3043,
+    3081
    ],
    "size": 39,
    "body_lines": 36,
@@ -23545,8 +23601,8 @@
    "name": "_run_normalize_artists_if_needed",
    "module": "backend/library_service.py",
    "lines": [
-    3041,
-    3104
+    3084,
+    3147
    ],
    "size": 64,
    "body_lines": 56,
@@ -23568,8 +23624,8 @@
    "name": "_scan_scope_label",
    "module": "backend/library_service.py",
    "lines": [
-    3107,
-    3116
+    3150,
+    3159
    ],
    "size": 10,
    "body_lines": 9,
@@ -23590,8 +23646,8 @@
    "name": "_album_source_folder",
    "module": "backend/library_service.py",
    "lines": [
-    3119,
-    3130
+    3162,
+    3173
    ],
    "size": 12,
    "body_lines": 11,
@@ -23614,8 +23670,8 @@
    "name": "_rgid_group_albums",
    "module": "backend/library_service.py",
    "lines": [
-    3140,
-    3150
+    3183,
+    3193
    ],
    "size": 11,
    "body_lines": 10,
@@ -23638,8 +23694,8 @@
    "name": "_artist_folder_db_counts",
    "module": "backend/library_service.py",
    "lines": [
-    3153,
-    3157
+    3196,
+    3200
    ],
    "size": 5,
    "body_lines": 4,
@@ -23658,8 +23714,8 @@
    "name": "_scan_artist_folder_groups",
    "module": "backend/library_service.py",
    "lines": [
-    3160,
-    3250
+    3203,
+    3293
    ],
    "size": 91,
    "body_lines": 89,
@@ -23686,8 +23742,8 @@
    "name": "_try_resolve_leaked_path",
    "module": "backend/library_service.py",
    "lines": [
-    3253,
-    3283
+    3296,
+    3326
    ],
    "size": 31,
    "body_lines": 24,
@@ -23706,8 +23762,8 @@
    "name": "_scan_leaked_db_paths",
    "module": "backend/library_service.py",
    "lines": [
-    3286,
-    3456
+    3329,
+    3499
    ],
    "size": 171,
    "body_lines": 161,
@@ -23731,8 +23787,8 @@
    "name": "_folder_placeholder_summary",
    "module": "backend/library_service.py",
    "lines": [
-    3459,
-    3473
+    3502,
+    3516
    ],
    "size": 15,
    "body_lines": 12,
@@ -23753,8 +23809,8 @@
    "name": "_scan_folder_name_placeholders",
    "module": "backend/library_service.py",
    "lines": [
-    3476,
-    3710
+    3519,
+    3753
    ],
    "size": 235,
    "body_lines": 226,
@@ -23780,8 +23836,8 @@
    "name": "_placeholder_norm_path",
    "module": "backend/library_service.py",
    "lines": [
-    3713,
-    3716
+    3756,
+    3759
    ],
    "size": 4,
    "body_lines": 1,
@@ -23803,8 +23859,8 @@
    "name": "_placeholder_folder_db",
    "module": "backend/library_service.py",
    "lines": [
-    3719,
-    3746
+    3762,
+    3789
    ],
    "size": 28,
    "body_lines": 24,
@@ -23824,8 +23880,8 @@
    "name": "_placeholder_folder_tracked",
    "module": "backend/library_service.py",
    "lines": [
-    3749,
-    3773
+    3792,
+    3816
    ],
    "size": 25,
    "body_lines": 9,
@@ -23845,8 +23901,8 @@
    "name": "_ops_cover_source",
    "module": "backend/library_service.py",
    "lines": [
-    3776,
-    3781
+    3819,
+    3824
    ],
    "size": 6,
    "body_lines": 3,
@@ -23867,8 +23923,8 @@
    "name": "_find_applied_folder_op",
    "module": "backend/library_service.py",
    "lines": [
-    3784,
-    3812
+    3827,
+    3855
    ],
    "size": 29,
    "body_lines": 17,
@@ -23890,8 +23946,8 @@
    "name": "_run_folder_rename_batch",
    "module": "backend/library_service.py",
    "lines": [
-    3815,
-    4057
+    3858,
+    4100
    ],
    "size": 243,
    "body_lines": 216,
@@ -23915,8 +23971,8 @@
    "name": "_apply_folder_name_placeholders",
    "module": "backend/library_service.py",
    "lines": [
-    4060,
-    4141
+    4103,
+    4184
    ],
    "size": 82,
    "body_lines": 41,
@@ -23941,8 +23997,8 @@
    "name": "_rollback_folder_placeholder_apply",
    "module": "backend/library_service.py",
    "lines": [
-    4144,
-    4215
+    4187,
+    4258
    ],
    "size": 72,
    "body_lines": 54,
@@ -23964,8 +24020,8 @@
    "name": "_artist_mbid_from_folder",
    "module": "backend/library_service.py",
    "lines": [
-    4230,
-    4236
+    4273,
+    4279
    ],
    "size": 7,
    "body_lines": 4,
@@ -23986,8 +24042,8 @@
    "name": "_iter_album_folders",
    "module": "backend/library_service.py",
    "lines": [
-    4239,
-    4258
+    4282,
+    4301
    ],
    "size": 20,
    "body_lines": 17,
@@ -24006,8 +24062,8 @@
    "name": "_album_rgid_via_adapter",
    "module": "backend/library_service.py",
    "lines": [
-    4261,
-    4275
+    4304,
+    4318
    ],
    "size": 15,
    "body_lines": 11,
@@ -24028,8 +24084,8 @@
    "name": "_album_db_paths_stale",
    "module": "backend/library_service.py",
    "lines": [
-    4278,
-    4302
+    4321,
+    4345
    ],
    "size": 25,
    "body_lines": 12,
@@ -24048,8 +24104,8 @@
    "name": "_apply_folder_mbid_names",
    "module": "backend/library_service.py",
    "lines": [
-    4305,
-    4449
+    4348,
+    4492
    ],
    "size": 145,
    "body_lines": 94,
@@ -24079,8 +24135,8 @@
    "name": "_root_folder_repair_scan",
    "module": "backend/library_service.py",
    "lines": [
-    4452,
-    4544
+    4495,
+    4587
    ],
    "size": 93,
    "body_lines": 84,
@@ -24102,8 +24158,8 @@
    "name": "_root_folder_repair_apply_safe",
    "module": "backend/library_service.py",
    "lines": [
-    4547,
-    4680
+    4590,
+    4723
    ],
    "size": 134,
    "body_lines": 125,
@@ -24128,8 +24184,8 @@
    "name": "_album_cleanup_duplicate_file_choice",
    "module": "backend/library_service.py",
    "lines": [
-    4683,
-    4690
+    4726,
+    4733
    ],
    "size": 8,
    "body_lines": 5,
@@ -24150,8 +24206,8 @@
    "name": "_root_folder_repair_save_report",
    "module": "backend/library_service.py",
    "lines": [
-    4693,
-    4700
+    4736,
+    4743
    ],
    "size": 8,
    "body_lines": 7,
@@ -24172,8 +24228,8 @@
    "name": "_merge_artist_dir_contents",
    "module": "backend/library_service.py",
    "lines": [
-    4703,
-    4762
+    4746,
+    4805
    ],
    "size": 60,
    "body_lines": 51,
@@ -24198,8 +24254,8 @@
    "name": "_artist_folder_repair_root",
    "module": "backend/library_service.py",
    "lines": [
-    4765,
-    4803
+    4808,
+    4846
    ],
    "size": 39,
    "body_lines": 25,
@@ -24224,8 +24280,8 @@
    "name": "_apply_artist_folder_groups",
    "module": "backend/library_service.py",
    "lines": [
-    4806,
-    4945
+    4849,
+    4988
    ],
    "size": 140,
    "body_lines": 137,
@@ -24254,8 +24310,8 @@
    "name": "_artist_folder_mbid_from_name",
    "module": "backend/library_service.py",
    "lines": [
-    4954,
-    4956
+    4997,
+    4999
    ],
    "size": 3,
    "body_lines": 2,
@@ -24276,8 +24332,8 @@
    "name": "_artist_folder_canonical_name",
    "module": "backend/library_service.py",
    "lines": [
-    4959,
-    4965
+    5002,
+    5008
    ],
    "size": 7,
    "body_lines": 5,
@@ -24299,8 +24355,8 @@
    "name": "_stamp_artist_folder_scan",
    "module": "backend/library_service.py",
    "lines": [
-    4968,
-    5228
+    5011,
+    5271
    ],
    "size": 261,
    "body_lines": 252,
@@ -24332,8 +24388,8 @@
    "name": "_append_stamp_candidate_log",
    "module": "backend/library_service.py",
    "lines": [
-    5231,
-    5243
+    5274,
+    5286
    ],
    "size": 13,
    "body_lines": 12,
@@ -24352,8 +24408,8 @@
    "name": "_append_stamp_skipped_log",
    "module": "backend/library_service.py",
    "lines": [
-    5246,
-    5264
+    5289,
+    5307
    ],
    "size": 19,
    "body_lines": 12,
@@ -24373,8 +24429,8 @@
    "name": "item_dict",
    "module": "backend/library_service.py",
    "lines": [
-    5267,
-    5280
+    5310,
+    5323
    ],
    "size": 14,
    "body_lines": 13,
@@ -24398,8 +24454,8 @@
    "name": "item_dict_full",
    "module": "backend/library_service.py",
    "lines": [
-    5283,
-    5291
+    5326,
+    5334
    ],
    "size": 9,
    "body_lines": 8,
@@ -24421,8 +24477,8 @@
    "name": "album_dict",
    "module": "backend/library_service.py",
    "lines": [
-    5294,
-    5304
+    5337,
+    5347
    ],
    "size": 11,
    "body_lines": 10,
@@ -24446,8 +24502,8 @@
    "name": "start_fetch_missing_art",
    "module": "backend/library_service.py",
    "lines": [
-    5309,
-    5380
+    5352,
+    5423
    ],
    "size": 72,
    "body_lines": 70,
@@ -24473,8 +24529,8 @@
    "name": "_missing_mb_album_row",
    "module": "backend/library_service.py",
    "lines": [
-    5396,
-    5424
+    5439,
+    5467
    ],
    "size": 29,
    "body_lines": 28,
@@ -24496,8 +24552,8 @@
    "name": "_missing_mb_item_row",
    "module": "backend/library_service.py",
    "lines": [
-    5427,
-    5484
+    5470,
+    5527
    ],
    "size": 58,
    "body_lines": 57,
@@ -24519,8 +24575,8 @@
    "name": "_missing_mb_rows",
    "module": "backend/library_service.py",
    "lines": [
-    5495,
-    5549
+    5538,
+    5592
    ],
    "size": 55,
    "body_lines": 52,
@@ -24546,8 +24602,8 @@
    "name": "library_missing_mb_payload",
    "module": "backend/library_service.py",
    "lines": [
-    5552,
-    5573
+    5595,
+    5616
    ],
    "size": 22,
    "body_lines": 12,
@@ -24570,8 +24626,8 @@
    "name": "library_mbid_status_payload",
    "module": "backend/library_service.py",
    "lines": [
-    5576,
-    5684
+    5619,
+    5727
    ],
    "size": 109,
    "body_lines": 107,
@@ -24594,8 +24650,8 @@
    "name": "album_tracks_with_disk_files",
    "module": "backend/library_service.py",
    "lines": [
-    5687,
-    5772
+    5730,
+    5815
    ],
    "size": 86,
    "body_lines": 83,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from backend.json_state import atomic_write_json
 
 import backend.provider_boundary as provider_boundary
-import json, os, re, sqlite3, stat, threading, time
+import json, os, re, sqlite3, stat, threading, time, unicodedata
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
@@ -1446,14 +1446,55 @@ def _recompute_artist_totals(artist: Dict[str, Any]) -> None:
     artist["missing"] = sum(int(a.get("missing") or 0) for a in real_albums)
 
 
+def _artist_display_key(name: Any) -> str:
+    """Grouping key for Library artist entries: UUID stamp stripped, Unicode
+    NFKC + dash/quote normalized, casefolded, whitespace collapsed."""
+    bare = _artist_folder_name_without_mbid(_s(name))
+    return _artist_alias_key(unicodedata.normalize("NFKC", bare))
+
+
+def _merge_same_name_artists(result: List[Dict[str, Any]]) -> None:
+    """Collapse artist entries that display as the same name into one.
+
+    Entries come from distinct artist folders (full builder) or distinct raw
+    albumartist strings (fast builder), so "Foo", "foo", "Foo " and a stamped
+    "Foo (<mbid>)" folder each became a separate Library artist. Display only:
+    nothing on disk or in Beets changes. A group whose albums carry more than
+    one distinct mb_albumartistid is left as-is, so artists with different
+    MBIDs are never merged.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for artist in result:
+        groups[_artist_display_key(artist.get("name"))].append(artist)
+    merged: List[Dict[str, Any]] = []
+    for entries in groups.values():
+        mbids = {
+            _s(album.get("mb_albumartistid")).strip().lower()
+            for entry in entries for album in entry.get("albums", [])
+        } - {""}
+        if len(entries) < 2 or len(mbids) > 1:
+            merged.extend(entries)
+            continue
+        # Keep the spelling (and folder path) that carries the most tracks.
+        primary = dict(max(entries, key=lambda e: (
+            sum(int(a.get("track_count") or 0) for a in e.get("albums", [])),
+            bool(e.get("path")),
+        )))
+        primary["albums"] = [album for entry in entries for album in entry.get("albums", [])]
+        primary["empty_artist_folder"] = not primary["albums"]
+        _recompute_artist_totals(primary)
+        merged.append(primary)
+    result[:] = merged
+
+
 def _apply_collaboration_album_views(result: List[Dict[str, Any]]) -> None:
     """Show multi-artist albums under each credited artist without copying files.
 
     The first credited artist becomes the primary display location, mirroring
     Lidarr's practical behavior. Other credited artists get virtual appearances.
     """
-    by_name: Dict[str, Dict[str, Any]] = {a["name"]: a for a in result}
-    known = set(by_name)
+    by_name: Dict[str, Dict[str, Any]] = {_artist_display_key(a["name"]): a for a in result}
+    known = {a["name"] for a in result}
     pending_adds: List[tuple] = []
 
     for artist in list(result):
@@ -1500,7 +1541,7 @@ def _apply_collaboration_album_views(result: List[Dict[str, Any]]) -> None:
         artist["albums"] = kept
 
     for target_name, album in pending_adds:
-        target = by_name.get(target_name)
+        target = by_name.get(_artist_display_key(target_name))
         if not target:
             target = {
                 "name": target_name,
@@ -1511,7 +1552,7 @@ def _apply_collaboration_album_views(result: List[Dict[str, Any]]) -> None:
                 "missing": 0,
                 "virtual_artist": True,
             }
-            by_name[target_name] = target
+            by_name[_artist_display_key(target_name)] = target
             result.append(target)
         album_key = album.get("album_id") or album.get("aldir") or album.get("album")
         if any((a.get("album_id") or a.get("aldir") or a.get("album")) == album_key
@@ -2014,6 +2055,7 @@ def _build_library_payload_fast() -> dict:
             "path":                "",
         })
 
+    _merge_same_name_artists(result)
     _apply_collaboration_album_views(result)
     _attach_artist_image_cache_urls(result)
     result.sort(key=lambda a: a["name"].lower())
@@ -2698,6 +2740,7 @@ def _build_library_payload() -> dict:
         })
 
     result.extend(sorted(final_extras, key=lambda a: a["name"].lower()))
+    _merge_same_name_artists(result)
     _apply_collaboration_album_views(result)
     _attach_artist_image_cache_urls(result)
     result.sort(key=lambda a: a["name"].lower())
