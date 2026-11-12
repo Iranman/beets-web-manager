@@ -81,6 +81,45 @@ def _summary(checks: List[Dict[str, Any]], **extra: Any) -> Dict[str, Any]:
     return {"engine": "embedded", "ok": ok, "checks": checks, **extra}
 
 
+def _release_lock_on_failed_exit(lib) -> None:
+    """Beets' ``Transaction.__exit__`` releases ``_db_lock`` only after the
+    root transaction's commit succeeds. If that commit (or reopening the
+    thread's connection for it) raises -- e.g. a new thread whose SQLite
+    connection cannot be opened -- the lock stays held with no owner and
+    every later library call blocks forever (#652).
+
+    The override mirrors beets 2.14.1 ``beets/dbcore/db.py``
+    ``Transaction.__exit__`` (lines 940-967) with one change: the root commit
+    is wrapped in ``try/finally`` so the lock is released exactly once, by the
+    thread that owns it. Releasing from an outer ``except`` instead would also
+    fire on the ``DBCustomFunctionError`` raised *after* a successful
+    release, freeing another thread's lock. Re-check on every Beets bump."""
+    import sqlite3
+
+    from beets.dbcore.db import DBCustomFunctionError, Transaction
+
+    class _Transaction(Transaction):
+        def __exit__(self, exc_type, exc_value, traceback):
+            self.db.revision += self._mutated
+            with self.db._tx_stack() as stack:
+                assert stack.pop() is self
+                empty = not stack
+            if empty:
+                try:
+                    self.db._connection().commit()
+                    self._mutated = False
+                finally:
+                    self.db._db_lock.release()
+            if (
+                isinstance(exc_value, sqlite3.OperationalError)
+                and exc_value.args[0] == "user-defined function raised exception"
+            ):
+                raise DBCustomFunctionError()
+            return None
+
+    lib.transaction = lambda: _Transaction(lib)
+
+
 class EmbeddedBeets:
     """One Beets runtime per process: config, plugins, Library, WSGI app."""
 
@@ -168,6 +207,7 @@ class EmbeddedBeets:
         existed = os.path.isfile(dbpath)
         try:
             lib = Library(dbpath, directory)
+            _release_lock_on_failed_exit(lib)
             lib.get_item(0)  # opens the connection, as `beet` does
         except Exception as ex:
             # Raw exception text can leak internal paths/details into the

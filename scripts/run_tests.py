@@ -47,6 +47,44 @@ def _init_worker() -> None:
         importlib.import_module(SUITE_ENV_MODULE)
     except Exception:
         pass  # its own tests report the import error when they run
+    # Discover installs the per-test job-thread guard by importing
+    # test_job_thread_guard; a worker that never runs that module would not.
+    try:
+        importlib.import_module("_job_threads").install_guard()
+    except Exception:
+        pass
+
+
+def _leaks(before: set) -> list[str]:
+    """What a unit left behind that would wedge later units in this worker
+    (#652): job threads still alive, or a shared embedded Beets engine whose
+    db lock is held or whose library file is gone. A broken engine is reset
+    so the next unit starts a fresh one instead of blocking forever."""
+    problems = []
+    try:
+        importlib.import_module("_job_threads").assert_no_new_job_threads(before)
+    except AssertionError as exc:
+        problems.append(str(exc))
+    except Exception:
+        pass
+    embedded = sys.modules.get("backend.beets_embedded")
+    engine = getattr(embedded, "_engine", None)
+    if engine is not None:
+        broken = []
+        lib = engine.lib
+        if lib._db_lock.acquire(timeout=5):
+            lib._db_lock.release()
+        else:
+            broken.append("the shared embedded Beets engine's db lock (beets "
+                          "Database._db_lock) is still held 5s after the unit ended")
+        path = os.fsdecode(lib.path)
+        if path != ":memory:" and not os.path.exists(path):
+            broken.append(f"the shared embedded Beets engine's library {path} was deleted "
+                          "(the engine was started under this unit's temp BEETSDIR)")
+        if broken:
+            embedded.reset()
+        problems += broken
+    return problems
 
 
 def _classes(module: str) -> list[str]:
@@ -75,16 +113,23 @@ def _run(name: str, verbosity: int) -> dict:
         suite = unittest.loader._make_skipped_test(name, exc, unittest.TestSuite)
     except Exception:  # any other import-time error: a failing test, not a dead runner
         suite, _ = unittest.loader._make_failed_import_test(name, unittest.TestSuite)
+    try:
+        before = set(importlib.import_module("_job_threads").job_threads())
+    except Exception:
+        before = set()
     result = unittest.TextTestRunner(stream=stream, verbosity=verbosity).run(suite)
+    leaks = _leaks(before)
+    if leaks:
+        stream.write("\nLEAK GUARD (#652): " + name + " left behind:\n  - " + "\n  - ".join(leaks) + "\n")
     return {
         "name": name,
         "run": result.testsRun,
         "failures": len(result.failures),
-        "errors": len(result.errors),
+        "errors": len(result.errors) + bool(leaks),
         "skipped": len(result.skipped),
         "expected_failures": len(result.expectedFailures),
         "unexpected_successes": len(result.unexpectedSuccesses),
-        "ok": result.wasSuccessful(),
+        "ok": result.wasSuccessful() and not leaks,
         "output": stream.getvalue(),
         "seconds": time.monotonic() - start,
     }

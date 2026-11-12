@@ -211,6 +211,11 @@ class BeetsPluginApiRoutesTests(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def tearDown(self):
+        # The status endpoints start the shared embedded engine under this
+        # temp BEETSDIR; forget it before deleting the dir (#652 leak guard).
+        from backend import beets_embedded
+
+        beets_embedded.reset()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_get_plugins_status_endpoint(self):
