@@ -232,10 +232,44 @@ class CacheTests(_Base):
     def test_a_repeat_lookup_is_served_from_the_cache(self):
         with mock.patch.object(urllib.request, "urlopen", return_value=_json(_mapping_body())) as urlopen:
             first = lbm.lookup_recording("Here Comes the Sun", "The Beatles")
-            again = lbm.lookup_recording("here comes the sun (Remastered)", "THE BEATLES")
+            again = lbm.lookup_recording("HERE COMES THE SUN", "the beatles")
         self.assertEqual(urlopen.call_count, 1)
         self.assertTrue(again.from_cache)
         self.assertEqual(again.data, first.data)
+
+    def test_a_version_qualifier_is_a_different_cache_key(self):
+        with mock.patch.object(urllib.request, "urlopen",
+                               side_effect=lambda *a, **k: _json(_mapping_body())) as urlopen:
+            lbm.lookup_recording("Moon (Live)", "X")
+            plain = lbm.lookup_recording("Moon", "X")
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertFalse(plain.from_cache)
+        self.assertEqual(_query(urlopen.call_args_list[1].args[0])["recording_name"], ["Moon"])
+
+    def test_a_cached_miss_does_not_block_a_qualified_title(self):
+        with mock.patch.object(urllib.request, "urlopen", side_effect=lambda *a, **k: _json({})) as urlopen:
+            lbm.lookup_recording("moon", "x")
+            lbm.lookup_recording("Moon (Live)", "X")
+        self.assertGreaterEqual(urlopen.call_count, 2)
+
+    def test_entries_expire_after_the_ttl(self):
+        clock = [1000.0]
+        with mock.patch.object(lbm.time, "monotonic", side_effect=lambda: clock[0]),                 mock.patch.object(urllib.request, "urlopen", side_effect=lambda *a, **k: _json({})) as urlopen:
+            lbm.lookup_recording("song", "artist")
+            clock[0] += lbm.CACHE_TTL_SECONDS - 1
+            self.assertTrue(lbm.lookup_recording("song", "artist").from_cache)
+            clock[0] += 2
+            self.assertFalse(lbm.lookup_recording("song", "artist").from_cache)
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_an_error_shaped_200_is_a_failure_and_not_cached(self):
+        effects = [_json({"code": 400, "error": "bad"}), _json(_mapping_body())]
+        with mock.patch.object(urllib.request, "urlopen", side_effect=effects) as urlopen:
+            first = lbm.lookup_recording("song", "artist")
+            second = lbm.lookup_recording("song", "artist")
+        self.assertEqual((first.outcome, second.outcome),
+                         (pb.ProviderOutcome.TRANSIENT_ERROR, pb.ProviderOutcome.CONFIRMED))
+        self.assertEqual(urlopen.call_count, 2)
 
     def test_a_clean_miss_is_cached(self):
         with mock.patch.object(urllib.request, "urlopen", side_effect=[_json({})]) as urlopen:

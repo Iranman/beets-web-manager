@@ -86,7 +86,10 @@ def _lookup_once(title: str, artist: str, token: str) -> ProviderResult:
         err = provider_boundary.classify_exception(exc)
         return ProviderResult(SOURCE, err.outcome, message="ListenBrainz lookup failed",
                               status_code=err.status_code)
-    rid = _uuid(body.get("recording_mbid")) if isinstance(body, dict) else ""
+    if not isinstance(body, dict) or "error" in body or "code" in body:
+        # An error-shaped 200 is not an answer: never a (cached) miss.
+        return ProviderResult(SOURCE, ProviderOutcome.TRANSIENT_ERROR, message="ListenBrainz lookup failed")
+    rid = _uuid(body.get("recording_mbid"))
     if not rid:
         return ProviderResult(SOURCE, ProviderOutcome.NO_RESULT)
     return ProviderResult(SOURCE, ProviderOutcome.CONFIRMED, data={
@@ -105,7 +108,12 @@ def lookup_recording(title: str, artist: str) -> ProviderResult:
     token = _token()
     if not token:
         return ProviderResult(SOURCE, ProviderOutcome.NOT_CONFIGURED, message="ListenBrainz token not configured")
-    key = (lookup_title(title), normalize_artist(artist))
+    variants = _query_variants(title, artist)
+    if not variants:
+        return ProviderResult(SOURCE, ProviderOutcome.NO_RESULT)
+    # Keyed on the exact first query sent (casefolded), never on the cleaned
+    # retry form: "Moon (Live)" and "Moon" are different questions.
+    key = (variants[0][0].casefold(), variants[0][1].casefold())
     now = time.monotonic()
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
@@ -113,7 +121,7 @@ def lookup_recording(title: str, artist: str) -> ProviderResult:
             return ProviderResult(SOURCE, cached[1].outcome, data=dict(cached[1].data or {}) or None,
                                   from_cache=True)
     result = ProviderResult(SOURCE, ProviderOutcome.NO_RESULT)
-    for q_title, q_artist in _query_variants(title, artist):
+    for q_title, q_artist in variants:
         result = _lookup_once(q_title, q_artist, token)
         if result.outcome != ProviderOutcome.NO_RESULT:
             break  # an answer, or a failure: a failure never gets the cleaned retry
