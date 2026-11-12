@@ -627,7 +627,7 @@ export default function Submissions() {
                   {selectedCandidateCount ? <Chip size="small" variant="outlined" label={`${selectedCandidateCount} MB candidates`} /> : null}
                 </div>
               </div>
-              {target?.summary.cover_art_url ? <img alt="Cover art" src={target.summary.cover_art_url} className="h-24 w-24 rounded border border-graphite-800 object-cover" /> : null}
+              {target?.summary.cover_art_url ? <img key={target.summary.cover_art_url} alt="Cover art" src={target.summary.cover_art_url} className="h-24 w-24 rounded border border-graphite-800 object-cover" onError={(e) => { e.currentTarget.hidden = true; }} /> : null}
             </div>
 
             {target ? <p className="mt-3 rounded border border-graphite-800 bg-graphite-950/40 p-3 text-sm text-zinc-300">{submissionSentence}</p> : null}

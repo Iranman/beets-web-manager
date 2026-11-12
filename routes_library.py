@@ -1243,10 +1243,9 @@ def album_art(aid):
         if art_result.get("ok") and art_result.get("url"):
             return redirect(art_result["url"])
 
-    # 5. Transparent placeholder
-    _SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
-    from flask import Response as _Resp
-    return _Resp(_SVG, status=200, mimetype="image/svg+xml")
+    # 5. No art anywhere: 404, so the page's <img> error handler shows its own
+    # placeholder (a 200 transparent image left an empty tile).
+    return ("", 404)
 
 
 @app.get("/api/albums/<int:aid>/art/status")
