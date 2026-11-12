@@ -384,6 +384,12 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     # media changes from a resolved review go through engine transactions only.
     "_write_reviews": ("APP_STATE", "app_state_v1", "import-reconciliation-review-queue-state"),
     "_mb_release_tracklist_write_disk": ("CACHE_STATE", "cache_v1", "mb-release-tracklist-disk-cache"),
+    # Local duplicate-fingerprint evidence (backend/acoustid_service.py):
+    # fpcalc -raw reads one audio file (argument list, no shell, 30 s
+    # timeout) and the raw fingerprint is cached as JSON under
+    # METADATA_CACHE_DIR/fingerprint_raw -- app cache, never library media.
+    "_fpcalc_raw": ("READ_ONLY_FALSE_POSITIVE", "none", "fpcalc-raw-read-only-audio-probe"),
+    "raw_fingerprint_outcome": ("CACHE_STATE", "cache_v1", "raw-fingerprint-disk-cache"),
     "_plex_client_identifier": ("APP_STATE", "app_state_v1", "plex-client-identifier-state"),
     "_record_scan": ("APP_STATE", "app_state_v1", "library-scan-timestamp-state"),
     "_save_acq_download_all_last": ("APP_STATE", "app_state_v1", "acquisition-last-download-history-state"),

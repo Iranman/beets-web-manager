@@ -13,6 +13,7 @@ user's Beets config. Pure: no I/O. Any missing or malformed field is "no".
 
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Tuple
 
 from .library_gaps import _has_id
@@ -73,20 +74,33 @@ def duplicate_is_already_in_library(ev: Any) -> Tuple[bool, str]:
 # its own authorises a merge or delete -- those still need the MB/AcoustID
 # identity gates (e.g. ``same_recording_proof``). Pure: no I/O.
 #
-# The offset search is adapted from pyacoustid's ``_match_fingerprints``
-# (https://github.com/beetbox/pyacoustid, acoustid.py):
-#   Copyright (C) 2011 Adrian Sampson. Permission is hereby granted, free of
-#   charge, to any person obtaining a copy of this software and associated
-#   documentation files (the "Software"), to deal in the Software without
-#   restriction, including without limitation the rights to use, copy,
-#   modify, merge, publish, distribute, sublicense, and/or sell copies of the
-#   Software, and to permit persons to whom the Software is furnished to do
-#   so, subject to the following conditions: The above copyright notice and
-#   this permission notice shall be included in all copies or substantial
-#   portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT
-#   WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. (MIT License)
-# Changed here: the best offset is then scored by bit-error rate over the
-# overlapping window, and the result is a three-way verdict.
+# The offset vote is adapted from ``_match_fingerprints`` in pyacoustid
+# (https://github.com/beetbox/pyacoustid, acoustid.py). Changed here: the
+# window is symmetric, too few votes is "no alignment" (inconclusive), and
+# the best offset is scored by bit-error rate into a three-way verdict.
+# pyacoustid's LICENSE, verbatim:
+#
+#   The MIT License
+#
+#   Copyright (c) 2011-2019 Adrian Sampson
+#
+#   Permission is hereby granted, free of charge, to any person obtaining a copy
+#   of this software and associated documentation files (the "Software"), to deal
+#   in the Software without restriction, including without limitation the rights
+#   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#   copies of the Software, and to permit persons to whom the Software is
+#   furnished to do so, subject to the following conditions:
+#
+#   The above copyright notice and this permission notice shall be included in
+#   all copies or substantial portions of the Software.
+#
+#   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+#   THE SOFTWARE.
 
 SAME_AUDIO = "same_audio"
 DIFFERENT_AUDIO = "different_audio"
@@ -99,9 +113,17 @@ SAME_AUDIO_MAX_BIT_ERROR_RATE = 0.15
 DIFFERENT_AUDIO_MIN_BIT_ERROR_RATE = 0.35
 #: Fewest overlapping fingerprint items (~0.124 s each) worth judging.
 MIN_OVERLAP_ITEMS = 40
-#: Offset search window and per-item vote tolerance (pyacoustid's values).
+#: Offset search window (items, both directions) and per-item vote tolerance
+#: (pyacoustid's values).
 MAX_ALIGN_OFFSET = 120
 MAX_ITEM_BIT_ERROR = 2
+#: Fewest near-identical item pairs at one offset to call the pair aligned.
+#: Fewer means the true offset may lie outside the window (or one file is a
+#: clip from elsewhere in the other), so no verdict is given.
+MIN_ALIGNMENT_VOTES = 10
+#: Mean per-bit binary entropy below which a fingerprint carries too little
+#: information to judge (silence or a constant tone; real music is ~0.9).
+MIN_BIT_ENTROPY = 0.5
 
 
 def _clean_fp(fp: Any) -> list:
@@ -115,25 +137,44 @@ def _clean_fp(fp: Any) -> list:
     return out
 
 
-def _best_offset(a: list, b: list) -> int:
-    """Offset ``i - j`` with the most near-identical item pairs (pyacoustid)."""
+def _bit_entropy(fp: list) -> float:
+    """Mean binary entropy of the 32 bit positions across the fingerprint."""
+    total = 0.0
+    for bit in range(32):
+        p = sum((v >> bit) & 1 for v in fp) / len(fp)
+        if 0 < p < 1:
+            total -= p * math.log2(p) + (1 - p) * math.log2(1 - p)
+    return total / 32
+
+
+def _best_offset(a: list, b: list) -> Tuple[int, int]:
+    """(offset ``i - j``, votes) with the most near-identical item pairs."""
     counts: dict = {}
     for i, x in enumerate(a):
-        for j in range(max(0, i - MAX_ALIGN_OFFSET), min(len(b), i + MAX_ALIGN_OFFSET)):
+        for j in range(max(0, i - MAX_ALIGN_OFFSET), min(len(b), i + MAX_ALIGN_OFFSET + 1)):
             if (x ^ b[j]).bit_count() <= MAX_ITEM_BIT_ERROR:
                 counts[i - j] = counts.get(i - j, 0) + 1
-    return max(counts, key=lambda k: (counts[k], -abs(k))) if counts else 0
+    if not counts:
+        return 0, 0
+    best = max(counts, key=lambda k: (counts[k], -abs(k)))
+    return best, counts[best]
 
 
 def compare_raw_fingerprints(fp_a: Any, fp_b: Any) -> Tuple[str, dict]:
-    """Return (verdict, details) for two raw fingerprints; malformed input or
-    too little overlap is ``inconclusive``, never an error."""
+    """Return (verdict, details) for two raw fingerprints. Malformed input,
+    low-information audio, no alignment or too little overlap is
+    ``inconclusive``, never an error and never a guess."""
     a, b = _clean_fp(fp_a), _clean_fp(fp_b)
     if not a or not b:
         return INCONCLUSIVE, {"reason": "fingerprint_missing"}
-    offset = _best_offset(a, b)
+    if min(_bit_entropy(a), _bit_entropy(b)) < MIN_BIT_ENTROPY:
+        return INCONCLUSIVE, {"reason": "low_entropy"}
+    offset, votes = _best_offset(a, b)
+    details = {"offset": offset, "votes": votes}
+    if votes < MIN_ALIGNMENT_VOTES:
+        return INCONCLUSIVE, {**details, "reason": "no_alignment"}
     pairs = [a[i] ^ b[i - offset] for i in range(max(0, offset), min(len(a), len(b) + offset))]
-    details = {"offset": offset, "overlap": len(pairs)}
+    details["overlap"] = len(pairs)
     if len(pairs) < MIN_OVERLAP_ITEMS:
         return INCONCLUSIVE, {**details, "reason": "overlap_too_short"}
     ber = sum(x.bit_count() for x in pairs) / (32 * len(pairs))

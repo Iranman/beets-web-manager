@@ -576,7 +576,7 @@ def _fpcalc_raw(file_path: str) -> ProviderResult:
     except ValueError:
         fp_data = {}
     fp = fp_data.get("fingerprint") if isinstance(fp_data, dict) else None
-    if not isinstance(fp, list) or not fp:
+    if not isinstance(fp, list) or not fp or not all(isinstance(v, int) and not isinstance(v, bool) for v in fp):
         return ProviderResult("fpcalc", ProviderOutcome.UNAVAILABLE, data=[],
                               message="audio could not be fingerprinted", evidence={"fingerprintable": False})
     return ProviderResult("fpcalc", ProviderOutcome.CONFIRMED, data=fp)
@@ -585,14 +585,16 @@ def _fpcalc_raw(file_path: str) -> ProviderResult:
 def raw_fingerprint_outcome(file_path: str) -> ProviderResult:
     """Raw Chromaprint fingerprint for one file, cached on disk by resolved
     path + size + mtime_ns (same key as the AcoustID file cache). Only a real
-    fingerprint is cached; a missing/failed fpcalc is returned, not cached."""
+    fingerprint is cached; a missing/failed fpcalc is returned, not cached,
+    and a corrupt cache entry is ignored and recomputed."""
     path, cache_key = _audio_cache_file_identity(file_path)
     if not path or not cache_key:
         return ProviderResult("fpcalc", ProviderOutcome.NO_RESULT, data=[], message="file not readable")
     cache_path = _RAW_FP_CACHE_DIR / cache_key[:2] / f"{cache_key}.json"
     try:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        if isinstance(cached, list) and cached:
+        if (isinstance(cached, list) and cached
+                and all(isinstance(v, int) and not isinstance(v, bool) for v in cached)):
             return ProviderResult("fpcalc", ProviderOutcome.CONFIRMED, data=cached, from_cache=True, attempts=0)
     except (OSError, ValueError):
         pass
