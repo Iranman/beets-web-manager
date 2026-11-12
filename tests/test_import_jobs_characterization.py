@@ -84,6 +84,7 @@ class World:
         self.cancel_on_log = cancel_on_log
         self.job = {}
         self.thread = threading.current_thread()
+        self.held_calls = []  # (name, kwargs); kept out of the trace so the golden stays put
 
     def clean(self, value):
         if isinstance(value, Log):
@@ -131,8 +132,9 @@ class World:
             return self.fill(copy.deepcopy(answer))
         return call
 
-    def held(self, name, **_kwargs):
+    def held(self, name, **kwargs):
         world = self
+        self.held_calls.append((name, kwargs))
 
         class _Held:
             def __enter__(self):
@@ -728,6 +730,51 @@ class ImportJobGoldenTests(unittest.TestCase):
                 held = [e for e in self.golden[key]["trace"] if e[0] in ("held-enter", "held-exit")]
                 self.assertEqual(held, order)
         self.assertIsInstance(isvc._IMPORT_JOB_LOCK, type(threading.Lock()))
+
+
+class ImportJobPinTests(unittest.TestCase):
+    """Behaviors the golden trace cannot see (#531)."""
+
+    def test_reimport_uses_the_engine_canonical_path_not_the_requested_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = str(Path(tmp) / "canonical" / "Artist" / "Album (2001)")
+            Path(canonical).mkdir(parents=True)
+            world = World(tmp, overrides={"cw.inspect_import_source": lambda path, operation=None: {
+                "ok": True, "path": canonical, "audio_file_count": 2}})
+            record = json.loads(json.dumps(world.run("reimport", _reimport(skip_import_lock=False))))
+            want = world.clean(canonical)
+            raw = json.dumps(world.clean(world.src))[1:-1]
+            self.assertEqual(record["metadata"]["aldir"], want)
+            self.assertEqual(record["result"]["aldir"], want)
+            self.assertIn("Album (2001)", record["label"])
+            # Only the inspection itself may see the requested path.
+            self.assertEqual(record["trace"][0][:2], ["call", "cw.inspect_import_source"])
+            self.assertIn(raw, json.dumps(record["trace"][0]))
+            self.assertNotIn(raw, json.dumps(record["trace"][1:]))
+            self.assertNotIn(raw, json.dumps(record["result"]))
+            self.assertIn(json.dumps(want)[1:-1], json.dumps(record["trace"][1:]))
+
+    def test_both_jobs_pass_the_cancel_event_to_the_durable_slot(self):
+        for kind, payload in (("reimport", _reimport(skip_import_lock=False)), ("with_id", _with_id())):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                world = World(tmp, files=["01.flac"])
+                world.run(kind, payload)
+                slots = [kw for name, kw in world.held_calls if name == "import-slot"]
+                self.assertEqual(len(slots), 1)
+                self.assertIs(slots[0].get("cancel_event"), world.cancel)
+
+    def test_auto_import_failure_is_recorded_for_a_non_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            world = World(tmp, overrides={"cw.apply_confirmed_import": BeetsUnavailableError("down")})
+            record = world.run("with_id", _with_id(**_AUTO))
+            self.assertEqual(record["error"][0], "BeetsAdapterConnectionError")
+            calls = [e for e in record["trace"] if e[0] == "call"
+                     and e[1] in ("_import_review_auto_update", "_mark_pending_review_status")]
+            self.assertEqual(calls[-2][1:], ["_import_review_auto_update", ["key-1"],
+                                             {"error": "down", "status": "failed"}])
+            self.assertEqual(calls[-1][1], "_mark_pending_review_status")
+            self.assertEqual(calls[-1][2][1:], ["auto_enqueue_failed", "down"])
+            self.assertEqual(calls[-1][3], {"idempotency_key": "key-1"})
 
 
 class SharedJobStoreTests(unittest.TestCase):
