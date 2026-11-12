@@ -217,17 +217,12 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
     ok, unbound = True, []
     for row in rows:
         tx_id = str(row["id"])
-        meta = row.get("metadata") or {}
-        candidates = list(grouped.get(tx_id) or [])
-        if tail.get(tx_id) and _is_job_wrapper(row):
-            known = {c.job_id for c in candidates}
-            candidates += [j for j in tail[tx_id] if j.job_id not in known]
-        # Beyond the startup window a job is on disk only; get() loads it by id.
-        for job_id in (meta.get("rollback_job_id"), row.get("originating_job"), meta.get("job_id")):
-            job = job_store.get(job_id) if job_id else None
-            if (job is not None and job.job_id not in {c.job_id for c in candidates}
-                    and str((getattr(job, "metadata", None) or {}).get("transaction_id")) == tx_id):
-                candidates.append(job)
+        try:
+            candidates = _job_candidates(job_store, grouped, tail, row, tx_id)
+        except TypeError as ex:  # a corrupt job record (#557): this row only, never settled on it
+            _app_logger.warning("transaction %s left unchanged: a job record naming it is unreadable (%s)",
+                                tx_id, type(ex).__name__)
+            continue
         if not candidates:
             if before is not None and (row.get("updated_at") or 0) < before and _is_job_wrapper(row):
                 try:
@@ -238,7 +233,6 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
                 continue
             unbound.append(tx_id)
             continue
-        candidates.sort(key=lambda j: j.created_at, reverse=True)
         job = _speaking_job(candidates)
         if job.status == "running":
             continue
@@ -254,6 +248,25 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
         _app_logger.warning("%d Running transaction(s) have no job record and were left unchanged: %s",
                             len(unbound), ", ".join(unbound[:20]))
     return ok
+
+
+def _job_candidates(job_store, grouped, tail, row: Dict[str, Any], tx_id: str) -> List[Any]:
+    """The jobs that may speak for ``row``, newest first. Raises TypeError on
+    a corrupt record (an unhashable ``job_id``, a ``created_at`` that does not
+    compare); the caller confines that to this row (#557)."""
+    meta = row.get("metadata") or {}
+    candidates = list(grouped.get(tx_id) or [])
+    if tail.get(tx_id) and _is_job_wrapper(row):
+        known = {c.job_id for c in candidates}
+        candidates += [j for j in tail[tx_id] if j.job_id not in known]
+    # Beyond the startup window a job is on disk only; get() loads it by id.
+    for job_id in (meta.get("rollback_job_id"), row.get("originating_job"), meta.get("job_id")):
+        job = job_store.get(job_id) if job_id else None
+        if (job is not None and job.job_id not in {c.job_id for c in candidates}
+                and str((getattr(job, "metadata", None) or {}).get("transaction_id")) == tx_id):
+            candidates.append(job)
+    candidates.sort(key=lambda j: j.created_at, reverse=True)
+    return candidates
 
 
 #: Rows per ``store.list`` page while collecting Running transactions.
@@ -302,6 +315,10 @@ def _install_transaction_job_hooks() -> None:
         # died is not a finished one (#545), so require its completion flag.
         scanned = getattr(job_store, "tail_scan_complete", None)
         settled = scanned is None or scanned.is_set()
+        # A sweep that ended without finishing (#557) is terminal too: stop
+        # waiting for it, but its partial tail never proves a job is gone.
+        aborted = getattr(job_store, "tail_scan_aborted", None)
+        aborted = not settled and aborted is not None and aborted.is_set()
         try:
             # The tail sweep has finished: every on-disk record naming a
             # transaction is in memory or in tail_transaction_jobs.
@@ -309,7 +326,7 @@ def _install_transaction_job_hooks() -> None:
             # here, never unset) holds for every later retry pass too (F2).
             judge = settled and not orphans["judged"]
             settled = _reconcile_running_transactions(job_store, tx_store, started if judge else None,
-                                                      scan_done=settled) and settled
+                                                      scan_done=settled or aborted) and (settled or aborted)
             if judge and settled:
                 orphans["judged"] = True
                 (getattr(job_store, "tail_transaction_jobs", None) or {}).clear()  # consumed; do not hold them

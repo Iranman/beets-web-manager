@@ -552,6 +552,10 @@ class JobStore:
         #: or was stopped by close() never sets it, so nothing reads a partial
         #: tail as a complete one (#545).
         self.tail_scan_complete = threading.Event()
+        #: The terminal state of a sweep that ended without finishing (it died
+        #: or close() stopped it): the tail is known to stay partial, so the
+        #: reconcile stops waiting for it but never judges orphans (#557).
+        self.tail_scan_aborted = threading.Event()
         # Every started job thread, also after clear/prune drops its job:
         # close() must join a thread whose final write is still in flight.
         self._threads: List[threading.Thread] = []
@@ -632,7 +636,7 @@ class JobStore:
         tail = [path for _mtime, path in entries[limit:]]
         if tail:
             self._recover_thread = threading.Thread(
-                target=self._recover_tail, args=(tail, now),
+                target=self._run_tail_sweep, args=(tail, now),
                 daemon=True, name="job-recover-tail")
             self._recover_thread.start()
         else:
@@ -684,6 +688,17 @@ class JobStore:
         with self._lock:
             self.recovered.append({"job_id": job.job_id, "status": job._terminal,
                                    "type": job.metadata.get("type")})
+
+    def _run_tail_sweep(self, paths: List[Path], now: float) -> None:
+        """The tail sweep thread: a sweep that returns or raises without
+        reaching its end is recorded as aborted, never as complete (#557)."""
+        try:
+            self._recover_tail(paths, now)
+        finally:
+            if not self.tail_scan_complete.is_set():
+                self.tail_scan_aborted.set()
+                _log.warning("job tail sweep stopped before reading every record; Running job-wrapper "
+                             "transactions without a job record are left unchanged this run")
 
     def _recover_tail(self, paths: List[Path], now: float) -> None:
         """Background catch-up for records beyond the startup window: resolve
