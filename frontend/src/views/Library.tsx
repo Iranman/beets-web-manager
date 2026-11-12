@@ -15,11 +15,31 @@ import { apiGet } from '../lib/api';
 import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
+import CoverFlow, { type CoverFlowItem } from '../components/CoverFlow';
 
 type SearchScope = 'all' | 'artists' | 'albums' | 'tracks';
 type ArtistSort = 'alpha' | 'albums' | 'tracks';
 type AlbumSort = 'artist' | 'album' | 'year';
 type ArtistLetter = 'all' | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z' | '#';
+
+type LibraryView = 'coverflow' | 'grid';
+export const LIBRARY_VIEW_KEY = 'library.view';
+
+function readLibraryView(): LibraryView {
+  try {
+    return localStorage.getItem(LIBRARY_VIEW_KEY) === 'grid' ? 'grid' : 'coverflow';
+  } catch {
+    return 'coverflow';
+  }
+}
+
+function saveLibraryView(view: LibraryView) {
+  try {
+    localStorage.setItem(LIBRARY_VIEW_KEY, view);
+  } catch {
+    /* storage unavailable: the choice lasts this visit only */
+  }
+}
 
 type AlbumRow = {
   album: LibraryAlbum;
@@ -622,16 +642,179 @@ function AlbumGrid({
   );
 }
 
+// Cover Flow and Grid are two views of the same list; the toggle only changes how it is laid out.
+function ViewToggle({ view, onChange }: { view: LibraryView; onChange: (view: LibraryView) => void }) {
+  return (
+    <div aria-label="Library view" className="crate-tabs ml-auto flex gap-1" role="group">
+      {(['coverflow', 'grid'] as const).map((option) => (
+        <button
+          key={option}
+          aria-pressed={view === option}
+          className={cx('crate-tab h-8 px-3 text-xs', view === option && 'font-semibold')}
+          type="button"
+          onClick={() => onChange(option)}
+        >
+          {option === 'coverflow' ? 'Cover Flow' : 'Grid'}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// An artist's sleeve in the flow: the artist image or first album cover the library payload already
+// carries (no extra request), else a lettered placard on sleeve paper.
+function ArtistFlowArt({ artist, libraryVersion }: { artist: LibraryArtist; libraryVersion?: number }) {
+  const name = displayArtistName(artist);
+  return (
+    <Artwork
+      className="h-full w-full"
+      fallback={<span className="cf-placard h-full w-full"><span>{name}</span></span>}
+      label=""
+      src={artistArtUrl(artist, libraryVersion)}
+    />
+  );
+}
+
+function ArtistFlow({
+  artists,
+  centerKey,
+  libraryVersion,
+  loading,
+  onCenterKeyChange,
+  onSelectArtist,
+}: {
+  artists: LibraryArtist[];
+  centerKey: string;
+  libraryVersion?: number;
+  loading: boolean;
+  onCenterKeyChange: (key: string) => void;
+  onSelectArtist: (artist: LibraryArtist) => void;
+}) {
+  const availableLetters = useMemo(() => new Set(artists.map(artistLetter)), [artists]);
+  const index = Math.max(0, artists.findIndex((artist) => artist.name === centerKey));
+  const current = artists[index];
+  const n = artists.length;
+  const item = (i: number): CoverFlowItem => {
+    const artist = artists[i];
+    const name = displayArtistName(artist);
+    return {
+      key: artist.name,
+      label: `Artist ${name}, ${i + 1} of ${n}`,
+      title: name,
+      subtitle: `${countLabel(artist.albums.length, 'album')} - ${countLabel(countTracks(artist), 'track')}`,
+      art: <ArtistFlowArt artist={artist} libraryVersion={libraryVersion} />,
+    };
+  };
+
+  return (
+    <section className="space-y-2">
+      {/* In the flow a letter jumps to its first artist instead of filtering; the centred artist's letter shows pressed. */}
+      <AlphabetIndex
+        active={current ? artistLetter(current) : 'all'}
+        available={availableLetters}
+        onChange={(letter) => {
+          const target = letter === 'all' ? artists[0] : artists.find((artist) => artistLetter(artist) === letter);
+          if (target) onCenterKeyChange(target.name);
+        }}
+      />
+      <h2 className="border-b border-graphite-800 pb-2 text-sm font-semibold text-zinc-300">
+        Artists - {numberFmt.format(n)}
+      </h2>
+      {loading ? (
+        <div className="crate rounded-sm p-4 text-sm text-zinc-300">Loading library…</div>
+      ) : n ? (
+        <CoverFlow
+          count={n}
+          index={index}
+          item={item}
+          label="Artists"
+          onActivate={(i) => onSelectArtist(artists[i])}
+          onIndexChange={(i) => onCenterKeyChange(artists[i].name)}
+        />
+      ) : (
+        <div className="crate rounded-sm p-4 text-sm text-zinc-300">No matching artists.</div>
+      )}
+    </section>
+  );
+}
+
+function albumRowKey(row: AlbumRow) {
+  return String(row.album.album_id || row.album.aldir || row.album.album);
+}
+
+function AlbumFlow({
+  rows,
+  centerKey,
+  libraryVersion,
+  onCenterKeyChange,
+  onDetails,
+}: {
+  rows: AlbumRow[];
+  centerKey: string;
+  libraryVersion?: number;
+  onCenterKeyChange: (key: string) => void;
+  onDetails: (row: AlbumRow) => void;
+}) {
+  const index = Math.max(0, rows.findIndex((row) => albumRowKey(row) === centerKey));
+  const n = rows.length;
+  const item = (i: number): CoverFlowItem => {
+    const { album, artist } = rows[i];
+    const title = displayAlbumTitle(album);
+    return {
+      key: albumRowKey(rows[i]),
+      label: `Album ${title} by ${displayArtistName(artist)}, ${i + 1} of ${n}`,
+      title,
+      subtitle: [album.year ? String(album.year).slice(0, 4) : '', countLabel(albumTrackCount(album), 'track')].filter(Boolean).join(' - '),
+      art: (
+        <Artwork
+          className="h-full w-full"
+          fallback={<SleevePlaceholder />}
+          fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
+          label=""
+          src={albumArtUrl(album, libraryVersion)}
+        />
+      ),
+    };
+  };
+
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-graphite-800 pb-2">
+        <h2 className="font-display text-lg font-semibold text-zinc-100">Albums</h2>
+        <p className="text-sm text-zinc-400">{countLabel(n, 'album')}</p>
+      </div>
+      {n ? (
+        <CoverFlow
+          count={n}
+          index={index}
+          item={item}
+          label="Albums"
+          onActivate={(i) => onDetails(rows[i])}
+          onIndexChange={(i) => onCenterKeyChange(albumRowKey(rows[i]))}
+        />
+      ) : (
+        <div className="crate rounded-sm p-4 text-sm text-zinc-400">No matching albums.</div>
+      )}
+    </section>
+  );
+}
+
 function ArtistDetail({
   artist,
   rows,
   libraryVersion,
+  view,
+  albumKey,
+  onAlbumKeyChange,
   onBack,
   onDetails,
 }: {
   artist: LibraryArtist;
   rows: AlbumRow[];
   libraryVersion?: number;
+  view: LibraryView;
+  albumKey: string;
+  onAlbumKeyChange: (key: string) => void;
   onBack: () => void;
   onDetails: (row: AlbumRow) => void;
 }) {
@@ -667,14 +850,24 @@ function ArtistDetail({
         </div>
       </div>
 
-      <AlbumGrid
-        rows={rows}
-        title="Albums"
-        subtitle={`${numberFmt.format(rows.length)} visible for ${name}`}
-        libraryVersion={libraryVersion}
-        showArtist={false}
-        onDetails={onDetails}
-      />
+      {view === 'coverflow' ? (
+        <AlbumFlow
+          centerKey={albumKey}
+          libraryVersion={libraryVersion}
+          rows={rows}
+          onCenterKeyChange={onAlbumKeyChange}
+          onDetails={onDetails}
+        />
+      ) : (
+        <AlbumGrid
+          rows={rows}
+          title="Albums"
+          subtitle={`${numberFmt.format(rows.length)} visible for ${name}`}
+          libraryVersion={libraryVersion}
+          showArtist={false}
+          onDetails={onDetails}
+        />
+      )}
     </section>
   );
 }
@@ -894,6 +1087,19 @@ export default function Library() {
   const [detailsTracks, setDetailsTracks] = useState<LibraryTrack[]>([]);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState('');
+  const [view, setView] = useState<LibraryView>(readLibraryView);
+  // The flows remember their centred sleeve by key, so a background reload never yanks them back.
+  const [artistKey, setArtistKey] = useState('');
+  const [albumKey, setAlbumKey] = useState('');
+  // A new search or sort sends both flows to the first match.
+  function resetFlows() {
+    setArtistKey('');
+    setAlbumKey('');
+  }
+  function changeView(next: LibraryView) {
+    setView(next);
+    saveLibraryView(next);
+  }
 
   // `background` fetches (disk-reconciliation polling) must not toggle the
   // blocking spinner or clear errors -- they silently swap in the richer tree.
@@ -1065,6 +1271,8 @@ export default function Library() {
   const albumMode = Boolean(selectedArtist);
   function handleSelectArtist(artist: LibraryArtist) {
     setSelectedArtistName(artist.name);
+    setArtistKey(artist.name);
+    setAlbumKey('');
   }
 
   const loadFailed = !data && Boolean(error);
@@ -1110,6 +1318,7 @@ export default function Library() {
         <span className="text-muted">
           {`${numberFmt.format(filteredArtists.length)} artists visible`}
         </span>
+        <ViewToggle view={view} onChange={changeView} />
       </div>}
 
       <SearchRow
@@ -1119,10 +1328,10 @@ export default function Library() {
         albumSort={albumSort}
         albumMode={albumMode}
         trackSearchLoading={trackSearchLoading}
-        onQueryChange={setQuery}
-        onScopeChange={setScope}
-        onArtistSortChange={setArtistSort}
-        onAlbumSortChange={setAlbumSort}
+        onQueryChange={(value) => { setQuery(value); resetFlows(); }}
+        onScopeChange={(value) => { setScope(value); resetFlows(); }}
+        onArtistSortChange={(value) => { setArtistSort(value); resetFlows(); }}
+        onAlbumSortChange={(value) => { setAlbumSort(value); setAlbumKey(''); }}
       />
 
       {shownError ? <Alert severity="error">{shownError}</Alert> : null}
@@ -1134,8 +1343,20 @@ export default function Library() {
           artist={selectedArtist}
           rows={selectedArtistRows}
           libraryVersion={libraryVersion}
+          view={view}
+          albumKey={albumKey}
+          onAlbumKeyChange={setAlbumKey}
           onBack={() => setSelectedArtistName('')}
           onDetails={setDetailsRow}
+        />
+      ) : view === 'coverflow' ? (
+        <ArtistFlow
+          artists={filteredArtists}
+          centerKey={artistKey}
+          libraryVersion={libraryVersion}
+          loading={loading && !data}
+          onCenterKeyChange={setArtistKey}
+          onSelectArtist={handleSelectArtist}
         />
       ) : (
         <ArtistBrowser

@@ -1,5 +1,10 @@
 import { expect, libraryAlbums, test } from '../fixtures';
 
+// These specs walk the crate grid; Cover Flow is the default view, so pick Grid first.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('library.view', 'grid'));
+});
+
 test('search narrows artists; clearing brings them back', async ({ page }) => {
   await page.goto('/library');
   const search = page.getByRole('textbox', { name: 'Search' });

@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import Library from '../src/views/Library';
 import { apiGet } from '../src/lib/api';
@@ -26,6 +26,8 @@ const album = (overrides: Partial<LibraryAlbum>): LibraryAlbum => ({
   ...overrides,
 });
 
+// These cover the crate grid, now the alternate view behind the Cover Flow / Grid toggle.
+beforeEach(() => localStorage.setItem('library.view', 'grid'));
 afterEach(cleanup);
 
 describe('Library cover-art grid', () => {
