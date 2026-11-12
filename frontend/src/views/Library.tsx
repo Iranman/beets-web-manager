@@ -937,7 +937,7 @@ function AlbumGrid({
       </div>
       <div className="max-h-[calc(100vh-22rem)] min-h-72 overflow-y-auto rounded-md border border-graphite-800 bg-graphite-950/20 p-2">
         {rows.length ? (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,8.5rem),1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(min(100%,12rem),1fr))]">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,8rem),1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(min(100%,12rem),1fr))]">
             {rows.map((row) => (
               <AlbumCard
                 key={`${row.artist.name}::${row.album.album_id || row.album.aldir || row.album.album}`}

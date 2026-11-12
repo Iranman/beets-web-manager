@@ -62,7 +62,7 @@ describe('record shelf theme, slice 2', () => {
 
   it('the Library cover grid fits two columns on phones and lets tile actions wrap', () => {
     const library = src('views/Library.tsx');
-    expect(library).toContain('grid-cols-[repeat(auto-fill,minmax(min(100%,8.5rem),1fr))]');
+    expect(library).toContain('grid-cols-[repeat(auto-fill,minmax(min(100%,8rem),1fr))]');
     expect(library).toContain("const tileButtonSx = { whiteSpace: 'normal'");
     expect(library.match(/sx=\{tileButtonSx\}/g)).toHaveLength(4);
   });
