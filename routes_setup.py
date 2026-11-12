@@ -3025,7 +3025,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
                 "Optional - not configured." if not any(
                     os.environ.get(name, "").strip()
                     for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_API_KEY"))
-                else "No AI key set belongs to AI_BASE_URL; set the key for that provider."),
+                else "No AI key set belongs to AI_BASE_URL. Enter an API key for this AI endpoint in Settings."),
         ),
         "musicbrainz": _musicbrainz_integration_status(diagnostics),
         "acoustid": _acoustid_integration_status(diagnostics, fpcalc_available),
@@ -3539,7 +3539,7 @@ def setup_test_ai():
         api_key = stored_key
     if not api_key:
         return jsonify({"ok": False, "status": "not_configured",
-                         "error": "No AI API key to test. Enter the API key for this base URL, or set OPENAI_API_KEY (or your provider's key) and retry."}), 200
+                         "error": "No AI API key to test. Enter an API key for this AI endpoint in Settings and retry."}), 200
     try:
         base_parts = urllib.parse.urlsplit(base_url)
         base_host = (base_parts.hostname or "").rstrip(".").lower()

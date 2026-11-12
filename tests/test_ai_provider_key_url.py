@@ -64,11 +64,7 @@ def _expected(keys, base_name):
     for name in own:
         if name in has:
             return name, host
-    # Legacy: the first-run wizard saved every provider's key as
-    # OPENAI_API_KEY next to the AI_BASE_URL the operator typed (#519 policy:
-    # old setups keep working, with a warning).
-    if "OPENAI_API_KEY" in has:
-        return "OPENAI_API_KEY", host
+    # No legacy OPENAI_API_KEY fallback for non-OpenAI URLs (#535 item 1).
     return None, host
 
 
@@ -104,14 +100,28 @@ class KeyUrlPairingTests(unittest.TestCase):
                         if key == KEYS["OPENROUTER_API_KEY"]:
                             self.assertEqual(_host(endpoint), "openrouter.ai")
 
-    def test_legacy_openai_key_on_a_non_openai_url_warns_once_by_name(self):
-        with self.assertLogs(config_layers.log, "WARNING") as logs:
-            for _ in range(3):
-                key, _ = _resolve({"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": BASES["openrouter"]})
-        self.assertEqual(key, "k-openai")
-        self.assertEqual(len(logs.output), 1)
-        self.assertIn("OPENROUTER_API_KEY", logs.output[0])
-        self.assertNotIn("k-openai", logs.output[0])
+    def test_openai_env_key_never_goes_to_a_non_openai_url(self):
+        # #535 item 1: the legacy fallback is gone; no key at all instead.
+        for url in (BASES["custom"], BASES["openrouter"], "http://llm.example/v1",
+                    "https://api.openai.com.evil.example/v1", "https://llm.example./v1"):
+            with self.subTest(url), self.assertNoLogs(config_layers.log, "WARNING"):
+                key, endpoint = _resolve({"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": url})
+                self.assertEqual(key, "")
+                self.assertEqual(endpoint, f"{url}/chat/completions")
+
+    def test_openai_env_key_still_goes_to_official_openai(self):
+        for env in ({"OPENAI_API_KEY": "k-openai"},
+                    {"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": BASES["openai"]}):
+            with self.subTest(env):
+                key, endpoint = _resolve(env)
+                self.assertEqual(key, "k-openai")
+                self.assertEqual(endpoint, "https://api.openai.com/v1/chat/completions")
+
+    def test_custom_url_uses_the_settings_key(self):
+        key, endpoint = _resolve({"OPENAI_API_KEY": "k-openai", "AI_API_KEY": "k-generic",
+                                  "AI_BASE_URL": BASES["custom"]})
+        self.assertEqual(key, "k-generic")
+        self.assertEqual(_host(endpoint), "llm.example")
 
     def test_openai_subdomain_counts_as_openai(self):
         key, _ = _resolve({"OPENAI_API_KEY": "k-openai", "AI_API_KEY": "k-generic",
@@ -139,11 +149,8 @@ class PlainHttpAndTrailingDotTests(unittest.TestCase):
                 self.assertEqual(key, "")
 
     def test_custom_http_url_is_unchanged(self):
-        # Custom URLs keep their keys, legacy OPENAI_API_KEY fallback included
-        # (#535 item 1 is a separate policy decision).
+        # A custom URL keeps its own AI_API_KEY over http.
         self.assertEqual(_resolve(_env(KEYS, "http://llm.example/v1"))[0], "k-generic")
-        self.assertEqual(_resolve({"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": "http://llm.example/v1"})[0],
-                         "k-openai")
 
     def test_trailing_dot_host_is_the_provider(self):
         for url, want in (("https://api.openai.com./v1", "k-openai"), ("https://openrouter.ai./api/v1", "k-openrouter"),
@@ -269,6 +276,18 @@ class SetupProbeKeyUrlTests(probe_tests._ProbeHarness):
                     self.assertEqual(out.get_json()["status"], "failed")
                     self.assertNotIn("body-key", out.get_data(as_text=True))
             self.assertEqual(self.sent, [])
+
+    def test_openai_env_key_is_not_probed_against_a_custom_url(self):
+        out = self._probe({"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": BASES["custom"]})
+        self.assertEqual(out["status"], "not_configured")
+        self.assertIn("Settings", out["error"])
+        self.assertNotIn("k-openai", str(out))
+        self.assertEqual(self.sent, [])
+
+    def test_openai_env_key_is_probed_against_official_openai(self):
+        self.assertTrue(self._probe({"OPENAI_API_KEY": "k-openai"})["ok"])
+        self.assertTrue(self.sent[0][1].startswith("https://api.openai.com/v1/"))
+        self.assertEqual(self.sent[0][2]["authorization"], "Bearer k-openai")
 
     def test_openrouter_key_is_not_probed_against_openai(self):
         out = self._probe({"OPENROUTER_API_KEY": "k-openrouter", "AI_BASE_URL": BASES["openai"]})
