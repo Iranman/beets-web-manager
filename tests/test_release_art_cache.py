@@ -174,6 +174,35 @@ class PayloadAndHostTests(_CacheCase):
         self.assertEqual(self.sent, [])
         self.assertFalse(self.cache.exists() and any(self.cache.iterdir()))
 
+    def test_download_refuses_trailing_newline_and_cache_paths_stay_inside(self):
+        self.assertEqual(mbs._release_art_download(RG + "\n", "https://coverartarchive.org/x", "x"), "")
+        self.assertEqual(self.sent, [])
+        self.cache.mkdir(parents=True)
+        self.assertEqual(mbs._release_art_cache_file(RG + ".png").parent, Path(os.path.realpath(self.cache)))
+        for name in ("../x.png", "sub/x.png", ""):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    mbs._release_art_cache_file(name)
+        self.assertEqual(routes_library.release_art_cache(RG + "\n"), ("", 404))
+
+    def test_legacy_entry_mime_is_never_trusted(self):
+        self.cache.mkdir(parents=True)
+        import json as _json
+        for body, stored, served in ((PNG, "text/html", "image/png"), (SVG, "image/svg+xml", None),
+                                     (b"<html><script>", "image/jpeg; charset=x", "image/jpeg")):
+            with self.subTest(stored=stored):
+                (self.cache / f"{RG}.jpg").write_bytes(body)
+                (self.cache / f"{RG}.json").write_text(_json.dumps({"image_file": f"{RG}.jpg", "mime": stored}))
+                info = artwork_service._release_art_cache_info(RG)
+                self.assertEqual(info.get("mime"), served)
+                with app_module.app.test_request_context():
+                    resp = routes_library.release_art_cache(RG)
+                if served is None:
+                    self.assertEqual(resp, ("", 404))
+                else:
+                    self.assertEqual(resp.mimetype, served)
+                    resp.close()
+
 
 class EvictionTests(_CacheCase):
     def test_oldest_images_are_evicted_over_the_cap(self):

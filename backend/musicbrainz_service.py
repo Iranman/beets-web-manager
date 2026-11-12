@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import json, re, threading, time
+import json, os, re, threading, time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, _MALFORMED_RELEASE_GROUP_STAMP_RE, _MB_UUID_RE, _extract_mb_uuid, _is_valid_mb_uuid, _s, _up, _ur
@@ -14,7 +14,7 @@ from backend.beets_adapter import lib, BeetsUnavailableError
 from backend.security import OutboundPolicyError
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm, _read_file_media_tags
-from backend.artwork_service import DISCOGS_TOKEN, _RELEASE_ART_MBID_RE, _IMAGE_FETCH_HEADERS, _artist_name_key, _release_art_cache_info, _release_art_save_miss
+from backend.artwork_service import DISCOGS_TOKEN, _RELEASE_ART_MBID_RE, _RELEASE_ART_MIME, _release_art_image_ext, _IMAGE_FETCH_HEADERS, _artist_name_key, _release_art_cache_info, _release_art_save_miss
 from backend.slskd_service import _slskd_title_guess_from_name
 from backend.matching_service import _album_key, _album_title_match, _album_track_title_variants, _fetch_mb_release_tracklist, _normalize_album
 
@@ -477,7 +477,6 @@ class ReleaseArtUnavailable(Exception):
 _RELEASE_ART_HOSTS = ("coverartarchive.org", "archive.org", "discogs.com")
 _RELEASE_ART_MAX_BYTES = 10 * 1024 * 1024
 _RELEASE_ART_CACHE_MAX_BYTES = _env_int("RELEASE_ART_CACHE_MAX_MB", 500, minimum=1) * 1024 * 1024
-_RELEASE_ART_MIME = {".jpg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
 _release_art_locks: Dict[str, threading.Lock] = {}
 _release_art_locks_guard = threading.Lock()
 
@@ -486,19 +485,6 @@ def _release_art_url_allowed(url: str) -> bool:
     parsed = _up.urlparse(url or "")
     host = (parsed.hostname or "").lower()
     return parsed.scheme == "https" and any(host == d or host.endswith("." + d) for d in _RELEASE_ART_HOSTS)
-
-
-def _release_art_image_ext(blob: bytes) -> str:
-    """Extension for a JPEG/PNG/GIF/WebP payload by magic bytes, else "" (SVG, HTML, ...)."""
-    if blob[:3] == b"\xff\xd8\xff":
-        return ".jpg"
-    if blob[:8] == b"\x89PNG\r\n\x1a\n":
-        return ".png"
-    if blob[:6] in (b"GIF87a", b"GIF89a"):
-        return ".gif"
-    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
-        return ".webp"
-    return ""
 
 
 def _release_art_evict(keep: str = "") -> None:
@@ -520,11 +506,22 @@ def _release_art_evict(keep: str = "") -> None:
         pass
 
 
+def _release_art_cache_file(name: str) -> Path:
+    """``name`` confined to the release-art cache dir: realpath containment
+    (the py/path-injection barrier CodeQL recognises). Also refuses a name
+    that resolves through a symlink to outside the cache dir."""
+    root = os.path.realpath(str(RELEASE_ART_CACHE_DIR))
+    path = os.path.realpath(os.path.join(root, name))
+    if not path.startswith(root + os.sep) or os.path.dirname(path) != root:
+        raise ValueError("release-art cache path escapes the cache dir")
+    return Path(path)
+
+
 def _release_art_download(mbid: str, url: str, source: str) -> str:
     """Download and cache one image. "" means the source answered without
     usable art (404, not an image, too large, host not allowed). Raises
     ReleaseArtUnavailable when the source could not be asked."""
-    if not _RELEASE_ART_MBID_RE.match(mbid or "") or not _release_art_url_allowed(url):
+    if not _RELEASE_ART_MBID_RE.fullmatch(mbid or "") or not _release_art_url_allowed(url):
         return ""
     try:
         RELEASE_ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -550,8 +547,8 @@ def _release_art_download(mbid: str, url: str, source: str) -> str:
             return ""
         mbid = mbid.lower()
         image_name = f"{mbid}{ext}"
-        image_path = RELEASE_ART_CACHE_DIR / image_name
-        tmp_path = RELEASE_ART_CACHE_DIR / f"{image_name}.tmp"
+        image_path = _release_art_cache_file(image_name)
+        tmp_path = _release_art_cache_file(f"{image_name}.tmp")
         tmp_path.write_bytes(blob)
         tmp_path.replace(image_path)
         for stale in RELEASE_ART_CACHE_DIR.glob(f"{mbid}.*"):
@@ -568,9 +565,9 @@ def _release_art_download(mbid: str, url: str, source: str) -> str:
             "mime": _RELEASE_ART_MIME[ext],
             "cached_at": time.time(),
         }
-        meta_tmp = RELEASE_ART_CACHE_DIR / f"{mbid}.json.tmp"
+        meta_tmp = _release_art_cache_file(f"{mbid}.json.tmp")
         meta_tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        meta_tmp.replace(RELEASE_ART_CACHE_DIR / f"{mbid}.json")
+        meta_tmp.replace(_release_art_cache_file(f"{mbid}.json"))
         _release_art_evict(keep=image_name)
         return f"/api/release-art-cache/{mbid}?v={int(image_path.stat().st_mtime)}"
     except Exception:

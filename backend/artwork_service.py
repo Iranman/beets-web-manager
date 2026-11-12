@@ -211,7 +211,21 @@ def _artist_local_art_url(artist_name: str) -> str:
     return fallback
 
 
-_RELEASE_ART_MBID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_RELEASE_ART_MBID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
+_RELEASE_ART_MIME = {".jpg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def _release_art_image_ext(blob: bytes) -> str:
+    """Extension for a JPEG/PNG/GIF/WebP payload by magic bytes, else "" (SVG, HTML, ...)."""
+    if blob[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if blob[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    return ""
 
 
 _RELEASE_ART_NEGATIVE_TTL = 7 * 24 * 3600  # re-check a "no art found" release weekly, not every page load
@@ -235,11 +249,24 @@ def _release_art_cache_info(mbid: str) -> Dict[str, Any]:
     image_path = RELEASE_ART_CACHE_DIR / image_name
     if not image_path.exists() or not image_path.is_file():
         return {}
+    # Only an image type is ever served. Entries written before the magic-byte
+    # check stored the upstream Content-Type, so anything else is re-derived
+    # from the file's magic bytes, and a non-image is treated as no entry.
+    mime = _s(meta.get("mime", "") or "").split(";", 1)[0].strip().lower()
+    if mime not in _RELEASE_ART_MIME.values():
+        try:
+            with image_path.open("rb") as fh:
+                ext = _release_art_image_ext(fh.read(12))
+        except OSError:
+            ext = ""
+        if not ext:
+            return {}
+        mime = _RELEASE_ART_MIME[ext]
     return {
         "url": f"/api/release-art-cache/{mbid}?v={int(image_path.stat().st_mtime)}",
         "image_file": image_name,
         "path": image_path,
-        "mime": _s(meta.get("mime", "") or "") or mimetypes.guess_type(image_name)[0] or "image/jpeg",
+        "mime": mime,
     }
 
 

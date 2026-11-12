@@ -1069,19 +1069,12 @@ _RELEASE_ART_MAX_AGE = 7 * 24 * 3600
 
 @app.get("/api/release-art-cache/<mbid>")
 def release_art_cache(mbid):
-    if not _RELEASE_ART_MBID_RE.match(mbid or ""):
+    # Same lookup as album_art(): validated MBID, bare image name, image MIME only.
+    cached = _release_art_cache_info((mbid or "").lower())
+    if not cached.get("path"):
         return ("", 404)
-    meta_path = RELEASE_ART_CACHE_DIR / f"{mbid}.json"
     try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        image_name = _s(meta.get("image_file", "") or "")
-        if not image_name or Path(image_name).name != image_name:
-            return ("", 404)
-        image_path = RELEASE_ART_CACHE_DIR / image_name
-        if not image_path.exists() or not image_path.is_file():
-            return ("", 404)
-        mime = _s(meta.get("mime", "") or "") or mimetypes.guess_type(image_name)[0] or "image/jpeg"
-        return send_file(str(image_path), mimetype=mime, max_age=_RELEASE_ART_MAX_AGE)
+        return send_file(str(cached["path"]), mimetype=cached["mime"], max_age=_RELEASE_ART_MAX_AGE)
     except Exception:
         return ("", 404)
 
