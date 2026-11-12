@@ -141,7 +141,7 @@ Only these keys may be saved from the System page, and only these keys are loade
 | `BEETS_WEB_AUTH_TOKEN` | live | Owner API/script bearer token. Auto-generated if unset. |
 | `BEETS_WEB_PASSWORD` | live | Administrator password, stored only as a hash. Prefer the first-run wizard. |
 | `BEETS_WEB_USERNAME` | live | Browser login username, default `admin`. |
-| `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` | restart | Wall-clock limit (default 60 s) for one fetch of a user-supplied or provider-supplied URL (reference URLs, artwork images). It covers trying each DNS answer, every redirect, and reading the whole body, so a server that sends data very slowly cannot hold a worker open. A value that is below 0.1 s, not a number, or above the 600 s ceiling is ignored with a warning in the log, and 60 s is used. The other outbound limits have ceilings too: `BEETS_OUTBOUND_TIMEOUT_SECONDS` 300 s, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` 200 MiB, `BEETS_OUTBOUND_MAX_REDIRECTS` 20. |
+| `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` | restart | Wall-clock limit (default 60 s) for one fetch of a user-supplied or provider-supplied URL (reference URLs, artwork images). It covers trying each DNS answer, every redirect, and reading the whole body, so a server that sends data very slowly cannot hold a worker open. A value that is below 0.1 s or not a number is ignored with a warning in the log, and 60 s is used. A value above the 600 s ceiling is capped to 600 s, with a warning. The other outbound limits have ceilings too, and a value above one is capped to it the same way: `BEETS_OUTBOUND_TIMEOUT_SECONDS` 300 s, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` 200 MiB, `BEETS_OUTBOUND_MAX_REDIRECTS` 20. |
 
 The provider settings in the next section are application settings too.
 
@@ -186,7 +186,7 @@ Files in `/web-manager-data` that can hold secrets are created at mode 0600: `.e
 | `PLAYLIST_MIN_DOWNLOAD_SECONDS` | Length in seconds below which a playlist download counts as a preview clip (default `45`; applies after a restart). A shorter downloaded file is deleted and logged, and a shorter track is flagged `preview_risk`. `0` turns this off. |
 | `BEETS_WEB_AUTH_MIN_LENGTH`, `BEETS_WEB_PASSWORD_MIN_LENGTH` | Shortest accepted API token (default `32`) and password (default `16`). |
 | `BEETS_LONG_OPERATION_POLL_SECONDS`, `BEETS_LONG_OPERATION_MAX_SECONDS`, `BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS` | Polling interval (default `5`) and limit (default `600`) for long Beets operations, and the artist reconcile timeout (default `120`), which has no effect while artist folder stamping and merging are unavailable. |
-| `BEETS_OUTBOUND_TIMEOUT_SECONDS`, `BEETS_OUTBOUND_MAX_REDIRECTS`, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` | Outbound fetch limits: timeout per request (default `20`), redirects (default `5`) and response size (default 20 MiB). |
+| `BEETS_OUTBOUND_TIMEOUT_SECONDS`, `BEETS_OUTBOUND_MAX_REDIRECTS`, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES` | Outbound fetch limits: timeout per request (default `20`), redirects (default `5`) and response size (default 20 MiB). A value above the ceiling (300 s, 20 redirects, 200 MiB) is capped to the ceiling, with a warning in the log. |
 
 ## Deprecated variable names
 

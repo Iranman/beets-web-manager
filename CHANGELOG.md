@@ -8,6 +8,8 @@ The project uses Semantic Versioning.
 
 ### Changed
 
+- **Outbound limits above their ceiling are capped, not reset.** A `BEETS_OUTBOUND_TIMEOUT_SECONDS`, `BEETS_OUTBOUND_MAX_RESPONSE_BYTES`, `BEETS_OUTBOUND_MAX_REDIRECTS` or `BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS` value above its ceiling (300 s, 200 MiB, 20, 600 s) now uses the ceiling, with a warning in the log, instead of falling back to the much lower default. Values below the minimum, not a number, or infinite still use the default.
+
 - **Import folders: a near-tie between two albums goes to review.** When another MusicBrainz release group's match score is within 0.05 of the chosen one and the chosen one's tracks are proven only by metadata (title, length and position), the folder is no longer imported unattended. Its candidate shows `close_runner_up` and the auto-import reasons include `close_runner_up`. A folder whose every file is proven by a confirmed fingerprint or an embedded MusicBrainz recording ID is not affected.
 - **Dead plugin Run buttons removed.** Settings > Plugin Controls no longer shows Run controls for ytimport, wlg (including "Force Re-tag All"), aisauce and ytupdate. They called `POST /api/plugins/run`, which the security work removed, so every click failed. A plugin that is not installed is still listed as unavailable, and Plex controls are unchanged.
 - **One home for MusicBrainz submission.** The Review Queue row no longer has its own "Prepare MB Submission" dialog. Its "Submit Metadata" button opens the Submissions page with the item selected, and that page is where mbsubmit runs.
