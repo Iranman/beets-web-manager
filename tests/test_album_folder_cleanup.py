@@ -1214,7 +1214,8 @@ class AlbumFolderCleanupRouteAndUiTests(unittest.TestCase):
 
     def test_zero_result_panels_are_hidden_or_collapsed_after_scan(self):
         self.assertIn("].filter((stat) => stat.value > 0)", JOBS_SOURCE)
-        self.assertIn("<summary className=\"cursor-pointer px-3 py-2 text-xs font-semibold text-zinc-400\">Cleanup details</summary>", JOBS_SOURCE)
+        # Hallmark Jobs redesign (#688): still a collapsed <details>, restyled as a 40px control.
+        self.assertIn("<summary className=\"inline-flex min-h-10 cursor-pointer items-center text-sm font-semibold text-zinc-300 hover:text-zinc-100\">Cleanup details</summary>", JOBS_SOURCE)
 
     def test_grouped_jobs_page_still_exposes_existing_maintenance_actions(self):
         for text in [
@@ -1234,7 +1235,8 @@ class AlbumFolderCleanupRouteAndUiTests(unittest.TestCase):
         self.assertIn("Job History", JOBS_SOURCE)
         self.assertIn("Show more history", JOBS_SOURCE)
         self.assertIn("View raw log", JOBS_SOURCE)
-        self.assertIn("h-[14rem]", JOBS_SOURCE)
+        # Compact by default: the history list is height-capped until expanded (#688 restyle).
+        self.assertIn("expanded ? 'max-h-[36rem]' : 'max-h-[26rem]'", JOBS_SOURCE)
 
     def test_api_client_has_album_folder_cleanup_functions(self):
         self.assertIn("scanAlbumFolders", CLIENT_SOURCE)

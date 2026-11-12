@@ -491,6 +491,12 @@ def _not_allowlisted(exc: BaseException) -> bool:
     return isinstance(exc, OutboundPolicyError) and bool(getattr(exc, "entry", ""))
 
 
+def unresolved_host(exc: BaseException) -> bool:
+    """True when the outbound policy refused a call only because the host
+    name did not resolve (DNS failure): a reachability problem, not a block."""
+    return isinstance(exc, OutboundPolicyError) and isinstance(exc.__cause__, socket.gaierror)
+
+
 def outbound_block(exc: BaseException, provider: str, url: Optional[str] = None) -> Optional[Dict[str, str]]:
     """User-facing details for a call ``provider`` could not make because the
     outbound policy refused ``url`` (default: the provider's configured URL),
