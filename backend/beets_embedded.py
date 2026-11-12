@@ -81,6 +81,28 @@ def _summary(checks: List[Dict[str, Any]], **extra: Any) -> Dict[str, Any]:
     return {"engine": "embedded", "ok": ok, "checks": checks, **extra}
 
 
+def _release_lock_on_failed_exit(lib) -> None:
+    """Beets' ``Transaction.__exit__`` releases ``_db_lock`` only after the
+    root transaction's commit succeeds. If that commit (or reopening the
+    thread's connection for it) raises -- e.g. a new thread whose SQLite
+    connection cannot be opened -- the lock stays held with no owner and
+    every later library call blocks forever (#652). Release it on that path."""
+    from beets.dbcore.db import Transaction
+
+    class _Transaction(Transaction):
+        def __exit__(self, exc_type, exc_value, traceback):
+            try:
+                return super().__exit__(exc_type, exc_value, traceback)
+            except BaseException:
+                with self.db._tx_stack() as stack:
+                    ended_root = not stack
+                if ended_root and self.db._db_lock.locked():
+                    self.db._db_lock.release()  # this thread acquired it as the root
+                raise
+
+    lib.transaction = lambda: _Transaction(lib)
+
+
 class EmbeddedBeets:
     """One Beets runtime per process: config, plugins, Library, WSGI app."""
 
@@ -168,6 +190,7 @@ class EmbeddedBeets:
         existed = os.path.isfile(dbpath)
         try:
             lib = Library(dbpath, directory)
+            _release_lock_on_failed_exit(lib)
             lib.get_item(0)  # opens the connection, as `beet` does
         except Exception as ex:
             # Raw exception text can leak internal paths/details into the

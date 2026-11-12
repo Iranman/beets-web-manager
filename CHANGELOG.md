@@ -35,6 +35,8 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
+- **A failed Beets commit no longer leaves the embedded library locked forever (#652).** Beets releases its per-library lock only after a transaction's commit succeeds; when a thread could not open or use its SQLite connection (for example the library's directory had gone), the lock stayed held by no thread and every later library call hung. The embedded engine's Library now releases it on that path and the error still surfaces. `scripts/run_tests.py` now fails a test unit, by name, that leaves job threads running or the shared engine's lock held or its library file deleted, and resets the engine so the rest of the worker does not wedge; workers also install the per-test job-thread guard that `unittest discover` already had.
+
 - **CI: `test_qa306_status_cas_edges` no longer wedges a test worker (#650).** One rollback check passed no adapter, so it fell through to the process-global embedded Beets shared by every test module in the worker. When that engine's library lock was left held (two leaked job threads from other modules were blocked on it too, per the CI faulthandler dump), Beets' lock wait is unbounded and the worker hung until the 900s runner timeout. The check now uses an explicit unreachable fake adapter, and the test class patches the shared adapter with one that refuses every call, so a fall-through fails fast instead of hanging.
 - **Test-only: the linear-time redaction test no longer fails on slow CI runners.** `test_crafted_input_is_linear` allowed 1.0 s per 1M-character input. On shared runners the `a-a-a-...` case took 1.05 to 1.10 s and failed PRs that do not touch redaction. The budget is now 5 s, which still catches backtracking: that would take minutes.
 
