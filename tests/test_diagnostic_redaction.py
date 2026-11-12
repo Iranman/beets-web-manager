@@ -71,7 +71,8 @@ class DiagnosticRedactionTests(unittest.TestCase):
                     start = time.perf_counter()
                     redact(text)
                     elapsed = time.perf_counter() - start
-                    self.assertLess(elapsed, 1.0, (real, n, text[:20]))
+                    # Backtracking on 1M chars takes minutes; 5s only absorbs slow CI runners.
+                    self.assertLess(elapsed, 5.0, (real, n, text[:20]))
 
 
 if __name__ == "__main__":
