@@ -687,9 +687,11 @@ EDITABLE_FIELDS = [
 # the end of the line only when unclosed; a "'" part stops there, so a
 # "can't" does not hide the traceback below it (#654). Only a "'" that
 # opens the value spans newlines, when it closes within 4096 characters
-# (#660: 'QQ\nSECRET'): the bound caps how much text an unclosed leading
-# "'" can hide, and a longer single-quoted multi-line value shows its tail
-# after the first line. Trailing
+# and that closing "'" ends the value (#660: 'QQ\nSECRET'). The first later
+# "'" in a traceback usually opens a quote (KeyError: 'foo'), so an unclosed
+# leading "'" stops at the end of its line instead of hiding the traceback
+# (#662). A longer multi-line single-quoted value, or one whose closing "'"
+# is followed by a letter, shows its tail after the first line. Trailing
 # punctuation is over-masked rather than leaked. Nothing follows it in a
 # pattern, so a closed '"' is never re-scanned; the one unclosed '"' left in
 # a text is scanned twice, and a leading "'" scans at most 4096 characters
@@ -697,8 +699,13 @@ EDITABLE_FIELDS = [
 _SECRET_VALUE_PART = (
     r"""(?:"(?:[^"\\]|\\.)*"|"(?:[^"\\\r\n]|\\.)*|'(?:[^'\\\r\n]|\\.)*'?|[^ \t\r\n\f\v"'])"""
 )
+# A quote that may span newlines must close the value: whitespace,
+# punctuation or the end of the text follows it, not the letter after an
+# opening quote (#662).
+_MULTILINE_QUOTE_END = r"""(?![^\s,.;:!?)\]}>&#"'])"""
 SECRET_VALUE_PATTERN = (
-    r"""(?:'(?:[^'\\]|\\.){0,4096}'|""" + _SECRET_VALUE_PART + ")" + _SECRET_VALUE_PART + "*"
+    r"""(?:'(?:[^'\\]|\\.){0,4096}'""" + _MULTILINE_QUOTE_END + "|" + _SECRET_VALUE_PART + ")"
+    + _SECRET_VALUE_PART + "*"
 )
 
 # Authorization schemes masked with the value after them, shared with
@@ -719,8 +726,10 @@ SECRET_NAME_PATTERN = (
 # masked once and the output is a fixed point:
 # - a query parameter ("?access_token=x&keep=1"): the value stops at "&",
 #   "#" or whitespace outside quotes, so the following parameters survive;
-#   a closed '"' spans newlines, and a following segment without "=" is
-#   taken as a raw "&" inside the value ("?token=a&b&keep=1", #660), so a
+#   a '"', or a "'" that opens the value, spans newlines when it closes the
+#   value within 4096 characters (#660, #662), and a following segment
+#   without "=" is taken as a raw "&" inside the value ("?token=a&b&keep=1",
+#   #660), also before a closing quote ('{"u": "?token=a&b"}', #662), so a
 #   valueless flag right after a secret is masked too (fail closed);
 # - an Authorization or Cookie header with an unquoted value: masked to the
 #   end of the line (Digest/Token parameters, several cookie pairs), the
@@ -729,8 +738,9 @@ SECRET_NAME_PATTERN = (
 #   quote first ({"password": ...}).
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![a-z0-9_-])(?:"
-    r"(?<=[?&])(?P<qk>" + SECRET_NAME_PATTERN + r")(?P<qs>=)(?:\"[^\"]*\"|\"[^\"\r\n]*|'[^'\r\n]*'?|[^&#\s\"'])*"
-    r"(?:&[^&#=\s\"']+(?![^&#\s]))*"
+    r"(?<=[?&])(?P<qk>" + SECRET_NAME_PATTERN + r")(?P<qs>=)(?:'[^']{0,4096}'" + _MULTILINE_QUOTE_END + r")?"
+    r"(?:\"[^\"]{0,4096}\"" + _MULTILINE_QUOTE_END + r"|\"[^\"\r\n]*|'[^'\r\n]*'?|[^&#\s\"'])*"
+    r"(?:&[^&#=\s\"']+(?![^&#\s\"']))*"
     r"|(?P<hk>[a-z0-9_-]*?(?:authorization|cookie))(?P<hs>[ \t]*[:=][ \t]*)(?![ \t]*[\"'])[^\r\n]*"
     r"|(?P<k>" + SECRET_NAME_PATTERN + r")(?P<s>[\"']?\s*[:=]\s*)"
     r"(?:" + SECRET_SCHEME_PATTERN + r"\s+)?" + SECRET_VALUE_PATTERN + r")",
