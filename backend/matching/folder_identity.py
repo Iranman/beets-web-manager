@@ -42,6 +42,13 @@ POST_CONDITIONS = ("beets_strong_match", "single_new_album_with_release_group")
 
 _CONFIRMED_SCORE = 80.0
 
+#: Ambiguity margin on the canonical score (0..1). When another Release
+#: Group scores within this distance of an otherwise acceptable candidate and
+#: that candidate's local tracks are not all hard-proven (confirmed
+#: fingerprint or embedded Recording ID), text/structure evidence cannot tell
+#: the two apart: the candidate gets ``close_runner_up`` and goes to review.
+CLOSE_RUNNER_UP_MARGIN = 0.05
+
 
 def _s(value: Any) -> str:
     return str(value or "").strip().lower()
@@ -110,6 +117,15 @@ def track_proof(release: Dict[str, Any]) -> Tuple[int, int]:
     return int(canonical.get("local_tracks_verified") or 0), int(canonical.get("local_tracks_total") or 0)
 
 
+def hard_proven(release: Dict[str, Any]) -> bool:
+    """Every local track is proven by a confirmed fingerprint or an embedded
+    Recording ID (not by metadata-slot or text evidence)."""
+    canonical = _canonical(release)
+    total = int(canonical.get("local_tracks_total") or 0)
+    rows = (canonical.get("track_alignment") or {}).get("assignments") or []
+    return total > 0 and sum(1 for row in rows if row.get("is_deterministic")) >= total
+
+
 def _release_key(release: Dict[str, Any], folder_track_count: int) -> tuple:
     """Representative release inside one Release Group (condition 6): same
     track count first, then alignment, then a stable ID tiebreak."""
@@ -153,6 +169,8 @@ def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_coun
         verified, total = track_proof(rep)
         decision = rep.get("matching_decision") or {}
         rows.append({
+            "_score": float(_canonical(rep).get("score") or 0.0),
+            "_hard_proven": hard_proven(rep),
             "release_group_id": rgid,
             "representative_release_id": _s(rep.get("release_id")),
             "matching_decision": decision,
@@ -162,6 +180,7 @@ def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_coun
                 "sources": sorted({src for m in members for src in (m.get("sources") or [])}),
                 "conflicts": conflicts,
                 "action_allowed": bool(decision.get("action_allowed")) and not conflicts,
+                "review_reasons": [],
                 "local_tracks_verified": verified,
                 "local_tracks_total": total,
                 "any_track_proof": any(track_proof(m)[0] > 0 for m in members),
@@ -175,12 +194,22 @@ def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_coun
             },
         })
 
+    # Near-tie: an acceptable candidate without hard per-track proof loses
+    # automation when any other Release Group scores within the margin.
+    for row in rows:
+        if row["evidence"]["action_allowed"] and not row["_hard_proven"] and any(
+                other["_score"] >= row["_score"] - CLOSE_RUNNER_UP_MARGIN for other in rows if other is not row):
+            row["evidence"]["action_allowed"] = False
+            row["evidence"]["review_reasons"].append("close_runner_up")
+
     rows.sort(key=lambda r: (
         0 if r["evidence"]["action_allowed"] else 1,
         -r["evidence"]["local_tracks_verified"],
-        -float(_canonical({"matching_decision": r["matching_decision"]}).get("score") or 0.0),
+        -r["_score"],
         r["release_group_id"],
     ))
+    for row in rows:
+        del row["_score"], row["_hard_proven"]
     for index, row in enumerate(rows, start=1):
         row["deterministic_rank"] = index
     return rows
@@ -248,6 +277,8 @@ def decide_auto_import(candidates: List[Dict[str, Any]], *, skip_reason: str,
         reasons.append("no_candidates")
     elif not accepted:
         reasons.append("no_release_group_verified")
+        if any("close_runner_up" in c["evidence"]["review_reasons"] for c in candidates):
+            reasons.append("close_runner_up")
     elif len(accepted) > 1:
         reasons.append("multiple_release_groups_verified")
 

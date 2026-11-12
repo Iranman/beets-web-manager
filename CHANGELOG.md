@@ -8,6 +8,7 @@ The project uses Semantic Versioning.
 
 ### Changed
 
+- **Import folders: a near-tie between two albums goes to review.** When another MusicBrainz release group's match score is within 0.05 of the chosen one and the chosen one's tracks are proven only by metadata (title, length and position), the folder is no longer imported unattended. Its candidate shows `close_runner_up` and the auto-import reasons include `close_runner_up`. A folder whose every file is proven by a confirmed fingerprint or an embedded MusicBrainz recording ID is not affected.
 - **Dead plugin Run buttons removed.** Settings > Plugin Controls no longer shows Run controls for ytimport, wlg (including "Force Re-tag All"), aisauce and ytupdate. They called `POST /api/plugins/run`, which the security work removed, so every click failed. A plugin that is not installed is still listed as unavailable, and Plex controls are unchanged.
 - **One home for MusicBrainz submission.** The Review Queue row no longer has its own "Prepare MB Submission" dialog. Its "Submit Metadata" button opens the Submissions page with the item selected, and that page is where mbsubmit runs.
 - **One home for transaction actions.** Jobs & Cleanup > Untracked files now only makes recovery plans. Each new plan links to its entry in Workbench > Library Changes (`/import?tab=changes&tx=<id>`), which is the one place to approve, apply or roll back a plan, with its confirmations and the server rollback check. The inline "Approve and apply" and "Roll back" buttons are removed.
