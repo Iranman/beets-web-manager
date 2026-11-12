@@ -993,6 +993,46 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         self.assertTrue(r.get_json()["ok"])
         self.assertEqual(self.module._load_settings()["urls"], urls)
 
+    def test_url_origin_change_refuses_masked_sibling_credential(self):
+        # #641: a masked sibling secret was kept when its URL moved host.
+        svc = {"url": "https://svc.invalid:8443/api", "password": "fake-pw-641"}
+        stored_in = {"ai_base_url": "https://ai.invalid/v1", "ai_api_key": "fake-key-641",
+                     "svc": svc, "svcs": [dict(svc)]}
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        moved = {"https://evil.invalid/v1": "host", "http://ai.invalid/v1": "scheme",
+                 "https://ai.invalid:8080/v1": "port"}
+        for url, what in moved.items():
+            for edit in ({"ai_base_url": url, "ai_api_key": mask},
+                         {"svc": {"url": url, "password": mask}},
+                         {"svcs": [{"url": url, "password": mask}]}):
+                r = self.client.post("/api/setup/settings", json={**got, **edit, "expected_revision": rev})
+                self.assertEqual(r.status_code, 400, (what, edit))
+                self.assertEqual(r.get_json()["code"], "settings_unmatched_mask")
+        self.assertEqual(self.module._load_settings(), stored_in)
+        # Same origin, other path: the mask still restores the secret.
+        r = self.client.post("/api/setup/settings", json={
+            **got, "ai_base_url": "https://ai.invalid/v2", "svc": {**got["svc"], "url": "https://svc.invalid:8443/v2"},
+            "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        stored = self.module._load_settings()
+        self.assertEqual((stored["ai_api_key"], stored["svc"]["password"]), ("fake-key-641", "fake-pw-641"))
+        # A new host with a newly entered secret is accepted.
+        r = self.client.post("/api/setup/settings", json={
+            **got, "ai_base_url": "https://new.invalid/v1", "ai_api_key": "fake-new-641",
+            "svc": {"url": "https://new.invalid/api", "password": "fake-newpw-641"},
+            "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        stored = self.module._load_settings()
+        self.assertEqual((stored["ai_api_key"], stored["svc"]["password"]), ("fake-new-641", "fake-newpw-641"))
+        # Unchanged origin round trip restores everything.
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        self.assertEqual(self.module._load_settings(), stored)
+
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
         self.assertEqual(r.status_code, 400)
