@@ -240,6 +240,8 @@ function YtImportPlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }
   );
 }
 
+export const WLG_FORCE_CONFIRM = 'Overwrite all existing genre tags across the library using wlg? This will modify tags on all albums.';
+
 // ── Genre Tagging (wlg) ───────────────────────────────────────────────────────
 
 function WlgPlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }) {
@@ -292,7 +294,11 @@ function WlgPlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }) {
           disabled={locked}
           size="small"
           variant="outlined"
-          onClick={() => void run(['wlg', '-f'], 'wlg: force re-tag all genres')}
+          onClick={() => {
+            // Same guard as the lastgenre force run in Jobs & Cleanup: it overwrites every genre tag.
+            if (!window.confirm(WLG_FORCE_CONFIRM)) return;
+            void run(['wlg', '-f'], 'wlg: force re-tag all genres');
+          }}
         >
           Force Re-tag All
         </Button>

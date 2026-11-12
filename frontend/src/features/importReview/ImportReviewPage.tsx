@@ -99,7 +99,7 @@ import type {
 /** Unified filter for the Review Queue. Type-based (pending_ai, skipped; sent to the
  *  server) and state-based (ready, blocked, audio_mismatch, no_candidate, failed; the
  *  loaded page only) filters live in one row. Library rows missing MusicBrainz IDs
- *  are not import decisions: they are on Library > Missing IDs (mode="missing_ids"). */
+ *  are not import decisions: they are on Workbench > Missing IDs (mode="missing_ids"). */
 export type QueueFilter =
   | 'all'
   | 'pending_ai'

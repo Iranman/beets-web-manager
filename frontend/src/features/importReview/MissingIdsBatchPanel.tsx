@@ -1,4 +1,4 @@
-// Library > Missing IDs: batch fix of proven matches (#399). The server proves
+// Workbench > Missing IDs: batch fix of proven matches (#399). The server proves
 // each row and decides what may be written; this panel only selects rows, shows
 // that decision, asks for confirmation and follows the jobs.
 import { errorMessage, sentences } from '../../lib/errors';

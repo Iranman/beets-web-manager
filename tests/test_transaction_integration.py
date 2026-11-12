@@ -61,11 +61,12 @@ class TransactionIntegrationSourceTests(unittest.TestCase):
         page_source = (ROOT / "frontend" / "src" / "views" / "LibraryChanges.tsx").read_text(encoding="utf-8")
         client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 
-        self.assertIn("import LibraryChanges from './views/LibraryChanges'", app_source)
-        self.assertIn('path="changes"', app_source)
-        self.assertNotIn("{ to: '/changes'", shell_source)
-        self.assertIn("navigate('/changes')", shell_source)
-        self.assertIn("Library Changes", shell_source)
+        import_source = (ROOT / "frontend" / "src" / "views" / "Import.tsx").read_text(encoding="utf-8")
+        # Library Changes is a Workbench (/import) tab; /changes redirects there and keeps ?tx=.
+        self.assertIn("import LibraryChanges from './LibraryChanges'", import_source)
+        self.assertIn("{ id: 'changes', label: 'Library Changes' }", import_source)
+        self.assertIn('path="changes" element={<WorkbenchRedirect tab="changes" />}', app_source)
+        self.assertNotIn("navigate('/changes')", shell_source)
         self.assertIn("getTransactions", page_source)
         self.assertIn("rollbackTransaction", page_source)
         self.assertIn("applyTransaction", page_source)
