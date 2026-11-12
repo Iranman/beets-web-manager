@@ -220,7 +220,7 @@ function ReviewDetailPanel({
   const action = review?.action ?? classifyRow(row);
 
   return (
-    <div className="mt-3 space-y-3 border-t border-graphite-700/40 pt-3 text-[0.72rem]">
+    <div className="mt-3 space-y-3 border-t border-graphite-700/40 pt-3 text-xs">
       {reviewLoading && <div className="text-zinc-400">Loading review details…</div>}
       {reviewError && <div className="text-rose-400">Error: {reviewError}</div>}
 
@@ -361,7 +361,7 @@ function ReviewDetailPanel({
           {previewError && <div className="text-rose-400">Preview error: {previewError}</div>}
           {preview && (
             <div className="rounded border border-graphite-700/50 bg-graphite-950/40 px-3 py-2.5 space-y-2">
-              <div className="font-medium text-zinc-300 text-[0.72rem]">Merge preview (dry-run)</div>
+              <div className="font-medium text-zinc-300 text-xs">Merge preview (dry-run)</div>
               {preview.safe ? (
                 <div className="text-emerald-400 text-xs font-medium">✓ Safe to merge — no conflicts, no DB items in source.</div>
               ) : (
@@ -402,7 +402,7 @@ function ReviewDetailPanel({
 
           {/* Apply result */}
           {applyResult && (
-            <div className="rounded border border-emerald-700/50 bg-emerald-950/30 px-2.5 py-2 text-emerald-300 text-[0.72rem]">
+            <div className="rounded border border-emerald-700/50 bg-emerald-950/30 px-2.5 py-2 text-emerald-300 text-xs">
               <div className="font-semibold">✓ Done</div>
               {applyResult.removed && <div>Removed: <span className="font-mono">{applyResult.removed}</span></div>}
               {applyResult.moved && applyResult.moved.length > 0 && (
@@ -414,7 +414,7 @@ function ReviewDetailPanel({
             </div>
           )}
           {applyError && (
-            <div className="rounded border border-rose-700/50 bg-rose-950/20 px-2.5 py-2 text-rose-300 text-[0.72rem]">
+            <div className="rounded border border-rose-700/50 bg-rose-950/20 px-2.5 py-2 text-rose-300 text-xs">
               Error: {applyError}
             </div>
           )}
@@ -422,7 +422,7 @@ function ReviewDetailPanel({
           {/* Confirm remove dialog */}
           {confirmRemove && (
             <div className="rounded border border-amber-700/50 bg-amber-950/30 px-3 py-2.5 space-y-2">
-              <div className="font-semibold text-amber-200 text-[0.72rem]">Confirm: Remove empty placeholder folder?</div>
+              <div className="font-semibold text-amber-200 text-xs">Confirm: Remove empty placeholder folder?</div>
               <div className="text-amber-300 text-xs">
                 This will remove the empty directory <span className="font-mono">{row.folder}</span> from disk.
                 The target canonical folder will not be changed. No files will be deleted.
@@ -438,7 +438,7 @@ function ReviewDetailPanel({
 
           {confirmMerge && preview && (
             <div className="rounded border border-amber-700/50 bg-amber-950/30 px-3 py-2.5 space-y-2">
-              <div className="font-semibold text-amber-200 text-[0.72rem]">Confirm: Apply merge preview?</div>
+              <div className="font-semibold text-amber-200 text-xs">Confirm: Apply merge preview?</div>
               <div className="text-amber-300 text-xs">
                 This will move {preview.moves.length} source-only file(s) into the existing canonical target folder.
                 Existing target files will not be overwritten, and DB-tracked source folders are blocked.
@@ -608,7 +608,7 @@ function FolderRow({
               )}
             </div>
           ) : (
-            <div className="text-amber-400 text-[0.72rem]">
+            <div className="text-amber-400 text-xs">
               No canonical path — Release Group ID unknown.
             </div>
           )}
@@ -621,7 +621,7 @@ function FolderRow({
           </div>
 
           {/* Status summary */}
-          <div className="text-[0.72rem] text-zinc-400">
+          <div className="text-xs text-zinc-400">
             <span className="font-medium">Status: </span>{renameResult ? `Renamed → ${renameResult.renamed_to?.split('/').at(-1)}` : bucketSummary(row, bucket)}
           </div>
 
@@ -933,7 +933,7 @@ export function FolderPlaceholdersPanel() {
               onChange={(e) => toggleAutoApply(e.target.checked)}
             />
           }
-          label={<span className="text-[0.72rem] text-zinc-400">Auto-apply safe renames after scan</span>}
+          label={<span className="text-xs text-zinc-400">Auto-apply safe renames after scan</span>}
           sx={{ ml: 0 }}
         />
       </CleanActionBar>
@@ -952,7 +952,7 @@ export function FolderPlaceholdersPanel() {
         <div className="mt-3">
           <JobStatusCard job={applyJob} runningLabel="Applying safe folder renames…" logLines={4} />
           {applyJobResult && (
-            <div className="mt-2 rounded border border-emerald-800/50 bg-emerald-950/20 px-3 py-2 text-[0.72rem] text-emerald-300">
+            <div className="mt-2 rounded border border-emerald-800/50 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-300">
               {applyJobResult.summary} — Results will refresh automatically.
             </div>
           )}

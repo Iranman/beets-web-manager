@@ -45,7 +45,7 @@ export function LogViewer({
 
   const rawClass = [
     'max-h-56 overflow-y-auto whitespace-pre-wrap rounded-b-md bg-graphite-950/80 p-3',
-    'font-mono text-[0.72rem] leading-6 text-zinc-300',
+    'font-mono text-xs leading-6 text-zinc-300',
     className,
   ].filter(Boolean).join(' ');
 
@@ -92,7 +92,7 @@ export function LogViewer({
         <div ref={ref as RefObject<HTMLDivElement>} className={`max-h-56 overflow-y-auto bg-graphite-950/80 p-2 ${className}`}>
           <ol className="space-y-1">
             {activityLines.map((line, index) => (
-              <li key={`${index}-${line}`} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-2 rounded px-1.5 py-1 text-[0.74rem] leading-5 text-zinc-300 hover:bg-graphite-850/70">
+              <li key={`${index}-${line}`} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-2 rounded px-1.5 py-1 text-xs leading-5 text-zinc-300 hover:bg-graphite-850/70">
                 <span className="pt-px text-right font-mono text-xs text-muted">{index + 1}</span>
                 <span className="min-w-0 break-words font-mono text-zinc-300">{line}</span>
               </li>

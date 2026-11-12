@@ -935,7 +935,7 @@ function MatchSummaryRow({ label, field }: { label: string; field?: { status?: s
     <div className="flex items-start justify-between gap-3 border-b border-graphite-800 py-1.5 last:border-b-0">
       <div className="min-w-0">
         <div className="text-xs font-medium text-graphite-200">{label}</div>
-        {detail ? <div className="truncate text-[0.72rem] text-muted">{detail}</div> : null}
+        {detail ? <div className="truncate text-xs text-muted">{detail}</div> : null}
       </div>
       <div className={`shrink-0 text-xs font-semibold ${tone}`}>{status}{score}</div>
     </div>
@@ -5054,7 +5054,7 @@ export function ImportReviewPage({
                 </Button>
               </>
             )}
-            <Button variant="contained" onClick={() => void loadQueue()} disabled={loading}>
+            <Button variant="outlined" onClick={() => void loadQueue()} disabled={loading}>
               Refresh
             </Button>
           </div>
@@ -5246,7 +5246,7 @@ export function ImportReviewPage({
               ←
             </button>
             <div className="min-w-0 flex-1 text-center">
-              <div className="text-[0.7rem] text-graphite-200">
+              <div className="text-xs text-graphite-200">
                 {activeIndex + 1} of {visibleItems.length} shown · items {pageStart}–{pageEnd} of {total}
                 {activeJobHiddenCount ? ` · ${activeJobHiddenCount} hidden by active jobs` : ''}
               </div>

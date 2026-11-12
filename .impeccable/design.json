@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-12T00:00:00Z",
+  "title": "Design System: Beets Web Manager",
+  "extensions": {
+    "colorMeta": {
+      "brass": { "role": "primary", "displayName": "Brass", "canonical": "#d39e3f", "tonalRamp": ["#2b1e0b", "#4a3412", "#8f6420", "#b5822b", "#d39e3f", "#e2b25c", "#f0cd85", "#f6dfae"] },
+      "shelf-black": { "role": "neutral", "displayName": "Shelf Black", "canonical": "#171310", "tonalRamp": ["#171310", "#201a16", "#2a231d", "#342c25", "#4b4137", "#7d705f", "#c4b5a2", "#f6f0e7"] },
+      "label-cream": { "role": "neutral", "displayName": "Label Cream", "canonical": "#f6f0e7" },
+      "danger": { "role": "error", "displayName": "Danger", "canonical": "#991b1b" },
+      "warning": { "role": "warning", "displayName": "Warning", "canonical": "#f59e0b" },
+      "success": { "role": "success", "displayName": "Success", "canonical": "#4ade80" },
+      "info": { "role": "info", "displayName": "Info", "canonical": "#60a5fa" }
+    },
+    "typographyMeta": {
+      "wordmark": { "displayName": "Wordmark", "purpose": "Product name in the header." },
+      "headline": { "displayName": "Page title", "purpose": "One serif title per screen." },
+      "title": { "displayName": "Section title", "purpose": "Section headings inside a page." },
+      "body": { "displayName": "Body", "purpose": "Descriptions, table cells, messages." },
+      "label": { "displayName": "Label", "purpose": "Chips, field labels, metadata." }
+    },
+    "shadows": [
+      { "name": "floating", "value": "0 20px 25px -5px rgba(0,0,0,0.4)", "purpose": "Menus and dialogs only; panels at rest are flat." }
+    ],
+    "motion": [
+      { "name": "state", "value": "150ms ease", "purpose": "Colour transitions on hover and selection (Tailwind transition-colors)." }
+    ],
+    "breakpoints": [
+      { "name": "phone-min", "value": "320px" },
+      { "name": "sm", "value": "640px" },
+      { "name": "lg", "value": "1024px" },
+      { "name": "container", "value": "1536px" }
+    ]
+  },
+  "components": [
+    { "name": "Primary Button", "kind": "button", "refersTo": "button-primary", "description": "The one action to take next.",
+      "html": "<button class=\"ds-btn-primary\">Clean All</button>",
+      "css": ".ds-btn-primary{background:#d39e3f;color:#1a140e;border:1px solid #d39e3f;border-radius:6px;min-height:32px;padding:4px 10px;font:650 13px Inter,system-ui,sans-serif;cursor:pointer;transition:background .15s}.ds-btn-primary:hover{background:#e2b25c;border-color:#e2b25c}.ds-btn-primary:active{background:#b5822b}.ds-btn-primary:focus-visible{outline:2px solid #f0c46a;outline-offset:2px}" },
+    { "name": "Secondary Button", "kind": "button", "refersTo": "button-secondary", "description": "Alternative actions beside the primary one.",
+      "html": "<button class=\"ds-btn-secondary\">Refresh</button>",
+      "css": ".ds-btn-secondary{background:#241e19;color:#f8f1e7;border:1px solid #b3a491;border-radius:6px;min-height:32px;padding:4px 10px;font:650 13px Inter,system-ui,sans-serif;cursor:pointer}.ds-btn-secondary:hover{background:#342c25;border-color:#e2b25c}.ds-btn-secondary:focus-visible{outline:2px solid #f0c46a;outline-offset:2px}" },
+    { "name": "Text Field", "kind": "input", "refersTo": "input-field", "description": "MUI outlined small field.",
+      "html": "<input class=\"ds-input\" placeholder=\"Search\">",
+      "css": ".ds-input{background:#201a16;color:#f6f0e7;border:1px solid #8f8170;border-radius:6px;padding:8px 12px;font:14px Inter,system-ui,sans-serif}.ds-input::placeholder{color:#a39481}.ds-input:hover{border-color:#a39481}.ds-input:focus{outline:none;border-color:#d39e3f}" },
+    { "name": "Primary Navigation", "kind": "nav", "description": "Header tabs with a brass underline on the active tab.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-tab ds-active\">Library</a><a class=\"ds-tab\">Import</a><a class=\"ds-tab\">Playlists</a><a class=\"ds-tab\">Jobs</a></nav>",
+      "css": ".ds-nav{display:flex;height:56px;background:#201a16;border-bottom:1px solid #342c25}.ds-tab{display:flex;align-items:center;padding:0 12px;border-bottom:2px solid transparent;color:#d2c6b6;font:500 13px Inter,system-ui,sans-serif;cursor:pointer}.ds-tab:hover{border-color:#8f6420;color:#faf6f0}.ds-active{border-color:#e2b25c;background:rgba(43,30,11,.6);color:#faf6f0}" },
+    { "name": "Status Chip", "kind": "chip", "refersTo": "chip", "description": "Job and evidence state, always with a word.",
+      "html": "<span class=\"ds-chip\">2 to review</span>",
+      "css": ".ds-chip{display:inline-flex;align-items:center;border:1px solid rgba(245,158,11,.4);background:rgba(245,158,11,.1);color:#fcd34d;border-radius:6px;padding:2px 6px;font:600 12px Inter,system-ui,sans-serif}" },
+    { "name": "Panel", "kind": "card", "refersTo": "card", "description": "Flat bordered section container.",
+      "html": "<section class=\"ds-panel\"><h2 class=\"ds-panel-title\">Library Cleanup</h2><p class=\"ds-panel-body\">One coordinated cleanup workflow.</p></section>",
+      "css": ".ds-panel{background:#2a231d;border:1px solid #4b4137;border-radius:8px;padding:16px}.ds-panel-title{margin:0 0 4px;color:#f6f0e7;font:600 16px Inter,system-ui,sans-serif}.ds-panel-body{margin:0;color:#c4b5a2;font:14px Inter,system-ui,sans-serif}" }
+  ],
+  "narrative": {
+    "northStar": "The Record Shelf",
+    "overview": "A late-evening listening room: dark wood shelving, cream sleeve labels, and one warm brass lamp that picks out what needs a hand. The interface is an operator console first. It is dense, tabular and calm, and the record-shop identity lives in a few precise places: the vinyl mark, the serif wordmark and page titles, and brass on the one thing the operator should act on next.",
+    "keyCharacteristics": [
+      "Warm dark only; there is no light theme.",
+      "One accent (brass), used for action, selection, focus and progress.",
+      "Serif display face for the wordmark and page titles; a system sans for everything an operator reads or clicks.",
+      "Flat, bordered panels with tonal steps instead of elevation.",
+      "Status colour (red, amber, green, blue) is reserved for job and evidence state, always paired with a text label."
+    ],
+    "rules": [
+      { "name": "The One Lamp Rule", "body": "Brass marks the one thing to do next. If two brass fills sit side by side, one of them is wrong.", "section": "colors" },
+      { "name": "The Label-With-Colour Rule", "body": "State colour never stands alone: every red, amber, green or blue chip carries its word (\"Failed\", \"Running\", \"2 to review\").", "section": "colors" },
+      { "name": "The Serif Is For Names Rule", "body": "The display serif is for the wordmark and page and section titles only, never for buttons, labels, data or numbers.", "section": "typography" },
+      { "name": "The Flat Shelf Rule", "body": "Panels at rest have a border and no shadow.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do use the theme tokens (graphite-*, zinc-*, brass-*, muted, field-border) rather than raw hex in components.",
+      "Do keep one brass primary action per decision; make the rest secondary or text buttons.",
+      "Do give every screen one page title in the display serif.",
+      "Do keep the 2px focus-brass ring visible on every interactive element."
+    ],
+    "donts": [
+      "Don't reintroduce blue-grey or neutral grey surfaces; the shelf is warm.",
+      "Don't use the serif on buttons, chips, numbers or table data.",
+      "Don't convey job or evidence state by colour alone.",
+      "Don't add shadows to panels at rest."
+    ]
+  }
+}

@@ -74,7 +74,7 @@ function DupRow({
           </div>
         )}
         {dup.reason && (
-          <div className="text-[0.7rem] italic text-muted">{dup.reason}</div>
+          <div className="text-xs italic text-muted">{dup.reason}</div>
         )}
       </div>
     </label>
@@ -311,7 +311,7 @@ export function DedupPanel() {
             </div>
           </div>
           {showRawScanLog && scan?.log?.length ? (
-            <LogViewer className="max-h-44 text-[0.7rem] leading-5 text-zinc-400" emptyText="No scan output yet." lines={scan.log} />
+            <LogViewer className="max-h-44 text-xs leading-5 text-zinc-400" emptyText="No scan output yet." lines={scan.log} />
           ) : null}
         </div>
       )}

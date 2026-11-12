@@ -36,19 +36,22 @@ const INTEGRATIONS: Array<{
   label: string;
   description: string;
 }> = [
-  { key: 'library_path',   label: 'Beets library',   description: '/config/musiclibrary.blb' },
-  { key: 'beet_bin',       label: 'beet binary',      description: 'fpcalc / beet in PATH' },
-  { key: 'music_root',     label: 'Music root',       description: 'Library mount (MUSIC_ROOT, default /music)' },
+  { key: 'beets_web',               label: 'Beets library',      description: 'Embedded Beets library reads' },
+  { key: 'beets_webmanager_plugin', label: 'Web Manager plugin', description: 'In-process library operations' },
   { key: 'openai_key',     label: 'OpenAI',           description: 'AI matching + batch import' },
   { key: 'discogs_token',  label: 'Discogs',          description: 'Artist images + discography' },
   { key: 'lidarr_key',     label: 'Lidarr',           description: 'Wanted albums + monitoring' },
   { key: 'slskd_key',      label: 'Soulseek (slskd)', description: 'Missing-track downloads' },
 ];
 
-function StatusDot({ ok }: { ok: boolean }) {
+// The embedded Beets checks are required; the providers are optional integrations,
+// so an unset one is neutral, not a failure. Keys mirror app.py _health_checks.
+const REQUIRED_CHECKS = new Set<keyof HealthChecks>(['beets_web', 'beets_webmanager_plugin']);
+
+function StatusDot({ ok, required }: { ok: boolean; required: boolean }) {
   return (
     <span
-      className={`inline-block size-2.5 rounded-full ${ok ? 'bg-emerald-400' : 'bg-red-500'}`}
+      className={`inline-block size-2.5 shrink-0 rounded-full ${ok ? 'bg-emerald-400' : required ? 'bg-red-500' : 'border border-graphite-500'}`}
       aria-label={ok ? 'configured' : 'not configured'}
     />
   );
@@ -58,20 +61,22 @@ function IntegrationRow({
   label,
   description,
   ok,
+  required,
 }: {
   label: string;
   description: string;
   ok: boolean;
+  required: boolean;
 }) {
   return (
     <div className="flex items-center gap-3 rounded border border-graphite-800 bg-graphite-900 px-4 py-3">
-      <StatusDot ok={ok} />
+      <StatusDot ok={ok} required={required} />
       <div className="flex-1">
-        <div className="text-[0.82rem] font-medium text-zinc-200">{label}</div>
-        <div className="text-[0.72rem] text-muted">{description}</div>
+        <div className="text-sm font-medium text-zinc-200">{label}</div>
+        <div className="text-xs text-muted">{description}</div>
       </div>
       <span
-        className={`text-[0.72rem] font-semibold ${ok ? 'text-emerald-400' : 'text-muted'}`}
+        className={`text-xs font-semibold ${ok ? 'text-emerald-400' : required ? 'text-red-300' : 'text-muted'}`}
       >
         {ok ? 'configured' : 'not set'}
       </span>
@@ -84,7 +89,7 @@ function IntegrationRow({
 function StatCard({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="flex flex-col gap-1 rounded border border-graphite-800 bg-graphite-900 px-5 py-4">
-      <div className="text-[0.72rem] font-semibold text-muted">
+      <div className="text-xs font-semibold text-muted">
         {label}
       </div>
       <div className="text-2xl font-semibold text-zinc-100">
@@ -101,7 +106,7 @@ function CoverageBar({ label, present, total }: { label: string; present: number
   const color = pct >= 90 ? 'success' : pct >= 60 ? 'warning' : 'error';
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center justify-between text-[0.78rem]">
+      <div className="flex items-center justify-between text-xs">
         <span className="text-zinc-300">{label}</span>
         <span className="tabular-nums text-zinc-400">
           {present.toLocaleString()} / {total.toLocaleString()} ({pct}%)
@@ -344,7 +349,7 @@ export default function Config() {
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold text-zinc-100">Settings</h1>
+        <h1 className="font-display text-2xl font-semibold text-zinc-100">Settings</h1>
         <Button variant="outlined" size="small" onClick={refreshAll} disabled={loading || formatLoading}>
           Refresh
         </Button>
@@ -355,7 +360,7 @@ export default function Config() {
 
       {/* Library stats */}
       <section className="space-y-3">
-        <h2 className="text-[0.78rem] font-semibold text-muted">Library</h2>
+        <h2 className="text-sm font-semibold text-zinc-200">Library</h2>
         {stats && (
           <div className="grid grid-cols-3 gap-3">
             <StatCard label="Artists" value={stats.artists} />
@@ -368,7 +373,7 @@ export default function Config() {
       {/* MusicBrainz coverage */}
       {mbStatus?.ok && (
         <section className="space-y-3">
-          <h2 className="text-[0.78rem] font-semibold text-muted">MusicBrainz</h2>
+          <h2 className="text-sm font-semibold text-zinc-200">MusicBrainz</h2>
           <div className="rounded border border-graphite-800 bg-graphite-900 px-5 py-4 space-y-4">
             <CoverageBar
               label="Albums with MB release ID"
@@ -393,10 +398,10 @@ export default function Config() {
       {/* Integration status */}
       {health && (
         <section className="space-y-3">
-          <h2 className="text-[0.78rem] font-semibold text-muted">Integrations</h2>
+          <h2 className="text-sm font-semibold text-zinc-200">Integrations</h2>
           <div className="grid gap-2 sm:grid-cols-2">
             {INTEGRATIONS.map(({ key, label, description }) => (
-              <IntegrationRow key={key} label={label} description={description} ok={health.checks[key]} />
+              <IntegrationRow key={key} label={label} description={description} ok={health.checks[key]} required={REQUIRED_CHECKS.has(key)} />
             ))}
           </div>
         </section>
@@ -406,12 +411,12 @@ export default function Config() {
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-[0.78rem] font-semibold text-muted">Music Format Preferences</h2>
+            <h2 className="text-sm font-semibold text-zinc-200">Music Format Preferences</h2>
             <p className="mt-1 text-xs text-muted">
               Downloaded tracks are inspected before import. Files that do not match your selected format preferences are rejected or replaced.
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button size="small" variant="outlined" onClick={() => void loadMusicFormat()} disabled={formatLoading || formatBusy}>Reload</Button>
             <Button size="small" variant="outlined" onClick={() => void handleStartMusicFormatScan()} disabled={formatLoading || formatBusy}>Scan library</Button>
             <Button size="small" variant="outlined" color="warning" onClick={() => void handleStartMusicFormatReplacement()} disabled={formatLoading || formatBusy || queuedReplacementCount === 0}>Replace queued</Button>
@@ -559,7 +564,7 @@ export default function Config() {
                   </div>
                   {row.reason ? <div className="mt-1 text-xs text-muted">{row.reason}</div> : null}
                   {(row.failure_stage || row.attempt_count || row.next_retry_at) ? (
-                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[0.7rem] text-muted">
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
                       {row.failure_stage ? <span>Stage: {row.failure_stage.replace(/_/g, ' ')}</span> : null}
                       {row.attempt_count ? <span>Attempts: {row.attempt_count}</span> : null}
                       {row.next_retry_at ? <span>Retry: {formatEpochDateTime(row.next_retry_at)}</span> : null}
@@ -575,7 +580,7 @@ export default function Config() {
       </section>
       {/* Plugin controls */}
       <section className="space-y-3">
-        <h2 className="text-[0.78rem] font-semibold text-muted">Plugins</h2>
+        <h2 className="text-sm font-semibold text-zinc-200">Plugins</h2>
         <PluginsPanel />
       </section>
 

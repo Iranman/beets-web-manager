@@ -257,7 +257,7 @@ export default function Import() {
       <div className="rounded-md border border-graphite-800 bg-graphite-950/45 px-4 py-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-zinc-100">Import music</h1>
+            <h1 className="font-display text-2xl font-semibold text-zinc-100">Import music</h1>
             <div className="mt-2 flex flex-wrap gap-2">
               <Chip
                 color={summary.runningJobs ? 'info' : summary.partial ? 'warning' : 'default'}
@@ -302,7 +302,7 @@ export default function Import() {
                 key={id}
                 className={({ selected }) =>
                   cx(
-                    'flex min-h-11 items-center justify-between gap-2 border-b-2 px-4 py-2.5 text-[0.82rem] font-medium transition-colors sm:justify-start',
+                    'flex min-h-11 items-center justify-between gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors sm:justify-start',
                     selected
                       ? 'border-brass-400 text-zinc-100'
                       : 'border-transparent text-zinc-400 hover:border-graphite-700 hover:text-zinc-200',

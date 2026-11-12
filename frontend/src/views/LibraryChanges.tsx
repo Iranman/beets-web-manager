@@ -418,7 +418,7 @@ export default function LibraryChanges() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-white">Library Changes</h1>
+          <h1 className="font-display text-2xl font-semibold text-zinc-100">Library Changes</h1>
           <p className="mt-1 text-sm text-zinc-400">Transaction history, previews, confidence, exports, and rollback status for library-changing work.</p>
         </div>
         <div className="flex flex-wrap gap-2">

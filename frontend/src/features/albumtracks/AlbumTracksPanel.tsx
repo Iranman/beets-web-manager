@@ -105,7 +105,7 @@ function ProblemAlbum({ problem }: { problem: AlbumTrackProblem }) {
 
       {removeJobId && job && (
           <div className="border-t border-graphite-800/80 bg-graphite-950/80 px-3 py-2">
-          <LogViewer className="max-h-40 text-[0.7rem] leading-5 text-zinc-400" emptyText="..." lines={job.log ?? []} />
+          <LogViewer className="max-h-40 text-xs leading-5 text-zinc-400" emptyText="..." lines={job.log ?? []} />
         </div>
       )}
 
@@ -321,7 +321,7 @@ export function AlbumTracksPanel() {
               Jobs
             </Button>
           </div>
-          <LogViewer className="max-h-48 text-[0.7rem] leading-5 text-zinc-400" emptyText="..." lines={batchJob.log ?? []} />
+          <LogViewer className="max-h-48 text-xs leading-5 text-zinc-400" emptyText="..." lines={batchJob.log ?? []} />
         </div>
       )}
 

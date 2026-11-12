@@ -811,7 +811,7 @@ function AlbumFolderIssueDialog({
       {rows.length ? (
         <div className="space-y-1">
           {rows.slice(0, 12).map((row, idx) => (
-            <div key={`${title}-${idx}`} className="grid gap-1 text-[0.7rem] text-muted md:grid-cols-2">
+            <div key={`${title}-${idx}`} className="grid gap-1 text-xs text-muted md:grid-cols-2">
               <div className="truncate" title={opText(row, 'source')}>{opText(row, 'source') || String(row.relative_path ?? '')}</div>
               <div className="truncate text-zinc-400" title={opText(row, 'target')}>{opText(row, 'target') || String(row.reason ?? '')}</div>
             </div>
@@ -819,7 +819,7 @@ function AlbumFolderIssueDialog({
           {rows.length > 12 ? <div className="text-xs text-muted">+ {rows.length - 12} more</div> : null}
         </div>
       ) : (
-        <div className="text-[0.7rem] text-muted">{empty}</div>
+        <div className="text-xs text-muted">{empty}</div>
       )}
     </div>
   );
@@ -859,11 +859,11 @@ function AlbumFolderIssueDialog({
               <div className="rounded border border-graphite-800 bg-graphite-950/40 p-3">
                 <div className="mb-1 text-xs font-semibold text-zinc-300">Final expected folder layout</div>
                 {layout.length ? (
-                  <div className="grid gap-1 text-[0.7rem] text-muted md:grid-cols-2">
+                  <div className="grid gap-1 text-xs text-muted md:grid-cols-2">
                     {layout.slice(0, 20).map((path) => <div key={path} className="truncate">{path}</div>)}
                   </div>
                 ) : (
-                  <div className="text-[0.7rem] text-muted">Layout will be verified after apply.</div>
+                  <div className="text-xs text-muted">Layout will be verified after apply.</div>
                 )}
               </div>
               <div className="flex flex-wrap justify-end gap-2">
@@ -1451,7 +1451,7 @@ function MaintenanceRunnerBar({
                 </div>
               ))}
             </div>
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[0.7rem] text-muted">
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
               <span>Last run: {formatDateTime(lastRun?.finished_at ?? lastRun?.started_at)}</span>
               <span>Last heartbeat: {formatDateTime(lastHeartbeat)}</span>
               <span>Next scheduled run: Manual only</span>
@@ -1501,7 +1501,7 @@ function MaintenanceRunnerBar({
         <div className="mt-3">
           <button
             type="button"
-            className="text-[0.7rem] text-muted hover:text-zinc-300 underline"
+            className="text-xs text-muted hover:text-zinc-300 underline"
             onClick={() => setShowTasks((v) => !v)}
           >
             {showTasks ? 'Hide technical checks' : `Show technical checks (${tasks.length})`}
@@ -1863,7 +1863,7 @@ function PathReference({ path }: { path: PathHit }) {
   }
 
   return (
-    <div className="mt-1 rounded border border-graphite-800 bg-graphite-950/60 px-2 py-1.5 text-[0.72rem]">
+    <div className="mt-1 rounded border border-graphite-800 bg-graphite-950/60 px-2 py-1.5 text-xs">
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate text-zinc-400">{expanded ? path.full : path.short}</span>
         <button className="shrink-0 text-brass-300 hover:text-brass-200" type="button" onClick={() => setExpanded((value) => !value)}>
@@ -1962,12 +1962,12 @@ function RawLogDetails({
         ) : null}
       </div>
       {showRaw ? (
-        <pre className="mt-2 max-h-56 overflow-y-auto whitespace-pre-wrap rounded border border-graphite-800 bg-graphite-950 p-3 font-mono text-[0.7rem] leading-5 text-zinc-400">
+        <pre className="mt-2 max-h-56 overflow-y-auto whitespace-pre-wrap rounded border border-graphite-800 bg-graphite-950 p-3 font-mono text-xs leading-5 text-zinc-400">
           {rawText}
         </pre>
       ) : null}
       {showTechnical && technicalDetails ? (
-        <pre className="mt-2 max-h-56 overflow-y-auto whitespace-pre-wrap rounded border border-graphite-800 bg-graphite-950 p-3 font-mono text-[0.7rem] leading-5 text-zinc-400">
+        <pre className="mt-2 max-h-56 overflow-y-auto whitespace-pre-wrap rounded border border-graphite-800 bg-graphite-950 p-3 font-mono text-xs leading-5 text-zinc-400">
           {JSON.stringify(technicalDetails, null, 2)}
         </pre>
       ) : null}
@@ -2147,7 +2147,7 @@ function FeedTimeline({ items, groups, emptyText }: { items: JobFeedItem[]; grou
         return (
           <section key={group.phase} className="relative">
             <div className="mb-2 flex items-center gap-2">
-              <span className={cx('inline-flex h-5 w-5 items-center justify-center rounded-full border text-[0.7rem]', toneClasses(group.status))}>{statusIcon(group.status)}</span>
+              <span className={cx('inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs', toneClasses(group.status))}>{statusIcon(group.status)}</span>
               <span className="text-xs font-semibold text-zinc-400">{group.phase}</span>
             </div>
             <div className="ml-2.5 space-y-2 border-l border-graphite-800 pl-4">
@@ -2164,7 +2164,7 @@ function FeedTimeline({ items, groups, emptyText }: { items: JobFeedItem[]; grou
                       {item.detail ? <div className="mt-1 text-xs text-zinc-400">{item.detail}</div> : null}
                       {item.paths.map((path) => <PathReference key={`${item.id}-${path.full}`} path={path} />)}
                       {item.technical && Object.keys(item.technical).length ? (
-                        <details className="mt-2 rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5 text-[0.7rem] text-muted">
+                        <details className="mt-2 rounded border border-graphite-800 bg-graphite-950/40 px-2 py-1.5 text-xs text-muted">
                           <summary className="cursor-pointer text-zinc-400">Technical details</summary>
                           <pre className="mt-1 overflow-x-auto whitespace-pre-wrap font-mono">{JSON.stringify(item.technical, null, 2)}</pre>
                         </details>
@@ -2317,14 +2317,14 @@ function ConsoleHistory({
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Filter bar */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-graphite-800/70 px-2.5 py-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-graphite-800/70 px-2.5 py-1.5">
         <input
-          className="h-6 min-w-0 flex-1 bg-transparent text-xs text-zinc-300 placeholder:text-muted"
+          className="h-6 min-w-0 flex-1 basis-40 bg-transparent text-xs text-zinc-300 placeholder:text-muted"
           placeholder="Search jobs…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        <div className="flex gap-0.5">
+        <div className="flex flex-wrap gap-0.5">
           {HISTORY_STATUS_OPTIONS.map((opt) => (
             <button
               key={opt.value}
@@ -2365,7 +2365,7 @@ function ConsoleHistory({
                   {job.finished_at ? <span>Finished {formatDateTime(job.finished_at)}</span> : null}
                   {formatDuration(job) ? <span>{formatDuration(job)}</span> : null}
                 </div>
-                {result ? <div className="mt-1 truncate text-[0.72rem] text-zinc-400">{result}</div> : null}
+                {result ? <div className="mt-1 truncate text-xs text-zinc-400">{result}</div> : null}
               </button>
               <div className="flex items-center gap-1.5 md:justify-end">
                 <Button size="small" variant="outlined" onClick={() => onSelectJob(job, { raw: false })}>Details</Button>
@@ -2419,10 +2419,10 @@ function JobStatusBar({
         <Switch
           aria-label="Auto-refresh"
           checked={autoRefresh}
-          className={cx('relative inline-flex h-5 w-9 items-center rounded-full transition-colors', autoRefresh ? 'bg-sky-500' : 'bg-graphite-700')}
+          className={cx('relative inline-flex h-5 w-9 items-center rounded-full transition-colors', autoRefresh ? 'bg-brass-500' : 'bg-graphite-700')}
           onChange={onAutoRefresh}
         >
-          <span className={cx('inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform', autoRefresh ? 'translate-x-4' : 'translate-x-0.5')} />
+          <span className={cx('inline-block h-3.5 w-3.5 rounded-full transition-transform', autoRefresh ? 'translate-x-4 bg-brass-950' : 'translate-x-0.5 bg-white')} />
         </Switch>
         <span className="text-xs text-zinc-300">Auto-refresh</span>
       </label>
@@ -2819,6 +2819,7 @@ export default function Jobs() {
   return (
     <>
       <div className="space-y-3">
+        <h1 className="font-display text-2xl font-semibold text-zinc-100">Jobs</h1>
         <JobStatusBar
           autoRefresh={autoRefresh}
           counts={listFailed ? null : counts}
