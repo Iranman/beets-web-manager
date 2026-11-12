@@ -3,29 +3,21 @@ import { expect, libraryAlbums, test } from '../fixtures';
 
 // There is no separate dashboard route: "/" lands on the Library overview,
 // and the System page carries version and readiness.
-test('landing page summarises the synthetic library and its next repair', async ({ page }) => {
+test('landing page summarises the synthetic library as a browse-only overview', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveURL(/\/library$/);
   const main = page.getByRole('main');
   await expect(main.getByText('3 artists', { exact: true })).toBeVisible();
   await expect(main.getByText('4 albums', { exact: true })).toBeVisible();
   await expect(main.getByText('8 tracks', { exact: true })).toBeVisible();
-  // The one album without MusicBrainz IDs is what needs repair next.
-  await expect(main.getByRole('heading', { name: 'Untagged Sessions', level: 2 })).toBeVisible();
-  await expect(main.getByRole('button', { name: /MusicBrainz Needs IDs 1/ })).toBeVisible();
+  // Library is browse-only: no repair focal block and no issue filter tabs.
+  // Role-agnostic, so a link, heading or plain text with the same name also fails.
+  await expect(main.getByText('Next repair')).toHaveCount(0);
+  await expect(main.getByLabel('Filter the library by issue')).toHaveCount(0);
 
   const albums = await libraryAlbums(page);
   expect(albums).toHaveLength(4);
   expect(albums.reduce((sum, album) => sum + album.track_count, 0)).toBe(8);
-});
-
-test('issue filter narrows the browser to the album that has the issue', async ({ page }) => {
-  await page.goto('/library');
-  await page.getByRole('button', { name: /MusicBrainz Needs IDs 1/ }).click();
-  const main = page.getByRole('main');
-  await expect(main.getByText('Active filter: Needs IDs')).toBeVisible();
-  await expect(main.getByRole('article')).toHaveCount(1);
-  await expect(main.getByRole('article')).toContainText('Untagged Sessions');
 });
 
 test('nav tabs and the system menu reach every section, and System reports the real version', async ({ page }) => {

@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 LOG = logging.getLogger("beets_web.security")
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -921,7 +921,8 @@ def _send_pinned_any(target: PinnedTarget, headers: Mapping[str, str], timeout: 
 
 def open_public_url(url: str, *, headers: Optional[Mapping[str, str]] = None, timeout: Optional[float] = None,
                     max_redirects: Optional[int] = None, max_bytes: Optional[int] = None,
-                    total_timeout: Optional[float] = None) -> LimitedHTTPResponse:
+                    total_timeout: Optional[float] = None,
+                    allow_url: Optional[Callable[[str], bool]] = None) -> LimitedHTTPResponse:
     """GET a user-supplied URL on the public internet (see block comment).
 
     Returns a size-limited response usable as a context manager; raises
@@ -929,7 +930,9 @@ def open_public_url(url: str, *, headers: Optional[Mapping[str, str]] = None, ti
     an HTTP error status, so provider_boundary classifies it as usual.
     ``timeout`` bounds each socket wait; ``total_timeout`` (default
     BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS) bounds the whole fetch including
-    the body read, raising OutboundDeadlineExceeded (a TimeoutError)."""
+    the body read, raising OutboundDeadlineExceeded (a TimeoutError).
+    ``allow_url``, when given, must accept the first URL and every redirect
+    hop, or OutboundPolicyError is raised before that hop is contacted."""
     policy = current_outbound_policy()
     hops = policy.max_redirects if max_redirects is None else max(0, int(max_redirects))
     effective_timeout = policy.timeout_seconds if timeout is None else float(timeout)
@@ -937,6 +940,8 @@ def open_public_url(url: str, *, headers: Optional[Mapping[str, str]] = None, ti
     deadline = time.monotonic() + max(0.1, budget)
     current = str(url or "")
     for _ in range(hops + 1):
+        if allow_url is not None and not allow_url(current):
+            raise OutboundPolicyError("outbound URL is not on this caller's host allowlist")
         target = resolve_public_target(current)
         response = _send_pinned_any(target, dict(headers or {}), effective_timeout, deadline)
         if response.status in _REDIRECT_STATUSES:

@@ -6049,7 +6049,15 @@ def inspect_import_source(
     # rather than trusting every present and future caller to do it first.
     if not _is_within_music_root(source_path) and not _is_safe_staging_path(source_path):
         return {"ok": False, "exists": False, "error": f"Path is outside approved roots: {source_path}"}
-    p = Path(source_path).resolve()
+    # The checks above are authoritative (component-wise, symlink-aware).
+    # This realpath + startswith is the same containment written as the
+    # py/path-injection barrier CodeQL recognises, so the walk below and the
+    # canonical path returned to callers are untainted (#1478, #1482).
+    real = os.path.realpath(source_path)
+    roots = tuple(os.path.realpath(str(r)) for r in [_music_root(), *_get_staging_roots()])
+    if not real.startswith(roots):
+        return {"ok": False, "exists": False, "error": f"Path is outside approved roots: {source_path}"}
+    p = Path(real)
     if not p.exists():
         return {"ok": False, "exists": False, "error": f"Path not found: {source_path}"}
     audio_files = []

@@ -13,7 +13,6 @@ class LibraryLazyTracksTests(unittest.TestCase):
         types_source = (root / "frontend" / "src" / "types" / "api.ts").read_text(encoding="utf-8")
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         library_page = (root / "frontend" / "src" / "views" / "Library.tsx").read_text(encoding="utf-8")
-        library_health = (root / "frontend" / "src" / "lib" / "libraryHealth.ts").read_text(encoding="utf-8")
 
         self.assertIn("def _library_payload_for_response", app_source)
         self.assertIn('next_album["tracks_deferred"] = True', app_source)
@@ -30,17 +29,16 @@ class LibraryLazyTracksTests(unittest.TestCase):
         self.assertIn("tracks_deferred?: boolean;", types_source)
         self.assertIn("getAlbumTracks", client_source)
         self.assertIn("await getAlbumTracks(albumId)", library_page)
-        self.assertIn("if (album.tracks_deferred) return false;", library_health)
-        self.assertIn("Exact MusicBrainz completeness gaps are not the same as local missing", library_health)
         # The DiscographyPanel assertions that used to live here are gone with
         # the panel itself: it was never imported or rendered, and its backend
         # album-completeness endpoints survive untouched for future clients.
-        self.assertIn("Track rows are deferred in the fast library payload.", library_page)
-        self.assertIn("No passive issue evidence in the current library summary.", library_page)
-        self.assertIn("function NextRepairPanel", library_page)
-        self.assertIn("albumSuggestedStatus", library_page)
-        self.assertIn("compareRepairRows", library_page)
-        self.assertIn("Show issue group", library_page)
+        # The Library is a browse-only overview: no repair focal block, issue filters, review notes
+        # or fix links. The album back cover prints the lazily loaded tracklist instead.
+        self.assertIn("Side A", library_page)
+        for removed in ("function NextRepairPanel", "albumSuggestedStatus", "compareRepairRows",
+                        "Show issue group", "No passive issue evidence", "Manage on Import",
+                        "Missing MusicBrainz IDs"):
+            self.assertNotIn(removed, library_page)
 
 
 if __name__ == "__main__":

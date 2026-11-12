@@ -10,7 +10,6 @@ import type { LibraryAlbum, LibraryResponse } from '../src/types/api';
 vi.mock('../src/lib/api', () => ({ apiGet: vi.fn() }));
 vi.mock('../src/api/client', () => ({
   getArtistImageUrl: vi.fn(() => new Promise(() => {})),
-  getLibraryArtRepairReport: vi.fn(() => new Promise(() => {})),
   getAlbumTracks: vi.fn(() => new Promise(() => {})),
 }));
 
@@ -57,13 +56,14 @@ describe('Library cover-art grid', () => {
     expect(img.getAttribute('src')).toMatch(/^\/api\/albums\/5\/art/);
     // Title sits under the cover in document order.
     expect(img.compareDocumentPosition(within(okc).getByText('OK Computer')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(okc).getByRole('button', { name: 'View details' })).toBeTruthy();
-    expect(within(okc).getByRole('button', { name: 'Remove from Library…' })).toBeTruthy();
+    // Browse-only: the sleeve opens the album, and the tile carries no action buttons.
+    expect(within(okc).getByRole('button', { name: 'Open OK Computer' })).toBeTruthy();
+    expect(within(okc).getAllByRole('button')).toHaveLength(1);
 
     expect(within(loose).queryByRole('img')).toBeNull();
     expect(within(loose).getByTestId('sleeve-placeholder')).toBeTruthy();
     expect(within(loose).getByText('No cover art')).toBeTruthy();
-    expect(within(loose).getByRole('button', { name: 'View details' })).toBeTruthy();
+    expect(within(loose).getByRole('button', { name: 'Open Loose Folder' })).toBeTruthy();
   });
 
   it('falls back to the sleeve when the cover image fails to load', async () => {
@@ -81,5 +81,43 @@ describe('Library cover-art grid', () => {
     const tile = screen.getAllByRole('article').find((t) => within(t).queryByText('Kid A'))!;
     fireEvent.error(within(tile).getByRole('img', { name: 'Kid A cover' }));
     expect(within(tile).getByTestId('sleeve-placeholder')).toBeTruthy();
+  });
+
+  it('tries the folder image the scan found when the album art route fails, then the sleeve', async () => {
+    vi.mocked(apiGet).mockResolvedValue({
+      ok: true,
+      reconciled: true,
+      artists: [{ name: 'Radiohead', albums: [album({ album_id: 7, album: 'Amnesiac', aldir: '/music/d', disk_art: '/music/d/cover.jpg' })] }],
+      stats: { artists: 1, albums: 1, tracks: 11 },
+      library_version: 2,
+    } as LibraryResponse);
+    render(<MemoryRouter><Library /></MemoryRouter>);
+    await act(async () => {});
+    fireEvent.click(await screen.findByRole('button', { name: /Radiohead/ }));
+
+    const tile = screen.getAllByRole('article').find((t) => within(t).queryByText('Amnesiac'))!;
+    const img = within(tile).getByRole('img', { name: 'Amnesiac cover' });
+    expect(img.getAttribute('src')).toMatch(/^\/api\/albums\/7\/art/);
+    fireEvent.error(img);
+    expect(within(tile).getByRole('img', { name: 'Amnesiac cover' }).getAttribute('src'))
+      .toBe('/api/disk-art?path=%2Fmusic%2Fd%2Fcover.jpg&v=2');
+    fireEvent.error(within(tile).getByRole('img', { name: 'Amnesiac cover' }));
+    expect(within(tile).getByTestId('sleeve-placeholder')).toBeTruthy();
+  });
+
+  it('keeps the artist card named by its artwork when initials stand in for the image', async () => {
+    vi.mocked(apiGet).mockResolvedValue({
+      ok: true,
+      reconciled: true,
+      artists: [{ name: 'Radiohead', albums: [album({ album: 'Loose Folder', aldir: '/music/b' })] }],
+      stats: { artists: 1, albums: 1, tracks: 12 },
+      library_version: 1,
+    } as LibraryResponse);
+    render(<MemoryRouter><Library /></MemoryRouter>);
+    await act(async () => {});
+
+    const card = await screen.findByRole('button', { name: /Radiohead artwork/ });
+    expect(card.querySelector('img')).toBeNull();
+    expect(within(card).getByRole('img', { name: 'Radiohead artwork' }).textContent).toBe('R');
   });
 });
