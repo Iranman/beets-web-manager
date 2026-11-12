@@ -254,8 +254,57 @@ function Artwork({
           onError={() => setFailed(true)}
         />
       ) : (
-        typeof fallback === 'string' ? <span className="max-w-full truncate px-2 text-center">{fallback}</span> : fallback
+        // No portrait: initials printed on a record label, grooves around it (authored CSS, no image).
+        typeof fallback === 'string' ? (
+          <span className="lib-groove flex h-full w-full items-center justify-center">
+            <span className="lib-label">{fallback}</span>
+          </span>
+        ) : fallback
       )}
+    </div>
+  );
+}
+
+// The header's shelf: a few sleeves leaning on the ledge, the library's own cover art. Decorative
+// (the albums are listed below), so hidden from assistive tech; a cover that fails to load just drops out.
+function ShelfCover({ src }: { src: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return null;
+  return (
+    <img
+      alt=""
+      className="lib-shelf-cover"
+      decoding="async"
+      height={112}
+      loading="lazy"
+      src={src}
+      width={112}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+function CoverShelf({ urls }: { urls: string[] }) {
+  if (!urls.length) return null;
+  return (
+    <div aria-hidden="true" className="lib-shelf">
+      {urls.map((url) => <ShelfCover key={url} src={url} />)}
+    </div>
+  );
+}
+
+// A sleeve blown up, blurred and tinted to sit behind a header. Decorative: the same cover is shown
+// sharp beside it. Without art (or when it fails) the walnut ground shows through.
+function CoverBackdrop({ src }: { src: string }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+  return (
+    <div aria-hidden="true" className="lib-backdrop">
+      {src && !failed ? (
+        <img alt="" decoding="async" height={64} loading="lazy" src={src} width={64} onError={() => setFailed(true)} />
+      ) : null}
     </div>
   );
 }
@@ -445,13 +494,6 @@ function albumIssueDetails(album: LibraryAlbum, artRepairAlbumIds: Set<number>) 
   return details;
 }
 
-function statusChipColor(status: StatusFilter) {
-  if (status === 'clean') return 'success' as const;
-  if (status === 'missing' || status === 'extra' || status === 'art') return 'warning' as const;
-  if (status === 'ids') return 'secondary' as const;
-  return 'default' as const;
-}
-
 function AlbumBadges({
   album,
   artRepairAlbumIds,
@@ -531,34 +573,33 @@ function NextRepairPanel({
   const artistName = displayArtistName(artist);
   const action = albumPrimaryAction(album, artRepairItemMap);
   const focusStatus = albumSuggestedStatus(album, artRepairAlbumIds);
+  const coverUrl = albumArtUrl(album, libraryVersion);
 
   return (
-    <section className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex min-w-0 gap-3">
-          <Artwork
-            className="h-16 w-16 rounded-md"
-            fallback={<SleevePlaceholder />}
-            label={`${title} cover`}
-            src={albumArtUrl(album, libraryVersion)}
-          />
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-amber-300">Next repair</div>
-            <h2 className="mt-1 line-clamp-1 text-base font-semibold text-zinc-100">{title}</h2>
-            <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-zinc-400">
-              <span>{artistName}</span>
-              {album.year ? <span>{String(album.year).slice(0, 4)}</span> : null}
-              <span>{albumPrimaryIssue(album, artRepairAlbumIds)}</span>
-            </div>
-            <div className="mt-2">
-              <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
-            </div>
+    // The page's focal point: the record to fix next, its own sleeve blown up and tinted behind it,
+    // bleeding to the edges of the content frame. No box: the backdrop and the rules set it apart.
+    <section aria-label="Next repair" className="relative isolate -mx-3 overflow-hidden border-y border-graphite-800 px-3 py-5 sm:-mx-4 sm:px-4 sm:py-6">
+      <CoverBackdrop src={coverUrl} />
+      <div className="grid gap-4 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center lg:grid-cols-[auto_minmax(0,1fr)_auto]">
+        <Artwork
+          className="h-28 w-28 rounded-sm ring-1 ring-black/40 sm:h-36 sm:w-36"
+          fallback={<SleevePlaceholder />}
+          label={`${title} cover`}
+          src={coverUrl}
+        />
+        <div className="min-w-0">
+          <h2 className="line-clamp-2 font-display text-2xl font-semibold text-zinc-100 sm:text-3xl">{title}</h2>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-300">
+            <span className="font-semibold text-brass-300">Next repair</span>
+            <span>{artistName}</span>
+            {album.year ? <span className="tabular-nums">{String(album.year).slice(0, 4)}</span> : null}
+            <span>{albumPrimaryIssue(album, artRepairAlbumIds)}</span>
+          </div>
+          <div className="mt-3">
+            <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
           </div>
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          <Button size="small" variant="outlined" onClick={() => onDetails(row)}>
-            View details
-          </Button>
+        <div className="flex flex-wrap gap-2 sm:col-span-2 lg:col-span-1 lg:flex-col lg:items-stretch">
           {action ? (
             <Button
               size="small"
@@ -570,6 +611,9 @@ function NextRepairPanel({
               {action.label}
             </Button>
           ) : null}
+          <Button aria-haspopup="dialog" size="small" variant="outlined" onClick={() => onDetails(row)}>
+            View details
+          </Button>
           {focusStatus !== 'all' ? (
             <Button size="small" variant="text" color="warning" onClick={() => onFocusStatus(focusStatus)}>
               Show issue group
@@ -580,6 +624,7 @@ function NextRepairPanel({
     </section>
   );
 }
+
 function StatusCards({
   active,
   counts,
@@ -589,25 +634,36 @@ function StatusCards({
   counts: Record<StatusFilter, number>;
   onChange: (status: StatusFilter) => void;
 }) {
+  // Six toggles set on one rule, like index tabs on a bin; the selected one carries a brass underline.
   return (
-    <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-6">
+    <div
+      aria-label="Filter the library by issue"
+      className="grid grid-cols-2 gap-x-4 sm:grid-cols-3 xl:grid-cols-6"
+      role="group"
+    >
       {statusFilters.map((filter) => {
         const selected = active === filter.id;
+        const count = counts[filter.id] ?? 0;
         return (
           <button
             key={filter.id}
+            aria-pressed={selected}
             className={cx(
-              'min-h-[4.75rem] rounded-md border px-3 py-2 text-left transition-colors',
+              'min-h-12 border-b-2 py-1.5 text-left transition-colors',
               selected
-                ? 'border-brass-400 bg-brass-500/10 text-brass-200'
-                : 'border-graphite-800 bg-graphite-950/35 text-zinc-300 hover:border-graphite-600 hover:bg-graphite-900/60',
+                ? 'border-brass-400 text-brass-200'
+                : 'border-graphite-800 text-zinc-200 hover:border-graphite-600 hover:text-zinc-100 active:border-brass-700',
             )}
             type="button"
             onClick={() => onChange(filter.id)}
           >
-            <span className="block text-xs font-semibold text-muted">{filter.detail}</span>
-            <span className="mt-1 block text-sm font-semibold">{filter.label}</span>
-            <span className="mt-1 block text-lg font-semibold tabular-nums text-zinc-100">{numberFmt.format(counts[filter.id] ?? 0)}</span>
+            <span className="block text-xs text-muted">{filter.detail}</span>{' '}
+            <span className="flex items-baseline justify-between gap-2">
+              <span className="truncate text-sm font-semibold">{filter.label}</span>{' '}
+              <span className={cx('text-base font-semibold tabular-nums', count ? 'text-zinc-100' : 'text-muted')}>
+                {numberFmt.format(count)}
+              </span>
+            </span>
           </button>
         );
       })}
@@ -639,7 +695,7 @@ function SearchRow({
   onAlbumSortChange: (value: AlbumSort) => void;
 }) {
   return (
-    <div className="grid gap-2 rounded-md border border-graphite-800 bg-graphite-950/35 p-3 lg:grid-cols-[minmax(0,1fr)_11rem_13rem]">
+    <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_11rem_13rem]">
       <TextField
         label="Search"
         placeholder="Artists, albums, tracks"
@@ -673,7 +729,7 @@ function SearchRow({
       {trackSearchLoading ? (
         <div className="lg:col-span-3">
           <LinearProgress sx={{ borderRadius: 1 }} />
-          <div className="mt-1 text-xs text-muted">Loading track rows for track search...</div>
+          <div className="mt-1 text-xs text-muted">Loading track rows for track search…</div>
         </div>
       ) : null}
     </div>
@@ -689,21 +745,23 @@ function AlphabetIndex({
   available: Set<ArtistLetter>;
   onChange: (letter: ArtistLetter) => void;
 }) {
+  // Crate divider tabs standing on the bin's edge, one per initial; the row scrolls sideways on a phone.
   return (
-    <div className="flex flex-wrap gap-1 rounded-md border border-graphite-800 bg-graphite-950/35 p-2">
+    <div
+      aria-label="Artists by initial"
+      className="crate-tabs flex gap-1 overflow-x-auto"
+      role="group"
+    >
       {ARTIST_LETTERS.map((letter) => {
         const enabled = letter === 'all' || available.has(letter);
         const selected = active === letter;
         return (
           <button
             key={letter}
+            aria-pressed={selected}
             className={cx(
-              'h-8 min-w-8 rounded border px-2 text-xs font-semibold transition',
-              selected
-                ? 'border-brass-400 bg-brass-500/15 text-brass-200'
-                : enabled
-                  ? 'border-graphite-700 text-zinc-300 hover:border-graphite-500 hover:bg-graphite-900'
-                  : 'cursor-not-allowed border-graphite-900 text-muted',
+              'crate-tab h-10 min-w-10 shrink-0 px-2 text-sm transition-colors',
+              selected ? 'font-semibold' : null,
             )}
             disabled={!enabled}
             type="button"
@@ -731,33 +789,34 @@ function ArtistCard({
   const attentionAlbums = countAttentionAlbums(artist);
   const artUrl = useArtistArtUrl(artist, libraryVersion);
 
+  // An index row, not a card: the portrait, the name, and one line of counts and state.
   return (
     <button
-      className="grid min-h-[5.5rem] grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-3 rounded-md border border-graphite-800 bg-graphite-950/35 p-2 text-left transition hover:border-brass-400/70 hover:bg-graphite-900/70"
+      className="grid min-h-13 w-full grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-3 border-b border-walnut-700 px-1 py-1.5 text-left transition-colors hover:bg-walnut-800 active:bg-walnut-700"
       type="button"
       onClick={() => onSelect(artist)}
     >
       <Artwork
-        className="h-14 w-14 rounded-md"
+        className="h-10 w-10 rounded-sm"
         fallback={initials(name) || 'A'}
         label={`${name} artwork`}
         src={artUrl}
       />
       <span className="min-w-0">
         <span className="block truncate text-sm font-semibold text-zinc-100">{name}</span>
-        <span className="mt-1 block text-xs text-zinc-400">
-          {numberFmt.format(artist.albums.length)} albums - {numberFmt.format(countTracks(artist))} tracks
-        </span>
-        <span className="mt-1 flex flex-wrap gap-1.5">
+        <span className="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-400">
+          <span className="tabular-nums">
+            {numberFmt.format(artist.albums.length)} albums - {numberFmt.format(countTracks(artist))} tracks
+          </span>
           {needsAttention ? (
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-200">
+            <span className="text-brass-300">
               {attentionAlbums ? `${attentionAlbums} need review` : 'Needs attention'}
             </span>
           ) : (
-            <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs font-medium text-emerald-200">Clean</span>
+            <span className="text-success">Clean</span>
           )}
           {artist.empty_artist_folder ? (
-            <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs font-medium text-sky-200">Empty folder</span>
+            <span className="text-info">Empty folder</span>
           ) : null}
         </span>
       </span>
@@ -770,10 +829,12 @@ function ArtistBrowser({
   letter,
   libraryVersion,
   loading,
+  grouped,
   onLetterChange,
   onSelectArtist,
 }: {
   artists: LibraryArtist[];
+  grouped: boolean;
   letter: ArtistLetter;
   libraryVersion?: number;
   loading: boolean;
@@ -782,31 +843,53 @@ function ArtistBrowser({
 }) {
   const availableLetters = useMemo(() => new Set(artists.map(artistLetter)), [artists]);
   const visibleArtists = letter === 'all' ? artists : artists.filter((artist) => artistLetter(artist) === letter);
+  // Sorted A to Z, the crate gets a divider tab at each new initial; other sorts stay one run.
+  const groups = useMemo(() => {
+    const runs: Array<{ letter: ArtistLetter | null; artists: LibraryArtist[] }> = [];
+    for (const artist of visibleArtists) {
+      const key = grouped ? artistLetter(artist) : null;
+      const last = runs[runs.length - 1];
+      if (last && last.letter === key) last.artists.push(artist);
+      else runs.push({ letter: key, artists: [artist] });
+    }
+    return runs;
+  }, [grouped, visibleArtists]);
+  // Letter groups flow down newspaper-style columns, so short groups pack instead of leaving holes.
+  const groupColumns = grouped ? 'gap-x-6 md:columns-2 xl:columns-3 2xl:columns-4' : '';
 
   return (
-    <section className="space-y-3">
+    <section className="space-y-2">
       <AlphabetIndex active={letter} available={availableLetters} onChange={onLetterChange} />
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-sm text-zinc-400">
-          {letter === 'all' ? 'Artists' : `Artists starting with ${letter}`} - {numberFmt.format(visibleArtists.length)}
-        </div>
-      </div>
-      <div className="max-h-[calc(100vh-21rem)] min-h-72 overflow-y-auto rounded-md border border-graphite-800 bg-graphite-950/20 p-2">
+      <h2 className="border-b border-graphite-800 pb-2 text-sm font-semibold text-zinc-300">
+        {letter === 'all' ? 'Artists' : `Artists starting with ${letter}`} - {numberFmt.format(visibleArtists.length)}
+      </h2>
+      <div className="crate max-h-[calc(100vh-21rem)] min-h-72 overflow-y-auto rounded-sm px-3 py-4">
         {loading ? (
-          <div className="p-4 text-sm text-zinc-400">Loading library...</div>
+          <div className="p-4 text-sm text-zinc-300">Loading library…</div>
         ) : visibleArtists.length ? (
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {visibleArtists.map((artist, index) => (
-              <ArtistCard
-                key={`${artist.name}::${artist.path ?? index}`}
-                artist={artist}
-                libraryVersion={libraryVersion}
-                onSelect={onSelectArtist}
-              />
+          <div className={groupColumns}>
+            {groups.map((group, groupIndex) => (
+              <div key={`${group.letter ?? 'run'}-${groupIndex}`} className="mb-5 break-inside-avoid">
+                {group.letter ? (
+                  <div className="crate-group">
+                    <h3 className="crate-divider">{group.letter}</h3>
+                  </div>
+                ) : null}
+                <div className={grouped ? undefined : 'grid gap-x-6 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4'}>
+                  {group.artists.map((artist, index) => (
+                    <ArtistCard
+                      key={`${artist.name}::${artist.path ?? index}`}
+                      artist={artist}
+                      libraryVersion={libraryVersion}
+                      onSelect={onSelectArtist}
+                    />
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
         ) : (
-          <div className="p-4 text-sm text-zinc-400">No matching artists.</div>
+          <div className="p-4 text-sm text-zinc-300">No matching artists.</div>
         )}
       </div>
     </section>
@@ -839,16 +922,19 @@ function AlbumCard({
   const action = albumPrimaryAction(album, artRepairItemMap);
 
   return (
-    <article className="flex min-w-0 flex-col rounded-md border border-graphite-800 bg-graphite-900/60 p-2 transition-colors hover:border-brass-700">
-      {/* Sleeve: square cover with a thin edge and shadow, like a record standing on a shelf. */}
-      <Artwork
-        className="aspect-square w-full rounded-sm shadow-md shadow-black/50 ring-1 ring-black/40"
-        fallback={<SleevePlaceholder />}
-        label={`${title} cover`}
-        src={albumArtUrl(album, libraryVersion)}
-      />
+    // Open tile: the sleeve leads, the words sit under it on the shelf, no box around either.
+    <article className="flex min-w-0 flex-col">
+      {/* A sleeve standing in the crate, the sleeves behind it showing at its edge. */}
+      <div className="sleeve aspect-square w-full">
+        <Artwork
+          className="sleeve-face h-full w-full"
+          fallback={<SleevePlaceholder />}
+          label={`${title} cover`}
+          src={albumArtUrl(album, libraryVersion)}
+        />
+      </div>
       <div className="mt-2 min-w-0 flex-1">
-        <h3 className="line-clamp-2 text-sm font-semibold text-zinc-100" title={title}>{title}</h3>
+        <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-zinc-100" title={title}>{title}</h3>
         {showArtist ? <div className="truncate text-sm text-zinc-300" title={artistName}>{artistName}</div> : null}
         <div className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-zinc-400">
           {album.year ? <span>{String(album.year).slice(0, 4)}</span> : null}
@@ -859,7 +945,7 @@ function AlbumCard({
           <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
         </div>
         <div className="mt-3 flex flex-wrap gap-1.5">
-          <Button size="small" sx={tileButtonSx} variant="outlined" onClick={() => onDetails(row)}>
+          <Button aria-haspopup="dialog" size="small" sx={tileButtonSx} variant="outlined" onClick={() => onDetails(row)}>
             View details
           </Button>
           {album.album_id ? (
@@ -929,13 +1015,11 @@ function AlbumGrid({
 }) {
   return (
     <section className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-display text-lg font-semibold text-zinc-100">{title}</h2>
-          <p className="mt-0.5 text-sm text-zinc-400">{subtitle}</p>
-        </div>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-graphite-800 pb-2">
+        <h2 className="font-display text-lg font-semibold text-zinc-100">{title}</h2>
+        <p className="text-sm text-zinc-400">{subtitle}</p>
       </div>
-      <div className="max-h-[calc(100vh-22rem)] min-h-72 overflow-y-auto rounded-md border border-graphite-800 bg-graphite-950/20 p-2">
+      <div className="crate max-h-[calc(100vh-22rem)] min-h-72 overflow-y-auto rounded-sm px-3 py-4">
         {rows.length ? (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,8rem),1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(min(100%,12rem),1fr))]">
             {rows.map((row) => (
@@ -988,32 +1072,35 @@ function ArtistDetail({
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-400">
-        <button className="text-brass-300 hover:text-brass-200" type="button" onClick={onBack}>Library</button>
-        <span>/</span>
-        <button className="text-brass-300 hover:text-brass-200" type="button" onClick={onBack}>Artists</button>
-        <span>/</span>
+        <button className="inline-flex min-h-8 items-center text-brass-300 hover:text-brass-200 active:text-brass-400" type="button" onClick={onBack}>Library</button>
+        <span aria-hidden="true">/</span>
+        <button className="inline-flex min-h-8 items-center text-brass-300 hover:text-brass-200 active:text-brass-400" type="button" onClick={onBack}>Artists</button>
+        <span aria-hidden="true">/</span>
         <span className="text-zinc-200">{name}</span>
       </div>
 
-      <div className="flex flex-col gap-3 rounded-md border border-graphite-800 bg-graphite-950/35 p-3 sm:flex-row sm:items-center">
+      {/* The artist's own art, blown up behind the header and bleeding to the frame's edges. */}
+      <div className="relative isolate -mx-3 flex flex-col gap-4 overflow-hidden px-3 py-6 sm:-mx-4 sm:flex-row sm:items-end sm:px-4 sm:py-8">
+        <CoverBackdrop src={artUrl} />
         <Artwork
-          className="h-20 w-20 rounded-md"
+          className="h-28 w-28 rounded-sm ring-1 ring-black/40 sm:h-36 sm:w-36"
           fallback={initials(name) || 'A'}
           label={`${name} artwork`}
           src={artUrl}
         />
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-xl font-semibold text-zinc-100">{name}</h2>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <Chip label={`${numberFmt.format(artist.albums.length)} albums`} size="small" variant="outlined" />
-            <Chip label={`${numberFmt.format(countTracks(artist))} tracks`} size="small" variant="outlined" />
+          <h2 className="font-display text-3xl font-semibold text-zinc-50 [overflow-wrap:anywhere] sm:text-4xl">{name}</h2>
+          {/* The same catalogue line as the page header, scoped to this artist. */}
+          <p className="lib-catalog">
+            <span>{`${numberFmt.format(artist.albums.length)} albums`}</span>
+            <span>{`${numberFmt.format(countTracks(artist))} tracks`}</span>
             {artistNeedsAttention(artist) ? (
-              <Chip color="warning" label={attentionAlbums ? `${attentionAlbums} need review` : 'Needs attention'} size="small" variant="outlined" />
+              <span className="lib-review is-flag">{attentionAlbums ? `${attentionAlbums} need review` : 'Needs attention'}</span>
             ) : (
-              <Chip color="success" label="Clean" size="small" variant="outlined" />
+              <span className="lib-review is-ok">Clean</span>
             )}
-            {artist.empty_artist_folder ? <Chip color="info" label="Empty folder" size="small" variant="outlined" /> : null}
-          </div>
+            {artist.empty_artist_folder ? <span className="lib-review">Empty folder</span> : null}
+          </p>
         </div>
       </div>
 
@@ -1034,11 +1121,11 @@ function ArtistDetail({
 }
 
 function trackStatus(track: LibraryTrack) {
-  if (track.missing || track.status === 'missing_file') return { label: 'Missing file', color: 'text-rose-300' };
-  if (track.status === 'not_imported' || track.disk_only) return { label: 'Not imported', color: 'text-amber-300' };
-  if (track.status === 'other_album') return { label: 'Other album', color: 'text-amber-300' };
+  if (track.missing || track.status === 'missing_file') return { label: 'Missing file', color: 'text-danger-text' };
+  if (track.status === 'not_imported' || track.disk_only) return { label: 'Not imported', color: 'text-warning' };
+  if (track.status === 'other_album') return { label: 'Other album', color: 'text-warning' };
   if (!String(track.mb_trackid ?? '').trim()) return { label: 'No recording ID', color: 'text-violet-300' };
-  return { label: 'Imported', color: 'text-emerald-300' };
+  return { label: 'Imported', color: 'text-success' };
 }
 
 function AlbumDetailsDialog({
@@ -1069,92 +1156,120 @@ function AlbumDetailsDialog({
   const title = album ? displayAlbumTitle(album) : '';
   const artistName = artist ? displayArtistName(artist) : '';
 
+  const coverUrl = album ? albumArtUrl(album, libraryVersion) : '';
+  const multiDisc = tracks.some((track) => Number(track.disc || 1) > 1);
+
+  // Opening an album flips its sleeve over: the front (the cover) turns away and the back cover,
+  // printed with the tracklist like an LP, faces the listener. Only this one panel animates.
   return (
     <Dialog className="relative z-50" open={Boolean(row)} onClose={onClose}>
-      <DialogBackdrop className="fixed inset-0 bg-black/60" />
+      <DialogBackdrop className="fixed inset-0 bg-black/70" />
       <div className="fixed inset-0 overflow-y-auto p-4">
         <div className="flex min-h-full items-center justify-center">
-          <DialogPanel className="w-full max-w-3xl rounded-md border border-graphite-700 bg-graphite-950 p-4 shadow-xl">
+          <DialogPanel className="flip-card w-full max-w-3xl">
             {album && artist ? (
-              <div className="space-y-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex min-w-0 gap-3">
-                    <Artwork
-                      className="h-20 w-20 rounded-md"
-                      fallback={<SleevePlaceholder />}
-                      label={`${title} cover`}
-                      src={albumArtUrl(album, libraryVersion)}
-                    />
-                    <div className="min-w-0">
-                      <DialogTitle className="line-clamp-2 text-lg font-semibold text-zinc-100">{title}</DialogTitle>
-                      <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-sm text-zinc-400">
-                        <span>{artistName}</span>
-                        {album.year ? <span>{String(album.year).slice(0, 4)}</span> : null}
-                        <span>{numberFmt.format(albumTrackCount(album))} tracks</span>
-                      </div>
-                      <div className="mt-2">
-                        <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
+              <div className="flip-inner">
+                <div aria-hidden="true" className="flip-face flip-front" inert>
+                  <Artwork
+                    className="aspect-square h-full max-h-full w-auto max-w-full"
+                    fallback={<SleevePlaceholder />}
+                    label=""
+                    src={coverUrl}
+                  />
+                </div>
+                <div className="flip-face flip-back space-y-5 p-4 sm:p-6">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex min-w-0 gap-4">
+                      <Artwork
+                        className="h-20 w-20 rounded-sm"
+                        fallback={<SleevePlaceholder />}
+                        label={`${title} cover`}
+                        src={coverUrl}
+                      />
+                      <div className="min-w-0">
+                        <DialogTitle
+                          className="line-clamp-2 font-display text-2xl font-semibold text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-300"
+                          data-autofocus
+                          tabIndex={-1}
+                        >
+                          {title}
+                        </DialogTitle>
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-300">
+                          <span>{artistName}</span>
+                          {album.year ? <span className="tabular-nums">{String(album.year).slice(0, 4)}</span> : null}
+                          <span>{numberFmt.format(albumTrackCount(album))} tracks</span>
+                        </div>
+                        <div className="mt-2">
+                          <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
+                        </div>
                       </div>
                     </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {album.album_id ? (
+                        <Button
+                          size="small"
+                          variant="contained"
+                          color="warning"
+                          onClick={() => {
+                            onClose();
+                            if (row) onCleanAlbum?.(row);
+                          }}
+                        >
+                          Remove from Library…
+                        </Button>
+                      ) : null}
+                      <Button size="small" variant="outlined" onClick={onClose}>Close</Button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {album.album_id ? (
-                      <Button
-                        size="small"
-                        variant="contained"
-                        color="warning"
-                        onClick={() => {
-                          onClose();
-                          if (row) onCleanAlbum?.(row);
-                        }}
-                      >
-                        Remove from Library…
-                      </Button>
+
+                  {/* The back cover's print: the tracklist first, then the review notes. */}
+                  <section>
+                    <div className="flex items-baseline justify-between border-b border-zinc-700 pb-1.5">
+                      <h3 className="font-display text-lg font-semibold text-zinc-100">Tracks</h3>
+                      <span className="text-xs text-muted tabular-nums">{loading ? 'Loading…' : `${tracks.length} rows`}</span>
+                    </div>
+                    {loading ? <LinearProgress /> : null}
+                    {error ? <div className="py-3 text-sm text-danger-text">{error}</div> : null}
+                    {!loading && !error ? (
+                      tracks.length ? (
+                        <ol className="max-h-80 overflow-y-auto">
+                          {tracks.map((track, index) => {
+                            const status = trackStatus(track);
+                            const canReplace = Boolean(track.id && track.path && !track.missing);
+                            const disc = Number(track.disc || 1);
+                            const discStart = multiDisc && (index === 0 || Number(tracks[index - 1].disc || 1) !== disc);
+                            return (
+                              <li key={`${track.id || index}-${track.title}`}>
+                                {discStart ? <div className="pb-1 pt-3 text-sm font-semibold text-brass-300">{`Disc ${disc}`}</div> : null}
+                                <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b border-zinc-800 py-2 text-sm sm:grid-cols-[2.5rem_minmax(0,1fr)_7rem_3.5rem_auto]">
+                                  <span className="text-xs text-muted tabular-nums">{track.disc && track.disc > 1 ? `${track.disc}.` : ''}{track.track || index + 1}</span>
+                                  <span className="min-w-0 truncate text-zinc-100">{stripStamps(track.title) || 'Untitled track'}</span>
+                                  <span className={cx('truncate text-xs sm:text-right', status.color)}>{status.label}</span>
+                                  <span className="hidden text-right text-xs text-muted tabular-nums sm:block">{formatLength(track.length)}</span>
+                                  {canReplace ? (
+                                    <Button size="small" variant="outlined" onClick={() => onReplaceTrack?.(track)}>
+                                      Replace…
+                                    </Button>
+                                  ) : <span />}
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ol>
+                      ) : (
+                        <div className="py-3 text-sm text-muted">No track rows loaded for this album.</div>
+                      )
                     ) : null}
-                    <Button size="small" variant="outlined" onClick={onClose}>Close</Button>
-                  </div>
-                </div>
+                  </section>
 
-                <div className="rounded border border-graphite-800 bg-graphite-900/50 p-3">
-                  <h3 className="text-sm font-semibold text-zinc-200">Review information</h3>
-                  <ul className="mt-2 space-y-1 text-sm text-zinc-400">
-                    {albumIssueDetails(album, artRepairAlbumIds).map((detail) => (
-                      <li key={detail}>{detail}</li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="rounded border border-graphite-800 bg-graphite-900/50">
-                  <div className="flex items-center justify-between border-b border-graphite-800 px-3 py-2">
-                    <h3 className="text-sm font-semibold text-zinc-200">Tracks</h3>
-                    <span className="text-xs text-muted">{loading ? 'Loading...' : `${tracks.length} rows`}</span>
-                  </div>
-                  {loading ? <LinearProgress /> : null}
-                  {error ? <div className="p-3 text-sm text-rose-300">{error}</div> : null}
-                  {!loading && !error ? (
-                    tracks.length ? (
-                      <div className="max-h-80 overflow-y-auto">
-                        {tracks.map((track, index) => {
-                          const status = trackStatus(track);
-                          const canReplace = Boolean(track.id && track.path && !track.missing);
-                          return (
-                            <div key={`${track.id || index}-${track.title}`} className="grid grid-cols-[3rem_minmax(0,1fr)_8rem_auto] items-center gap-2 border-t border-graphite-800 px-3 py-2 text-sm">
-                              <span className="font-mono text-xs text-muted">{track.disc && track.disc > 1 ? `${track.disc}.` : ''}{track.track || index + 1}</span>
-                              <span className="min-w-0 truncate text-zinc-200">{stripStamps(track.title) || 'Untitled track'}</span>
-                              <span className={cx('truncate text-right text-xs', status.color)}>{status.label}</span>
-                              {canReplace ? (
-                                <Button size="small" variant="outlined" onClick={() => onReplaceTrack?.(track)}>
-                                  Replace…
-                                </Button>
-                              ) : <span />}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="p-3 text-sm text-muted">No track rows loaded for this album.</div>
-                    )
-                  ) : null}
+                  <section>
+                    <h3 className="border-b border-zinc-700 pb-1.5 font-display text-lg font-semibold text-zinc-100">Review information</h3>
+                    <ul className="mt-2 space-y-1 text-sm text-zinc-300">
+                      {albumIssueDetails(album, artRepairAlbumIds).map((detail) => (
+                        <li key={detail}>{detail}</li>
+                      ))}
+                    </ul>
+                  </section>
                 </div>
               </div>
             ) : null}
@@ -1163,6 +1278,12 @@ function AlbumDetailsDialog({
       </div>
     </Dialog>
   );
+}
+
+function formatLength(seconds?: number) {
+  if (!seconds || !Number.isFinite(seconds)) return '';
+  const total = Math.round(seconds);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
 export default function Library() {
@@ -1455,52 +1576,68 @@ export default function Library() {
     navigate(path);
   }, [navigate]);
   const loadFailed = !data && Boolean(error);
+  // Up to eight sleeves for the header shelf, taken from the albums already loaded (no extra request).
+  const shelfCovers = useMemo(() => {
+    const urls: string[] = [];
+    for (const row of allAlbumRows) {
+      const url = albumArtUrl(row.album, libraryVersion);
+      if (url && !urls.includes(url)) urls.push(url);
+      if (urls.length >= 8) break;
+    }
+    return urls;
+  }, [allAlbumRows, libraryVersion]);
   const shownError = panelError(error, engineOffline);
 
   return (
     <div className="space-y-4">
-      <section className="rounded-md border border-graphite-800 bg-graphite-950/45 p-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      {/* Page header straight on the shelf: no panel around the page's own title. */}
+      <div className="border-b border-graphite-800 pb-4">
+        <div className="flex flex-col-reverse gap-4 md:flex-row md:items-end md:justify-between">
           <div className="min-w-0">
-            <h1 className="text-2xl font-semibold text-zinc-100">Browse music library</h1>
-            <div className="mt-2 flex flex-wrap gap-2">
+            <h1 className="lib-title">Browse music library</h1>
+            <p className="lib-catalog">
               {/* No library loaded yet, or the load failed: counts are unknown, not zero. */}
-              <Chip label={`${data ? numberFmt.format(data.stats.artists) : '—'} artists`} size="small" variant="outlined" />
-              <Chip label={`${data ? numberFmt.format(data.stats.albums) : '—'} albums`} size="small" variant="outlined" />
-              <Chip label={`${data ? numberFmt.format(data.stats.tracks) : '—'} tracks`} size="small" variant="outlined" />
+              <span>{`${data ? numberFmt.format(data.stats.artists) : '—'} artists`}</span>
+              <span>{`${data ? numberFmt.format(data.stats.albums) : '—'} albums`}</span>
+              <span>{`${data ? numberFmt.format(data.stats.tracks) : '—'} tracks`}</span>
               {!data ? null : attentionAlbumCount ? (
-                <Chip color="warning" label={`${numberFmt.format(attentionAlbumCount)} review albums`} size="small" variant="outlined" />
+                <span className="lib-review is-flag">{`${numberFmt.format(attentionAlbumCount)} albums to review`}</span>
               ) : (
-                <Chip color="success" label="No review issues" size="small" variant="outlined" />
+                <span className="lib-review is-ok">No review issues</span>
               )}
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-muted">
+              <span>{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
+              {reconcilePollActive ? (
+                <span className="flex items-center gap-1 text-warning" aria-live="polite">
+                  <CircularProgress size={12} color="inherit" />
+                  Checking disk for missing &amp; not-imported files…
+                </span>
+              ) : reconcileStalled ? (
+                <span className="flex items-center gap-1 text-zinc-400" aria-live="polite">
+                  Disk check incomplete
+                  <button
+                    type="button"
+                    className="inline-flex min-h-8 items-center px-1 text-zinc-300 underline hover:text-zinc-100 active:text-brass-300"
+                    onClick={() => setReconcilePolls(0)}
+                  >
+                    retry
+                  </button>
+                </span>
+              ) : null}
+              <button
+                type="button"
+                className="inline-flex min-h-8 items-center text-sm text-zinc-300 underline underline-offset-2 hover:text-zinc-100 active:text-brass-300"
+                onClick={() => handleNavigate('/library/missing-ids')}
+              >
+                Missing MusicBrainz IDs
+              </button>
             </div>
           </div>
-          <div className="flex flex-col gap-1 text-xs text-muted lg:items-end lg:text-right">
-            <span>{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
-            {reconcilePollActive ? (
-              <span className="flex items-center gap-1 text-amber-400/80 lg:justify-end" aria-live="polite">
-                <CircularProgress size={12} color="inherit" />
-                Checking disk for missing &amp; not-imported files…
-              </span>
-            ) : reconcileStalled ? (
-              <span className="flex items-center gap-1 text-zinc-400 lg:justify-end" aria-live="polite">
-                Disk check incomplete
-                <button
-                  type="button"
-                  className="text-zinc-300 underline hover:text-zinc-100"
-                  onClick={() => setReconcilePolls(0)}
-                >
-                  retry
-                </button>
-              </span>
-            ) : null}
-            <button type="button" className="text-zinc-300 underline hover:text-zinc-100" onClick={() => handleNavigate('/library/missing-ids')}>
-              Missing MusicBrainz IDs
-            </button>
-          </div>
+          <CoverShelf urls={shelfCovers} />
         </div>
         {loading ? <LinearProgress sx={{ mt: 2, borderRadius: 1 }} /> : null}
-      </section>
+      </div>
 
       <NextRepairPanel
         row={nextRepairRow}
@@ -1520,24 +1657,22 @@ export default function Library() {
         />
       )}
 
-      {loadFailed ? null : <div className="flex flex-wrap items-center gap-2 rounded-md border border-graphite-800 bg-graphite-950/35 px-3 py-2 text-sm">
-        <Chip
-          color={statusChipColor(activeStatus)}
-          label={activeStatus === 'all' ? 'Browsing artists' : `Active filter: ${activeFilter.label}`}
-          size="small"
-          variant="outlined"
-        />
-        {selectedArtist ? <Chip label={`Artist: ${displayArtistName(selectedArtist)}`} size="small" variant="outlined" /> : null}
+      {/* What the list below is showing, as one plain line over the search fields. */}
+      {loadFailed ? null : <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+        <span className={activeStatus === 'all' ? 'font-semibold text-zinc-100' : 'font-semibold text-brass-300'}>
+          {activeStatus === 'all' ? 'Browsing artists' : `Active filter: ${activeFilter.label}`}
+        </span>
+        {selectedArtist ? <span className="text-zinc-200">{`Artist: ${displayArtistName(selectedArtist)}`}</span> : null}
+        <span className="text-muted">
+          {activeStatus === 'all'
+            ? `${numberFmt.format(filteredArtists.length)} artists visible, ${numberFmt.format(attentionArtistCount)} with review items`
+            : `${numberFmt.format(albumResults.length)} matching albums`}
+        </span>
         {activeStatus !== 'all' ? (
           <Button size="small" variant="text" onClick={() => setActiveStatus('all')}>
             Clear filter
           </Button>
         ) : null}
-        <span className="text-xs text-muted">
-          {activeStatus === 'all'
-            ? `${numberFmt.format(filteredArtists.length)} artists visible, ${numberFmt.format(attentionArtistCount)} with review items`
-            : `${numberFmt.format(albumResults.length)} matching albums`}
-        </span>
       </div>}
 
       <SearchRow
@@ -1589,6 +1724,7 @@ export default function Library() {
           letter={artistLetterFilter}
           libraryVersion={libraryVersion}
           loading={loading && !data}
+          grouped={artistSort === 'alpha'}
           onLetterChange={setArtistLetterFilter}
           onSelectArtist={handleSelectArtist}
         />
