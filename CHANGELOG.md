@@ -35,6 +35,7 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
+- **CI: `test_qa306_status_cas_edges` no longer wedges a test worker (#650).** One rollback check passed no adapter, so it fell through to the process-global embedded Beets shared by every test module in the worker. When that engine's library lock was left held (two leaked job threads from other modules were blocked on it too, per the CI faulthandler dump), Beets' lock wait is unbounded and the worker hung until the 900s runner timeout. The check now uses an explicit unreachable fake adapter, and the test class patches the shared adapter with one that refuses every call, so a fall-through fails fast instead of hanging.
 - **Test-only: the linear-time redaction test no longer fails on slow CI runners.** `test_crafted_input_is_linear` allowed 1.0 s per 1M-character input. On shared runners the `a-a-a-...` case took 1.05 to 1.10 s and failed PRs that do not touch redaction. The budget is now 5 s, which still catches backtracking: that would take minutes.
 
 - **Reviewed duplicate cleanup re-checks the keeper before quarantining (#530).** The preview now records the keeper file's size and mtime. Under the apply locks, before the engine call, every keeper must still be in the library at the planned path with that size and mtime. If a keeper was deleted, moved or replaced since the review, the whole cleanup is refused with a per-keeper reason, marked Failed, and nothing is removed. Previews made before this change have no keeper record and must be re-planned.
