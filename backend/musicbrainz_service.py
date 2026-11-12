@@ -4,17 +4,17 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import json, mimetypes, re, time
+import json, re, threading, time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from backend.app_runtime import AUDIO_EXT, DOWNLOADS_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, _MALFORMED_RELEASE_GROUP_STAMP_RE, _MB_UUID_RE, _extract_mb_uuid, _is_valid_mb_uuid, _s, _up, _ur
-from backend.app_runtime import _normalize_name, _path_is_under, _split_mbid_values
+from backend.app_runtime import _env_int, _normalize_name, _path_is_under, _split_mbid_values
 from helpers_mb import _fetch_mb_release_candidate, _mb_unavailable
 from backend.beets_adapter import lib, BeetsUnavailableError
 from backend.security import OutboundPolicyError
 import backend.composite_workflows as composite_workflows
 from backend.acoustid_service import _album_track_norm, _read_file_media_tags
-from backend.artwork_service import DISCOGS_TOKEN, _ARTIST_IMAGE_MAX_BYTES, _RELEASE_ART_MBID_RE, _artist_image_ext, _IMAGE_FETCH_HEADERS, _artist_name_key, _release_art_cache_info, _release_art_save_miss
+from backend.artwork_service import DISCOGS_TOKEN, _RELEASE_ART_MBID_RE, _IMAGE_FETCH_HEADERS, _artist_name_key, _release_art_cache_info, _release_art_save_miss
 from backend.slskd_service import _slskd_title_guess_from_name
 from backend.matching_service import _album_key, _album_title_match, _album_track_title_variants, _fetch_mb_release_tracklist, _normalize_album
 
@@ -471,32 +471,84 @@ class ReleaseArtUnavailable(Exception):
     not an answer, so never cached as "no art" (IA-01)."""
 
 
+# Release-art cache (METADATA_CACHE_DIR/release-art). Only these https hosts
+# may serve an image, on the first URL and on every redirect hop: Cover Art
+# Archive redirects to archive.org; Discogs images live on i.discogs.com.
+_RELEASE_ART_HOSTS = ("coverartarchive.org", "archive.org", "discogs.com")
+_RELEASE_ART_MAX_BYTES = 10 * 1024 * 1024
+_RELEASE_ART_CACHE_MAX_BYTES = _env_int("RELEASE_ART_CACHE_MAX_MB", 500, minimum=1) * 1024 * 1024
+_RELEASE_ART_MIME = {".jpg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
+_release_art_locks: Dict[str, threading.Lock] = {}
+_release_art_locks_guard = threading.Lock()
+
+
+def _release_art_url_allowed(url: str) -> bool:
+    parsed = _up.urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and any(host == d or host.endswith("." + d) for d in _RELEASE_ART_HOSTS)
+
+
+def _release_art_image_ext(blob: bytes) -> str:
+    """Extension for a JPEG/PNG/GIF/WebP payload by magic bytes, else "" (SVG, HTML, ...)."""
+    if blob[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if blob[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    return ""
+
+
+def _release_art_evict(keep: str = "") -> None:
+    """Drop the oldest cached images (and their metadata) until the cache fits
+    RELEASE_ART_CACHE_MAX_MB. ``keep`` (a just-written file name) is never evicted."""
+    try:
+        stats = sorted((p.stat().st_mtime, p.stat().st_size, p) for p in RELEASE_ART_CACHE_DIR.iterdir()
+                       if p.is_file() and p.suffix in _RELEASE_ART_MIME)
+        total = sum(size for _, size, _ in stats)
+        for _, size, path in stats:
+            if total <= _RELEASE_ART_CACHE_MAX_BYTES:
+                break
+            if path.name == keep:
+                continue
+            path.unlink(missing_ok=True)
+            (RELEASE_ART_CACHE_DIR / f"{path.stem}.json").unlink(missing_ok=True)
+            total -= size
+    except OSError:
+        pass
+
+
 def _release_art_download(mbid: str, url: str, source: str) -> str:
     """Download and cache one image. "" means the source answered without
-    usable art (404, not an image, too large). Raises ReleaseArtUnavailable
-    when the source could not be asked."""
+    usable art (404, not an image, too large, host not allowed). Raises
+    ReleaseArtUnavailable when the source could not be asked."""
+    if not _RELEASE_ART_MBID_RE.match(mbid or "") or not _release_art_url_allowed(url):
+        return ""
     try:
         RELEASE_ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         # Cover Art Archive / Discogs image URLs come from provider responses:
-        # fetched with the public-only, address-pinned policy (opened_public).
-        with provider_boundary.opened_public("artwork", url, timeout=15, headers=_IMAGE_FETCH_HEADERS) as r:
-            content_type = r.headers.get("Content-Type", "")
-            ext = _artist_image_ext(url, content_type)
-            if not ext:
-                return ""
-            blob = r.read(_ARTIST_IMAGE_MAX_BYTES + 1)
+        # fetched with the public-only, address-pinned policy (opened_public),
+        # and every redirect hop must stay on the art hosts above.
+        with provider_boundary.opened_public("artwork", url, timeout=15, headers=_IMAGE_FETCH_HEADERS,
+                                             max_bytes=_RELEASE_ART_MAX_BYTES + 1,
+                                             allow_url=_release_art_url_allowed) as r:
+            blob = r.read(_RELEASE_ART_MAX_BYTES + 1)
     except OutboundPolicyError:
-        return ""  # the provider pointed at a non-public address: unusable art
+        return ""  # non-public address, off-allowlist redirect, or over the size cap
     except Exception as exc:
         unavailable = _mb_unavailable(exc)
         if unavailable is None:
             return ""  # the source answered (4xx): no such image
         raise ReleaseArtUnavailable(str(unavailable)) from exc
     try:
-        if not blob or len(blob) > _ARTIST_IMAGE_MAX_BYTES:
+        if not blob or len(blob) > _RELEASE_ART_MAX_BYTES:
             return ""
-        if ext == ".jpeg":
-            ext = ".jpg"
+        ext = _release_art_image_ext(blob)
+        if not ext:
+            return ""
+        mbid = mbid.lower()
         image_name = f"{mbid}{ext}"
         image_path = RELEASE_ART_CACHE_DIR / image_name
         tmp_path = RELEASE_ART_CACHE_DIR / f"{image_name}.tmp"
@@ -513,13 +565,13 @@ def _release_art_download(mbid: str, url: str, source: str) -> str:
             "source_url": url,
             "source": source,
             "image_file": image_name,
-            "mime": (content_type or mimetypes.guess_type(image_name)[0] or "image/jpeg").split(";", 1)[0],
+            "mime": _RELEASE_ART_MIME[ext],
             "cached_at": time.time(),
         }
-        (RELEASE_ART_CACHE_DIR / f"{mbid}.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        meta_tmp = RELEASE_ART_CACHE_DIR / f"{mbid}.json.tmp"
+        meta_tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        meta_tmp.replace(RELEASE_ART_CACHE_DIR / f"{mbid}.json")
+        _release_art_evict(keep=image_name)
         return f"/api/release-art-cache/{mbid}?v={int(image_path.stat().st_mtime)}"
     except Exception:
         return ""
@@ -554,6 +606,15 @@ def _ensure_release_group_art(mbid: str, artist_name: str = "", album_title: str
     release with genuinely no art anywhere isn't re-fetched on every page load."""
     if not _RELEASE_ART_MBID_RE.match(mbid or ""):
         return {"ok": False, "error": "invalid mbid"}
+    mbid = mbid.lower()
+    with _release_art_locks_guard:
+        lock = _release_art_locks.setdefault(mbid, threading.Lock())
+    # ponytail: one lock per mbid ever seen, never pruned; bounded by library size.
+    with lock:  # concurrent requests for one album download it once
+        return _ensure_release_group_art_locked(mbid, artist_name, album_title)
+
+
+def _ensure_release_group_art_locked(mbid: str, artist_name: str, album_title: str) -> Dict[str, Any]:
     cached = _release_art_cache_info(mbid)
     if cached.get("url"):
         return {"ok": True, "url": cached["url"]}

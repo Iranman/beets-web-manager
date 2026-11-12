@@ -238,6 +238,8 @@ def _release_art_cache_info(mbid: str) -> Dict[str, Any]:
     return {
         "url": f"/api/release-art-cache/{mbid}?v={int(image_path.stat().st_mtime)}",
         "image_file": image_name,
+        "path": image_path,
+        "mime": _s(meta.get("mime", "") or "") or mimetypes.guess_type(image_name)[0] or "image/jpeg",
     }
 
 
