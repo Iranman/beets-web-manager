@@ -35,7 +35,7 @@ test('artist page lists that artist\'s albums with the right counts', async ({ p
 test('album details show the tracks stored in Beets, with canonical release-group identity', async ({ page }) => {
   await page.goto('/library');
   await page.getByRole('button', { name: /Synthetic Aurora artwork/ }).click();
-  await page.getByRole('article').filter({ hasText: 'Glass Horizons' }).getByRole('button', { name: 'View details' }).click();
+  await page.getByRole('article').filter({ hasText: 'Glass Horizons' }).getByRole('button', { name: 'Open Glass Horizons' }).click();
   const dialog = page.getByRole('dialog', { name: 'Glass Horizons' });
   await expect(dialog.getByText('3 tracks', { exact: true })).toBeVisible();
   for (const title of ['First Light', 'Paper Moons', 'Long Exposure']) {

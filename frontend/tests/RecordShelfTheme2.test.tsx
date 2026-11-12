@@ -60,10 +60,10 @@ describe('record shelf theme, slice 2', () => {
     expect(jobs.match(/bg-graphite-800 text-zinc-300 hover:bg-graphite-700 hover:text-zinc-50/g)).toHaveLength(2);
   });
 
-  it('the Library cover grid fits two columns on phones and lets tile actions wrap', () => {
+  it('the Library cover grid fits two columns on phones and its tiles carry no action buttons', () => {
     const library = src('views/Library.tsx');
     expect(library).toContain('grid-cols-[repeat(auto-fill,minmax(min(100%,8rem),1fr))]');
-    expect(library).toContain("const tileButtonSx = { whiteSpace: 'normal'");
-    expect(library.match(/sx=\{tileButtonSx\}/g)).toHaveLength(4);
+    // Browse-only (owner decision): the per-tile action row, and its wrapping style, are gone.
+    expect(library).not.toContain('tileButtonSx');
   });
 });

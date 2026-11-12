@@ -20,11 +20,8 @@ import { artistNeedsAttention, getAlbumHealth } from '../lib/libraryHealth';
 import { apiGet } from '../lib/api';
 import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
-import { AlbumCleanupModal } from '../components/AlbumCleanupModal';
-import { TrackReplacementModal } from '../components/TrackReplacementModal';
 import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 
-type StatusFilter = 'all' | 'ids' | 'missing' | 'extra' | 'art' | 'clean';
 type SearchScope = 'all' | 'artists' | 'albums' | 'tracks';
 type ArtistSort = 'alpha' | 'albums' | 'tracks' | 'attention';
 type AlbumSort = 'artist' | 'album' | 'year' | 'issues';
@@ -37,19 +34,6 @@ type AlbumRow = {
 
 const numberFmt = new Intl.NumberFormat();
 const ARTIST_LETTERS: ArtistLetter[] = ['all', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '#'];
-
-const statusFilters: Array<{
-  id: StatusFilter;
-  label: string;
-  detail: string;
-}> = [
-  { id: 'all', label: 'All', detail: 'Artists' },
-  { id: 'ids', label: 'Needs IDs', detail: 'MusicBrainz' },
-  { id: 'missing', label: 'Missing / Not Imported', detail: 'Import gaps' },
-  { id: 'extra', label: 'Extra Tracks', detail: 'Review rows' },
-  { id: 'art', label: 'Art Repair', detail: 'Artwork' },
-  { id: 'clean', label: 'Clean', detail: 'No issues' },
-];
 
 const artistSortOptions: Array<{ value: ArtistSort; label: string }> = [
   { value: 'alpha', label: 'Alphabetical' },
@@ -212,7 +196,6 @@ function initials(name: string) {
 
 // Tile actions may wrap onto two lines so two cover columns fit on phones (the theme keeps
 // button labels on one line everywhere else, #607).
-const tileButtonSx = { whiteSpace: 'normal', lineHeight: 1.25, textAlign: 'center' } as const;
 
 // Placeholder sleeve for albums without art: a record half out of a plain card sleeve.
 function SleevePlaceholder() {
@@ -374,36 +357,8 @@ function albumHasIdIssue(album: LibraryAlbum) {
   return health.releaseMbMissing || health.trackMbMissing > 0 || health.trackMbMismatched > 0 || health.mbRepairable > 0 || health.duplicateRecordingIds > 0;
 }
 
-function albumMatchesStatus(album: LibraryAlbum, status: StatusFilter, artRepairAlbumIds: Set<number>) {
-  const health = getAlbumHealth(album);
-  const artIssue = artRepairAlbumIds.has(Number(album.album_id || 0));
-
-  if (status === 'all') return true;
-  if (status === 'ids') return albumHasIdIssue(album);
-  if (status === 'missing') return health.missing > 0 || health.notImported > 0;
-  if (status === 'extra') return health.extra > 0;
-  if (status === 'art') return artIssue;
-  if (status === 'clean') return !health.needsAttention && !artIssue;
-  return true;
-}
-
 function albumNeedsAttention(album: LibraryAlbum, artRepairAlbumIds: Set<number>) {
   return getAlbumHealth(album).needsAttention || artRepairAlbumIds.has(Number(album.album_id || 0));
-}
-
-function albumSuggestedStatus(album: LibraryAlbum, artRepairAlbumIds: Set<number>): StatusFilter {
-  const health = getAlbumHealth(album);
-  if (albumHasIdIssue(album)) return 'ids';
-  if (health.missing > 0 || (health.notImported > 0 && !album.not_imported_is_extra)) return 'missing';
-  if (health.extra > 0 || (health.notImported > 0 && album.not_imported_is_extra)) return 'extra';
-  if (artRepairAlbumIds.has(Number(album.album_id || 0))) return 'art';
-  return 'all';
-}
-
-function compareRepairRows(a: AlbumRow, b: AlbumRow, artRepairAlbumIds: Set<number>) {
-  return albumIssueScore(b.album, artRepairAlbumIds) - albumIssueScore(a.album, artRepairAlbumIds)
-    || displayArtistName(a.artist).localeCompare(displayArtistName(b.artist))
-    || displayAlbumTitle(a.album).localeCompare(displayAlbumTitle(b.album));
 }
 
 function albumPrimaryIssue(album: LibraryAlbum, artRepairAlbumIds: Set<number>) {
@@ -482,18 +437,6 @@ export function albumPrimaryAction(album: LibraryAlbum, artRepairItemMap: Map<nu
   return null;
 }
 
-// Library is browse-only: repair actions live on their owning page, so these render as links that
-// name where they lead, never as action buttons.
-function ActionLinkLabel({ action }: { action: AlbumAction }) {
-  const page = action.path.startsWith('/jobs') ? 'Jobs' : action.path.startsWith('/library/missing-ids') ? 'Missing IDs' : 'Import';
-  return (
-    // One span: MUI buttons are inline-flex, which would drop the spaces between bare text nodes.
-    <span>
-      {action.label} <span className="sr-only">on</span><span aria-hidden="true">→</span> {page}
-    </span>
-  );
-}
-
 function albumIssueDetails(album: LibraryAlbum, artRepairAlbumIds: Set<number>) {
   const health = getAlbumHealth(album);
   const details: string[] = [];
@@ -568,130 +511,6 @@ function AlbumBadges({
       {recordingIdsOk && !album.pending_review ? (
         <Chip color="success" label="Recording IDs OK" size="small" variant="outlined" />
       ) : null}
-    </div>
-  );
-}
-
-function NextRepairPanel({
-  row,
-  artRepairAlbumIds,
-  artRepairItemMap,
-  libraryVersion,
-  onDetails,
-  onFocusStatus,
-  onNavigate,
-}: {
-  row: AlbumRow | null;
-  artRepairAlbumIds: Set<number>;
-  artRepairItemMap: Map<number, ArtRepairItem>;
-  libraryVersion?: number;
-  onDetails: (row: AlbumRow) => void;
-  onFocusStatus: (status: StatusFilter) => void;
-  onNavigate: (path: string) => void;
-}) {
-  if (!row) return null;
-
-  const { album, artist } = row;
-  const title = displayAlbumTitle(album);
-  const artistName = displayArtistName(artist);
-  const action = albumPrimaryAction(album, artRepairItemMap);
-  const focusStatus = albumSuggestedStatus(album, artRepairAlbumIds);
-  const coverUrl = albumArtUrl(album, libraryVersion);
-
-  return (
-    // The page's focal point: the record to fix next, its own sleeve blown up and tinted behind it,
-    // bleeding to the edges of the content frame. No box: the backdrop and the rules set it apart.
-    <section aria-label="Next repair" className="relative isolate -mx-3 overflow-hidden border-y border-graphite-800 px-3 py-5 sm:-mx-4 sm:px-4 sm:py-6">
-      <CoverBackdrop src={coverUrl} />
-      <div className="grid gap-4 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center lg:grid-cols-[auto_minmax(0,1fr)_auto]">
-        <Artwork
-          className="h-28 w-28 rounded-sm ring-1 ring-black/40 sm:h-36 sm:w-36"
-          fallback={<SleevePlaceholder />}
-          label={`${title} cover`}
-          fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
-          src={coverUrl}
-        />
-        <div className="min-w-0">
-          <h2 className="line-clamp-2 font-display text-2xl font-semibold text-zinc-100 sm:text-3xl">{title}</h2>
-          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-300">
-            <span className="font-semibold text-brass-300">Next repair</span>
-            <span>{artistName}</span>
-            {album.year ? <span className="tabular-nums">{String(album.year).slice(0, 4)}</span> : null}
-            <span>{albumPrimaryIssue(album, artRepairAlbumIds)}</span>
-          </div>
-          <div className="mt-3">
-            <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-2 sm:col-span-2 lg:col-span-1 lg:flex-col lg:items-stretch">
-          {action ? (
-            <Button
-              size="small"
-              variant="text"
-              color={action.variant === 'warning' ? 'warning' : 'primary'}
-              title={action.title}
-              sx={{ textDecoration: 'underline', textUnderlineOffset: '0.2em' }}
-              onClick={() => onNavigate(action.path)}
-            >
-              <ActionLinkLabel action={action} />
-            </Button>
-          ) : null}
-          <Button aria-haspopup="dialog" size="small" variant="outlined" onClick={() => onDetails(row)}>
-            View details
-          </Button>
-          {focusStatus !== 'all' ? (
-            <Button size="small" variant="text" color="warning" onClick={() => onFocusStatus(focusStatus)}>
-              Show issue group
-            </Button>
-          ) : null}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function StatusCards({
-  active,
-  counts,
-  onChange,
-}: {
-  active: StatusFilter;
-  counts: Record<StatusFilter, number>;
-  onChange: (status: StatusFilter) => void;
-}) {
-  // Six toggles set on one rule, like index tabs on a bin; the selected one carries a brass underline.
-  return (
-    <div
-      aria-label="Filter the library by issue"
-      className="grid grid-cols-2 gap-x-4 sm:grid-cols-3 xl:grid-cols-6"
-      role="group"
-    >
-      {statusFilters.map((filter) => {
-        const selected = active === filter.id;
-        const count = counts[filter.id] ?? 0;
-        return (
-          <button
-            key={filter.id}
-            aria-pressed={selected}
-            className={cx(
-              'min-h-12 border-b-2 py-1.5 text-left transition-colors',
-              selected
-                ? 'border-brass-400 text-brass-200'
-                : 'border-graphite-800 text-zinc-200 hover:border-graphite-600 hover:text-zinc-100 active:border-brass-700',
-            )}
-            type="button"
-            onClick={() => onChange(filter.id)}
-          >
-            <span className="block text-xs text-muted">{filter.detail}</span>{' '}
-            <span className="flex items-baseline justify-between gap-2">
-              <span className="text-sm font-semibold">{filter.label}</span>{' '}
-              <span className={cx('text-base font-semibold tabular-nums', count ? 'text-zinc-100' : 'text-muted')}>
-                {numberFmt.format(count)}
-              </span>
-            </span>
-          </button>
-        );
-      })}
     </div>
   );
 }
@@ -926,8 +745,6 @@ function AlbumCard({
   libraryVersion,
   showArtist,
   onDetails,
-  onNavigate,
-  onCleanAlbum,
 }: {
   row: AlbumRow;
   artRepairAlbumIds: Set<number>;
@@ -935,20 +752,24 @@ function AlbumCard({
   libraryVersion?: number;
   showArtist: boolean;
   onDetails: (row: AlbumRow) => void;
-  onNavigate: (path: string) => void;
-  onCleanAlbum?: (row: AlbumRow) => void;
 }) {
   const { album, artist } = row;
   const title = displayAlbumTitle(album);
   const artistName = displayArtistName(artist);
   const issue = albumPrimaryIssue(album, artRepairAlbumIds);
-  const action = albumPrimaryAction(album, artRepairItemMap);
 
   return (
     // Open tile: the sleeve leads, the words sit under it on the shelf, no box around either.
+    // Library is browse-only: the sleeve itself opens the album, and there are no actions here.
     <article className="flex min-w-0 flex-col">
-      {/* A sleeve standing in the crate, the sleeves behind it showing at its edge. */}
-      <div className="sleeve aspect-square w-full">
+      {/* A sleeve standing in the crate; pulling it out flips it over to its back cover. */}
+      <button
+        aria-haspopup="dialog"
+        aria-label={`Open ${title}`}
+        className="sleeve block aspect-square w-full cursor-pointer rounded-sm motion-safe:transition-transform motion-safe:hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brass-300"
+        type="button"
+        onClick={() => onDetails(row)}
+      >
         <Artwork
           className="sleeve-face h-full w-full"
           fallback={<SleevePlaceholder />}
@@ -956,7 +777,7 @@ function AlbumCard({
           fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
           src={albumArtUrl(album, libraryVersion)}
         />
-      </div>
+      </button>
       <div className="mt-2 min-w-0 flex-1">
         <h3 className="mt-1 line-clamp-2 text-sm font-semibold text-zinc-100" title={title}>{title}</h3>
         {showArtist ? <div className="truncate text-sm text-zinc-300" title={artistName}>{artistName}</div> : null}
@@ -967,47 +788,6 @@ function AlbumCard({
         <div className="mt-2 space-y-1.5">
           <Chip label={issue} size="small" sx={{ maxWidth: '100%' }} variant="outlined" />
           <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
-        </div>
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          <Button aria-haspopup="dialog" size="small" sx={tileButtonSx} variant="outlined" onClick={() => onDetails(row)}>
-            View details
-          </Button>
-          {album.album_id ? (
-            <Button
-              size="small"
-              sx={tileButtonSx}
-              variant="outlined"
-              color="warning"
-              onClick={() => onCleanAlbum?.(row)}
-            >
-              Remove from Library…
-            </Button>
-          ) : null}
-          {action ? (
-            album.pending_review ? (
-              <Button
-                size="small"
-                sx={tileButtonSx}
-                variant="text"
-                color="info"
-                title={action.title}
-                onClick={() => onNavigate(action.path)}
-              >
-                <ActionLinkLabel action={action} />
-              </Button>
-            ) : (
-              <Button
-                size="small"
-                sx={tileButtonSx}
-                variant="text"
-                color={action.variant === 'warning' ? 'warning' : 'primary'}
-                title={action.title}
-                onClick={() => onNavigate(action.path)}
-              >
-                <ActionLinkLabel action={action} />
-              </Button>
-            )
-          ) : null}
         </div>
       </div>
     </article>
@@ -1023,8 +803,6 @@ function AlbumGrid({
   libraryVersion,
   showArtist,
   onDetails,
-  onNavigate,
-  onCleanAlbum,
 }: {
   rows: AlbumRow[];
   title: string;
@@ -1034,8 +812,6 @@ function AlbumGrid({
   libraryVersion?: number;
   showArtist: boolean;
   onDetails: (row: AlbumRow) => void;
-  onNavigate: (path: string) => void;
-  onCleanAlbum?: (row: AlbumRow) => void;
 }) {
   return (
     <section className="space-y-3">
@@ -1055,8 +831,6 @@ function AlbumGrid({
                 libraryVersion={libraryVersion}
                 showArtist={showArtist}
                 onDetails={onDetails}
-                onNavigate={onNavigate}
-                onCleanAlbum={onCleanAlbum}
               />
             ))}
           </div>
@@ -1076,8 +850,6 @@ function ArtistDetail({
   libraryVersion,
   onBack,
   onDetails,
-  onNavigate,
-  onCleanAlbum,
 }: {
   artist: LibraryArtist;
   rows: AlbumRow[];
@@ -1086,8 +858,6 @@ function ArtistDetail({
   libraryVersion?: number;
   onBack: () => void;
   onDetails: (row: AlbumRow) => void;
-  onNavigate: (path: string) => void;
-  onCleanAlbum?: (row: AlbumRow) => void;
 }) {
   const name = displayArtistName(artist);
   const attentionAlbums = countAttentionAlbums(artist);
@@ -1137,8 +907,6 @@ function ArtistDetail({
         libraryVersion={libraryVersion}
         showArtist={false}
         onDetails={onDetails}
-        onNavigate={onNavigate}
-        onCleanAlbum={onCleanAlbum}
       />
     </section>
   );
@@ -1233,7 +1001,7 @@ function AlbumDetailsDialog({
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      {album.album_id ? (
+                      {album.album_id && onCleanAlbum ? (
                         <Button
                           size="small"
                           variant="outlined"
@@ -1263,7 +1031,7 @@ function AlbumDetailsDialog({
                         <ol className="max-h-80 overflow-y-auto">
                           {tracks.map((track, index) => {
                             const status = trackStatus(track);
-                            const canReplace = Boolean(track.id && track.path && !track.missing);
+                            const canReplace = Boolean(onReplaceTrack && track.id && track.path && !track.missing);
                             const disc = Number(track.disc || 1);
                             const discStart = multiDisc && (index === 0 || Number(tracks[index - 1].disc || 1) !== disc);
                             return (
@@ -1336,7 +1104,6 @@ export default function Library() {
   const [scope, setScope] = useState<SearchScope>('all');
   const [artistSort, setArtistSort] = useState<ArtistSort>('alpha');
   const [albumSort, setAlbumSort] = useState<AlbumSort>('artist');
-  const [activeStatus, setActiveStatus] = useState<StatusFilter>('all');
   const [artistLetterFilter, setArtistLetterFilter] = useState<ArtistLetter>('all');
   const [selectedArtistName, setSelectedArtistName] = useState('');
   const [artRepairReport, setArtRepairReport] = useState<ArtRepairReportResponse | null>(null);
@@ -1348,8 +1115,6 @@ export default function Library() {
   const [detailsTracks, setDetailsTracks] = useState<LibraryTrack[]>([]);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState('');
-  const [cleanupTarget, setCleanupTarget] = useState<AlbumRow | null>(null);
-  const [replacementTarget, setReplacementTarget] = useState<LibraryTrack | null>(null);
 
   // `background` fetches (disk-reconciliation polling) must not toggle the
   // blocking spinner or clear errors -- they silently swap in the richer tree.
@@ -1521,25 +1286,6 @@ export default function Library() {
     return rows;
   }, [artists]);
 
-  const statusCounts = useMemo(() => {
-    const counts: Record<StatusFilter, number> = {
-      all: allAlbumRows.length,
-      ids: 0,
-      missing: 0,
-      extra: 0,
-      art: 0,
-      clean: 0,
-    };
-
-    for (const { album } of allAlbumRows) {
-      for (const status of ['ids', 'missing', 'extra', 'art', 'clean'] as StatusFilter[]) {
-        if (albumMatchesStatus(album, status, artRepairAlbumIds)) counts[status] += 1;
-      }
-    }
-
-    return counts;
-  }, [allAlbumRows, artRepairAlbumIds]);
-
   const filteredArtists = useMemo(() => {
     const result = artists.filter((artist) => artistMatchesQuery(artist, query, scope));
     result.sort((a, b) => {
@@ -1583,33 +1329,10 @@ export default function Library() {
     );
   }, [query, scope, selectedArtist, sortAlbumRows]);
 
-  const albumResults = useMemo(() => (
-    sortAlbumRows(
-      allAlbumRows.filter((row) => (
-        activeStatus !== 'all' &&
-        albumMatchesStatus(row.album, activeStatus, artRepairAlbumIds) &&
-        albumMatchesQuery(row.album, row.artist, query, scope)
-      )),
-    )
-  ), [activeStatus, allAlbumRows, artRepairAlbumIds, query, scope, sortAlbumRows]);
-
-  const albumMode = activeStatus !== 'all' || Boolean(selectedArtist);
-  const activeFilter = statusFilters.find((filter) => filter.id === activeStatus) ?? statusFilters[0];
+  const albumMode = Boolean(selectedArtist);
   const attentionArtistCount = artists.filter(artistNeedsAttention).length;
   const attentionAlbumCount = allAlbumRows.filter((row) => albumNeedsAttention(row.album, artRepairAlbumIds)).length;
-  const nextRepairRow = useMemo(() => {
-    const rows = allAlbumRows.filter((row) => albumNeedsAttention(row.album, artRepairAlbumIds));
-    rows.sort((a, b) => compareRepairRows(a, b, artRepairAlbumIds));
-    return rows[0] ?? null;
-  }, [allAlbumRows, artRepairAlbumIds]);
-
-  function handleStatusChange(status: StatusFilter) {
-    setActiveStatus(status);
-    if (status !== 'all') setSelectedArtistName('');
-  }
-
   function handleSelectArtist(artist: LibraryArtist) {
-    setActiveStatus('all');
     setSelectedArtistName(artist.name);
   }
 
@@ -1681,40 +1404,13 @@ export default function Library() {
         {loading ? <LinearProgress sx={{ mt: 2, borderRadius: 1 }} /> : null}
       </div>
 
-      <NextRepairPanel
-        row={selectedArtist ? null : nextRepairRow}
-        artRepairAlbumIds={artRepairAlbumIds}
-        artRepairItemMap={artRepairItemMap}
-        libraryVersion={libraryVersion}
-        onDetails={setDetailsRow}
-        onFocusStatus={handleStatusChange}
-        onNavigate={handleNavigate}
-      />
-
-      {loadFailed ? null : (
-        <StatusCards
-          active={activeStatus}
-          counts={statusCounts}
-          onChange={handleStatusChange}
-        />
-      )}
-
       {/* What the list below is showing, as one plain line over the search fields. */}
       {loadFailed ? null : <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-        <span className={activeStatus === 'all' ? 'font-semibold text-zinc-100' : 'font-semibold text-brass-300'}>
-          {activeStatus === 'all' ? 'Browsing artists' : `Active filter: ${activeFilter.label}`}
-        </span>
+        <span className="font-semibold text-zinc-100">Browsing artists</span>
         {selectedArtist ? <span className="text-zinc-200">{`Artist: ${displayArtistName(selectedArtist)}`}</span> : null}
         <span className="text-muted">
-          {activeStatus === 'all'
-            ? `${numberFmt.format(filteredArtists.length)} artists visible, ${numberFmt.format(attentionArtistCount)} with review items`
-            : `${numberFmt.format(albumResults.length)} matching albums`}
+          {`${numberFmt.format(filteredArtists.length)} artists visible, ${numberFmt.format(attentionArtistCount)} with review items`}
         </span>
-        {activeStatus !== 'all' ? (
-          <Button size="small" variant="text" onClick={() => setActiveStatus('all')}>
-            Clear filter
-          </Button>
-        ) : null}
       </div>}
 
       <SearchRow
@@ -1735,20 +1431,7 @@ export default function Library() {
       {trackSearchError ? <Alert severity="warning">Track search rows could not be loaded: {trackSearchError}</Alert> : null}
 
       {/* Under a load error there is no list: "No matching artists" would claim an empty library. */}
-      {loadFailed ? null : activeStatus !== 'all' ? (
-        <AlbumGrid
-          rows={albumResults}
-          title={activeFilter.label}
-          subtitle={`${numberFmt.format(albumResults.length)} matching albums across the library`}
-          artRepairAlbumIds={artRepairAlbumIds}
-          artRepairItemMap={artRepairItemMap}
-          libraryVersion={libraryVersion}
-          showArtist
-          onDetails={setDetailsRow}
-          onNavigate={handleNavigate}
-          onCleanAlbum={setCleanupTarget}
-        />
-      ) : selectedArtist ? (
+      {loadFailed ? null : selectedArtist ? (
         <ArtistDetail
           artist={selectedArtist}
           rows={selectedArtistRows}
@@ -1757,8 +1440,6 @@ export default function Library() {
           libraryVersion={libraryVersion}
           onBack={() => setSelectedArtistName('')}
           onDetails={setDetailsRow}
-          onNavigate={handleNavigate}
-          onCleanAlbum={setCleanupTarget}
         />
       ) : (
         <ArtistBrowser
@@ -1781,29 +1462,11 @@ export default function Library() {
         artRepairItemMap={artRepairItemMap}
         libraryVersion={libraryVersion}
         onClose={() => setDetailsRow(null)}
-        onCleanAlbum={setCleanupTarget}
         onNavigate={handleNavigate}
-        onReplaceTrack={setReplacementTarget}
       />
-
-      <AlbumCleanupModal
-        open={Boolean(cleanupTarget)}
-        albumId={Number(cleanupTarget?.album.album_id || 0)}
-        albumTitle={cleanupTarget ? displayAlbumTitle(cleanupTarget.album) : ''}
-        artistName={cleanupTarget ? displayArtistName(cleanupTarget.artist) : ''}
-        mbReleaseGroupId={cleanupTarget?.album.mb_releasegroupid}
-        onClose={() => setCleanupTarget(null)}
-        onSuccess={() => void loadLibrary()}
-      />
-
-      <TrackReplacementModal
-        open={Boolean(replacementTarget)}
-        itemId={Number(replacementTarget?.id || 0)}
-        trackTitle={replacementTarget ? (stripStamps(replacementTarget.title) || 'Untitled track') : ''}
-        originalPath={replacementTarget?.path || ''}
-        onClose={() => setReplacementTarget(null)}
-        onSuccess={() => void loadLibrary()}
-      />
+      {/* Remove from Library and per-track Replace (AlbumCleanupModal, TrackReplacementModal and the
+          dialog's onCleanAlbum/onReplaceTrack props) are deliberately not wired here: Library is
+          browse-only, and where they move is still undecided. */}
     </div>
   );
 }

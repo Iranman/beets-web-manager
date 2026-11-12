@@ -230,7 +230,7 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - Only the opened album animates. The trigger is a real button (`aria-haspopup="dialog"`); focus moves to the back cover's title; Escape or Close returns focus to the trigger. The front face is `inert` and `aria-hidden`.
 - Under `prefers-reduced-motion` there is no rotation: the back cover is simply shown.
 - This is the Library's one authored motion. Nothing animates on load or at rest.
-- The Library is browse-only. Each action has exactly one home page; the Library shows another page's action only as a link that names that page ("Acquire missing → Import"), never as an action button. The back cover carries one quiet "Manage on Import" link.
+- The Library is browse-only, a simple overview. The sleeve itself is the button that opens an album; tiles carry no actions or repair links, there is no repair focal block and no issue filter. Review state shows only as passive badges. The back cover carries one quiet "Manage on Import" link.
 
 ## Do's and Don'ts
 
