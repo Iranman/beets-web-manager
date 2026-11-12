@@ -8,7 +8,7 @@ from unittest import mock
 
 import backend.composite_workflows as cw
 from backend import transaction_engine as te
-from backend.beets_adapter import BeetsAdapterTimeoutError
+from backend.beets_adapter import BeetsAdapterConnectionError, BeetsAdapterTimeoutError
 from tests._folder_ops_local import LocalFolderOps
 from tests.test_staging_mutation_hardening import _RouteEnv
 from tests.test_wave0_s1_containment import FakeAdapter, _Env
@@ -25,6 +25,15 @@ def _adapter():
 
 
 class CompositeApplyEdges(_Env):
+    def setUp(self):
+        super().setUp()
+        # Never fall through to the process-global embedded Beets (#650): its
+        # library lock can be held by another module's leaked job thread, and
+        # Beets waits on that lock forever. Fail fast instead of wedging.
+        p = mock.patch.object(cw, "beets_adapter", mock.NonCallableMock(spec=[]))
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_refusal_that_wrote_nothing_is_not_rollback_eligible(self):
         op = cw.plan_album_maintenance({"mode": "remove_album", "album_id": 1}, store=self.store)["operation_id"]
         ad = _adapter()
@@ -48,7 +57,10 @@ class CompositeApplyEdges(_Env):
         self.assertTrue(tx["metadata"]["engine_result"]["mutation_started"])
         # The rollback restores through Beets (#224): an unreachable engine
         # must not be reported as "Rolled Back".
-        self.assertNotEqual(cw.rollback_album_genre_repair(op, store=self.store)["status"], "Rolled Back")
+        down = mock.Mock()
+        down.get_album.side_effect = down.get_item.side_effect = BeetsAdapterConnectionError("down")
+        self.assertNotEqual(cw.rollback_album_genre_repair(op, adapter=down, store=self.store)["status"],
+                            "Rolled Back")
         # With an engine the rollback restores and reports the truth.
         self.assertEqual(cw.rollback_album_genre_repair(op, adapter=ad, store=self.store)["status"], "Rolled Back")
 
