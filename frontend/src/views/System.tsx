@@ -1,41 +1,26 @@
-import { formatEpochDateTime } from '../lib/dates';
 import { errorMessage, panelError } from '../lib/errors';
 import { useEngineOffline } from '../components/EngineOfflineBanner';
 import { WarningIcon } from '../components/WarningIcon';
-import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
-import Checkbox from '@mui/material/Checkbox';
 import CircularProgress from '@mui/material/CircularProgress';
-import LinearProgress from '@mui/material/LinearProgress';
-import TextField from '@mui/material/TextField';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { Link } from 'react-router';
 import {
-  apiErrorBody,
-  authorizeSetupEnvReveal,
   completeSetup,
-  getConfigFile,
-  getSetupEnv,
   getSetupStatus,
-  regenerateAuthToken,
-  revealSetupEnvValue,
-  revertConfigFile,
-  saveConfigFile,
-  saveSetupEnv,
   testSetupAcoustid,
   testSetupAi,
   testSetupMusicBrainz,
   testSetupPlex,
   verifyPlugins,
 } from '../api/client';
-import type {
-  BeetsPluginsReport,
-  ConfigFileResponse,
-  SetupEnvResponse,
-  SetupEnvVariable,
-  SetupIntegrationTestResponse,
-  SetupStatusResponse,
-} from '../api/types';
+import type { BeetsPluginsReport, SetupIntegrationTestResponse, SetupStatusResponse } from '../api/types';
+import { EnvEditor, SECURITY_SECTION } from '../features/system/EnvEditor';
+
+// System is the diagnostics page: one health line, then integrations and paths as rows, then
+// reference material behind disclosures. Editing Beets' config.yaml and sign-in settings lives in
+// Settings (config.yaml, Security); the remaining environment variables are edited here, folded away.
 
 type IntegrationKey = 'ai' | 'musicbrainz' | 'acoustid' | 'plex';
 
@@ -45,6 +30,8 @@ const INTEGRATION_TESTS: Record<IntegrationKey, () => Promise<SetupIntegrationTe
   acoustid: testSetupAcoustid,
   plex: testSetupPlex,
 };
+
+const SERVICE_NAMES: Record<string, string> = { ai: 'AI', musicbrainz: 'MusicBrainz', acoustid: 'AcoustID', slskd: 'slskd' };
 
 type IntegrationStatus = SetupStatusResponse['integrations'][string];
 
@@ -79,6 +66,8 @@ function integrationBadge(
   return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
 }
 
+const TONE_TEXT = { ok: 'text-emerald-300', warn: 'text-amber-300', neutral: 'text-zinc-300' } as const;
+
 /** Reflects the backend-reported plugin-loader probe state only (never
  * recomputed client-side from configured_plugins/plugin_failures) --
  * `beets.available`/`plugin_loader_timed_out`/`plugin_loader_ok` are the
@@ -90,776 +79,91 @@ function pluginLoaderLabel(beets: NonNullable<SetupStatusResponse['beets']>): st
   return 'failed';
 }
 
-function initialFormValues(variables: SetupEnvVariable[]): Record<string, string> {
-  const values: Record<string, string> = {};
-  for (const variable of variables) {
-    values[variable.name] = variable.secret ? '' : variable.value;
+/** The health line's problem list. Readiness is the backend's call: its blocking reasons come
+ * first, word for word. Two things it does not block on are added: a required integration that is
+ * not working, and required Beets plugins that report unhealthy. */
+export function healthProblems(
+  status: SetupStatusResponse,
+  plugins: BeetsPluginsReport | null,
+  tests: Partial<Record<IntegrationKey, SetupIntegrationTestResponse>> = {},
+): string[] {
+  const problems = [...(status.blocking_reasons ?? [])];
+  for (const [name, integration] of Object.entries(status.integrations ?? {})) {
+    if (!integration.required) continue;
+    const badge = integrationBadge(integration, tests[name as IntegrationKey], false);
+    if (badge.tone === 'warn') problems.push(`${SERVICE_NAMES[name] ?? name}: ${badge.label}.`);
   }
-  return values;
-}
-
-const CANONICAL_SECTION_ORDER = [
-  'System & Environment',
-  'Authentication & Security',
-  'AI & LLM Services',
-  'Beets Core & Engine',
-  'Storage & Paths',
-  'Music Services & Metadata',
-  'Media Server Integrations',
-  'Playlists & Download Providers',
-];
-
-function groupVariables(variables: SetupEnvVariable[]): Array<[string, SetupEnvVariable[]]> {
-  const groups: Record<string, SetupEnvVariable[]> = {};
-  for (const variable of variables) {
-    const section = variable.section || 'System & Environment';
-    if (!groups[section]) {
-      groups[section] = [];
-    }
-    groups[section].push(variable);
+  if (plugins && !plugins.all_required_healthy) {
+    const unhealthy = plugins.required_count - plugins.required_healthy_count;
+    problems.push(`${unhealthy} of ${plugins.required_count} required Beets plugins report a problem. Open Beets plugins below.`);
   }
-  const orderedSections: string[] = [];
-  for (const sec of CANONICAL_SECTION_ORDER) {
-    if (groups[sec]) {
-      orderedSections.push(sec);
-    }
-  }
-  for (const sec of Object.keys(groups)) {
-    if (!orderedSections.includes(sec)) {
-      orderedSections.push(sec);
-    }
-  }
-  return orderedSections.map((section) => [section, groups[section]]);
+  return problems;
 }
 
-function StatusCard({
-  label,
-  value,
-  tone = 'neutral',
-}: {
-  label: string;
-  value: string;
-  tone?: 'neutral' | 'ok' | 'warn';
-}) {
-  const color = tone === 'ok' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100';
+function Row({ name, state, tone, children }: { name: ReactNode; state: ReactNode; tone: keyof typeof TONE_TEXT; children?: ReactNode }) {
   return (
-    <div className="rounded border border-graphite-800 bg-graphite-900 px-4 py-3">
-      <div className="text-xs font-semibold text-muted">{label}</div>
-      <div className={`mt-1 text-sm font-semibold ${color}`}>{value}</div>
-    </div>
+    <li className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-4 gap-y-0.5 px-3 py-2 sm:grid-cols-[9rem_minmax(0,1fr)_auto]">
+      <span className="min-w-0 truncate text-sm font-medium text-zinc-100">{name}</span>
+      <span className="col-span-2 row-start-2 min-w-0 text-xs text-zinc-300 sm:col-span-1 sm:row-start-1 sm:col-start-2">{children}</span>
+      <span className={`flex items-center gap-1 justify-self-end whitespace-nowrap text-xs font-semibold ${TONE_TEXT[tone]}`}>{state}</span>
+    </li>
   );
 }
 
-function PathRow({ label, path, ok }: { label: string; path: string; ok: boolean }) {
+function Disclosure({ title, hint, children }: { title: string; hint?: ReactNode; children: ReactNode }) {
   return (
-    <div className="flex min-w-0 items-center justify-between gap-3 border-t border-graphite-800 py-2 first:border-t-0">
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-zinc-300">{label}</div>
-        <div className="truncate text-xs text-muted">{path || 'not configured'}</div>
-      </div>
-      <span className={`shrink-0 text-xs font-semibold ${ok ? 'text-emerald-300' : 'text-red-300'}`}>
-        {ok ? 'ok' : 'check'}
-      </span>
-    </div>
+    <details className="group py-1">
+      <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-sm py-2 [&::-webkit-details-marker]:hidden">
+        <span aria-hidden="true" className="inline-block w-3 text-brass-300 transition-transform group-open:rotate-90 motion-reduce:transition-none">›</span>
+        <span className="font-display text-base font-semibold text-zinc-100">{title}</span>
+        {hint && <span className="min-w-0 text-xs text-muted">{hint}</span>}
+      </summary>
+      <div className="pb-4 pl-6">{children}</div>
+    </details>
   );
 }
 
-type ConfigAction = 'save' | 'revert' | null;
-
-function formatBackupTime(value?: number | null): string {
-  if (!value) return 'No backup';
-  return `Backup from ${formatEpochDateTime(value)}`;
-}
-
-function ConfigActionDialog({
-  action,
-  onClose,
-  onConfirm,
-  busy,
-}: {
-  action: ConfigAction;
-  onClose: () => void;
-  onConfirm: () => void;
-  busy: boolean;
-}) {
-  const isSave = action === 'save';
-  return (
-    <Dialog open={action !== null} onClose={busy ? () => undefined : onClose} className="relative z-50">
-      <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
-      <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-sm rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
-          <DialogTitle className="text-base font-semibold text-zinc-100">
-            {isSave ? 'Save config.yaml?' : 'Revert config.yaml?'}
-          </DialogTitle>
-          <p className="mt-2 text-sm text-zinc-400">
-            {isSave
-              ? 'The current file will be backed up before the new content is written.'
-              : 'The backup file will replace the current config.yaml.'}
-          </p>
-          <div className="mt-5 flex justify-end gap-2">
-            <Button variant="outlined" size="small" onClick={onClose} disabled={busy}>
-              Cancel
-            </Button>
-            <Button
-              variant="contained"
-              size="small"
-              color={isSave ? 'primary' : 'warning'}
-              onClick={onConfirm}
-              disabled={busy}
-            >
-              {busy ? 'Working...' : isSave ? 'Save' : 'Revert'}
-            </Button>
-          </div>
-        </DialogPanel>
-      </div>
-    </Dialog>
-  );
-}
-
-// Browser passwords are passphrase-friendly and separate from the API bearer
-// token length floor. Keep this in sync with app.py/routes_setup.py.
-const PASSWORD_MIN_LENGTH = 16;
-const PASSWORD_REQUIREMENTS: Array<{ label: string; test: (v: string) => boolean }> = [
-  { label: `At least ${PASSWORD_MIN_LENGTH} characters`, test: (v) => v.length >= PASSWORD_MIN_LENGTH },
-];
-
-function passwordStrength(value: string): { met: number; total: number; label: string; tone: 'ok' | 'warn' | 'bad' } {
-  const met = PASSWORD_REQUIREMENTS.filter((req) => req.test(value)).length;
-  const total = PASSWORD_REQUIREMENTS.length;
-  if (!value) return { met: 0, total, label: '', tone: 'bad' };
-  if (met === total) return { met, total, label: 'Ready', tone: 'ok' };
-  return { met, total, label: 'Too short', tone: 'bad' };
-}
-
-function PasswordStrengthMeter({ value }: { value: string }) {
-  const strength = passwordStrength(value);
-  const barColor = strength.tone === 'ok' ? 'bg-emerald-400' : strength.tone === 'warn' ? 'bg-amber-400' : 'bg-red-400';
-  return (
-    <div className="mt-2 space-y-1.5">
-      {value && (
-        <div className="flex items-center gap-2">
-          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-graphite-800">
-            <div
-              className={`h-full rounded-full transition-[width] motion-reduce:transition-none ${barColor}`}
-              style={{ width: `${(strength.met / strength.total) * 100}%` }}
-            />
-          </div>
-          <span className={`text-xs font-semibold ${strength.tone === 'ok' ? 'text-emerald-300' : strength.tone === 'warn' ? 'text-amber-300' : 'text-red-300'}`}>
-            {strength.label}
-          </span>
-        </div>
-      )}
-      <div className="flex flex-wrap gap-1.5">
-        {PASSWORD_REQUIREMENTS.map((req) => {
-          const met = req.test(value);
-          return (
-            <span
-              key={req.label}
-              className={`rounded px-1.5 py-0.5 text-xs font-semibold ${
-                met ? 'bg-emerald-950/45 text-emerald-300' : 'bg-graphite-800 text-muted'
-              }`}
-            >
-              {met ? '✓' : '○'} {req.label}
-            </span>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function AuthTokenDialog({
-  open,
-  token,
-  warning,
-  onClose,
-}: {
-  open: boolean;
-  token: string;
-  warning: string;
-  onClose: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <Dialog open={open} onClose={() => undefined} className="relative z-50">
-      <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
-      <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-lg rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
-          <DialogTitle className="text-base font-semibold text-zinc-100">New API token generated</DialogTitle>
-          <p className="mt-2 text-sm font-semibold text-amber-300">{warning || 'Save this token now — it will not be shown again.'}</p>
-          <div className="mt-3 break-all rounded border border-graphite-700 bg-graphite-950 p-3 font-mono text-sm text-emerald-300">
-            {token}
-          </div>
-          <p className="mt-2 text-xs text-muted">
-            Use this as a Bearer token (Authorization: Bearer &lt;token&gt;) for API/script clients. It replaces the
-            previous token immediately.
-          </p>
-          <div className="mt-5 flex justify-end gap-2">
-            <Button
-              variant="outlined"
-              size="small"
-              onClick={() => {
-                void navigator.clipboard?.writeText(token).then(() => setCopied(true)).catch(() => undefined);
-              }}
-            >
-              {copied ? 'Copied' : 'Copy'}
-            </Button>
-            <Button variant="contained" size="small" onClick={onClose}>
-              I've saved it — close
-            </Button>
-          </div>
-        </DialogPanel>
-      </div>
-    </Dialog>
-  );
-}
-
-function sourceBadge(source: string): { label: string; className: string } {
-  switch (source) {
-    case 'environment':
-    case 'process':
-      return {
-        label: 'environment',
-        className: 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/80',
-      };
-    case 'persisted':
-    case 'file':
-      return {
-        label: 'persisted',
-        className: 'bg-blue-950/70 text-blue-300 border border-blue-800/80',
-      };
-    case 'runtime':
-      return {
-        label: 'runtime',
-        className: 'bg-cyan-950/70 text-cyan-300 border border-cyan-800/80',
-      };
-    case 'default':
-    case 'example':
-      return {
-        label: 'default',
-        className: 'bg-graphite-800 text-zinc-300 border border-graphite-700',
-      };
-    case 'override':
-      return {
-        label: 'override',
-        className: 'bg-amber-950/70 text-amber-300 border border-amber-800/80',
-      };
-    case 'not_configured':
-    default:
-      return {
-        label: 'not configured',
-        className: 'bg-zinc-900 text-zinc-400 border border-zinc-800',
-      };
-  }
-}
-
-function EnvVariableRow({
-  variable,
-  value,
-  clear,
-  onValue,
-  onClear,
-  revealedValue,
-  revealing,
-  revealError,
-  onShow,
-  onHide,
-}: {
-  variable: SetupEnvVariable;
-  value: string;
-  clear: boolean;
-  onValue: (value: string) => void;
-  onClear: (checked: boolean) => void;
-  revealedValue: string | undefined;
-  revealing: boolean;
-  revealError: string;
-  onShow: () => void;
-  onHide: () => void;
-}) {
-  const changed = variable.secret ? value !== '' || clear : value !== variable.value;
-  const badge = sourceBadge(variable.source);
-  const notEditable = variable.editable === false;
-  const canReveal = variable.secret && variable.revealable === true && variable.configured;
-  const isRevealed = revealedValue !== undefined;
-  const [copied, setCopied] = useState(false);
-  const [isChangingPassword, setIsChangingPassword] = useState(false);
-
-  const isPassword = variable.name === 'BEETS_WEB_PASSWORD';
-
-  return (
-    <div className="grid gap-3 rounded border border-graphite-800 bg-graphite-950/35 p-3.5 lg:grid-cols-[minmax(14rem,22rem)_minmax(0,1fr)_auto]">
-      <div className="min-w-0">
-        <div className="break-all text-sm font-semibold text-zinc-100">{variable.name}</div>
-        <div className="mt-1.5 flex flex-wrap gap-1.5 text-xs font-semibold">
-          <span className={`rounded px-1.5 py-0.5 ${badge.className}`}>{badge.label}</span>
-          {variable.secret && (
-            <span className="rounded bg-red-950/50 px-1.5 py-0.5 text-red-200 border border-red-800/50">secret</span>
-          )}
-          {variable.configured && !clear && value === '' && (
-            <span className="rounded bg-emerald-950/50 px-1.5 py-0.5 text-emerald-300 border border-emerald-800/50">Configured</span>
-          )}
-          {!variable.configured && !clear && value === '' && (
-            <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400 border border-zinc-800">Not configured</span>
-          )}
-          {variable.restart_required && (
-            <span className="rounded bg-purple-950/50 px-1.5 py-0.5 text-purple-300 border border-purple-800/50">Restart required</span>
-          )}
-          {variable.is_overridden && (
-            <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-amber-300 border border-amber-800/60">Overridden</span>
-          )}
-          {variable.secret && value !== '' && !clear && (
-            <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-amber-300 border border-amber-800/60">Will replace existing value</span>
-          )}
-          {clear && (
-            <span className="rounded bg-red-950/60 px-1.5 py-0.5 text-red-300 border border-red-800/60">Will remove configured value</span>
-          )}
-          {!variable.secret && changed && (
-            <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-amber-300 border border-amber-800/60">changed</span>
-          )}
-          {notEditable && (
-            <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400 border border-zinc-800">not editable here</span>
-          )}
-        </div>
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-400">
-          {variable.container_path && (
-            <span>
-              <span className="text-muted">Container:</span> <code className="text-zinc-300">{variable.container_path}</code>
-            </span>
-          )}
-          {variable.host_path && (
-            <span>
-              <span className="text-muted">Host:</span> <code className="text-zinc-300">{variable.host_path}</code>
-            </span>
-          )}
-          {variable.default !== null && variable.default !== undefined && variable.default !== '' && (
-            <span>
-              <span className="text-muted">Default:</span> <code className="text-zinc-300">{variable.default}</code>
-            </span>
-          )}
-          {variable.description && (
-            <div className="w-full text-zinc-400 leading-relaxed mt-0.5">{variable.description}</div>
-          )}
-        </div>
-
-        {variable.is_overridden && (
-          <div className="mt-2 rounded border border-amber-800/50 bg-amber-950/30 p-2 text-xs text-amber-200">
-            <div className="font-semibold text-amber-300"><WarningIcon /> Environment overrides saved configuration</div>
-            <div className="mt-0.5 font-mono text-zinc-300">
-              <span>Running: </span>
-              <strong className="text-amber-200">{variable.effective_value || '(set in environment)'}</strong>
-              {variable.saved_value && (
-                <>
-                  <span className="mx-1.5 text-muted">|</span>
-                  <span>Saved: </span>
-                  <span className="text-zinc-400">{variable.saved_value}</span>
-                </>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="min-w-0 flex flex-col justify-center">
-        {/* Reveal display area */}
-        {isRevealed && (
-          <div className="mb-2 flex items-center gap-2 rounded border border-emerald-700/70 bg-emerald-950/40 p-2 text-xs">
-            <span className="font-mono text-xs font-bold text-emerald-400">VALUE:</span>
-            <code className="min-w-0 flex-1 break-all font-mono text-xs text-emerald-200 select-all font-semibold">
-              {revealedValue}
-            </code>
-            <Button
-              size="small"
-              variant="outlined"
-              onClick={() => {
-                void navigator.clipboard?.writeText(revealedValue).then(() => setCopied(true)).catch(() => undefined);
-              }}
-            >
-              {copied ? '✓ Copied' : 'Copy'}
-            </Button>
-            <Button size="small" variant="text" onClick={onHide}>
-              Hide
-            </Button>
-          </div>
-        )}
-
-        {revealError && !isRevealed && (
-          <div className="mb-1.5 text-xs text-red-300">{revealError}</div>
-        )}
-
-        {/* 1. BEETS_WEB_PASSWORD Special Row */}
-        {isPassword ? (
-          <div>
-            {!isChangingPassword && value === '' && !clear ? (
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-graphite-800 bg-graphite-900/60 p-2 text-xs text-zinc-300">
-                <span className="text-zinc-400">
-                  {variable.configured ? 'Stored securely as a one-way password hash.' : 'No browser password configured.'}
-                </span>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={() => setIsChangingPassword(true)}
-                >
-                  {variable.configured ? 'Change Password' : 'Set Password'}
-                </Button>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <TextField
-                  fullWidth
-                  autoFocus
-                  size="small"
-                  type="password"
-                  value={value}
-                  placeholder="Enter new password (min 8 chars, mixed case/numbers)"
-                  onChange={(event) => onValue(event.target.value)}
-                />
-                {value !== '' && <PasswordStrengthMeter value={value} />}
-                <div className="flex justify-end">
-                  <Button
-                    size="small"
-                    variant="text"
-                    onClick={() => {
-                      onValue('');
-                      setIsChangingPassword(false);
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          /* 2. Generic Input Row */
-          <div className="flex items-center gap-2">
-            <TextField
-              fullWidth
-              disabled={clear || notEditable}
-              size="small"
-              type={variable.secret ? 'password' : 'text'}
-              value={clear ? '' : value}
-              placeholder={
-                notEditable
-                  ? 'Set on the host via .env / docker-compose.yml'
-                  : clear
-                  ? 'Will be removed on save'
-                  : variable.secret
-                  ? variable.configured
-                    ? '••••••••••••••••'
-                    : 'Not configured (enter new value)'
-                  : variable.default
-                  ? `Default: ${variable.default}`
-                  : 'Not configured'
-              }
-              onChange={(event) => onValue(event.target.value)}
-            />
-            {canReveal && !clear && value === '' && (
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={() => (isRevealed ? onHide() : onShow())}
-                disabled={revealing}
-                sx={{ minWidth: '5.5rem', whiteSpace: 'nowrap', height: '36px' }}
-              >
-                {revealing ? 'Revealing…' : isRevealed ? '🙈 Hide' : '👁 Show'}
-              </Button>
-            )}
-          </div>
-        )}
-      </div>
-
-      <label className="flex items-center justify-end gap-1.5 text-xs font-semibold text-zinc-400">
-        <Checkbox
-          size="small"
-          disabled={notEditable || (!variable.secret && !variable.configured && !variable.value) || (!variable.configured && value === '')}
-          checked={clear}
-          onChange={(event) => {
-            onClear(event.target.checked);
-            if (event.target.checked && isChangingPassword) {
-              setIsChangingPassword(false);
-              onValue('');
-            }
-          }}
-        />
-        Clear
-      </label>
-    </div>
-  );
-}
+const notSecurity = (section: string) => section !== SECURITY_SECTION;
 
 export default function System() {
   const engineOffline = useEngineOffline();
   const [status, setStatus] = useState<SetupStatusResponse | null>(null);
-  const [env, setEnv] = useState<SetupEnvResponse | null>(null);
-  const [form, setForm] = useState<Record<string, string>>({});
-  const [clearNames, setClearNames] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const [configText, setConfigText] = useState('');
-  const [savedConfigText, setSavedConfigText] = useState('');
-  const [configMeta, setConfigMeta] = useState<Pick<ConfigFileResponse, 'revision' | 'has_backup' | 'backup_ts'> | null>(null);
-  const [configLoading, setConfigLoading] = useState(true);
-  const [configBusy, setConfigBusy] = useState(false);
-  const [configError, setConfigError] = useState('');
-  const [configMsg, setConfigMsg] = useState('');
-  const [configAction, setConfigAction] = useState<ConfigAction>(null);
+  const [envKey, setEnvKey] = useState(0);
   const [integrationTests, setIntegrationTests] = useState<Partial<Record<IntegrationKey, SetupIntegrationTestResponse>>>({});
   const [integrationTesting, setIntegrationTesting] = useState<Partial<Record<IntegrationKey, boolean>>>({});
-  const [regeneratingToken, setRegeneratingToken] = useState(false);
-  const [regenerateTokenError, setRegenerateTokenError] = useState('');
-  const [confirmRegenerate, setConfirmRegenerate] = useState(false);
-  const [revealedToken, setRevealedToken] = useState<{ token: string; warning: string } | null>(null);
   const [pluginsReport, setPluginsReport] = useState<BeetsPluginsReport | null>(null);
   const [pluginsLoading, setPluginsLoading] = useState(false);
   const [pluginsMsg, setPluginsMsg] = useState('');
   const [pluginsError, setPluginsError] = useState('');
 
-  // Per-field secret reveal state -- deliberately separate from `form`
-  // (the edit/replacement buffer) so viewing a value can never be confused
-  // with typing a replacement for it. Kept only in this component's
-  // ephemeral React state: never written to localStorage/sessionStorage,
-  // never part of the payload sent to saveEnv().
-  const [revealedSecrets, setRevealedSecrets] = useState<Record<string, string>>({});
-  const [revealingNames, setRevealingNames] = useState<Set<string>>(new Set());
-  const [revealErrors, setRevealErrors] = useState<Record<string, string>>({});
-  const [reauthDialog, setReauthDialog] = useState<{
-    open: boolean;
-    pendingName: string | null;
-    password: string;
-    error: string;
-    submitting: boolean;
-  }>({ open: false, pendingName: null, password: '', error: '', submitting: false });
-  const revealTimers = useRef<Map<string, number>>(new Map());
-
-  const hideSecret = useCallback((name: string) => {
-    setRevealedSecrets((current) => {
-      if (!(name in current)) return current;
-      const next = { ...current };
-      delete next[name];
-      return next;
-    });
-    const timerId = revealTimers.current.get(name);
-    if (timerId !== undefined) {
-      window.clearTimeout(timerId);
-      revealTimers.current.delete(name);
-    }
-  }, []);
-
-  const hideAllSecrets = useCallback(() => {
-    revealTimers.current.forEach((id) => window.clearTimeout(id));
-    revealTimers.current.clear();
-    setRevealedSecrets({});
-  }, []);
-
-  // Hide any revealed secret automatically on unmount (navigating away).
-  useEffect(() => {
-    return () => {
-      revealTimers.current.forEach((id) => window.clearTimeout(id));
-      revealTimers.current.clear();
-    };
-  }, []);
-
-  // Hide all revealed secrets when the tab/page becomes inactive.
-  useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.hidden) hideAllSecrets();
-    };
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [hideAllSecrets]);
-
-  const REVEAL_AUTO_HIDE_MS = 45_000;
-
-  const performReveal = useCallback(async (name: string) => {
-    setRevealingNames((current) => new Set(current).add(name));
-    setRevealErrors((current) => {
-      if (!(name in current)) return current;
-      const next = { ...current };
-      delete next[name];
-      return next;
-    });
+  const loadStatus = useCallback(async () => {
     try {
-      const result = await revealSetupEnvValue(name);
-      if (result.ok && typeof result.value === 'string') {
-        setRevealedSecrets((current) => ({ ...current, [name]: result.value as string }));
-        const existingTimer = revealTimers.current.get(name);
-        if (existingTimer !== undefined) window.clearTimeout(existingTimer);
-        const timerId = window.setTimeout(() => hideSecret(name), REVEAL_AUTO_HIDE_MS);
-        revealTimers.current.set(name, timerId);
-      } else {
-        setRevealErrors((current) => ({ ...current, [name]: result.error || 'Could not reveal value.' }));
-      }
+      const nextStatus = await getSetupStatus();
+      setStatus(nextStatus);
+      if (nextStatus.plugins) setPluginsReport(nextStatus.plugins);
     } catch (err) {
-      const body = apiErrorBody(err);
-      if (body?.reauth_required) {
-        setReauthDialog({ open: true, pendingName: name, password: '', error: '', submitting: false });
-      } else {
-        setRevealErrors((current) => ({ ...current, [name]: errorMessage(err) }));
-      }
-    } finally {
-      setRevealingNames((current) => {
-        if (!current.has(name)) return current;
-        const next = new Set(current);
-        next.delete(name);
-        return next;
-      });
+      setError(errorMessage(err));
     }
-  }, [hideSecret]);
-
-  const handleShowSecret = (name: string) => {
-    void performReveal(name);
-  };
-
-  const submitReauth = async () => {
-    const pendingName = reauthDialog.pendingName;
-    if (!pendingName) return;
-    setReauthDialog((current) => ({ ...current, submitting: true, error: '' }));
-    try {
-      const result = await authorizeSetupEnvReveal(reauthDialog.password);
-      if (result.ok) {
-        setReauthDialog({ open: false, pendingName: null, password: '', error: '', submitting: false });
-        await performReveal(pendingName);
-      } else {
-        setReauthDialog((current) => ({ ...current, submitting: false, error: result.error || 'Incorrect password.' }));
-      }
-    } catch (err) {
-      setReauthDialog((current) => ({ ...current, submitting: false, error: errorMessage(err) }));
-    }
-  };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
-    try {
-      const [nextStatus, nextEnv] = await Promise.all([getSetupStatus(), getSetupEnv()]);
-      setStatus(nextStatus);
-      if (nextStatus.plugins) {
-        setPluginsReport(nextStatus.plugins);
-      }
-      setEnv(nextEnv);
-      setForm(initialFormValues(nextEnv.variables));
-      setClearNames(new Set());
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadConfig = useCallback(async () => {
-    setConfigLoading(true);
-    setConfigError('');
-    try {
-      const cfg = await getConfigFile();
-      const content = cfg.content ?? '';
-      setConfigText(content);
-      setSavedConfigText(content);
-      setConfigMeta({ revision: cfg.revision || '', has_backup: Boolean(cfg.has_backup), backup_ts: cfg.backup_ts ?? null });
-    } catch (err) {
-      setConfigError(errorMessage(err));
-    } finally {
-      setConfigLoading(false);
-    }
-  }, []);
+    await loadStatus();
+    setLoading(false);
+  }, [loadStatus]);
 
   useEffect(() => {
     void load();
-    void loadConfig();
-  }, [load, loadConfig]);
-
-  const grouped = useMemo(() => groupVariables(env?.variables ?? []), [env?.variables]);
-  const configDirty = configText !== savedConfigText;
-  const configEmpty = !configText.trim();
-
-  const dirty = useMemo(() => {
-    if (!env) return false;
-    return env.variables.some((variable) => {
-      if (clearNames.has(variable.name)) return true;
-      const nextValue = form[variable.name] ?? '';
-      return variable.secret ? nextValue !== '' : nextValue !== variable.value;
-    });
-  }, [clearNames, env, form]);
-
-  const saveEnv = async () => {
-    if (!env || !dirty) return;
-    setSaving(true);
-    setError('');
-    setMessage('');
-    hideAllSecrets();
-    const variables: Record<string, string> = {};
-    for (const variable of env.variables) {
-      const nextValue = form[variable.name] ?? '';
-      if (clearNames.has(variable.name)) {
-        variables[variable.name] = '';
-      } else if (variable.secret) {
-        if (nextValue !== '') variables[variable.name] = nextValue;
-      } else if (nextValue !== variable.value) {
-        variables[variable.name] = nextValue;
-      }
-    }
-    try {
-      const updated = await saveSetupEnv({ variables, clear: Array.from(clearNames) });
-      setEnv(updated);
-      setForm(initialFormValues(updated.variables));
-      setClearNames(new Set());
-      try {
-        const nextStatus = await getSetupStatus();
-        setStatus(nextStatus);
-        if (nextStatus.plugins) {
-          setPluginsReport(nextStatus.plugins);
-        }
-      } catch {
-        // Status refresh non-fatal
-      }
-      const saved = updated.saved?.length ? updated.saved.join(', ') : 'environment';
-      setMessage(`Saved ${saved}. Restart or recreate the container for Docker-managed values.`);
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleSaveConfig = async () => {
-    setConfigBusy(true);
-    setConfigMsg('');
-    setConfigError('');
-    try {
-      if (!configMeta?.revision) throw new Error('Reload config.yaml before saving.');
-      const saved = await saveConfigFile(configText, configMeta.revision);
-      await loadConfig();
-      setConfigMsg(saved.backed_up ? 'Saved config.yaml. Backup updated.' : 'Saved config.yaml.');
-    } catch (err) {
-      setConfigError(errorMessage(err));
-    } finally {
-      setConfigBusy(false);
-      setConfigAction(null);
-    }
-  };
-
-  const handleRevertConfig = async () => {
-    setConfigBusy(true);
-    setConfigMsg('');
-    setConfigError('');
-    try {
-      if (!configMeta?.revision) throw new Error('Reload config.yaml before reverting.');
-      await revertConfigFile(configMeta.revision);
-      await loadConfig();
-      setConfigMsg('Reverted config.yaml from backup.');
-    } catch (err) {
-      setConfigError(errorMessage(err));
-    } finally {
-      setConfigBusy(false);
-      setConfigAction(null);
-    }
-  };
+  }, [load]);
 
   const refreshSystem = () => {
     void load();
-    void loadConfig();
+    setEnvKey((key) => key + 1);
   };
 
   const runIntegrationTests = useCallback(() => {
@@ -882,25 +186,6 @@ export default function System() {
         });
     });
   }, []);
-
-  const handleRegenerateToken = async () => {
-    setConfirmRegenerate(false);
-    setRegeneratingToken(true);
-    setRegenerateTokenError('');
-    try {
-      const result = await regenerateAuthToken();
-      if (result.ok && result.token) {
-        setRevealedToken({ token: result.token, warning: result.warning || '' });
-        await load();
-      } else {
-        setRegenerateTokenError(result.error || 'Could not regenerate token.');
-      }
-    } catch (err) {
-      setRegenerateTokenError(errorMessage(err));
-    } finally {
-      setRegeneratingToken(false);
-    }
-  };
 
   const handleVerifyPlugins = async () => {
     setPluginsLoading(true);
@@ -932,463 +217,218 @@ export default function System() {
     }
   };
 
-  if (loading) {
+  if (loading && !status) {
     return (
       <div className="flex min-h-[24rem] items-center justify-center">
-        <CircularProgress size={28} />
+        <CircularProgress size={28} aria-label="Loading system status" />
       </div>
     );
   }
 
+  const testingAny = Object.values(integrationTesting).some(Boolean);
+  const problems = status ? healthProblems(status, pluginsReport, integrationTests) : [];
+  const integrations = Object.entries(status?.integrations ?? {});
+  const services = integrations.filter(([, integration]) => integration.category !== 'beets_plugin');
+  const pluginIntegrations = integrations.filter(([, integration]) => integration.category === 'beets_plugin');
+  const beets = status?.beets;
+  const paths = status
+    ? [
+        { label: 'Config', path: status.paths.config.path, ok: status.paths.config.writable === true, bad: 'not writable' },
+        { label: 'Music library', path: status.paths.music_library.path, ok: status.paths.music_library.exists, bad: 'missing' },
+        { label: 'Downloads', path: status.paths.downloads.path, ok: status.paths.downloads.writable === true, bad: 'not writable' },
+        { label: 'Beets config', path: status.paths.beets_config.path, ok: status.paths.beets_config.exists, bad: 'missing' },
+      ]
+    : [];
+
   return (
-    <div className="space-y-5">
-      <section className="flex flex-wrap items-start justify-between gap-3 border-b border-graphite-800 pb-4">
-        <div>
-          <h1 className="font-display text-2xl font-semibold text-zinc-100">System</h1>
-          <div className="mt-1 text-sm text-muted">
-            {status?.version ? versionLabel(status.version, status.revision) : 'Environment, readiness, and Beets configuration'}
-          </div>
+    <div className="min-w-0 space-y-6 overflow-x-clip">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-graphite-800 pb-4">
+        <div className="min-w-0">
+          <h1 className="lib-title">System</h1>
+          <p className="lib-catalog">
+            <span>{status?.version ? versionLabel(status.version, status.revision) : 'Version unknown'}</span>
+            <span>Beets {beets?.version || (beets?.available ? 'available' : 'unavailable')}</span>
+            {status?.demo_mode ? <span>Demo mode</span> : null}
+            {status ? (
+              <span role="status" className={`lib-review ${problems.length ? 'is-flag' : 'is-ok'}`}>
+                {problems.length ? `${problems.length} ${problems.length === 1 ? 'problem' : 'problems'}` : 'All systems OK'}
+              </span>
+            ) : null}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outlined" size="small" onClick={() => refreshSystem()} disabled={loading || configLoading}>
+          {status && !status.setup_complete ? (
+            <Button variant="outlined" size="small" disabled={completing} onClick={() => void markComplete()}>
+              {completing ? 'Marking...' : 'Mark system ready'}
+            </Button>
+          ) : null}
+          <Button variant="outlined" size="small" onClick={refreshSystem} disabled={loading}>
             Refresh
           </Button>
-          <Button
-            variant="contained"
-            size="small"
-            disabled={saving || !dirty}
-            onClick={() => void saveEnv()}
-          >
-            {saving ? 'Saving...' : 'Save environment'}
-          </Button>
         </div>
-      </section>
+      </header>
 
-      {panelError(error, engineOffline) && <Alert severity="error">{error}</Alert>}
+      {panelError(error, engineOffline) && <Alert severity="error">{`System status could not be loaded: ${error}`}</Alert>}
       {message && <Alert severity="success">{message}</Alert>}
 
-      <section className="grid gap-3 md:grid-cols-4">
-        <StatusCard
-          label="Readiness"
-          value={status?.status ?? 'unknown'}
-          tone={status?.status === 'ready' ? 'ok' : 'warn'}
-        />
-        <StatusCard
-          label="Readiness marker"
-          value={status?.setup_complete ? 'complete' : 'open'}
-          tone={status?.setup_complete ? 'ok' : 'warn'}
-        />
-        <StatusCard
-          label="Demo mode"
-          value={status?.demo_mode ? 'enabled' : 'off'}
-          tone={status?.demo_mode ? 'warn' : 'neutral'}
-        />
-        <StatusCard
-          label="Beets"
-          value={status?.beets?.version || (status?.beets?.available ? 'available' : 'missing')}
-          tone={status?.beets?.available ? 'ok' : 'warn'}
-        />
-        <StatusCard
-          label="fpcalc"
-          value={status?.fpcalc.available ? 'available' : 'missing'}
-          tone={status?.fpcalc.available ? 'ok' : 'warn'}
-        />
-      </section>
-
-      {status?.blocking_reasons?.length ? (
-        <Alert severity="warning">
-          {status.blocking_reasons.join(' ')}
-        </Alert>
-      ) : null}
-
-      {status && (
-        <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,24rem)]">
-          <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
-            <div className="mb-2 text-sm font-semibold text-zinc-100">Paths</div>
-            <PathRow label="Config" path={status.paths.config.path} ok={status.paths.config.writable === true} />
-            <PathRow label="Music library" path={status.paths.music_library.path} ok={status.paths.music_library.exists} />
-            <PathRow label="Downloads" path={status.paths.downloads.path} ok={status.paths.downloads.writable === true} />
-            <PathRow label="Beets config" path={status.paths.beets_config.path} ok={status.paths.beets_config.exists} />
-          </div>
-          <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-zinc-100">Integrations</div>
-              <Button
-                variant="outlined"
-                size="small"
-                onClick={runIntegrationTests}
-                disabled={Object.values(integrationTesting).some(Boolean)}
-              >
-                {Object.values(integrationTesting).some(Boolean) ? 'Testing...' : 'Test connections'}
-              </Button>
-            </div>
-            <div className="mb-2 text-xs text-muted">
-              Each integration is tested independently — one failing does not disable the others.
-            </div>
-            {Object.entries(status.integrations).map(([name, integration]) => {
-              const key = name as IntegrationKey;
-              const test = integrationTests[key];
-              const testing = Boolean(integrationTesting[key]);
-              const badge = integrationBadge(integration, test, testing);
-              const toneClass = badge.tone === 'ok' ? 'text-emerald-300' : badge.tone === 'warn' ? 'text-amber-300' : 'text-muted';
-              return (
-                <div key={name} className="border-t border-graphite-800 py-2 first:border-t-0">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm font-medium capitalize text-zinc-300">
-                      {name}
-                      {integration.required && <span className="ml-1.5 text-xs font-semibold text-muted">(required)</span>}
-                    </span>
-                    <span className={`flex items-center gap-1 text-xs font-semibold ${toneClass}`}>
-                      <span aria-hidden="true">{badge.icon}</span>
-                      {badge.label}
-                    </span>
-                  </div>
-                  {test?.error && (
-                    <div className="mt-1 text-xs text-amber-300">{test.error}</div>
-                  )}
-                  {integration.detail && !test && (
-                    <div className="mt-1 text-xs text-amber-300">{integration.detail}</div>
-                  )}
-                  {integration.note && !test && (
-                    <div className="mt-1 text-xs text-zinc-300">{integration.note}</div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </section>
+      {problems.length > 0 && (
+        <ul aria-label="Problems" className="m-0 list-none space-y-1 p-0">
+          {problems.map((problem, index) => (
+            <li key={index} className="flex gap-2 text-sm text-zinc-100">
+              <span className="shrink-0 font-semibold text-amber-300">Problem</span>
+              <span className="min-w-0 break-words">{problem}</span>
+            </li>
+          ))}
+        </ul>
       )}
 
-      {status?.beets && (
-        <section className="rounded border border-graphite-800 bg-graphite-900 p-4 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-zinc-100">Beets Plugin Management</div>
-              <div className="text-xs text-zinc-400">
-                Authoritative Beets plugin status, bundled extensions, and runtime health.
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outlined"
-                size="small"
-                onClick={() => void handleVerifyPlugins()}
-                disabled={pluginsLoading}
-              >
-                {pluginsLoading ? 'Checking...' : 'Recheck plugins'}
+      {status && (
+        <div className="grid gap-x-8 gap-y-6 lg:grid-cols-2">
+          <section aria-labelledby="system-integrations" className="min-w-0 space-y-2">
+            <div className="flex min-h-9 flex-wrap items-center justify-between gap-2">
+              <h2 id="system-integrations" className="m-0 font-display text-lg font-semibold text-zinc-100">Integrations</h2>
+              <Button variant="outlined" size="small" onClick={runIntegrationTests} disabled={testingAny}>
+                {testingAny ? 'Testing...' : 'Test connections'}
               </Button>
             </div>
-          </div>
-
-          {pluginsMsg && <Alert severity="success">{pluginsMsg}</Alert>}
-          {panelError(pluginsError, engineOffline) && <Alert severity="error">{pluginsError}</Alert>}
-
-          <div className="grid gap-2 text-xs text-zinc-200 sm:grid-cols-2 lg:grid-cols-4 rounded bg-graphite-950 p-3 border border-graphite-800">
-            <div><span className="font-semibold text-zinc-100">Plugin path:</span> {status.beets.pluginpath?.join(' then ') || 'not configured'}</div>
-            <div><span className="font-semibold text-zinc-100">ReplayGain:</span> {status.beets.replaygain_backend || status.beets.replaygain_command || 'not configured'}</div>
-            <div><span className="font-semibold text-zinc-100">Enabled plugins:</span> {status.beets.configured_plugins?.length ?? 0}</div>
-            <div><span className="font-semibold text-zinc-100">Plugin loader:</span>{' '}
-              <span className={pluginLoaderLabel(status.beets) === 'loaded' ? 'text-emerald-300' : 'font-semibold text-red-300'}>{pluginLoaderLabel(status.beets)}</span>
-            </div>
-          </div>
-
-          {pluginsReport && (
-            <div className="space-y-3 pt-2">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-bold text-zinc-300">
-                  Required core plugins ({pluginsReport.required_healthy_count} of {pluginsReport.required_count} healthy)
-                </div>
-                <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                  pluginsReport.all_required_healthy ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'
-                }`}>
-                  {pluginsReport.all_required_healthy ? '✓ All required healthy' : <><WarningIcon /> Action required</>}
-                </span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-                {pluginsReport.categories.required.map((plugin) => (
-                  <div
-                    key={plugin.name}
-                    className="rounded border border-graphite-800 bg-graphite-950 p-2.5 flex items-center justify-between text-xs"
+            <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
+              {services.map(([name, integration]) => {
+                const key = name as IntegrationKey;
+                const test = integrationTests[key];
+                const badge = integrationBadge(integration, test, Boolean(integrationTesting[key]));
+                const reason = test?.error || (!test && (integration.detail || integration.note)) || (integration.required ? 'Required' : '');
+                return (
+                  <Row
+                    key={name}
+                    name={<span className="capitalize">{SERVICE_NAMES[name] ?? name}</span>}
+                    tone={badge.tone}
+                    state={<><span aria-hidden="true">{badge.icon}</span>{badge.label}</>}
                   >
-                    <div className="min-w-0 pr-2">
-                      <div className="font-semibold text-zinc-100 truncate">{plugin.display_name || plugin.name}</div>
-                      <div className="text-xs text-zinc-400 truncate">{plugin.description}</div>
-                    </div>
-                    <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-bold ${
-                      plugin.healthy
-                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
-                        : 'bg-amber-950/80 text-amber-400 border border-amber-800'
-                    }`}>
-                      {plugin.healthy ? '✓ Ready' : <><WarningIcon /> Issue</>}
-                    </span>
-                  </div>
-                ))}
-              </div>
+                    {reason}
+                  </Row>
+                );
+              })}
+            </ul>
+            <p className="m-0 text-xs text-muted">Each integration is tested on its own; one failing does not stop the others.</p>
+          </section>
 
-              <div className="text-xs font-bold text-zinc-300 pt-2">
-                Optional & integration plugins
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-                {[...pluginsReport.categories.optional, ...pluginsReport.categories.integration].map((plugin) => (
-                  <div
-                    key={plugin.name}
-                    className="rounded border border-graphite-800 bg-graphite-950 p-2.5 flex items-center justify-between text-xs"
-                  >
-                    <div className="min-w-0 pr-2">
-                      <div className="font-semibold text-zinc-100 truncate">{plugin.display_name || plugin.name}</div>
-                      <div className="text-xs text-zinc-400 truncate">{plugin.description}</div>
-                    </div>
-                    <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-bold ${
-                      plugin.enabled
-                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
-                        : 'bg-zinc-800 text-zinc-400'
-                    }`}>
-                      {plugin.enabled ? '✓ Enabled' : '○ Available'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {status.beets.plugin_failures?.length ? (
-            <Alert severity="warning" className="mt-3">
-              {status.beets.plugin_failures.join(' ')}
-            </Alert>
-          ) : null}
-          {!status.beets.plugin_failures?.length && status.beets.plugin_loader_error ? (
-            <Alert severity="warning" className="mt-3">
-              {status.beets.plugin_loader_error}
-            </Alert>
-          ) : null}
-        </section>
+          <section aria-labelledby="system-paths" className="min-w-0 space-y-2">
+            <h2 id="system-paths" className="m-0 flex min-h-9 items-center font-display text-lg font-semibold text-zinc-100">Paths</h2>
+            <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
+              {paths.map((row) => (
+                <Row key={row.label} name={row.label} tone={row.ok ? 'ok' : 'warn'} state={row.ok ? 'ok' : row.bad}>
+                  <code className="block truncate text-zinc-300" title={row.path}>{row.path || 'not configured'}</code>
+                </Row>
+              ))}
+              <Row name="fpcalc" tone={status.fpcalc.available ? 'ok' : 'warn'} state={status.fpcalc.available ? 'ok' : 'missing'}>
+                <code className="block truncate text-zinc-300" title={status.fpcalc.path}>{status.fpcalc.path || 'not found on PATH'}</code>
+              </Row>
+            </ul>
+          </section>
+        </div>
       )}
-      {status && (
-        <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
-            <div className="text-sm font-semibold text-zinc-100">Authentication</div>
-            <Button
-              variant="outlined"
-              size="small"
-              color="warning"
-              onClick={() => setConfirmRegenerate(true)}
-              disabled={regeneratingToken}
-            >
-              {regeneratingToken ? 'Regenerating...' : 'Regenerate API token'}
-            </Button>
-          </div>
-          {regenerateTokenError && <Alert severity="error" onClose={() => setRegenerateTokenError('')}>{regenerateTokenError}</Alert>}
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:border-r sm:pr-3">
-              <div className="text-sm font-medium text-zinc-300">API token (Bearer)</div>
-              <div className={`mt-1 text-xs font-semibold ${status.auth.token_configured ? 'text-emerald-300' : 'text-muted'}`}>
-                {status.auth.token_configured
-                  ? status.auth.token_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
-                  : '✗ Not configured'}
+
+      <section aria-label="Reference" className="divide-y divide-graphite-800 border-y border-graphite-800">
+        {beets && (
+          <Disclosure
+            title="Beets plugins"
+            hint={`${beets.configured_plugins?.length ?? 0} enabled · loader ${pluginLoaderLabel(beets)}${
+              pluginsReport ? ` · ${pluginsReport.required_healthy_count} of ${pluginsReport.required_count} required healthy` : ''
+            }`}
+          >
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="m-0 text-xs text-muted">
+                  Read-only. Plugin actions live in <Link className="text-brass-300 underline underline-offset-2" to="/config#plugins">Settings › Plugins</Link>.
+                </p>
+                <Button variant="outlined" size="small" onClick={() => void handleVerifyPlugins()} disabled={pluginsLoading}>
+                  {pluginsLoading ? 'Checking...' : 'Recheck plugins'}
+                </Button>
               </div>
-              {status.auth.token_auto_generated && (
-                <div className="mt-1 text-xs text-muted">
-                  A secure token was generated automatically on first run and printed once to the server log.
-                  Regenerate it here any time.
+              {pluginsMsg && <Alert severity="success">{pluginsMsg}</Alert>}
+              {panelError(pluginsError, engineOffline) && <Alert severity="error">{pluginsError}</Alert>}
+              <dl className="m-0 grid gap-x-6 gap-y-1 text-xs text-zinc-300 sm:grid-cols-2">
+                <div><dt className="inline font-semibold text-zinc-100">Plugin path:</dt> <dd className="inline m-0">{beets.pluginpath?.join(' then ') || 'not configured'}</dd></div>
+                <div><dt className="inline font-semibold text-zinc-100">ReplayGain:</dt> <dd className="inline m-0">{beets.replaygain_backend || beets.replaygain_command || 'not configured'}</dd></div>
+                <div><dt className="inline font-semibold text-zinc-100">Enabled plugins:</dt> <dd className="inline m-0">{beets.configured_plugins?.length ?? 0}</dd></div>
+                <div>
+                  <dt className="inline font-semibold text-zinc-100">Plugin loader:</dt>{' '}
+                  <dd className={`inline m-0 font-semibold ${pluginLoaderLabel(beets) === 'loaded' ? 'text-emerald-300' : 'text-red-300'}`}>{pluginLoaderLabel(beets)}</dd>
+                </div>
+              </dl>
+              {beets.plugin_failures?.length ? (
+                <Alert severity="warning">{beets.plugin_failures.join(' ')}</Alert>
+              ) : beets.plugin_loader_error ? (
+                <Alert severity="warning">{beets.plugin_loader_error}</Alert>
+              ) : null}
+              {pluginsReport && (
+                <div className="grid gap-x-8 gap-y-3 lg:grid-cols-2">
+                  <div className="min-w-0">
+                    <h3 className="m-0 mb-1 text-xs font-semibold text-zinc-300">
+                      Required core plugins ({pluginsReport.required_healthy_count} of {pluginsReport.required_count} healthy)
+                    </h3>
+                    <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
+                      {pluginsReport.categories.required.map((plugin) => (
+                        <Row key={plugin.name} name={plugin.display_name || plugin.name} tone={plugin.healthy ? 'ok' : 'warn'} state={plugin.healthy ? '✓ Ready' : <><WarningIcon /> Issue</>}>
+                          {plugin.description}
+                        </Row>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="m-0 mb-1 text-xs font-semibold text-zinc-300">Optional & integration plugins</h3>
+                    <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
+                      {[...pluginsReport.categories.optional, ...pluginsReport.categories.integration].map((plugin) => (
+                        <Row key={plugin.name} name={plugin.display_name || plugin.name} tone={plugin.enabled ? 'ok' : 'neutral'} state={plugin.enabled ? '✓ Enabled' : '○ Available'}>
+                          {plugin.description}
+                        </Row>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
+              {pluginIntegrations.length > 0 && (
+                <div className="min-w-0">
+                  <h3 className="m-0 mb-1 text-xs font-semibold text-zinc-300">Plugins used by Web Manager features</h3>
+                  <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
+                    {pluginIntegrations.map(([name, integration]) => {
+                      const badge = integrationBadge(integration, undefined, false);
+                      return (
+                        <Row key={name} name={name} tone={badge.tone} state={<><span aria-hidden="true">{badge.icon}</span>{badge.label}</>}>
+                          {integration.detail || integration.note}
+                        </Row>
+                      );
+                    })}
+                  </ul>
                 </div>
               )}
             </div>
-            <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:pl-3">
-              <div className="text-sm font-medium text-zinc-300">Browser Login (Basic Auth)</div>
-              <div className={`mt-1 text-xs font-semibold ${status.auth.password_configured ? 'text-emerald-300' : 'text-muted'}`}>
-                {status.auth.password_configured
-                  ? status.auth.password_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
-                  : '✗ Not configured'}
-              </div>
-              <div className="mt-1 text-xs text-muted">
-                {status.auth.password_auto_generated
-                  ? `Username: ${status.auth.username || 'admin'}. Initial password was generated on first boot in /web-manager-data/.initial_admin_password. Set BEETS_WEB_PASSWORD below to replace it.`
-                  : `Username: ${status.auth.username || 'admin'}. Set BEETS_WEB_PASSWORD or BEETS_WEB_USERNAME below to change browser credentials.`}
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
+          </Disclosure>
+        )}
 
-      <Dialog open={confirmRegenerate} onClose={() => setConfirmRegenerate(false)} className="relative z-50">
-        <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
-        <div className="fixed inset-0 flex items-center justify-center p-4">
-          <DialogPanel className="w-full max-w-sm rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
-            <DialogTitle className="text-base font-semibold text-zinc-100">Regenerate API token?</DialogTitle>
-            <p className="mt-2 text-sm text-zinc-400">
-              The current token stops working immediately. Any script or API client using it will need the new value.
+        <Disclosure title="Environment variables" hint="Values Web Manager runs with. Secrets stay masked.">
+          <p className="m-0 mb-3 text-xs text-muted">
+            Sign-in, API token and outbound policy variables are edited in{' '}
+            <Link className="text-brass-300 underline underline-offset-2" to="/config#security">Settings › Security</Link>.
+          </p>
+          <EnvEditor key={envKey} include={notSecurity} onSaved={() => void loadStatus()} />
+        </Disclosure>
+
+        {status && (
+          <Disclosure title="Beets config" hint={status.paths.beets_config.path || 'not configured'}>
+            <dl className="m-0 grid gap-y-1 text-xs text-zinc-300">
+              <div><dt className="inline font-semibold text-zinc-100">Config file:</dt> <dd className="inline m-0 break-all"><code>{status.paths.beets_config.path || 'not configured'}</code> {status.paths.beets_config.exists ? '(found)' : '(missing)'}</dd></div>
+              {beets?.path ? <div><dt className="inline font-semibold text-zinc-100">Beets:</dt> <dd className="inline m-0 break-all"><code>{beets.path}</code></dd></div> : null}
+              {beets?.engine_compatibility?.message ? <div><dt className="inline font-semibold text-zinc-100">Compatibility:</dt> <dd className="inline m-0">{beets.engine_compatibility.message}</dd></div> : null}
+              <div><dt className="inline font-semibold text-zinc-100">Readiness marker:</dt> <dd className="inline m-0">{status.setup_complete ? 'complete' : 'open'}</dd></div>
+            </dl>
+            <p className="m-0 mt-3 text-xs text-muted">
+              Edit, reload or revert config.yaml in{' '}
+              <Link className="text-brass-300 underline underline-offset-2" to="/config#config-yaml">Settings › config.yaml</Link>.
             </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <Button variant="outlined" size="small" onClick={() => setConfirmRegenerate(false)}>Cancel</Button>
-              <Button variant="contained" size="small" color="warning" onClick={() => void handleRegenerateToken()}>
-                Regenerate
-              </Button>
-            </div>
-          </DialogPanel>
-        </div>
-      </Dialog>
-
-      <AuthTokenDialog
-        open={revealedToken !== null}
-        token={revealedToken?.token ?? ''}
-        warning={revealedToken?.warning ?? ''}
-        onClose={() => setRevealedToken(null)}
-      />
-
-      <Dialog
-        open={reauthDialog.open}
-        onClose={() => setReauthDialog({ open: false, pendingName: null, password: '', error: '', submitting: false })}
-        className="relative z-50"
-      >
-        <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
-        <div className="fixed inset-0 flex items-center justify-center p-4">
-          <DialogPanel className="w-full max-w-sm rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
-            <DialogTitle className="text-base font-semibold text-zinc-100">Confirm your password</DialogTitle>
-            <p className="mt-2 text-sm text-zinc-400">
-              Revealing a configured secret requires re-entering your administrator password. This confirmation
-              covers additional reveals for a short time.
-            </p>
-            <TextField
-              autoFocus
-              fullWidth
-              size="small"
-              type="password"
-              className="mt-3"
-              label="Current password"
-              value={reauthDialog.password}
-              onChange={(event) => setReauthDialog((current) => ({ ...current, password: event.target.value, error: '' }))}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && reauthDialog.password && !reauthDialog.submitting) void submitReauth();
-              }}
-            />
-            {reauthDialog.error && <div className="mt-2 text-xs text-red-300">{reauthDialog.error}</div>}
-            <div className="mt-5 flex justify-end gap-2">
-              <Button
-                variant="outlined"
-                size="small"
-                onClick={() => setReauthDialog({ open: false, pendingName: null, password: '', error: '', submitting: false })}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="contained"
-                size="small"
-                disabled={!reauthDialog.password || reauthDialog.submitting}
-                onClick={() => void submitReauth()}
-              >
-                {reauthDialog.submitting ? 'Confirming…' : 'Confirm'}
-              </Button>
-            </div>
-          </DialogPanel>
-        </div>
-      </Dialog>
-
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-zinc-100">Environment variables</h2>
-            <div className="mt-1 break-all text-xs text-muted">
-              {env?.env_file ?? 'No env file'} {env?.exists ? '' : '(will be created)'}
-            </div>
-          </div>
-          <Button
-            variant="outlined"
-            size="small"
-            disabled={completing || status?.setup_complete}
-            onClick={() => void markComplete()}
-          >
-            {completing ? 'Marking...' : status?.setup_complete ? 'Complete' : 'Mark system ready'}
-          </Button>
-        </div>
-
-        {grouped.map(([section, variables]) => (
-          <div key={section} className="space-y-2">
-            <div className="text-xs font-semibold text-muted">{section}</div>
-            {variables.map((variable) => (
-              <EnvVariableRow
-                key={variable.name}
-                variable={variable}
-                value={form[variable.name] ?? ''}
-                clear={clearNames.has(variable.name)}
-                onValue={(nextValue) => {
-                  setForm((current) => ({ ...current, [variable.name]: nextValue }));
-                  if (clearNames.has(variable.name)) {
-                    setClearNames((current) => {
-                      const next = new Set(current);
-                      next.delete(variable.name);
-                      return next;
-                    });
-                  }
-                }}
-                onClear={(checked) => {
-                  setClearNames((current) => {
-                    const next = new Set(current);
-                    if (checked) next.add(variable.name);
-                    else next.delete(variable.name);
-                    return next;
-                  });
-                }}
-                revealedValue={revealedSecrets[variable.name]}
-                revealing={revealingNames.has(variable.name)}
-                revealError={revealErrors[variable.name] ?? ''}
-                onShow={() => handleShowSecret(variable.name)}
-                onHide={() => hideSecret(variable.name)}
-              />
-            ))}
-          </div>
-        ))}
+          </Disclosure>
+        )}
       </section>
-
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-zinc-100">config.yaml</h2>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
-              <code className="text-zinc-400">/config/config.yaml</code>
-              <span>{formatBackupTime(configMeta?.backup_ts)}</span>
-              {configDirty && <span className="font-semibold text-amber-400">Unsaved</span>}
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button size="small" variant="outlined" onClick={loadConfig} disabled={configLoading || configBusy}>Reload</Button>
-            <Button size="small" variant="outlined" color="warning" onClick={() => setConfigAction('revert')} disabled={configLoading || configBusy || !configMeta?.has_backup || !configMeta?.revision}>Revert</Button>
-            <Button size="small" variant="contained" onClick={() => setConfigAction('save')} disabled={configLoading || configBusy || !configDirty || configEmpty || !configMeta?.revision}>Save</Button>
-          </div>
-        </div>
-        {configMsg && <Alert severity="success" onClose={() => setConfigMsg('')}>{configMsg}</Alert>}
-        {panelError(configError, engineOffline) && <Alert severity="error">{configError}</Alert>}
-        {configLoading && <LinearProgress sx={{ borderRadius: 1 }} />}
-        <TextField
-          value={configText}
-          onChange={(event) => setConfigText(event.target.value)}
-          fullWidth
-          multiline
-          minRows={10}
-          maxRows={20}
-          disabled={configLoading || configBusy}
-          spellCheck={false}
-          slotProps={{
-            input: {
-              sx: {
-                alignItems: 'flex-start',
-                bgcolor: 'var(--bw-bg)',
-                color: 'var(--bw-text)',
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
-                fontSize: '0.78rem',
-                lineHeight: 1.55,
-                overflowY: 'auto',
-              },
-            },
-          }}
-        />
-      </section>
-
-      <ConfigActionDialog
-        action={configAction}
-        onClose={() => setConfigAction(null)}
-        onConfirm={configAction === 'save' ? handleSaveConfig : handleRevertConfig}
-        busy={configBusy}
-      />
     </div>
   );
 }

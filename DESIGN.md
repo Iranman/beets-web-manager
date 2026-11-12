@@ -202,7 +202,7 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - **Header:** a flat walnut bar closed by a 1px Shelf Edge border. No shadow, blur or gradient hairline: the header follows the Flat Shelf Rule like any panel.
 - **Wordmark bay:** the record mark and wordmark sit in their own bay, closed on the right by a 1px divider from `sm` up, like the card at the front of a record bin.
 - **Tabs:** text tabs (Library, Import, Playlists, Jobs) with a 2px brass underline and a faint brass wash when active.
-- **System menu:** a full-height header button, a gear plus the word "System" (the word from `md` up). It holds Settings, Library Changes and System, then a divider and the app-level pair, Restart app (danger text) and Sign Out. On a page the menu holds (Settings, Library Changes, System), the button wears the active-tab treatment (brass wash and the same 2px brass underline on the header edge), so every screen has a "you are here" cue.
+- **System menu:** a full-height header button, a gear plus the word "System" (the word from `md` up). It holds Settings, Library Changes and System (diagnostics), then a divider and the app-level pair, Restart app (danger text) and Sign Out. On a page the menu holds (Settings, Library Changes, System), the button wears the active-tab treatment (brass wash and the same 2px brass underline on the header edge), so every screen has a "you are here" cue.
 - **Job status:** the Jobs tab carries separate pills for running (Info blue, matching the Jobs page) and failed (red) counts, both shown when both apply; each pill names its count for assistive technology and as a tooltip. Beside the System button, a status line spells the counts out ("2 running", "1 failed") at every width, outside the scrolling tabs, so a phone always shows it. Colour is never the only signal.
 
 ### Page frame
@@ -241,6 +241,11 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - Size the J-card in rem, never in percentages: percentage padding resolves against the row, not the card.
 - Filters and track states are crate tabs (`.crate-tab`) with `aria-pressed`. Figures sit in runs of text, never in stat tiles or pills; state is a word in a state colour.
 - No motion of its own: the Library's sleeve flip stays the app's one authored motion.
+
+### System: diagnostics
+- System is read-only first: one health line in the catalogue style (`.lib-title`, `.lib-catalog`, a `lib-review` pill that reads "All systems OK" in green or "N problems" in brass), the problem sentences, then Integrations and Paths as rows in the walnut crate (name, detail, state word in a state colour). No stat tiles or cards.
+- Reference material (Beets plugins, Environment variables, Beets config) sits behind native `<details>` with a serif summary and a one-line hint. The first screen at 1440x900 shows the whole health picture.
+- Editing Beets' config.yaml and sign-in lives in Settings (`/config#config-yaml`, `/config#security`); System links there.
 
 ## Do's and Don'ts
 

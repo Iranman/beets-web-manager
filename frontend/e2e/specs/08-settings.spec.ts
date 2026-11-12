@@ -25,12 +25,13 @@ test('music format preferences: save, reload, read back, restore', async ({ page
   await expect(opus).not.toBeChecked();
 });
 
-test('environment setting: edit in System, saved to the data dir, shown after reload', async ({ page }) => {
-  await page.goto('/system');
+// BEETS_OUTBOUND_TIMEOUT_SECONDS is in the "Authentication & Security" group, edited in Settings > Security.
+test('environment setting: edit in Settings > Security, saved to the data dir, shown after reload', async ({ page }) => {
+  await page.goto('/config#security');
   const field = page.getByRole('textbox', { name: 'Default: 20', exact: true });
   await field.fill('41');
   const saved = page.waitForResponse((r) => r.request().method() !== 'GET' && r.url().includes('/api/setup'));
-  await page.getByRole('button', { name: 'Save environment' }).click();
+  await page.getByRole('button', { name: 'Save security settings' }).click();
   expect((await saved).ok()).toBeTruthy();
 
   await page.reload();

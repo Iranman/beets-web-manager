@@ -41,6 +41,9 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = app_family_source()
 SETUP_SOURCE = (ROOT / "routes_setup.py").read_text(encoding="utf-8")
 SYSTEM_SOURCE = (ROOT / "frontend" / "src" / "views" / "System.tsx").read_text(encoding="utf-8")
+# Moved from System.tsx: the env editor (password row) and Settings > Security (API token).
+ENV_EDITOR_SOURCE = (ROOT / "frontend" / "src" / "features" / "system" / "EnvEditor.tsx").read_text(encoding="utf-8")
+SECURITY_SOURCE = (ROOT / "frontend" / "src" / "features" / "system" / "SecuritySection.tsx").read_text(encoding="utf-8")
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 README_SOURCE = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -282,13 +285,16 @@ class PasswordValidationWiringTests(unittest.TestCase):
         self.assertIn("raise ValueError", fn)
 
     def test_frontend_shows_password_requirements_and_strength_meter(self):
-        self.assertIn("PASSWORD_REQUIREMENTS", SYSTEM_SOURCE)
-        self.assertIn("PASSWORD_MIN_LENGTH = 16", SYSTEM_SOURCE)
-        self.assertIn("At least ${PASSWORD_MIN_LENGTH} characters", SYSTEM_SOURCE)
-        self.assertNotIn("An uppercase letter", SYSTEM_SOURCE)
-        self.assertNotIn("A special character", SYSTEM_SOURCE)
-        self.assertIn("function PasswordStrengthMeter", SYSTEM_SOURCE)
-        self.assertIn("variable.name === 'BEETS_WEB_PASSWORD'", SYSTEM_SOURCE)
+        self.assertIn("PASSWORD_REQUIREMENTS", ENV_EDITOR_SOURCE)
+        self.assertIn("PASSWORD_MIN_LENGTH = 16", ENV_EDITOR_SOURCE)
+        self.assertIn("At least ${PASSWORD_MIN_LENGTH} characters", ENV_EDITOR_SOURCE)
+        self.assertNotIn("An uppercase letter", ENV_EDITOR_SOURCE)
+        self.assertNotIn("A special character", ENV_EDITOR_SOURCE)
+        self.assertIn("function PasswordStrengthMeter", ENV_EDITOR_SOURCE)
+        self.assertIn("variable.name === 'BEETS_WEB_PASSWORD'", ENV_EDITOR_SOURCE)
+        # The password is in the "Authentication & Security" section, edited only in Settings > Security.
+        self.assertIn("section === SECURITY_SECTION", SECURITY_SOURCE)
+        self.assertIn("section !== SECURITY_SECTION", SYSTEM_SOURCE)
 
 
 class AuthTokenAutoGenerationTests(unittest.TestCase):
@@ -458,9 +464,11 @@ class FrontendIntegrationStatusUiTests(unittest.TestCase):
         self.assertNotIn("Promise.all(", fn)
 
     def test_regenerate_token_shown_exactly_once_then_masked(self):
-        self.assertIn("function AuthTokenDialog", SYSTEM_SOURCE)
-        self.assertIn("it will not be shown again", SYSTEM_SOURCE)
-        self.assertIn("setRevealedToken(null)", SYSTEM_SOURCE)
+        self.assertIn("function AuthTokenDialog", SECURITY_SOURCE)
+        self.assertIn("it will not be shown again", SECURITY_SOURCE)
+        self.assertIn("setRevealedToken(null)", SECURITY_SOURCE)
+        self.assertIn("Regenerate API token?", SECURITY_SOURCE)
+        self.assertNotIn("regenerateAuthToken", SYSTEM_SOURCE)
 
 
 class ReadmeDocumentationTests(unittest.TestCase):

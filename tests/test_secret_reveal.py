@@ -30,7 +30,9 @@ except ImportError:  # pragma: no cover
     from tests._app_family import patch_app_family  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-SYSTEM_SOURCE = (ROOT / "frontend" / "src" / "views" / "System.tsx").read_text(encoding="utf-8")
+# The environment editor (secret reveal, edit buffer, save) moved from System.tsx to its own
+# component, mounted by System and by Settings > Security.
+SYSTEM_SOURCE = (ROOT / "frontend" / "src" / "features" / "system" / "EnvEditor.tsx").read_text(encoding="utf-8")
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 
@@ -428,7 +430,7 @@ class RevealAuthenticationTests(unittest.TestCase):
 
 
 class FrontendWiringTests(unittest.TestCase):
-    """Source-level assertions that System.tsx keeps viewing and editing
+    """Source-level assertions that EnvEditor.tsx keeps viewing and editing
     state genuinely separate, and never persists a revealed value anywhere
     but ephemeral component state."""
 
