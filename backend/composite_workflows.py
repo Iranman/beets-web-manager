@@ -210,6 +210,99 @@ def _rollback_conflict(operation_id: str) -> Dict[str, Any]:
             "error": "The transaction changed state during rollback; reload and check it."}
 
 
+#: Metadata key on a step transaction whose Undo belongs to another (outer)
+#: transaction, e.g. the repair and relocation rows of an album attach (#555).
+UNDO_OWNER_KEY = "undo_owner_transaction_id"
+
+
+def undo_owner_reason(owner: str) -> str:
+    return f"This step is part of a larger change; Undo it from transaction {owner}, which reverses the whole change."
+
+
+def undo_owner_refusal(tx: Dict[str, Any], undo_owner: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Refuse a rollback of a step row unless its owning transaction runs it."""
+    owner = (tx.get("metadata") or {}).get(UNDO_OWNER_KEY)
+    if not owner or owner == undo_owner:
+        return None
+    return {"ok": False, "code": "undo_owned_elsewhere", "operation_id": tx.get("id"),
+            "status": tx.get("status"), "mutated": False, "undo_transaction_id": owner,
+            "error": undo_owner_reason(owner)}
+
+
+def _owned_steps(st: TransactionStore, owner_id: str) -> Dict[str, List[str]]:
+    """{mutation_family: [operation ids]} of every row whose Undo ``owner_id`` owns."""
+    found: Dict[str, List[str]] = {}
+    offset = 0
+    while True:
+        # The id is in the metadata the query searches; the exact key is re-checked.
+        rows, total = st.list(query=owner_id, limit=500, offset=offset)
+        for row in rows:
+            meta = st.get(row["id"]).get("metadata") or {}
+            if meta.get(UNDO_OWNER_KEY) == owner_id:
+                found.setdefault(_s(meta.get("mutation_family")), []).append(row["id"])
+        offset += len(rows)
+        if not rows or offset >= total:
+            return found
+
+
+def rollback_album_attach(
+    owner_id: str,
+    repair_id: Optional[str],
+    relocation_id: Optional[str],
+    adapter: Optional[BeetsAdapter] = None,
+    store: Optional[TransactionStore] = None,
+) -> Dict[str, Any]:
+    """Undo an album attach-recording from its audit row (#555 item 1): the
+    relocation is moved back first, then the repair's before-state is
+    restored, each through its own executor (locks, CAS claim, rollback
+    request, verification). Stops at the first step that does not finish, so
+    the repair is never restored over files still at the relocated paths. A
+    retry skips steps already Rolled Back.
+
+    The step ids recorded on the audit row are merged with every row that
+    names ``owner_id`` as its Undo owner, so a step whose id never reached
+    the audit row (a crash) is still undone, never orphaned."""
+    st = _get_store(store)
+    done: List[str] = []
+    steps = _owned_steps(st, owner_id)
+    relocations = set(steps.get(ALBUM_RELOCATION_FAMILY, [])) | ({relocation_id} if relocation_id else set())
+    repairs = set(steps.get(ALBUM_MB_TRACK_REPAIR_FAMILY, [])) | ({repair_id} if repair_id else set())
+    if len(relocations) > 1 or len(repairs) > 1:
+        return {"ok": False, "done": done, "code": "attach_steps_ambiguous",
+                "error": f"This attach owns more steps than expected (moves {sorted(relocations)}, repairs "
+                         f"{sorted(repairs)}); nothing was restored. Check them by hand."}
+    relocation_id = next(iter(relocations), None)
+    repair_id = next(iter(repairs), None)
+    if relocation_id:
+        rel = st.get(relocation_id)
+        rel_meta = rel.get("metadata") or {}
+        if rel.get("status") == "Rolled Back":
+            pass
+        elif (rel_meta.get("engine_result") or {}).get("after"):
+            res = rollback_album_relocation(relocation_id, adapter=adapter, store=st, undo_owner=owner_id)
+            if not res.get("ok"):
+                return {"ok": False, "step": relocation_id, "done": done, "code": res.get("code"),
+                        "error": f"Moving the album back failed ({res.get('code') or 'error'}); the repair was "
+                                 "not restored."}
+            done.append(relocation_id)
+        elif rel.get("status") not in ("Pending", "Preview", "Approved", "Cancelled", "Failed"):
+            # Running / Recovery Required with no recorded result: whether it
+            # moved is unknown, so nothing is restored over it. (A Failed one
+            # without a result was refused by Beets: nothing moved.)
+            return {"ok": False, "step": relocation_id, "done": done, "code": "relocation_outcome_unknown",
+                    "error": f"Whether album move {relocation_id} ran is unknown (status {rel.get('status')}); "
+                             "nothing was restored. Check the album's files."}
+    if repair_id:
+        rep = st.get(repair_id)
+        if rep.get("status") != "Rolled Back" and (rep.get("metadata") or {}).get("engine_result"):
+            res = rollback_album_mb_track_repair(repair_id, adapter=adapter, store=st, undo_owner=owner_id)
+            if not res.get("ok"):
+                return {"ok": False, "step": repair_id, "done": done, "code": res.get("code"),
+                        "error": f"Restoring the album's metadata failed ({res.get('code') or 'error'})."}
+            done.append(repair_id)
+    return {"ok": True, "done": done}
+
+
 def _apply_locks(family: str, meta: Dict[str, Any], operation_id: str):
     """The resource locks an apply holds for the whole snapshot -> write ->
     verify sequence (H3), the same keys its rollback takes (``_family_lock_keys``).
@@ -3440,6 +3533,7 @@ def plan_album_mb_track_repair(
     ad = adapter or beets_adapter
     st = _get_store(store)
     payload = dict(payload_or_album_id if isinstance(payload_or_album_id, dict) else kwargs)
+    undo_owner = _s(payload.pop(UNDO_OWNER_KEY, "")).strip()
 
     aid = int(payload.get("album_id") or payload.get("aid") or (payload_or_album_id if isinstance(payload_or_album_id, (int, str)) and str(payload_or_album_id).isdigit() else 0))
     if not aid:
@@ -3508,8 +3602,10 @@ def plan_album_mb_track_repair(
         # plan does not use; its before_state is restored by
         # rollback_album_mb_track_repair and exposed as rollback.allowed.
         rollback_available=False,
+        **({"rollback_reason": undo_owner_reason(undo_owner)} if undo_owner else {}),
         metadata={"album_id": aid, "mutation_family": ALBUM_MB_TRACK_REPAIR_FAMILY,
-                  "before_state": before, "payload": payload, "plan": plan},
+                  "before_state": before, "payload": payload, "plan": plan,
+                  **({UNDO_OWNER_KEY: undo_owner} if undo_owner else {})},
     )
     return {
         "ok": True,
@@ -3616,8 +3712,12 @@ def rollback_album_mb_track_repair(
     operation_id: str,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    undo_owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Restore every album and track value captured at plan time.
+
+    A repair that is a step of an album attach is undone only by the attach's
+    audit row (``undo_owner``, #555); a direct rollback is refused.
 
     Follows the same contract as the other composite rollbacks: family match,
     a complete before-state, the apply's resource locks, a CAS claim,
@@ -3635,6 +3735,9 @@ def rollback_album_mb_track_repair(
     if meta.get("mutation_family") not in (None, ALBUM_MB_TRACK_REPAIR_FAMILY):
         return {"ok": False, "code": "not_applied", "operation_id": operation_id,
                 "error": "Not a MusicBrainz track repair transaction."}
+    owned = undo_owner_refusal(tx, undo_owner)
+    if owned:
+        return owned
     before = meta.get("before_state")
     if not isinstance(before, dict) or not (before.get("album") or before.get("items")):
         return {"ok": False, "code": "rollback_unavailable", "operation_id": operation_id,
@@ -4349,6 +4452,7 @@ def plan_album_relocation(
     mode: str = "rename",
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    undo_owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Preview moving an album to where Beets' path templates put it
     ("rename" or "move" to library): records every track's current path,
@@ -4379,8 +4483,10 @@ def plan_album_relocation(
         changes=[{"type": "album_relocation", "album_id": aid, "mode": mode, "old_paths": paths,
                   "old_artpath": before["artpath"], "old_folders": before["folders"],
                   "operations": before["operations"], "art_operation": before["art_operation"]}],
-        rollback_available=True,
-        metadata={"mutation_family": ALBUM_RELOCATION_FAMILY, "album_id": aid, "mode": mode, "before": before},
+        rollback_available=not undo_owner,
+        **({"rollback_reason": undo_owner_reason(undo_owner)} if undo_owner else {}),
+        metadata={"mutation_family": ALBUM_RELOCATION_FAMILY, "album_id": aid, "mode": mode, "before": before,
+                  **({UNDO_OWNER_KEY: undo_owner} if undo_owner else {})},
     )
     return {"ok": True, "operation_id": tx["id"], "token": tx["id"], "status": "Preview",
             "album_id": aid, "mode": mode, "before": before}
@@ -4570,11 +4676,13 @@ def rollback_album_relocation(
     operation_id: str,
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    undo_owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Move every track and the cover back to where they were, through
     Beets. Beets refuses -- and changes nothing -- when the album changed
     since (moved again, tracks added or removed, cover changed, album gone)
-    or an old location is occupied; it never overwrites."""
+    or an old location is occupied; it never overwrites. A move that is a
+    step of an album attach is undone only by its audit row (#555)."""
     ad = adapter or beets_adapter
     st = _get_store(store)
     try:
@@ -4583,6 +4691,9 @@ def rollback_album_relocation(
         return {"ok": False, "code": "not_found", "error": "Transaction not found"}
     meta = tx.get("metadata") or {}
     engine = meta.get("engine_result") or {}
+    owned = undo_owner_refusal(tx, undo_owner)
+    if owned:
+        return owned
     if meta.get("mutation_family") != ALBUM_RELOCATION_FAMILY or not engine.get("after"):
         return {"ok": False, "code": "not_applied", "error": "No applied album move to roll back."
                 + (f" {RELOCATION_UNKNOWN_ADVICE}." if tx.get("status") == "Recovery Required" else "")}
@@ -4679,14 +4790,27 @@ def relocate_album(
     mode: str = "rename",
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
+    undo_owner: Optional[str] = None,
+    on_planned: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Rename / move one album as one audited, reversible transaction: plan,
-    record the operator's request as the approval, apply through Beets."""
+    record the operator's request as the approval, apply through Beets.
+    ``undo_owner``: the outer transaction whose Undo reverses this move (#555).
+    ``on_planned(operation_id)`` runs before anything moves, so the owner
+    records this step first; if it raises, the plan is cancelled unapplied."""
     st = _get_store(store)
-    plan = plan_album_relocation(album_id=int(album_id), mode=mode, adapter=adapter, store=st)
+    plan = plan_album_relocation(album_id=int(album_id), mode=mode, adapter=adapter, store=st,
+                                 undo_owner=undo_owner)
     if not plan.get("ok"):
         return {"ok": False, "error": plan.get("error") or "Relocation plan rejected", "code": plan.get("code")}
     op_id = plan["operation_id"]
+    if on_planned is not None:
+        try:
+            on_planned(op_id)
+        except Exception:
+            st.transition(op_id, "Preview", "Cancelled",
+                          append_logs=["The owning transaction could not record this move; nothing was moved."])
+            raise
     from backend.resource_locks import approve_preview, cancel_unclaimed_on_error
     if approve_preview(st, op_id, f"operator album {plan.get('mode') or mode}") is None:
         return {"ok": False, "code": "not_preview", "operation_id": op_id,

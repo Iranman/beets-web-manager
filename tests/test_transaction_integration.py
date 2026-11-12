@@ -49,7 +49,8 @@ class TransactionIntegrationSourceTests(unittest.TestCase):
         start = source.index('@app.post("/api/transactions/<transaction_id>/rollback")')
         end = source.index('@app.get("/api/transactions/<transaction_id>/export")', start)
         route = source[start:end]
-        self.assertIn('op.get("type") != "metadata_restore"', route)
+        self.assertIn('op.get("type") not in _LOCAL_ROLLBACK_OPS', route)
+        self.assertIn('_LOCAL_ROLLBACK_OPS = frozenset({"metadata_restore"', source)
         self.assertIn('_run_item_metadata_restore(item_id, fields, log', route)
         self.assertIn('status = "Rolled Back" if failed_count == 0 else "Partially Rolled Back"', route)
         self.assertIn('metadata={"transaction": False, "transaction_id": transaction_id', route)

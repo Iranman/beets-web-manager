@@ -296,8 +296,11 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self.assertEqual(tx["status"], "Completed")
         self.assertEqual(tx["operation_type"], "MusicBrainz Match")
         self.assertTrue(tx["rollback"]["available"])
-        self.assertEqual(tx["rollback"]["operations"][0]["type"], "recording_id_restore")
-        self.assertEqual(tx["rollback"]["operations"][0]["fields"]["mb_trackid"], "")
+        # #555: an album attach's Undo rolls back its own steps (the repair
+        # row here; the faked relocation recorded no transaction).
+        self.assertEqual(tx["rollback"]["operations"][0]["type"], "album_attach_undo")
+        self.assertEqual(tx["rollback"]["operations"][0]["repair_operation_id"], "txn_fake_1")
+        self.assertEqual(self._track_repair_payloads[-1]["undo_owner_transaction_id"], audit_id)
 
         # Wave 24 review section 31: the forward attach path mutates only
         # through the engine transaction boundary now -- assert the engine
@@ -495,6 +498,8 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
     # ---- undo ------------------------------------------------------------
 
     def test_undo_restores_previous_identity_values(self):
+        self.attach_undo = self._patch(mock.patch.object(
+            APP.composite_workflows, "rollback_album_attach", return_value={"ok": True, "done": ["txn_fake_1"]}))
         resp = self._post(9001, {"mb_trackid": RECORDING_ID, "mode": "safe"})
         body = resp.get_json()
         job = _wait_job(body["job_id"])
@@ -510,11 +515,9 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
 
         tx = APP.transactions.get(audit_id)
         self.assertEqual(tx["status"], "Rolled Back")
-        self.assertTrue(self.item_metadata_calls)
-        item_id, fields, kwargs = self.item_metadata_calls[-1]
-        self.assertEqual(item_id, 9001)
-        self.assertEqual(fields["mb_trackid"], "")
-        self.assertTrue(kwargs.get("force_write_tags"))
+        # #555: the audit row undoes the attach's recorded steps
+        # (tests/test_attach_undo_owner_555.py proves the real restore).
+        self.attach_undo.assert_called_once_with(audit_id, "txn_fake_1", None)
 
     # ---- serialization safety --------------------------------------------
 

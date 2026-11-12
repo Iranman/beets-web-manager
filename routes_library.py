@@ -667,6 +667,15 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
         }, counts={"items": 1, "changes": 1})
         audit_id = tx["id"]
         actor = _transaction_user_label()
+        album_undo: Dict[str, Any] = {"type": "album_attach_undo", "item_id": iid}
+
+        def _record_album_attach_undo() -> None:
+            # Replaces the recording_id_restore op: an album attach is undone
+            # by rolling back its own steps (relocation, then repair).
+            transactions.update(audit_id, rollback={
+                "available": True, "operations": [dict(album_undo)],
+                "reason": "Moves the album back and restores the metadata captured before the attach.",
+            }, metadata={"attach_steps": {k: v for k, v in album_undo.items() if k.endswith("_operation_id")}})
 
         def _do(log, cancel_event=None):
             transactions.update(audit_id, status="Running")
@@ -725,19 +734,28 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
                                 "reason": f"Undo this attach from its Metadata Update transaction {inner_id}.",
                             }, metadata={"undo_transaction_id": inner_id})
                     else:
+                        # #555 item 1: this audit row owns the attach's Undo;
+                        # the repair and relocation rows are its steps.
+                        repair_payload[composite_workflows.UNDO_OWNER_KEY] = audit_id
                         p_res = composite_workflows.plan_album_mb_track_repair(repair_payload)
                         if p_res.get("ok"):
                             op_id = p_res.get("operation_id")
                             if op_id:
+                                album_undo["repair_operation_id"] = op_id
+                                _record_album_attach_undo()
                                 a_res = composite_workflows.apply_album_mb_track_repair(op_id, write_tags=True)
+                                if a_res.get("ok") or a_res.get("mutated"):
+                                    # Something was written: a Failed attach
+                                    # stays undoable from this row.
+                                    transactions.update(audit_id, metadata={"engine_result": {"mutated": True}})
                                 if a_res.get("ok"):
                                     applied = True
                                 else:
                                     engine_error = a_res.get("error") or "apply_album_mb_track_repair failed"
                             else:
-                                # No operation_id with ok=True means there was
-                                # nothing to change -- not a failure.
-                                applied = True
+                                # A successful plan always has an operation id;
+                                # without one there is no step to undo (#555).
+                                engine_error = "plan_album_mb_track_repair returned no operation id"
                         else:
                             engine_error = p_res.get("error") or "plan_album_mb_track_repair rejected"
                 except AttachRecordingCancelled:
@@ -754,7 +772,14 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
                     raise RuntimeError(f"Engine track repair transaction failed, refusing local fallback mutation: {safe_engine_error}")
 
                 if aid > 0:
-                    relocate_result = composite_workflows.relocate_album(aid, mode="rename")
+                    def _record_relocation(op_id: str) -> None:
+                        # Recorded before Beets moves anything (#555 QA): a
+                        # crash mid-move still leaves the step on this row.
+                        album_undo["relocation_operation_id"] = op_id
+                        _record_album_attach_undo()
+
+                    relocate_result = composite_workflows.relocate_album(
+                        aid, mode="rename", undo_owner=audit_id, on_planned=_record_relocation)
                     _require_attach_stage_success(relocate_result, "attach recording relocation")
 
                 # Truthfulness: never claim the candidate-expected identity

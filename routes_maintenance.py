@@ -964,7 +964,8 @@ def _item_file_replacement_response(fn, transaction_id, *, rollback_family=None)
         return jsonify(body), status
     if rollback_family is not None and not res.get("ok") and res.get("status") == "Recovery Required":
         res = {**res, "mutated": True}  # #228 F3: it ran, then failed verification
-    refused = ("not_approved", "already_applied", "rollback_not_eligible", "rollback_deferred", "conflict")
+    refused = ("not_approved", "already_applied", "rollback_not_eligible", "rollback_deferred", "conflict",
+               "undo_owned_elsewhere")
     if rollback_family == composite_workflows.ALBUM_RELOCATION_FAMILY:
         refused += composite_workflows.RELOCATION_ROLLBACK_REFUSALS  # the album changed since
     status_code = 200 if res.get("ok") else (409 if res.get("code") in refused else 400)
@@ -1087,7 +1088,7 @@ FOLDER_CLEANUP_FAMILY = "folder_cleanup_v1"
 
 
 #: Operation types the local (non-engine) rollback below can restore.
-_LOCAL_ROLLBACK_OPS = frozenset({"metadata_restore", "recording_id_restore"})
+_LOCAL_ROLLBACK_OPS = frozenset({"metadata_restore", "recording_id_restore", "album_attach_undo"})
 
 
 def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
@@ -1116,6 +1117,11 @@ def rollback_eligibility(tx: Dict[str, Any]) -> Dict[str, Any]:
 
     def refused(code: str, reason: str) -> Dict[str, Any]:
         return {"allowed": False, "code": code, "reason": reason}
+
+    owner = meta.get(composite_workflows.UNDO_OWNER_KEY)
+    if owner:
+        # A step of a larger change (#555): only its owning row offers Undo.
+        return refused("undo_owned_elsewhere", composite_workflows.undo_owner_reason(owner))
 
     if meta.get("mutation_family") == RECOVER_IMPORT_FAMILY:
         # recover_import_v1 undoes a Recover My Uploads singleton import. Its
@@ -1376,10 +1382,7 @@ def api_transaction_rollback(transaction_id):
             "rollback_available": False,
         }), 409
 
-    unsupported = [
-        op for op in operations
-        if op.get("type") != "metadata_restore" and op.get("type") != "recording_id_restore"
-    ]
+    unsupported = [op for op in operations if op.get("type") not in _LOCAL_ROLLBACK_OPS]
     if unsupported:
         return jsonify({
             "ok": False,
@@ -1421,7 +1424,13 @@ def api_transaction_rollback(transaction_id):
                     failed_count += 1
                     log.append("  [rollback] Missing item id; skipped operation.")
                     continue
-                if op.get("type") == "recording_id_restore":
+                if op.get("type") == "album_attach_undo":
+                    res = composite_workflows.rollback_album_attach(
+                        transaction_id, op.get("repair_operation_id"), op.get("relocation_operation_id"))
+                    restored = bool(res.get("ok"))
+                    log.append(f"  [rollback] Album attach undo: steps rolled back {res.get('done') or []}"
+                               + ("" if restored else f"; stopped ({res.get('code')}): {res.get('error')}"))
+                elif op.get("type") == "recording_id_restore":
                     restored = _run_item_recording_id_restore(item_id, fields, log, cancel_event=cancel_event)
                 else:
                     restored = _run_item_metadata_restore(item_id, fields, log, cancel_event=cancel_event)

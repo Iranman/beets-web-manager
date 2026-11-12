@@ -547,9 +547,8 @@ class SubprocessOutcomeTests(_AttachIntegrityTestCase):
                 self.assertNotIn("rollback-secret", rendered)
 
     def test_rollback_mbsync_failure_with_prior_recording_id_fails_restore(self):
-        # Only reachable when the rollback target mb_trackid is non-empty --
-        # attach a second recording ID on top of an item that already had
-        # one, then fail mbsync while rolling the second attach back.
+        # Attach a second recording ID on top of an item that already had
+        # one, then fail the album attach Undo (#555: its steps' rollbacks).
         iid = 42001
         self.add_item(iid, recording_id=SECOND_RECORDING_ID, release_id=SECOND_RELEASE_ID, rgid=SECOND_RGID,
                        mb_trackid=PRIOR_RECORDING_ID, mb_albumid=RELEASE_ID, mb_releasegroupid=RGID)
@@ -561,15 +560,17 @@ class SubprocessOutcomeTests(_AttachIntegrityTestCase):
         self.assertEqual(job.status, "success")
 
         tx = APP.transactions.get(audit_id)
-        self.assertEqual(tx["rollback"]["operations"][0]["fields"]["mb_trackid"], PRIOR_RECORDING_ID)
+        self.assertEqual(tx["rollback"]["operations"][0]["type"], "album_attach_undo")
 
-        self.rollback_metadata_results[iid] = {"ok": False, "error": "identity restore failed"}
+        undo = self._patch(mock.patch.object(APP.composite_workflows, "rollback_album_attach", return_value={
+            "ok": False, "done": [], "error": "identity restore failed"}))
         rb_resp = self.client.post(f"/api/transactions/{audit_id}/rollback")
         _wait_job(rb_resp.get_json()["job_id"])
         tx_after = APP.transactions.get(audit_id)
         self.assertNotEqual(tx_after["status"], "Rolled Back")
         self.assertEqual(self._stages_called_for(iid), [])
-        self.assertTrue(any(call[0] == iid and call[2].get("force_write_tags") for call in self.item_metadata_calls))
+        self.assertEqual(undo.call_count, 1)
+        self.assertIn("identity restore failed", json.dumps(tx_after["logs"]))
 
 
 # ── Step 14: persisted-state verification ─────────────────────────────────────
@@ -632,12 +633,15 @@ class PersistedStateVerificationTests(_AttachIntegrityTestCase):
         tx = APP.transactions.get(audit_id)
         self.assertEqual((tx["status"], tx["metadata"]["engine_result"]["mutated"]), ("Failed", True))
 
+        # #555: the album attach is undone by rolling back its recorded steps.
+        repair_id = tx["metadata"]["attach_steps"]["repair_operation_id"]
+        undo = self._patch(mock.patch.object(APP.composite_workflows, "rollback_album_attach",
+                                             return_value={"ok": True, "done": [repair_id]}))
         rb = self.client.post(f"/api/transactions/{audit_id}/rollback")
         self.assertEqual(rb.status_code, 200, rb.get_json())
         self.assertEqual(_wait_job(rb.get_json()["job_id"]).status, "success")
         self.assertEqual(APP.transactions.get(audit_id)["status"], "Rolled Back")
-        restored = [fields for item_id, fields, _kw in self.item_metadata_calls if item_id == iid]
-        self.assertEqual([f["mb_trackid"] for f in restored], [(before or "").lower()])
+        undo.assert_called_once_with(audit_id, repair_id, None)
 
     def test_c_relocation_dict_failure_fails_before_completed_status(self):
         iid = 43004
@@ -652,6 +656,10 @@ class PersistedStateVerificationTests(_AttachIntegrityTestCase):
         tx = APP.transactions.get(audit_id)
         self.assertEqual(tx["status"], "Failed")
         self.assertEqual(self.relocate_calls[-1][0], 77)
+        # #555: the move is a step owned by this audit row, and the repair
+        # already ran, so the Failed attach stays undoable from here.
+        self.assertEqual(self.relocate_calls[-1][1].get("undo_owner"), audit_id)
+        self.assertIs(tx["metadata"]["engine_result"]["mutated"], True)
         rendered = json.dumps(tx)
         self.assertNotIn("Recording ID attached and item synced/moved.", rendered)
     def test_c_different_release_id_persisted_completes_but_audits_truthfully(self):
