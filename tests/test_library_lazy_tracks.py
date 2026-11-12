@@ -35,12 +35,13 @@ class LibraryLazyTracksTests(unittest.TestCase):
         # The DiscographyPanel assertions that used to live here are gone with
         # the panel itself: it was never imported or rendered, and its backend
         # album-completeness endpoints survive untouched for future clients.
-        self.assertIn("Track rows are deferred in the fast library payload.", library_page)
-        self.assertIn("No passive issue evidence in the current library summary.", library_page)
-        self.assertIn("function NextRepairPanel", library_page)
-        self.assertIn("albumSuggestedStatus", library_page)
-        self.assertIn("compareRepairRows", library_page)
-        self.assertIn("Show issue group", library_page)
+        # The Library is a browse-only overview: no repair focal block, issue filters, review notes
+        # or fix links. The album back cover prints the lazily loaded tracklist instead.
+        self.assertIn("Side A", library_page)
+        for removed in ("function NextRepairPanel", "albumSuggestedStatus", "compareRepairRows",
+                        "Show issue group", "No passive issue evidence", "Manage on Import",
+                        "Missing MusicBrainz IDs"):
+            self.assertNotIn(removed, library_page)
 
 
 if __name__ == "__main__":

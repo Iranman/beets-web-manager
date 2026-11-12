@@ -57,13 +57,14 @@ describe('Library cover-art grid', () => {
     expect(img.getAttribute('src')).toMatch(/^\/api\/albums\/5\/art/);
     // Title sits under the cover in document order.
     expect(img.compareDocumentPosition(within(okc).getByText('OK Computer')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(okc).getByRole('button', { name: 'View details' })).toBeTruthy();
-    expect(within(okc).getByRole('button', { name: 'Remove from Library…' })).toBeTruthy();
+    // Browse-only: the sleeve opens the album, and the tile carries no action buttons.
+    expect(within(okc).getByRole('button', { name: 'Open OK Computer' })).toBeTruthy();
+    expect(within(okc).getAllByRole('button')).toHaveLength(1);
 
     expect(within(loose).queryByRole('img')).toBeNull();
     expect(within(loose).getByTestId('sleeve-placeholder')).toBeTruthy();
     expect(within(loose).getByText('No cover art')).toBeTruthy();
-    expect(within(loose).getByRole('button', { name: 'View details' })).toBeTruthy();
+    expect(within(loose).getByRole('button', { name: 'Open Loose Folder' })).toBeTruthy();
   });
 
   it('falls back to the sleeve when the cover image fails to load', async () => {

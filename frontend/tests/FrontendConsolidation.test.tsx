@@ -22,8 +22,6 @@ import { classifyHttpFailure, fetchFailure } from '../src/lib/api';
 import { errorMessage } from '../src/lib/errors';
 import { formatScanTime, normaliseEpochSeconds } from '../src/lib/dates';
 import Jobs from '../src/views/Jobs';
-import { albumPrimaryAction } from '../src/views/Library';
-import type { LibraryAlbum } from '../src/types/api';
 
 const mocked = vi.mocked(client);
 const RGID = '11111111-2222-3333-4444-555555555555';
@@ -75,10 +73,6 @@ describe('Find Music: Lidarr release-group rows (QA M1)', () => {
 });
 
 describe('Old Clean links reach their Jobs panel (QA L1)', () => {
-  const album = (fields: Partial<LibraryAlbum>) => ({
-    id: 1, album: 'A', albumartist: 'B', track_count: 1, tracks: [{ id: 1, ok: true, missing: false, mb_trackid: RGID }], mb_albumid: RELEASE_ID, ...fields,
-  }) as LibraryAlbum;
-
   function stubJobsApi() {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(
       JSON.stringify(String(input).endsWith('/api/jobs') ? { ok: true, jobs: [] } : { ok: true, groups: [] }),
@@ -86,11 +80,6 @@ describe('Old Clean links reach their Jobs panel (QA L1)', () => {
     ))));
   }
   const detailsOf = (name: string) => screen.getByText(name).closest('details') as HTMLDetailsElement;
-
-  it('Library actions link straight to the panel', () => {
-    expect(albumPrimaryAction(album({ mb_duplicate_recording_id_count: 2 }), new Map())?.path).toBe('/jobs?tab=library-db');
-    expect(albumPrimaryAction(album({ not_imported: 1, not_imported_is_extra: true }), new Map())?.path).toBe('/jobs?tab=album-tracks');
-  });
 
   function spyOnScroll() {
     const scrollIntoView = vi.fn();

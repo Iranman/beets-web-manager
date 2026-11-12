@@ -100,7 +100,7 @@ export const theme = createTheme({
     fontSize: 13,
     h1: { fontFamily: displayFont, fontSize: '1.5rem', fontWeight: 600, letterSpacing: 0 },
     h2: { fontFamily: displayFont, fontSize: '1.22rem', fontWeight: 600, letterSpacing: 0 },
-    h3: { fontSize: '1rem', fontWeight: 650, letterSpacing: 0 },
+    h3: { fontSize: '1rem', fontWeight: 600, letterSpacing: 0 },
   },
   components: {
     MuiCssBaseline: {
@@ -189,7 +189,7 @@ export const theme = createTheme({
         root: {
           borderRadius: 6,
           textTransform: 'none',
-          fontWeight: 650,
+          fontWeight: 600,
           // Labels stay on one line at phone widths (#607); containers wrap instead.
           whiteSpace: 'nowrap',
           minHeight: 32,
