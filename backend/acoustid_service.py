@@ -550,6 +550,79 @@ def same_recording_proof(drop_path: str, keep_path: str, expected_recording_id: 
             "keep_status": _s(getattr(keep_ev.status, "value", keep_ev.status))}
 
 
+_RAW_FP_CACHE_DIR = METADATA_CACHE_ROOT / "fingerprint_raw"
+
+
+def _fpcalc_raw(file_path: str) -> ProviderResult:
+    """``fpcalc -raw -json`` for one file, with the same typed outcomes as
+    helpers_mb.acoustid_lookup_outcome's fpcalc step. Local only, no network.
+    ponytail: mirrors that step rather than sharing it (helpers_mb is being
+    edited elsewhere); extract one runner once that work lands."""
+    import shutil, subprocess
+    fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
+    if not Path(fpcalc).exists():
+        return ProviderResult("fpcalc", ProviderOutcome.UNAVAILABLE, data=[], message="fpcalc is not installed")
+    try:
+        r = subprocess.run([fpcalc, "-raw", "-json", file_path], capture_output=True, text=True, timeout=30)
+        if r.returncode in (126, 127) and not r.stdout.strip():
+            return ProviderResult("fpcalc", ProviderOutcome.UNAVAILABLE, data=[], message="fpcalc could not be run")
+        # fpcalc may exit non-zero yet print a valid fingerprint (QA 0.4.0 B2): trust the JSON.
+        fp_data = json.loads(r.stdout) if r.stdout.strip() else {}
+    except subprocess.TimeoutExpired:
+        return ProviderResult("fpcalc", ProviderOutcome.TRANSIENT_ERROR, data=[], message="fpcalc timed out",
+                              evidence={"fingerprintable": False})
+    except OSError:
+        return ProviderResult("fpcalc", ProviderOutcome.UNAVAILABLE, data=[], message="fpcalc could not be run")
+    except ValueError:
+        fp_data = {}
+    fp = fp_data.get("fingerprint") if isinstance(fp_data, dict) else None
+    if not isinstance(fp, list) or not fp or not all(isinstance(v, int) and not isinstance(v, bool) for v in fp):
+        return ProviderResult("fpcalc", ProviderOutcome.UNAVAILABLE, data=[],
+                              message="audio could not be fingerprinted", evidence={"fingerprintable": False})
+    return ProviderResult("fpcalc", ProviderOutcome.CONFIRMED, data=fp)
+
+
+def raw_fingerprint_outcome(file_path: str) -> ProviderResult:
+    """Raw Chromaprint fingerprint for one file, cached on disk by resolved
+    path + size + mtime_ns (same key as the AcoustID file cache). Only a real
+    fingerprint is cached; a missing/failed fpcalc is returned, not cached,
+    and a corrupt cache entry is ignored and recomputed."""
+    path, cache_key = _audio_cache_file_identity(file_path)
+    if not path or not cache_key:
+        return ProviderResult("fpcalc", ProviderOutcome.NO_RESULT, data=[], message="file not readable")
+    cache_path = _RAW_FP_CACHE_DIR / cache_key[:2] / f"{cache_key}.json"
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        if (isinstance(cached, list) and cached
+                and all(isinstance(v, int) and not isinstance(v, bool) for v in cached)):
+            return ProviderResult("fpcalc", ProviderOutcome.CONFIRMED, data=cached, from_cache=True, attempts=0)
+    except (OSError, ValueError):
+        pass
+    result = _fpcalc_raw(str(path))
+    if result.outcome == ProviderOutcome.CONFIRMED:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(result.data), encoding="utf-8")
+        except OSError:
+            pass
+    return result
+
+
+def local_audio_match(path_a: str, path_b: str) -> Dict[str, Any]:
+    """Local fingerprint evidence for ONE pair of files: ``same_audio``,
+    ``different_audio`` or ``inconclusive`` (fpcalc missing/failing included).
+    Supporting evidence for duplicate grouping only -- never an identity and
+    never, alone, a licence to merge or delete (see same_recording_proof).
+    Deliberately one pair per call so no request fingerprints a library."""
+    from backend.matching.duplicate_identity import INCONCLUSIVE, compare_raw_fingerprints
+    fps = [raw_fingerprint_outcome(p) for p in (path_a, path_b)]
+    failed = [r for r in fps if r.outcome != ProviderOutcome.CONFIRMED]
+    if failed:
+        return {"verdict": INCONCLUSIVE, "reason": "fingerprint_unavailable", "message": failed[0].message}
+    verdict, details = compare_raw_fingerprints(fps[0].data, fps[1].data)
+    return {"verdict": verdict, **details}
+
+
 def _acoustid_multi_file(
     audio_files: List[str], max_files: int = 5
 ) -> Dict[str, int]:
