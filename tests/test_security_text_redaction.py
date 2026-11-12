@@ -87,6 +87,26 @@ class SecurityTextRedactionTests(unittest.TestCase):
         self.assert_masked('x?token="QQ\nfake-s21"&keep=1', "x?token=[REDACTED]&keep=1")
         self.assert_masked("x?token=QQ&fake-s22&keep=1#f", "x?token=[REDACTED]&keep=1#f")
 
+    def test_issue_662_raw_segment_before_closing_quote(self):
+        # A second pass may over-mask the closing quote, as it does for '"x?token=QQ"'.
+        for text, expected in (('{"url": "x?token=QQ&fake-s23"}', '{"url": "x?token=[REDACTED]"}'),
+                               ("{'url': 'x?token=QQ&fake-s24'}", "{'url': 'x?token=[REDACTED]'}")):
+            self.assertEqual(redact(text), expected)
+            self.assertNotIn("fake", redact(expected))
+
+    def test_issue_662_unclosed_leading_single_quote_stops_at_line(self):
+        tail = "\nTraceback (most recent call last):\n  File \"x.py\", line 3\nKeyError: 'foo'\nnext"
+        self.assert_masked("password='abc" + tail, "password=[REDACTED]" + tail)
+
+    def test_issue_662_unclosed_query_double_quote_is_bounded(self):
+        tail = '\n  File "x.py", line 3\nnext "y"'
+        self.assert_masked('x?token="unclosed' + tail, "x?token=[REDACTED]" + tail)
+        self.assert_masked('x?token="unclosed\n' + "y" * 5000 + '"', "x?token=[REDACTED]\n" + "y" * 5000 + '"')
+
+    def test_issue_662_query_single_quote_spans_newline(self):
+        self.assert_masked("x?token='QQ\nfake-s25'&keep=1", "x?token=[REDACTED]&keep=1")
+        self.assert_masked("x?token='unclosed\nKeyError: 'foo'\nnext", "x?token=[REDACTED]\nKeyError: 'foo'\nnext")
+
     def test_negotiate_scheme_in_assignment(self):
         self.assert_masked("token=Negotiate fake-s19 tail", "token=[REDACTED] tail")
 
@@ -106,7 +126,8 @@ class SecurityTextRedactionTests(unittest.TestCase):
                      "&token" * 30000, "?" + "a" * 100000, "://a:" + "@" * 100000,
                      "Cookie" * 30000, "x_" * 50000 + "=", "token='\n" * 30000,
                      "token='" + "\\'" * 50000, "?token=\"" + "a\n" * 50000, "?token=x" + "&a" * 50000,
-                     "?token=x" + "&a\"" * 30000):
+                     "?token=x" + "&a\"" * 30000, "?token='" + "a\n" * 50000, "?token=" + "\"a\n" * 30000,
+                     "password='" + "a\n" * 50000 + "'x", "?token=" + "'a" * 50000):
             start = time.perf_counter()
             redact(text)
             self.assertLess(time.perf_counter() - start, 1.0)

@@ -67,11 +67,19 @@ class DiagnosticRedactionTests(unittest.TestCase):
                      'password="FAKEX\nFAKEY" tail', 'client_secret: "-----BEGIN\nFAKEX\n-----END"',
                      # #660
                      "password='FAKEX\nFAKEY'\nnext", "token=Negotiate FAKEX tail", "api_key: Digest FAKEX",
-                     'x?token="FAKEX\nFAKEY"&keep=1', "x?token=FAKEX&FAKEY&keep=1"):
+                     'x?token="FAKEX\nFAKEY"&keep=1', "x?token=FAKEX&FAKEY&keep=1",
+                     # #662
+                     '{"url": "x?token=FAKEX&FAKEY"}', "x?token='FAKEX\nFAKEY'&keep=1"):
             for real, redact in self.redactors.items():
                 out = redact(text)
                 self.assertNotIn("FAKE", out, (real, text))
                 self.assertEqual(redact(out), out, (real, text))
+
+    def test_issue_662_unclosed_quote_keeps_traceback(self):
+        tail = "\nTraceback (most recent call last):\nKeyError: 'foo'\nnext"
+        for real, redact in self.redactors.items():
+            out = redact("password='FAKEX" + tail).replace("[REDACTED]", "[redacted]")
+            self.assertEqual(out, "password=[redacted]" + tail, real)
 
     def test_crafted_input_is_linear(self):
         for n in (100_000, 1_000_000):
