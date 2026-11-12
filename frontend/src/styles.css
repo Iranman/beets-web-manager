@@ -207,6 +207,9 @@ body {
 :root {
   /* Long horizontal grain: stretched fractal noise, low alpha, so art and text stay the focus. */
   --wood-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='240'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.0025 0.12' numOctaves='3' seed='11' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.22 0 0 0 0 0.14 0 0 0 0 0.08 0 0 0 0.55 -0.12'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+  /* Old card stock for the back cover: fibre tooth plus slow foxing blotches, printed in brown. */
+  --cardstock-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='t'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' seed='7' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.36 0 0 0 0 0.25 0 0 0 0 0.14 0 0 0 0.5 -0.12'/%3E%3C/filter%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.012' numOctaves='2' seed='4' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.45 0 0 0 0 0.32 0 0 0 0 0.16 0 0 0 0.9 -0.42'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23f)'/%3E%3Crect width='100%25' height='100%25' filter='url(%23t)'/%3E%3C/svg%3E");
+  --wear-speckle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='w'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.55' numOctaves='2' seed='9' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 3 0 0 0 -1.35'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23w)'/%3E%3C/svg%3E");
   /* Fine paper tooth for sleeves. */
   --paper-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.95 0 0 0 0 0.9 0 0 0 0 0.8 0 0 0 0.16 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23p)'/%3E%3C/svg%3E");
 }
@@ -324,43 +327,260 @@ body {
     background-image: var(--paper-grain);
     pointer-events: none;
   }
-  /* The Library signature: opening an album flips its sleeve over to the back cover. One panel,
-     transform only, an exponential ease-out; the front face is inert and hidden from assistive tech. */
+  /* The Library signature: opening an album pulls its sleeve out and turns it over to the back
+     cover. A square sleeve on the dark wood; transform only; the front face is inert and hidden from
+     assistive tech. Closing turns it back over before the dialog goes. */
+  .sleeve-table {
+    background-color: color-mix(in srgb, var(--color-walnut-950) 94%, transparent);
+    background-image: var(--wood-grain);
+  }
   .flip-card {
-    perspective: 1600px;
+    width: min(100%, 40rem, calc(100dvh - 3rem));
+    aspect-ratio: 1;
+    perspective: 1800px;
   }
   .flip-inner {
     position: relative;
+    width: 100%;
+    height: 100%;
     transform-style: preserve-3d;
     transform: rotateY(180deg);
     animation: sleeve-flip 620ms cubic-bezier(0.16, 1, 0.3, 1) both;
   }
-  .flip-face {
-    backface-visibility: hidden;
-    border-radius: 0.25rem;
+  .flip-inner.is-closing {
+    animation: sleeve-unflip 620ms cubic-bezier(0.7, 0, 0.84, 0) both;
   }
-  .flip-front {
+  .flip-face {
     position: absolute;
     inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     overflow: hidden;
+    backface-visibility: hidden;
+    border-radius: 3px;
+    box-shadow: 0 30px 60px -24px #000, 0 2px 0 var(--color-walnut-950);
+  }
+  .flip-front {
     background-color: var(--color-walnut-900);
     background-image: var(--wood-grain);
   }
-  /* The back cover: sleeve paper with its tooth, printed in the Record shelf type. */
+
+  /* The back cover: aged card stock with a soft vignette (an inset shadow), printed in brown ink. Ink colours keep WCAG AA against the paper, corners included. */
   .flip-back {
-    position: relative;
+    --sleeve-ink: #2b2118;
+    --sleeve-ink-soft: #5b4733;
+    --sleeve-ink-mark: #8a2c1d;
+    --sleeve-font: "Avenir Next Condensed", "Arial Narrow", "Roboto Condensed", "Helvetica Neue", Arial, sans-serif;
+    --sleeve-mono: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, "Courier New", monospace;
+    container-type: inline-size;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: clamp(0.875rem, 4cqi, 1.75rem);
     transform: rotateY(180deg);
-    border: 1px solid var(--color-graphite-700);
-    background-color: var(--color-graphite-900);
-    background-image: var(--paper-grain);
-    box-shadow: inset 0 0 0 6px var(--color-graphite-950), inset 0 0 0 7px var(--color-graphite-700);
+    color: var(--sleeve-ink);
+    font-family: var(--sleeve-font);
+    font-stretch: condensed;
+    background: var(--cardstock-grain), #e8dcc0;
+  }
+  .flip-face.flip-back {
+    box-shadow: 0 30px 60px -24px #000, 0 2px 0 var(--color-walnut-950), inset 0 0 4.5rem rgb(92 64 34 / 0.3);
+  }
+  /* Worn corners and edges: a pale scuff masked to speckles, so the edge reads rubbed, not drawn. */
+  .flip-back::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    border: 5px solid rgb(250 244 228 / 0.7);
+    border-radius: inherit;
+    mask-image: var(--wear-speckle);
+    pointer-events: none;
+  }
+  .flip-back > :not(.sleeve-back-art) {
+    position: relative;
+    z-index: 3;
+  }
+  /* With cover art, the back is the cover blurred and darkened toward walnut under a scrim, and the
+     print turns pale. The scrim alone keeps light ink above 4.5:1 even over white art. */
+  .flip-back.has-art {
+    --sleeve-ink: #f3ead6;
+    --sleeve-ink-soft: #d9cbb0;
+    --sleeve-ink-mark: #ffa58f;
+    background: var(--color-walnut-950);
+  }
+  .flip-back.has-art::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background: var(--cardstock-grain), color-mix(in srgb, var(--color-walnut-950) 74%, transparent);
+    box-shadow: inset 0 0 5rem rgb(0 0 0 / 0.45);
+    pointer-events: none;
+  }
+  .flip-back.has-art::before {
+    border-color: rgb(250 244 228 / 0.28);
+  }
+  .sleeve-back-art {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: blur(18px) saturate(0.8) brightness(0.55) sepia(0.25);
+    transform: scale(1.15);
+  }
+
+  .sleeve-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 3px double var(--sleeve-ink);
+  }
+  .sleeve-artist {
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .sleeve-title {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    font-family: var(--font-display);
+    font-size: clamp(1.125rem, 6cqi, 2rem);
+    font-weight: 600;
+    line-height: 1.1;
+    overflow-wrap: anywhere;
+  }
+  .sleeve-print-button {
+    display: inline-flex;
+    min-height: 2rem;
+    align-items: center;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--sleeve-ink);
+    border-radius: 2px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--sleeve-ink);
+  }
+  .sleeve-print-button:hover {
+    background: color-mix(in srgb, var(--sleeve-ink) 10%, transparent);
+  }
+  .sleeve-print-button:active {
+    background: color-mix(in srgb, var(--sleeve-ink) 18%, transparent);
+  }
+  .sleeve-print-button:focus-visible,
+  .sleeve-body:focus-visible {
+    outline: 2px solid var(--sleeve-ink);
+    outline-offset: 2px;
+  }
+
+  /* The paper area: long tracklists scroll inside the square instead of stretching the sleeve. */
+  .sleeve-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+    overflow-y: auto;
+    scrollbar-color: var(--sleeve-ink-soft) transparent;
+    scrollbar-width: thin;
+  }
+  .sleeve-sides {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.75rem 1.75rem;
+  }
+  @container (min-width: 28rem) {
+    .sleeve-sides {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  .sleeve-side-title {
+    margin-bottom: 0.25rem;
+    padding-bottom: 0.125rem;
+    border-bottom: 1px solid var(--sleeve-ink);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+  }
+  .sleeve-track {
+    display: grid;
+    grid-template-columns: 1.75rem minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.125rem 0;
+    font-size: 0.8125rem;
+    line-height: 1.35;
+  }
+  .sleeve-track-no,
+  .sleeve-track-time {
+    font-family: var(--sleeve-mono);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--sleeve-ink-soft);
+  }
+  .sleeve-track-time {
+    text-align: right;
+  }
+  .sleeve-track-title {
+    overflow-wrap: anywhere;
+  }
+  /* The one issue the Library shows: a missing track prints struck through, with a small mark. */
+  .sleeve-track.is-missing .sleeve-track-title {
+    color: var(--sleeve-ink-soft);
+    text-decoration: line-through;
+    text-decoration-color: var(--sleeve-ink-mark);
+  }
+  .sleeve-track-note {
+    display: inline-block;
+    margin-left: 0.375rem;
+    padding: 0 0.25rem;
+    border: 1px solid var(--sleeve-ink-mark);
+    border-radius: 2px;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--sleeve-ink-mark);
+  }
+  .sleeve-foot {
+    display: grid;
+    gap: 0.375rem;
+    margin-top: auto;
+    padding-top: 0.75rem;
+  }
+  .sleeve-small {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.125rem 0.875rem;
+    padding-top: 0.375rem;
+    border-top: 1px solid var(--sleeve-ink-soft);
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sleeve-ink-soft);
+  }
+  .sleeve-error {
+    font-size: 0.8125rem;
+    color: var(--sleeve-ink-mark);
   }
   @keyframes sleeve-flip {
     from { transform: rotateY(0deg); }
     to { transform: rotateY(180deg); }
+  }
+  @keyframes sleeve-unflip {
+    from { transform: rotateY(180deg); }
+    to { transform: rotateY(0deg); }
+  }
+  @keyframes sleeve-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 
   /* A cover blown up and tinted behind a header; the walnut ground shows when there is no art. */
@@ -416,12 +636,18 @@ body {
   }
 }
 
-/* Reduced motion: no rotation, the back cover is simply there. */
+/* Reduced motion: no rotation; the back cover crossfades in and out. */
 @media (prefers-reduced-motion: reduce) {
   .flip-inner,
   .flip-back {
-    animation: none;
+    animation: sleeve-fade 180ms ease-out both;
     transform: none;
+  }
+  .flip-back {
+    animation: none;
+  }
+  .flip-inner.is-closing {
+    animation: sleeve-fade 180ms ease-in reverse both;
   }
   .flip-front {
     display: none;

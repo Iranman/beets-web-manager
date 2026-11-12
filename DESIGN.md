@@ -216,21 +216,24 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 ### Crate materials (Library; reusable on other pages)
 - **Walnut wood** is the crate: `.crate` in `styles.css` sets `--color-walnut-900` with `--wood-grain`, an authored SVG `feTurbulence` grain inlined as a data URI (no image file, allowed by `img-src data:`). Tokens: `walnut-950` (bottom board), `walnut-900` (crate floor), `walnut-800` (row hover), `walnut-700` (divider tabs, rules on wood). Keep the grain at its current alpha: art and text lead. Text on wood is `zinc-100`/`zinc-300` (well over 4.5:1 on `walnut-700`); never put `zinc-600` or `muted` small text on `walnut-700` without checking.
 - **Crate dividers** (`.crate-divider`, `.crate-tab`) are walnut tabs with a serif letter in `brass-200`; the selected tab gets a 2px brass top edge and `aria-pressed`.
-- **Paper** (`--paper-grain`) is only for sleeves: the cover face and the back cover. Never on panels or crates.
+- **Paper** (`--paper-grain` on cover faces, `--cardstock-grain` on the back cover) is only for sleeves. Never on panels or crates.
 - **Sleeves have depth** (`.sleeve`): two offset edges of the sleeves behind and a soft drop. This is the one exception to the Flat Shelf Rule, because a sleeve is an object, not a panel.
 
 ### Imagery
-- Album and artist art lead: cover tiles, a header shelf of leaning sleeves, and a blurred, tinted cover backdrop (`.lib-backdrop`) behind the focal record or artist header, bleeding to the content frame.
+- Album and artist art lead: cover tiles, a header shelf of leaning sleeves, and a blurred, tinted cover backdrop (`.lib-backdrop`) behind the artist header, bleeding to the content frame.
 - Art comes only from the existing endpoints (`/api/albums/<id>/art`, `/api/disk-art`, artist image URL) with their fallbacks. No stock photos, no hotlinked images.
 - No art: the authored sleeve placeholder (an SVG record half out of its sleeve) or, for artists, initials on a record label ringed by SVG grooves (`.lib-groove`, `.lib-label`).
 - Every image is lazy, sits in a box of fixed size (no layout shift) and has alt text; decorative copies (the shelf, backdrops, the flip's front face) use `alt=""` and are hidden from assistive technology.
 
 ### Library signature: the sleeve flip
-- Opening an album flips its sleeve over (`.flip-card`, `.flip-inner`, `.flip-face`): 620ms, `cubic-bezier(0.16, 1, 0.3, 1)`, transform only, `rotateY(180deg)` with `backface-visibility: hidden`. The front is the cover; the back is the back cover on sleeve paper, with the tracklist (number, title, state, length; a "Disc N" line when the album has several discs), the album facts and the review notes.
-- Only the opened album animates. The trigger is a real button (`aria-haspopup="dialog"`); focus moves to the back cover's title; Escape or Close returns focus to the trigger. The front face is `inert` and `aria-hidden`.
-- Under `prefers-reduced-motion` there is no rotation: the back cover is simply shown.
+- Clicking (or Enter on) an album's sleeve pulls it out of the crate and turns it over (`.flip-card`, `.flip-inner`, `.flip-face`): 620ms, `cubic-bezier(0.16, 1, 0.3, 1)`, transform only, `rotateY(180deg)` with `backface-visibility: hidden`. Escape, Close or a click on the table turns it back (`.is-closing`, `sleeve-unflip`, 620ms ease-in) before the dialog closes. The sleeve is square (`aspect-ratio: 1`, at most 40rem and the viewport height) and sits on the dark wood (`.sleeve-table`).
+- The back cover (`.flip-back`) is old card stock: `#e8dcc0` under `--cardstock-grain` (SVG fibre tooth plus slow foxing), an inset-shadow vignette and speckled edge wear (`::before`, masked by `--wear-speckle`). It is printed in brown ink: `--sleeve-ink #2b2118`, `--sleeve-ink-soft #5b4733`, `--sleeve-ink-mark #8a2c1d`, all at least 4.5:1 on the paper including the darker corners. Type: the display serif for the album title; a condensed sans (`--sleeve-font`) for the print; a mono (`--sleeve-mono`) for track numbers and times.
+- When the album has art, the back is that same art (same URL as the front, so no new request), blurred, darkened and warmed (`.sleeve-back-art`), under a walnut scrim at 74% with the grain (`.has-art::after`); the print turns pale (`#f3ead6`, `#d9cbb0`, `#ffa58f`), above 4.5:1 even over white art. If the art fails or there is none, the plain paper is used.
+- The tracklist is printed as SIDE A (first half) and SIDE B (second half): number, title, length right-aligned. Two columns when the sleeve is at least 28rem wide (a container query), one column below. Long lists scroll inside the paper area (`.sleeve-body`, focusable, named "Tracklist"); the sleeve keeps its square.
+- The small print along the foot: artist, title, year, track count, total time and a catalogue number made from the release group ID (omitted when there is none).
+- Focus moves to the back cover's title on open and returns to the sleeve on close. The front face is `inert` and `aria-hidden`. Under `prefers-reduced-motion` there is no rotation: the back crossfades in and out (180ms).
 - This is the Library's one authored motion. Nothing animates on load or at rest.
-- The Library is browse-only, a simple overview. The sleeve itself is the button that opens an album; tiles carry no actions or repair links, there is no repair focal block and no issue filter. Review state shows only as passive badges. The back cover carries one quiet "Manage on Import" link.
+- The Library is browse-only, a simple overview: counts, search, scope, sort, A to Z and the artist/album navigation. No fix links or buttons to Import, Jobs or Missing IDs, no review pills, badges, stamps or notes. The one issue marker anywhere on the page is a missing track on the back cover: struck through in the soft ink with a small "missing" mark (`.is-missing`, `.sleeve-track-note`).
 
 ## Do's and Don'ts
 

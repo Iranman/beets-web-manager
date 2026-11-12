@@ -6,25 +6,20 @@ import {
   DialogTitle,
 } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
-import Button from '@mui/material/Button';
-import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router';
-import { getAlbumTracks, getArtistImageUrl, getLibraryArtRepairReport } from '../api/client';
-import type { ArtRepairItem, ArtRepairReportResponse } from '../api/types';
-import { artistNeedsAttention, getAlbumHealth } from '../lib/libraryHealth';
+import { getAlbumTracks, getArtistImageUrl } from '../api/client';
 import { apiGet } from '../lib/api';
 import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 
 type SearchScope = 'all' | 'artists' | 'albums' | 'tracks';
-type ArtistSort = 'alpha' | 'albums' | 'tracks' | 'attention';
-type AlbumSort = 'artist' | 'album' | 'year' | 'issues';
+type ArtistSort = 'alpha' | 'albums' | 'tracks';
+type AlbumSort = 'artist' | 'album' | 'year';
 type ArtistLetter = 'all' | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J' | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T' | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z' | '#';
 
 type AlbumRow = {
@@ -39,14 +34,12 @@ const artistSortOptions: Array<{ value: ArtistSort; label: string }> = [
   { value: 'alpha', label: 'Alphabetical' },
   { value: 'albums', label: 'Most albums' },
   { value: 'tracks', label: 'Most tracks' },
-  { value: 'attention', label: 'Needs attention first' },
 ];
 
 const albumSortOptions: Array<{ value: AlbumSort; label: string }> = [
   { value: 'artist', label: 'Artist' },
   { value: 'album', label: 'Album title' },
   { value: 'year', label: 'Year' },
-  { value: 'issues', label: 'Most issues' },
 ];
 
 function cx(...classes: Array<string | false | null | undefined>) {
@@ -84,14 +77,6 @@ function countTracks(artist: LibraryArtist) {
 
 function albumTrackCount(album: LibraryAlbum) {
   return Number(album.track_count || album.tracks?.length || 0);
-}
-
-function countAttentionAlbums(artist: LibraryArtist) {
-  return artist.albums.filter((album) => getAlbumHealth(album).needsAttention).length;
-}
-
-function albumHasLocalArt(album: LibraryAlbum) {
-  return Boolean(album.artpath || album.disk_art || album.image_url);
 }
 
 function addVersion(url: string, version?: number) {
@@ -340,181 +325,6 @@ function artistMatchesQuery(artist: LibraryArtist, query: string, scope: SearchS
   return artist.albums.some((album) => albumMatchesQuery(album, artist, query, scope));
 }
 
-function albumIssueScore(album: LibraryAlbum, artRepairAlbumIds: Set<number>) {
-  const health = getAlbumHealth(album);
-  let score = 0;
-  if (health.releaseMbMissing) score += 3;
-  score += health.trackMbMissing + health.trackMbMismatched + health.duplicateRecordingIds + health.mbRepairable;
-  score += health.missing * 2;
-  score += health.notImported * 2;
-  score += health.extra;
-  if (artRepairAlbumIds.has(Number(album.album_id || 0))) score += 1;
-  return score;
-}
-
-function albumHasIdIssue(album: LibraryAlbum) {
-  const health = getAlbumHealth(album);
-  return health.releaseMbMissing || health.trackMbMissing > 0 || health.trackMbMismatched > 0 || health.mbRepairable > 0 || health.duplicateRecordingIds > 0;
-}
-
-function albumNeedsAttention(album: LibraryAlbum, artRepairAlbumIds: Set<number>) {
-  return getAlbumHealth(album).needsAttention || artRepairAlbumIds.has(Number(album.album_id || 0));
-}
-
-function albumPrimaryIssue(album: LibraryAlbum, artRepairAlbumIds: Set<number>) {
-  const health = getAlbumHealth(album);
-  if (health.releaseMbMissing) return 'Missing album MusicBrainz ID';
-  if (health.trackMbMissing > 0) return `${health.trackMbMissing} track ID(s) missing`;
-  if (health.trackMbMismatched > 0) return `${health.trackMbMismatched} recording ID mismatch(es)`;
-  if (health.mbRepairable > 0) return `${health.mbRepairable} recording ID repair candidate(s)`;
-  if (health.missing > 0) return `${health.missing} missing file(s)`;
-  if (health.notImported > 0) return `${health.notImported} not imported`;
-  if (health.extra > 0) return `${health.extra} extra track row(s)`;
-  if (artRepairAlbumIds.has(Number(album.album_id || 0))) return 'Artwork needs review';
-  return 'Clean';
-}
-
-type AlbumAction = {
-  label: string;
-  path: string;
-  title?: string;
-  variant: 'primary' | 'warning';
-};
-
-export function albumPrimaryAction(album: LibraryAlbum, artRepairItemMap: Map<number, ArtRepairItem>): AlbumAction | null {
-  const health = getAlbumHealth(album);
-  if (album.pending_review) return {
-    label: 'In review queue',
-    path: '/import?tab=review',
-    title: 'Already queued in Import Review — check there for next steps',
-    variant: 'primary',
-  };
-  if (health.releaseMbMissing) return {
-    label: 'Fix missing IDs',
-    path: '/library/missing-ids',
-    title: 'No MusicBrainz release ID — assign one in Library > Missing IDs',
-    variant: 'primary',
-  };
-  if (health.missing > 0) return {
-    label: 'Acquire missing',
-    path: '/import?tab=acquire',
-    title: `${health.missing} track file(s) missing from disk — download replacements in Acquire`,
-    variant: 'warning',
-  };
-  if (health.notImported > 0) {
-    if (album.not_imported_is_extra) return {
-      label: 'Track Cleanup',
-      path: '/jobs?tab=album-tracks',
-      title: `${health.notImported} extra file(s) on disk beyond expected tracklist — use Album Track Cleanup`,
-      variant: 'warning',
-    };
-    return {
-      label: 'Import files',
-      path: '/import?tab=review',
-      title: `${health.notImported} file(s) on disk not yet imported into Beets`,
-      variant: 'warning',
-    };
-  }
-  if (health.duplicateRecordingIds > 0) return {
-    label: 'Merge split album',
-    path: '/jobs?tab=library-db',
-    title: `${health.duplicateRecordingIds} duplicate recording ID row(s) — possible split album in Library DB`,
-    variant: 'warning',
-  };
-  if (health.mbRepairable > 0 || health.trackMbMissing > 0 || health.trackMbMismatched > 0) return {
-    label: 'Repair recording IDs',
-    path: '/jobs',
-    title: `Recording IDs can be repaired — run MB Full Sync or MusicBrainz Repair in Jobs`,
-    variant: 'primary',
-  };
-  const artItem = artRepairItemMap.get(Number(album.album_id || 0));
-  if (artItem) return {
-    label: artItem.actionable ? 'Fetch art' : 'Fix art',
-    path: '/jobs',
-    title: artItem.reason || 'Artwork needs repair — run Fetch Missing Art in Jobs',
-    variant: 'warning',
-  };
-  return null;
-}
-
-function albumIssueDetails(album: LibraryAlbum, artRepairAlbumIds: Set<number>) {
-  const health = getAlbumHealth(album);
-  const details: string[] = [];
-  if (album.tracks_deferred) details.push('Track rows are deferred in the fast library payload.');
-  if (album.pending_review) details.push('Already queued in Import Review — awaiting manual decision.');
-  if (health.releaseMbMissing) details.push('Album has no MusicBrainz release ID.');
-  if (health.trackMbMissing > 0) details.push(`${health.trackMbMissing} imported track row(s) have no MusicBrainz recording ID.`);
-  if (health.trackMbMismatched > 0) details.push(`${health.trackMbMismatched} imported track row(s) have a recording ID mismatch.`);
-  if (health.duplicateRecordingIds > 0) details.push(`${health.duplicateRecordingIds} duplicate recording ID row(s) — possible split album.`);
-  if (health.missing > 0) details.push(`${health.missing} Beets row(s) point to missing files.`);
-  if (health.notImported > 0) {
-    if (album.not_imported_is_extra) {
-      details.push(`${health.notImported} extra file(s) on disk beyond the expected MB tracklist — use Album Track Cleanup.`);
-    } else {
-      details.push(`${health.notImported} file(s) are on disk but not yet imported into Beets.`);
-    }
-  }
-  if (health.extra > 0) details.push(`${health.extra} local track row(s) are beyond the expected tracklist.`);
-  if (artRepairAlbumIds.has(Number(album.album_id || 0))) details.push('Artwork appears in the art repair report.');
-  if (!details.length) details.push('No passive issue evidence in the current library summary.');
-  return details;
-}
-
-function AlbumBadges({
-  album,
-  artRepairAlbumIds,
-  artRepairItemMap,
-}: {
-  album: LibraryAlbum;
-  artRepairAlbumIds: Set<number>;
-  artRepairItemMap?: Map<number, ArtRepairItem>;
-}) {
-  const health = getAlbumHealth(album);
-  const albumId = Number(album.album_id || 0);
-  const artItem = artRepairItemMap?.get(albumId);
-  const artIssue = artRepairAlbumIds.has(albumId);
-  const recordingIdsOk = !health.releaseMbMissing && health.trackMbMissing === 0 && health.trackMbMismatched === 0 && health.duplicateRecordingIds === 0 && health.mbRepairable === 0;
-
-  const artLabel = artItem
-    ? artItem.issue === 'missing' ? 'Art missing'
-      : artItem.issue === 'broken' ? 'Art broken'
-      : 'Art unresolved'
-    : 'Art repair';
-
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {album.pending_review ? (
-        <Chip color="info" label="In review queue" size="small" variant="outlined" />
-      ) : null}
-      {albumHasIdIssue(album) ? (
-        <Chip color="secondary" label="Needs IDs" size="small" variant="outlined" />
-      ) : null}
-      {health.missing > 0 ? (
-        <Chip color="error" label={`${health.missing} missing`} size="small" variant="outlined" />
-      ) : null}
-      {health.notImported > 0 ? (
-        album.not_imported_is_extra
-          ? <Chip color="warning" label={`${health.notImported} extra disk files`} size="small" variant="outlined" />
-          : <Chip color="warning" label={`${health.notImported} not imported`} size="small" variant="outlined" />
-      ) : null}
-      {health.extra > 0 ? (
-        <Chip color="warning" label={`${health.extra} extra rows`} size="small" variant="outlined" />
-      ) : null}
-      {health.duplicateRecordingIds > 0 ? (
-        <Chip color="warning" label={`${health.duplicateRecordingIds} dup recording IDs`} size="small" variant="outlined" />
-      ) : null}
-      {artIssue ? (
-        <Chip color="warning" label={artLabel} size="small" variant="outlined" />
-      ) : albumHasLocalArt(album) ? (
-        <Chip color="success" label="Art local" size="small" variant="outlined" />
-      ) : null}
-      {recordingIdsOk && !album.pending_review ? (
-        <Chip color="success" label="Recording IDs OK" size="small" variant="outlined" />
-      ) : null}
-    </div>
-  );
-}
-
 function SearchRow({
   query,
   scope,
@@ -629,8 +439,6 @@ function ArtistCard({
   onSelect: (artist: LibraryArtist) => void;
 }) {
   const name = displayArtistName(artist);
-  const needsAttention = artistNeedsAttention(artist);
-  const attentionAlbums = countAttentionAlbums(artist);
   const artUrl = useArtistArtUrl(artist, libraryVersion);
 
   // A record in the crate: the artist's art as a sleeve, the name and one line of counts under it.
@@ -654,16 +462,6 @@ function ArtistCard({
           <span className="tabular-nums">
             {numberFmt.format(artist.albums.length)} albums - {numberFmt.format(countTracks(artist))} tracks
           </span>
-          {needsAttention ? (
-            <span className="text-brass-300">
-              {attentionAlbums ? `${attentionAlbums} need review` : 'Needs attention'}
-            </span>
-          ) : (
-            <span className="text-success">Clean</span>
-          )}
-          {artist.empty_artist_folder ? (
-            <span className="text-info">Empty folder</span>
-          ) : null}
         </span>
       </span>
     </button>
@@ -740,15 +538,11 @@ function ArtistBrowser({
 
 function AlbumCard({
   row,
-  artRepairAlbumIds,
-  artRepairItemMap,
   libraryVersion,
   showArtist,
   onDetails,
 }: {
   row: AlbumRow;
-  artRepairAlbumIds: Set<number>;
-  artRepairItemMap: Map<number, ArtRepairItem>;
   libraryVersion?: number;
   showArtist: boolean;
   onDetails: (row: AlbumRow) => void;
@@ -756,7 +550,6 @@ function AlbumCard({
   const { album, artist } = row;
   const title = displayAlbumTitle(album);
   const artistName = displayArtistName(artist);
-  const issue = albumPrimaryIssue(album, artRepairAlbumIds);
 
   return (
     // Open tile: the sleeve leads, the words sit under it on the shelf, no box around either.
@@ -785,10 +578,6 @@ function AlbumCard({
           {album.year ? <span>{String(album.year).slice(0, 4)}</span> : null}
           <span>{numberFmt.format(albumTrackCount(album))} tracks</span>
         </div>
-        <div className="mt-2 space-y-1.5">
-          <Chip label={issue} size="small" sx={{ maxWidth: '100%' }} variant="outlined" />
-          <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
-        </div>
       </div>
     </article>
   );
@@ -798,8 +587,6 @@ function AlbumGrid({
   rows,
   title,
   subtitle,
-  artRepairAlbumIds,
-  artRepairItemMap,
   libraryVersion,
   showArtist,
   onDetails,
@@ -807,8 +594,6 @@ function AlbumGrid({
   rows: AlbumRow[];
   title: string;
   subtitle: string;
-  artRepairAlbumIds: Set<number>;
-  artRepairItemMap: Map<number, ArtRepairItem>;
   libraryVersion?: number;
   showArtist: boolean;
   onDetails: (row: AlbumRow) => void;
@@ -826,8 +611,6 @@ function AlbumGrid({
               <AlbumCard
                 key={`${row.artist.name}::${row.album.album_id || row.album.aldir || row.album.album}`}
                 row={row}
-                artRepairAlbumIds={artRepairAlbumIds}
-                artRepairItemMap={artRepairItemMap}
                 libraryVersion={libraryVersion}
                 showArtist={showArtist}
                 onDetails={onDetails}
@@ -845,22 +628,17 @@ function AlbumGrid({
 function ArtistDetail({
   artist,
   rows,
-  artRepairAlbumIds,
-  artRepairItemMap,
   libraryVersion,
   onBack,
   onDetails,
 }: {
   artist: LibraryArtist;
   rows: AlbumRow[];
-  artRepairAlbumIds: Set<number>;
-  artRepairItemMap: Map<number, ArtRepairItem>;
   libraryVersion?: number;
   onBack: () => void;
   onDetails: (row: AlbumRow) => void;
 }) {
   const name = displayArtistName(artist);
-  const attentionAlbums = countAttentionAlbums(artist);
   const artUrl = useArtistArtUrl(artist, libraryVersion);
 
   return (
@@ -888,12 +666,6 @@ function ArtistDetail({
           <p className="lib-catalog">
             <span>{`${numberFmt.format(artist.albums.length)} albums`}</span>
             <span>{`${numberFmt.format(countTracks(artist))} tracks`}</span>
-            {artistNeedsAttention(artist) ? (
-              <span className="lib-review is-flag">{attentionAlbums ? `${attentionAlbums} need review` : 'Needs attention'}</span>
-            ) : (
-              <span className="lib-review is-ok">Clean</span>
-            )}
-            {artist.empty_artist_folder ? <span className="lib-review">Empty folder</span> : null}
           </p>
         </div>
       </div>
@@ -902,8 +674,6 @@ function ArtistDetail({
         rows={rows}
         title="Albums"
         subtitle={`${numberFmt.format(rows.length)} visible for ${name}`}
-        artRepairAlbumIds={artRepairAlbumIds}
-        artRepairItemMap={artRepairItemMap}
         libraryVersion={libraryVersion}
         showArtist={false}
         onDetails={onDetails}
@@ -912,12 +682,47 @@ function ArtistDetail({
   );
 }
 
-function trackStatus(track: LibraryTrack) {
-  if (track.missing || track.status === 'missing_file') return { label: 'Missing file', color: 'text-danger-text' };
-  if (track.status === 'not_imported' || track.disk_only) return { label: 'Not imported', color: 'text-warning' };
-  if (track.status === 'other_album') return { label: 'Other album', color: 'text-warning' };
-  if (!String(track.mb_trackid ?? '').trim()) return { label: 'No recording ID', color: 'text-violet-300' };
-  return { label: 'Imported', color: 'text-success' };
+// The one issue the Library shows: a track whose file is missing prints faded and struck through.
+function trackIsMissing(track: LibraryTrack) {
+  return Boolean(track.missing || track.status === 'missing_file');
+}
+
+function catalogNumber(album: LibraryAlbum) {
+  const rg = String(album.mb_releasegroupid || '').replace(/-/g, '').trim();
+  return rg.length >= 8 ? `Cat. No. ${rg.slice(0, 4).toUpperCase()}-${rg.slice(4, 8).toUpperCase()}` : '';
+}
+
+function prefersReducedMotion() {
+  return typeof window !== 'undefined' && Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+}
+
+// The flip back takes as long as the flip over (CSS: sleeve-flip / sleeve-fade); then the dialog closes.
+const FLIP_MS = 620;
+const FADE_MS = 180;
+
+function SleeveSide({ label, tracks, startIndex, multiDisc }: { label: string; tracks: LibraryTrack[]; startIndex: number; multiDisc: boolean }) {
+  if (!tracks.length) return null;
+  return (
+    <section className="sleeve-side">
+      <h3 className="sleeve-side-title">{label}</h3>
+      <ol>
+        {tracks.map((track, offset) => {
+          const index = startIndex + offset;
+          const missing = trackIsMissing(track);
+          return (
+            <li key={`${track.id || index}-${track.title}`} className={cx('sleeve-track', missing && 'is-missing')}>
+              <span className="sleeve-track-no">{multiDisc && track.disc ? `${track.disc}.` : ''}{track.track || index + 1}</span>
+              <span className="sleeve-track-title">
+                {stripStamps(track.title) || 'Untitled track'}
+                {missing ? <span className="sleeve-track-note">missing</span> : null}
+              </span>
+              <span className="sleeve-track-time">{formatLength(track.length)}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
 }
 
 function AlbumDetailsDialog({
@@ -925,160 +730,139 @@ function AlbumDetailsDialog({
   tracks,
   loading,
   error,
-  artRepairAlbumIds,
-  artRepairItemMap,
   libraryVersion,
   onClose,
   onCleanAlbum,
-  onNavigate,
   onReplaceTrack,
 }: {
   row: AlbumRow | null;
   tracks: LibraryTrack[];
   loading: boolean;
   error: string;
-  artRepairAlbumIds: Set<number>;
-  artRepairItemMap: Map<number, ArtRepairItem>;
   libraryVersion?: number;
   onClose: () => void;
   onCleanAlbum?: (row: AlbumRow) => void;
-  onNavigate?: (path: string) => void;
   onReplaceTrack?: (track: LibraryTrack) => void;
 }) {
   const album = row?.album ?? null;
   const artist = row?.artist ?? null;
   const title = album ? displayAlbumTitle(album) : '';
   const artistName = artist ? displayArtistName(artist) : '';
+  const [closing, setClosing] = useState(false);
+  // The back cover is printed over the album's own art (the same URL as the front, so no new
+  // fetch); when there is no art, or it fails, it falls back to plain aged paper.
+  const [backArtFailures, setBackArtFailures] = useState(0);
+
+  useEffect(() => {
+    setClosing(false);
+    setBackArtFailures(0);
+  }, [row]);
+
+  // Esc, the Close control and a click on the table all turn the sleeve back over, then close.
+  function requestClose(after?: () => void) {
+    if (closing) return;
+    setClosing(true);
+    window.setTimeout(() => {
+      onClose();
+      after?.();
+    }, prefersReducedMotion() ? FADE_MS : FLIP_MS);
+  }
 
   const coverUrl = album ? albumArtUrl(album, libraryVersion) : '';
+  const coverFallbackUrl = album ? albumDiskArtFallbackUrl(album, libraryVersion) : '';
+  const backArt = backArtFailures === 0 ? coverUrl : backArtFailures === 1 ? coverFallbackUrl : '';
   const multiDisc = tracks.some((track) => Number(track.disc || 1) > 1);
+  const half = Math.ceil(tracks.length / 2);
+  const totalSeconds = tracks.reduce((sum, track) => sum + (Number.isFinite(track.length) ? Number(track.length) : 0), 0);
+  const catalog = album ? catalogNumber(album) : '';
+  const replaceable = onReplaceTrack ? tracks.filter((track) => track.id && track.path && !track.missing) : [];
 
-  // Opening an album flips its sleeve over: the front (the cover) turns away and the back cover,
-  // printed with the tracklist like an LP, faces the listener. Only this one panel animates.
+  // Opening an album pulls its sleeve from the crate and turns it over: the front (the same cover as
+  // in the crate) rotates away and the back cover, printed with the tracklist, faces the listener.
   return (
-    <Dialog className="relative z-50" open={Boolean(row)} onClose={onClose}>
-      <DialogBackdrop className="fixed inset-0 bg-black/70" />
-      <div className="fixed inset-0 overflow-y-auto p-4">
+    <Dialog className="relative z-50" open={Boolean(row)} onClose={() => requestClose()}>
+      <DialogBackdrop className="sleeve-table fixed inset-0" />
+      <div className="fixed inset-0 overflow-y-auto p-3 sm:p-6">
         <div className="flex min-h-full items-center justify-center">
-          <DialogPanel className="flip-card w-full max-w-3xl">
+          <DialogPanel className="flip-card">
             {album && artist ? (
-              <div className="flip-inner">
+              <div className={cx('flip-inner', closing && 'is-closing')}>
                 <div aria-hidden="true" className="flip-face flip-front" inert>
                   <Artwork
-                    className="aspect-square h-full max-h-full w-auto max-w-full"
+                    className="h-full w-full"
                     fallback={<SleevePlaceholder />}
                     label=""
                     fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
                     src={coverUrl}
                   />
                 </div>
-                <div className="flip-face flip-back space-y-5 p-4 sm:p-6">
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="flex min-w-0 gap-4">
-                      <Artwork
-                        className="h-20 w-20 rounded-sm"
-                        fallback={<SleevePlaceholder />}
-                        label={`${title} cover`}
-                        fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
-                        src={coverUrl}
-                      />
-                      <div className="min-w-0">
-                        <DialogTitle
-                          className="line-clamp-2 font-display text-2xl font-semibold text-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-300"
-                          data-autofocus
-                          tabIndex={-1}
-                        >
-                          {title}
-                        </DialogTitle>
-                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-300">
-                          <span>{artistName}</span>
-                          {album.year ? <span className="tabular-nums">{String(album.year).slice(0, 4)}</span> : null}
-                          <span>{numberFmt.format(albumTrackCount(album))} tracks</span>
-                        </div>
-                        <div className="mt-2">
-                          <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
-                        </div>
-                      </div>
+                <div className={cx('flip-face flip-back', backArt && 'has-art')}>
+                  {backArt ? (
+                    <img
+                      alt=""
+                      aria-hidden="true"
+                      className="sleeve-back-art"
+                      src={backArt}
+                      onError={() => setBackArtFailures((n) => n + 1)}
+                    />
+                  ) : null}
+                  <header className="sleeve-head">
+                    <div className="min-w-0">
+                      <p className="sleeve-artist">{artistName}</p>
+                      <DialogTitle className="sleeve-title focus:outline-none" data-autofocus tabIndex={-1}>
+                        {title}
+                      </DialogTitle>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
+                    <div className="flex shrink-0 items-start gap-2">
                       {album.album_id && onCleanAlbum ? (
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          color="warning"
-                          onClick={() => {
-                            onClose();
-                            if (row) onCleanAlbum?.(row);
-                          }}
+                        <button
+                          className="sleeve-print-button"
+                          type="button"
+                          onClick={() => requestClose(() => onCleanAlbum(row!))}
                         >
                           Remove from Library…
-                        </Button>
+                        </button>
                       ) : null}
-                      <Button size="small" variant="outlined" onClick={onClose}>Close</Button>
+                      <button className="sleeve-print-button" type="button" onClick={() => requestClose()}>Close</button>
                     </div>
+                  </header>
+
+                  {/* The paper area scrolls inside the square when a tracklist runs long. */}
+                  <div aria-label="Tracklist" className="sleeve-body" role="region" tabIndex={0}>
+                    {loading ? <p className="sleeve-small" aria-live="polite">Loading the tracklist…</p> : null}
+                    {error ? <p className="sleeve-error" role="alert">{`Tracklist could not be loaded: ${error}`}</p> : null}
+                    {!loading && !error && !tracks.length ? <p className="sleeve-small">No track rows loaded for this album.</p> : null}
+                    {!loading && tracks.length ? (
+                      <div className="sleeve-sides">
+                        <SleeveSide label="Side A" tracks={tracks.slice(0, half)} startIndex={0} multiDisc={multiDisc} />
+                        <SleeveSide label="Side B" tracks={tracks.slice(half)} startIndex={half} multiDisc={multiDisc} />
+                      </div>
+                    ) : null}
+
+                    {replaceable.length ? (
+                      <ul className="sleeve-small mt-3 flex flex-wrap gap-x-3">
+                        {replaceable.map((track) => (
+                          <li key={track.id}>
+                            <button className="sleeve-print-button" type="button" onClick={() => onReplaceTrack?.(track)}>
+                              {`Replace ${stripStamps(track.title) || 'track'}…`}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+
+                    {/* The small print along the foot of the sleeve. */}
+                    <footer className="sleeve-foot">
+                      <p className="sleeve-small">
+                        <span>{artistName}</span>
+                        <span>{title}</span>
+                        {album.year ? <span className="tabular-nums">{String(album.year).slice(0, 4)}</span> : null}
+                        <span>{`${numberFmt.format(albumTrackCount(album))} tracks`}</span>
+                        {totalSeconds ? <span className="tabular-nums">{`Total time ${formatLength(totalSeconds)}`}</span> : null}
+                        {catalog ? <span className="tabular-nums">{catalog}</span> : null}
+                      </p>
+                    </footer>
                   </div>
-
-                  {/* The back cover's print: the tracklist first, then the review notes. */}
-                  <section>
-                    <div className="flex items-baseline justify-between border-b border-zinc-700 pb-1.5">
-                      <h3 className="font-display text-lg font-semibold text-zinc-100">Tracks</h3>
-                      <span className="text-xs text-muted tabular-nums">{loading ? 'Loading…' : `${tracks.length} rows`}</span>
-                    </div>
-                    {loading ? <LinearProgress /> : null}
-                    {error ? <div className="py-3 text-sm text-danger-text">{error}</div> : null}
-                    {!loading && !error ? (
-                      tracks.length ? (
-                        <ol className="max-h-80 overflow-y-auto">
-                          {tracks.map((track, index) => {
-                            const status = trackStatus(track);
-                            const canReplace = Boolean(onReplaceTrack && track.id && track.path && !track.missing);
-                            const disc = Number(track.disc || 1);
-                            const discStart = multiDisc && (index === 0 || Number(tracks[index - 1].disc || 1) !== disc);
-                            return (
-                              <li key={`${track.id || index}-${track.title}`}>
-                                {discStart ? <div className="pb-1 pt-3 text-sm font-semibold text-brass-300">{`Disc ${disc}`}</div> : null}
-                                <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 border-b border-zinc-800 py-2 text-sm sm:grid-cols-[2.5rem_minmax(0,1fr)_7rem_3.5rem_auto]">
-                                  <span className="text-xs text-muted tabular-nums">{track.disc && track.disc > 1 ? `${track.disc}.` : ''}{track.track || index + 1}</span>
-                                  <span className="min-w-0 truncate text-zinc-100">{stripStamps(track.title) || 'Untitled track'}</span>
-                                  <span className={cx('truncate text-xs sm:text-right', status.color)}>{status.label}</span>
-                                  <span className="hidden text-right text-xs text-muted tabular-nums sm:block">{formatLength(track.length)}</span>
-                                  {canReplace ? (
-                                    <Button size="small" variant="outlined" onClick={() => onReplaceTrack?.(track)}>
-                                      Replace…
-                                    </Button>
-                                  ) : <span />}
-                                </div>
-                              </li>
-                            );
-                          })}
-                        </ol>
-                      ) : (
-                        <div className="py-3 text-sm text-muted">No track rows loaded for this album.</div>
-                      )
-                    ) : null}
-                  </section>
-
-                  <section>
-                    <h3 className="border-b border-zinc-700 pb-1.5 font-display text-lg font-semibold text-zinc-100">Review information</h3>
-                    <ul className="mt-2 space-y-1 text-sm text-zinc-300">
-                      {albumIssueDetails(album, artRepairAlbumIds).map((detail) => (
-                        <li key={detail}>{detail}</li>
-                      ))}
-                    </ul>
-                    {/* Library is for browsing; changes to an album are made on the Import workbench. */}
-                    {onNavigate ? (
-                      <button
-                        className="mt-3 inline-flex min-h-8 items-center text-sm text-brass-300 underline underline-offset-2 hover:text-brass-200 active:text-brass-400"
-                        type="button"
-                        onClick={() => {
-                          onClose();
-                          onNavigate('/import');
-                        }}
-                      >
-                        Manage on Import
-                      </button>
-                    ) : null}
-                  </section>
                 </div>
               </div>
             ) : null}
@@ -1096,7 +880,6 @@ function formatLength(seconds?: number) {
 }
 
 export default function Library() {
-  const navigate = useNavigate();
   const [data, setData] = useState<LibraryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -1106,8 +889,6 @@ export default function Library() {
   const [albumSort, setAlbumSort] = useState<AlbumSort>('artist');
   const [artistLetterFilter, setArtistLetterFilter] = useState<ArtistLetter>('all');
   const [selectedArtistName, setSelectedArtistName] = useState('');
-  const [artRepairReport, setArtRepairReport] = useState<ArtRepairReportResponse | null>(null);
-  const [artRepairError, setArtRepairError] = useState('');
   const [trackSearchLoading, setTrackSearchLoading] = useState(false);
   const [trackSearchError, setTrackSearchError] = useState('');
   const [trackSearchTried, setTrackSearchTried] = useState(false);
@@ -1138,11 +919,8 @@ export default function Library() {
     void loadLibrary();
   }, [loadLibrary]);
   const engineOffline = useEngineOffline();
-  // Bumped when the engine comes back, to reload the art repair status too.
-  const [engineReturns, setEngineReturns] = useState(0);
   useReloadOnEngineReturn(useCallback(() => {
     void loadLibrary();
-    setEngineReturns((n) => n + 1);
   }, [loadLibrary]));
 
   // The page paints from whatever /api/library returns first, then polls in the
@@ -1176,25 +954,6 @@ export default function Library() {
     setReconcilePolls((n) => n + 1);
     void loadLibrary(tracksIncludedForPoll, true);
   }, reconcilePollDelay);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadArtRepair() {
-      try {
-        const report = await getLibraryArtRepairReport();
-        if (!cancelled) {
-          setArtRepairReport(report);
-          setArtRepairError('');
-        }
-      } catch (err) {
-        if (!cancelled) setArtRepairError(errorMessage(err));
-      }
-    }
-    void loadArtRepair();
-    return () => {
-      cancelled = true;
-    };
-  }, [engineReturns]);
 
   useEffect(() => {
     const needsTrackRows = query.trim().length >= 2 && (scope === 'all' || scope === 'tracks');
@@ -1258,24 +1017,6 @@ export default function Library() {
   const artists = data?.artists ?? [];
   const libraryVersion = data?.library_version;
 
-  const artRepairAlbumIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const item of artRepairReport?.items ?? []) {
-      const id = Number(item.album_id || 0);
-      if (id) ids.add(id);
-    }
-    return ids;
-  }, [artRepairReport]);
-
-  const artRepairItemMap = useMemo(() => {
-    const map = new Map<number, ArtRepairItem>();
-    for (const item of artRepairReport?.items ?? []) {
-      const id = Number(item.album_id || 0);
-      if (id) map.set(id, item);
-    }
-    return map;
-  }, [artRepairReport]);
-
   const allAlbumRows = useMemo(() => {
     const rows: AlbumRow[] = [];
     for (const artist of artists) {
@@ -1291,10 +1032,6 @@ export default function Library() {
     result.sort((a, b) => {
       if (artistSort === 'albums') return b.albums.length - a.albums.length || displayArtistName(a).localeCompare(displayArtistName(b));
       if (artistSort === 'tracks') return countTracks(b) - countTracks(a) || displayArtistName(a).localeCompare(displayArtistName(b));
-      if (artistSort === 'attention') {
-        const attentionDelta = Number(artistNeedsAttention(b)) - Number(artistNeedsAttention(a));
-        return attentionDelta || countAttentionAlbums(b) - countAttentionAlbums(a) || displayArtistName(a).localeCompare(displayArtistName(b));
-      }
       return displayArtistName(a).localeCompare(displayArtistName(b));
     });
     return result;
@@ -1314,11 +1051,10 @@ export default function Library() {
     sorted.sort((a, b) => {
       if (albumSort === 'album') return displayAlbumTitle(a.album).localeCompare(displayAlbumTitle(b.album)) || displayArtistName(a.artist).localeCompare(displayArtistName(b.artist));
       if (albumSort === 'year') return Number(b.album.year || 0) - Number(a.album.year || 0) || displayAlbumTitle(a.album).localeCompare(displayAlbumTitle(b.album));
-      if (albumSort === 'issues') return albumIssueScore(b.album, artRepairAlbumIds) - albumIssueScore(a.album, artRepairAlbumIds) || displayArtistName(a.artist).localeCompare(displayArtistName(b.artist));
       return displayArtistName(a.artist).localeCompare(displayArtistName(b.artist)) || displayAlbumTitle(a.album).localeCompare(displayAlbumTitle(b.album));
     });
     return sorted;
-  }, [albumSort, artRepairAlbumIds]);
+  }, [albumSort]);
 
   const selectedArtistRows = useMemo(() => {
     if (!selectedArtist) return [];
@@ -1330,15 +1066,10 @@ export default function Library() {
   }, [query, scope, selectedArtist, sortAlbumRows]);
 
   const albumMode = Boolean(selectedArtist);
-  const attentionArtistCount = artists.filter(artistNeedsAttention).length;
-  const attentionAlbumCount = allAlbumRows.filter((row) => albumNeedsAttention(row.album, artRepairAlbumIds)).length;
   function handleSelectArtist(artist: LibraryArtist) {
     setSelectedArtistName(artist.name);
   }
 
-  const handleNavigate = useCallback((path: string) => {
-    navigate(path);
-  }, [navigate]);
   const loadFailed = !data && Boolean(error);
   // Up to eight sleeves for the header shelf, taken from the albums already loaded (no extra request).
   const shelfCovers = useMemo(() => {
@@ -1364,11 +1095,6 @@ export default function Library() {
               <span>{`${data ? numberFmt.format(data.stats.artists) : '—'} artists`}</span>
               <span>{`${data ? numberFmt.format(data.stats.albums) : '—'} albums`}</span>
               <span>{`${data ? numberFmt.format(data.stats.tracks) : '—'} tracks`}</span>
-              {!data ? null : attentionAlbumCount ? (
-                <span className="lib-review is-flag">{`${numberFmt.format(attentionAlbumCount)} albums to review`}</span>
-              ) : (
-                <span className="lib-review is-ok">No review issues</span>
-              )}
             </p>
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-muted">
               <span>{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
@@ -1389,13 +1115,6 @@ export default function Library() {
                   </button>
                 </span>
               ) : null}
-              <button
-                type="button"
-                className="inline-flex min-h-8 items-center text-sm text-zinc-300 underline underline-offset-2 hover:text-zinc-100 active:text-brass-300"
-                onClick={() => handleNavigate('/library/missing-ids')}
-              >
-                Missing MusicBrainz IDs
-              </button>
             </div>
           </div>
           {/* Inside an artist the shelf steps aside so the artist's own header leads. */}
@@ -1409,7 +1128,7 @@ export default function Library() {
         <span className="font-semibold text-zinc-100">Browsing artists</span>
         {selectedArtist ? <span className="text-zinc-200">{`Artist: ${displayArtistName(selectedArtist)}`}</span> : null}
         <span className="text-muted">
-          {`${numberFmt.format(filteredArtists.length)} artists visible, ${numberFmt.format(attentionArtistCount)} with review items`}
+          {`${numberFmt.format(filteredArtists.length)} artists visible`}
         </span>
       </div>}
 
@@ -1427,7 +1146,6 @@ export default function Library() {
       />
 
       {shownError ? <Alert severity="error">{shownError}</Alert> : null}
-      {artRepairError ? <Alert severity="warning">Art repair status could not be loaded: {artRepairError}</Alert> : null}
       {trackSearchError ? <Alert severity="warning">Track search rows could not be loaded: {trackSearchError}</Alert> : null}
 
       {/* Under a load error there is no list: "No matching artists" would claim an empty library. */}
@@ -1435,8 +1153,6 @@ export default function Library() {
         <ArtistDetail
           artist={selectedArtist}
           rows={selectedArtistRows}
-          artRepairAlbumIds={artRepairAlbumIds}
-          artRepairItemMap={artRepairItemMap}
           libraryVersion={libraryVersion}
           onBack={() => setSelectedArtistName('')}
           onDetails={setDetailsRow}
@@ -1458,11 +1174,8 @@ export default function Library() {
         tracks={detailsTracks}
         loading={detailsLoading}
         error={detailsError}
-        artRepairAlbumIds={artRepairAlbumIds}
-        artRepairItemMap={artRepairItemMap}
         libraryVersion={libraryVersion}
         onClose={() => setDetailsRow(null)}
-        onNavigate={handleNavigate}
       />
       {/* Remove from Library and per-track Replace (AlbumCleanupModal, TrackReplacementModal and the
           dialog's onCleanAlbum/onReplaceTrack props) are deliberately not wired here: Library is

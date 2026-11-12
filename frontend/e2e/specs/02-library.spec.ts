@@ -38,6 +38,7 @@ test('album details show the tracks stored in Beets, with canonical release-grou
   await page.getByRole('article').filter({ hasText: 'Glass Horizons' }).getByRole('button', { name: 'Open Glass Horizons' }).click();
   const dialog = page.getByRole('dialog', { name: 'Glass Horizons' });
   await expect(dialog.getByText('3 tracks', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Side A' })).toBeVisible();
   for (const title of ['First Light', 'Paper Moons', 'Long Exposure']) {
     await expect(dialog.getByText(title)).toBeVisible();
   }
@@ -48,10 +49,20 @@ test('album details show the tracks stored in Beets, with canonical release-grou
   expect(album?.mb_releasegroupid).toBe('11111111-1111-4111-8111-111111111111');
 });
 
-test('album without IDs offers the repair path and appears under Missing IDs', async ({ page }) => {
+test('album without IDs shows no issue marker or fix link in Library, and appears under Missing IDs', async ({ page }) => {
   await page.goto('/library');
+  const main = page.getByRole('main');
+  await expect(main.getByRole('button', { name: 'Missing MusicBrainz IDs' })).toHaveCount(0);
   await page.getByRole('button', { name: /Unknown Quantity artwork/ }).click();
-  await expect(page.getByRole('article').filter({ hasText: 'Untagged Sessions' })).toContainText(/Needs IDs/);
+  const tile = page.getByRole('article').filter({ hasText: 'Untagged Sessions' });
+  await expect(tile).not.toContainText(/Needs IDs|review/);
+  await expect(tile.getByRole('button')).toHaveCount(1);
+  await tile.getByRole('button', { name: 'Open Untagged Sessions' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Untagged Sessions' });
+  await expect(dialog.getByRole('button', { name: 'Manage on Import' })).toHaveCount(0);
+  await expect(dialog).not.toContainText(/Needs IDs|Review information/);
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await expect(dialog).toHaveCount(0);
   await page.goto('/library/missing-ids');
   await expect(page.getByRole('main')).toContainText('Untagged Sessions');
   await expect(page.getByRole('main')).not.toContainText('Glass Horizons');
