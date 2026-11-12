@@ -86,19 +86,36 @@ def _release_lock_on_failed_exit(lib) -> None:
     root transaction's commit succeeds. If that commit (or reopening the
     thread's connection for it) raises -- e.g. a new thread whose SQLite
     connection cannot be opened -- the lock stays held with no owner and
-    every later library call blocks forever (#652). Release it on that path."""
-    from beets.dbcore.db import Transaction
+    every later library call blocks forever (#652).
+
+    The override mirrors beets 2.14.1 ``beets/dbcore/db.py``
+    ``Transaction.__exit__`` (lines 940-967) with one change: the root commit
+    is wrapped in ``try/finally`` so the lock is released exactly once, by the
+    thread that owns it. Releasing from an outer ``except`` instead would also
+    fire on the ``DBCustomFunctionError`` raised *after* a successful
+    release, freeing another thread's lock. Re-check on every Beets bump."""
+    import sqlite3
+
+    from beets.dbcore.db import DBCustomFunctionError, Transaction
 
     class _Transaction(Transaction):
         def __exit__(self, exc_type, exc_value, traceback):
-            try:
-                return super().__exit__(exc_type, exc_value, traceback)
-            except BaseException:
-                with self.db._tx_stack() as stack:
-                    ended_root = not stack
-                if ended_root and self.db._db_lock.locked():
-                    self.db._db_lock.release()  # this thread acquired it as the root
-                raise
+            self.db.revision += self._mutated
+            with self.db._tx_stack() as stack:
+                assert stack.pop() is self
+                empty = not stack
+            if empty:
+                try:
+                    self.db._connection().commit()
+                    self._mutated = False
+                finally:
+                    self.db._db_lock.release()
+            if (
+                isinstance(exc_value, sqlite3.OperationalError)
+                and exc_value.args[0] == "user-defined function raised exception"
+            ):
+                raise DBCustomFunctionError()
+            return None
 
     lib.transaction = lambda: _Transaction(lib)
 
