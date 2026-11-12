@@ -796,11 +796,11 @@
    "name": "_redact_secret_assignment_match",
    "module": "backend/app_runtime.py",
    "lines": [
-    695,
-    698
+    747,
+    751
    ],
-   "size": 4,
-   "body_lines": 3,
+   "size": 5,
+   "body_lines": 4,
    "route": null,
    "mutation_capable": false,
    "domain": "AUTH",
@@ -816,8 +816,8 @@
    "name": "_redact_security_text",
    "module": "backend/app_runtime.py",
    "lines": [
-    715,
-    719
+    773,
+    777
    ],
    "size": 5,
    "body_lines": 4,
@@ -859,8 +859,8 @@
    "name": "_split_mbid_values",
    "module": "backend/app_runtime.py",
    "lines": [
-    722,
-    732
+    780,
+    790
    ],
    "size": 11,
    "body_lines": 10,
@@ -882,8 +882,8 @@
    "name": "_path_is_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    735,
-    740
+    793,
+    798
    ],
    "size": 6,
    "body_lines": 5,
@@ -926,8 +926,8 @@
    "name": "_split_beets_multi",
    "module": "backend/app_runtime.py",
    "lines": [
-    743,
-    754
+    801,
+    812
    ],
    "size": 12,
    "body_lines": 10,
@@ -951,8 +951,8 @@
    "name": "_split_collab_credit",
    "module": "backend/app_runtime.py",
    "lines": [
-    757,
-    774
+    815,
+    832
    ],
    "size": 18,
    "body_lines": 11,
@@ -974,8 +974,8 @@
    "name": "_path_lexically_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    777,
-    784
+    835,
+    842
    ],
    "size": 8,
    "body_lines": 7,
@@ -998,8 +998,8 @@
    "name": "_path_has_symlink_component_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    787,
-    801
+    845,
+    859
    ],
    "size": 15,
    "body_lines": 14,
@@ -1027,8 +1027,8 @@
    "name": "_normalize_name",
    "module": "backend/app_runtime.py",
    "lines": [
-    831,
-    834
+    889,
+    892
    ],
    "size": 4,
    "body_lines": 3,
@@ -1052,8 +1052,8 @@
    "name": "_path_under",
    "module": "backend/app_runtime.py",
    "lines": [
-    837,
-    847
+    895,
+    905
    ],
    "size": 11,
    "body_lines": 10,
@@ -1087,8 +1087,8 @@
    "name": "_safe_path_component",
    "module": "backend/app_runtime.py",
    "lines": [
-    850,
-    864
+    908,
+    922
    ],
    "size": 15,
    "body_lines": 14,
@@ -1113,8 +1113,8 @@
    "name": "_same_resolved_path",
    "module": "backend/app_runtime.py",
    "lines": [
-    867,
-    871
+    925,
+    929
    ],
    "size": 5,
    "body_lines": 4,
@@ -1135,8 +1135,8 @@
    "name": "_safe_beets_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    874,
-    893
+    932,
+    951
    ],
    "size": 20,
    "body_lines": 11,
@@ -1157,8 +1157,8 @@
    "name": "_safe_inventory_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    896,
-    905
+    954,
+    963
    ],
    "size": 10,
    "body_lines": 7,
@@ -1181,8 +1181,8 @@
    "name": "_safe_operation_status_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    908,
-    917
+    966,
+    975
    ],
    "size": 10,
    "body_lines": 7,
@@ -1203,8 +1203,8 @@
    "name": "_safe_apply_error_message",
    "module": "backend/app_runtime.py",
    "lines": [
-    920,
-    930
+    978,
+    988
    ],
    "size": 11,
    "body_lines": 7,
@@ -1225,8 +1225,8 @@
    "name": "_norm",
    "module": "backend/app_runtime.py",
    "lines": [
-    935,
-    936
+    993,
+    994
    ],
    "size": 2,
    "body_lines": 1,
@@ -1269,8 +1269,8 @@
    "name": "_db",
    "module": "backend/app_runtime.py",
    "lines": [
-    941,
-    949
+    999,
+    1007
    ],
    "size": 9,
    "body_lines": 2,
@@ -1287,8 +1287,8 @@
    "name": "_durable_jobs_dir",
    "module": "backend/app_runtime.py",
    "lines": [
-    965,
-    970
+    1023,
+    1028
    ],
    "size": 6,
    "body_lines": 3,
@@ -1305,8 +1305,8 @@
    "name": "register_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    983,
-    985
+    1041,
+    1043
    ],
    "size": 3,
    "body_lines": 2,
@@ -1323,8 +1323,8 @@
    "name": "registered_flask_app",
    "module": "backend/app_runtime.py",
    "lines": [
-    988,
-    991
+    1046,
+    1049
    ],
    "size": 4,
    "body_lines": 3,
@@ -33957,9 +33957,10 @@
    "desired_owner": "backend/job_service.py",
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
+    "_job_candidates",
     "_reconcile_running_transactions"
    ],
-   "caller_count": 1,
+   "caller_count": 2,
    "dependencies": []
   },
   {
@@ -33987,10 +33988,10 @@
    "module": "backend/transaction_service.py",
    "lines": [
     193,
-    256
+    250
    ],
-   "size": 64,
-   "body_lines": 45,
+   "size": 58,
+   "body_lines": 39,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT_RECONCILIATION",
@@ -34002,6 +34003,7 @@
    "caller_count": 1,
    "dependencies": [
     "_is_job_wrapper",
+    "_job_candidates",
     "_jobs_by_transaction",
     "_orphaned_job_wrapper",
     "_running_rows",
@@ -34009,11 +34011,33 @@
    ]
   },
   {
+   "name": "_job_candidates",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    253,
+    269
+   ],
+   "size": 17,
+   "body_lines": 13,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "JOBS",
+   "desired_owner": "backend/job_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_reconcile_running_transactions"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_is_job_wrapper"
+   ]
+  },
+  {
    "name": "_running_rows",
    "module": "backend/transaction_service.py",
    "lines": [
-    263,
-    278
+    276,
+    291
    ],
    "size": 16,
    "body_lines": 7,
@@ -34032,11 +34056,11 @@
    "name": "_install_transaction_job_hooks",
    "module": "backend/transaction_service.py",
    "lines": [
-    284,
-    448
+    297,
+    465
    ],
-   "size": 165,
-   "body_lines": 164,
+   "size": 169,
+   "body_lines": 168,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -34054,8 +34078,8 @@
    "name": "start_transaction_reconcile_schedule",
    "module": "backend/transaction_service.py",
    "lines": [
-    451,
-    461
+    468,
+    478
    ],
    "size": 11,
    "body_lines": 7,
@@ -34074,8 +34098,8 @@
    "name": "transaction_cancel_eligibility",
    "module": "backend/transaction_service.py",
    "lines": [
-    468,
-    485
+    485,
+    502
    ],
    "size": 18,
    "body_lines": 12,
@@ -34095,8 +34119,8 @@
    "name": "_sync_transactions_from_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    488,
-    497
+    505,
+    514
    ],
    "size": 10,
    "body_lines": 9,
@@ -34115,8 +34139,8 @@
    "name": "_item_transaction_fields",
    "module": "backend/transaction_service.py",
    "lines": [
-    502,
-    513
+    519,
+    530
    ],
    "size": 12,
    "body_lines": 11,
@@ -34137,8 +34161,8 @@
    "name": "_item_metadata_transaction_payload",
    "module": "backend/transaction_service.py",
    "lines": [
-    516,
-    546
+    533,
+    563
    ],
    "size": 31,
    "body_lines": 30,
@@ -34160,8 +34184,8 @@
    "name": "_start_metadata_apply_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    549,
-    603
+    566,
+    620
    ],
    "size": 55,
    "body_lines": 54,
