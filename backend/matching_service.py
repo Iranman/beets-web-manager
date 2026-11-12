@@ -1531,6 +1531,8 @@ def _ai_provider() -> Tuple[str, str]:
     wizard used to save every provider's key as OPENAI_API_KEY next to the
     AI_BASE_URL the operator typed, so on a non-OpenAI URL with none of its
     own keys set OPENAI_API_KEY is still used, with a one-time warning.
+    No key goes to an OpenAI/OpenRouter URL, and OPENAI_API_KEY goes nowhere,
+    unless the URL is https (#535).
     """
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
     openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -1543,16 +1545,22 @@ def _ai_provider() -> Tuple[str, str]:
             return _OPENROUTER_BASE_URL, openrouter_key
         return _OPENAI_BASE_URL, generic_key
     try:
-        host = "." + (urllib.parse.urlsplit(base_url).hostname or "").lower()
+        parts = urllib.parse.urlsplit(base_url)
+        # "api.openai.com." is the same host as "api.openai.com" (#535).
+        host = "." + (parts.hostname or "").rstrip(".").lower()
     except ValueError:
         # Unparseable (e.g. NFKC-invalid netloc). Never send a key there, and
         # never surface the error: its text quotes the netloc, password included.
         return base_url, ""
+    # OpenAI/OpenRouter keys, and any key for those hosts, only over https (#535).
+    https = parts.scheme.lower() == "https"
     if host.endswith(".api.openai.com"):
-        return base_url, openai_key or generic_key
+        return base_url, (openai_key or generic_key) if https else ""
     own_name = "OPENROUTER_API_KEY" if host.endswith(".openrouter.ai") else "AI_API_KEY"
     own_key = (openrouter_key or generic_key) if own_name == "OPENROUTER_API_KEY" else generic_key
-    if own_key or not openai_key:
+    if own_name == "OPENROUTER_API_KEY" and not https:
+        return base_url, ""
+    if own_key or not openai_key or not https:
         return base_url, own_key
     from backend.config_layers import _warn_once
     _warn_once("OPENAI_API_KEY is used for a non-OpenAI AI_BASE_URL; set %s instead.", own_name)
