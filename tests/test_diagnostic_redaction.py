@@ -9,6 +9,7 @@ import sys
 import time
 import types
 import unittest
+import unittest.mock as mock
 
 from flask import Flask
 
@@ -16,28 +17,27 @@ from backend.app_runtime import _redact_security_text
 
 
 def _load(real_first_pass):
-    saved = {name: sys.modules.get(name) for name in ("app", "routes_setup")}
     stub = types.ModuleType("app")
     stub.__routes_setup_test_stub__ = True
     stub.app = Flask(__name__)
     if real_first_pass:
         stub._redact_security_text = _redact_security_text
-    sys.modules["app"] = stub
-    sys.modules.pop("routes_setup", None)
-    try:
-        return importlib.import_module("routes_setup")
-    finally:
-        for name, module in saved.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
+    # The redactor imports `app` on each call, so the stub stays in place for
+    # the calls too (or the real app.py would load).
+    with mock.patch.dict(sys.modules, {"app": stub}):
+        sys.modules.pop("routes_setup", None)
+        module = importlib.import_module("routes_setup")
+
+    def redact(text):
+        with mock.patch.dict(sys.modules, {"app": stub}):
+            return module._redact_diagnostic_text(text)
+    return redact
 
 
 class DiagnosticRedactionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.redactors = {flag: _load(flag)._redact_diagnostic_text for flag in (True, False)}
+        cls.redactors = {flag: _load(flag) for flag in (True, False)}
 
     def test_issue_524_values_are_masked_whole(self):
         for text in (
@@ -45,7 +45,7 @@ class DiagnosticRedactionTests(unittest.TestCase):
             "Authorization: '{x} {y}'", "authorization='Bearer {x} {y}'",
             "password={x};{y}", "password={x}}}{y}", "password={x}]{y}", "password={x}&{y}",
             "password={x}'{y} {z}'", "token: {x},{y}", "cookie={x},{y}", "Authorization: token {x} {y}",
-            'api_key="{x} {y}",{z}',
+            'api_key="{x} {y}",{z}', "password={x} {y}",
         ):
             text = text.format(x="FAKEX", y="FAKEY", z="FAKEZ")
             for real, redact in self.redactors.items():

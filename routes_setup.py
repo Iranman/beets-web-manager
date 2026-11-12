@@ -1727,10 +1727,11 @@ _SECRET_KV_RE = re.compile(
     # "[REDACTED],y" the ",y" is still part of the secret (#524).
     (?!['"]?(?:(?:bearer|basic)\s+)?\[redacted\]['"]?(?:\s|$))
     ((?:(?:bearer|basic)\s+)?)
-    # The value runs to whitespace; a quoted part may hold spaces and runs to
-    # its closing quote, or to the end when unclosed (#524). The alternatives
-    # start on different characters, so matching stays linear.
-    (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\s"'])+
+    # The value runs to ASCII whitespace (an NBSP may be part of it); a quoted
+    # part may hold spaces and runs to its closing quote, or to the end when
+    # unclosed (#524). The alternatives start on different characters, so
+    # matching stays linear.
+    (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\ \t\r\n\f\v"'])+
     """,
     re.VERBOSE | re.DOTALL,
 )
