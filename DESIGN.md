@@ -242,6 +242,13 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - **Wood on ops pages.** `.ops-station` uses `--ops-wood` (#20150e) with an interim self-hosted `feTurbulence` grain (`--ops-grain`) that only darkens. Text on it: `zinc-50` 16.6:1, `muted` 6.75:1. When the Library crate material (`.crate`, `walnut-*`, `--wood-grain`) lands on `main`, the station moves to it and `--ops-grain` is removed.
 - **Controls** in ops pages are at least 40px tall, 44px on coarse pointers; filters are text with a brass underline when on (`.ops-filter.is-on`, `aria-pressed`).
 
+### Playlists: mixtapes
+- The page has two jobs, making playlists and syncing them, and is built around them. The focal point is the bench where a playlist is made: a mixtape J-card on the left takes the playlist's name as it is typed, and the add/import form sits beside it. Syncing to Plex has its own titled band with its status line, last-sync link and the Sync All button. Saved playlists stand in the walnut crate, one J-card per playlist.
+- The J-card (`.mixtape`) is authored CSS: sleeve paper (`--color-brass-200` with the paper grain), two strips of tape colour across the top third, and the name lettered in the display serif (initials at row size). The tape tone comes from a hash of the name, from four token pairs. It is always `aria-hidden`; the name is printed beside it. Playlists carry no album ids, so there is no cover art to draw from; a cover mosaic needs that field from the backend first.
+- Size the J-card in rem, never in percentages: percentage padding resolves against the row, not the card.
+- Filters and track states are crate tabs (`.crate-tab`) with `aria-pressed`. Figures sit in runs of text, never in stat tiles or pills; state is a word in a state colour.
+- No motion of its own: the Library's sleeve flip stays the app's one authored motion.
+
 ## Do's and Don'ts
 
 ### Do:

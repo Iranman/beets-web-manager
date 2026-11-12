@@ -14,6 +14,12 @@
  * dismissed 74 · the zinc-* scale is a theme token set (warm values in @theme), not the default palette
  * kept "Browse music library" as the h1 under the Library tab · four e2e specs select the heading by that name
  */
+/* Hallmark · Playlists · redesign: full · shape: app screen · idea: a mixtape bench; you letter a J-card while you make the playlist, and the saved ones stand in the crate
+ * jobs: making (the focal bench) and syncing (its own band) · materials: mixtape J-cards (authored CSS on sleeve paper), the walnut crate · states: empty, loading, failed load, filtered, running
+ * dismissed 40 · same MUI fieldset edge as the Library, 4.54:1
+ * dismissed 39b · a saved-playlist row is a disclosure for the whole record (name, state, figures), not a button; its height is its content
+ * dismissed 74 · the zinc-* scale is the warm theme token set
+ */
 /* Hallmark · shape: app screen · genre: atmospheric · theme: locked (DESIGN.md, Record shelf) · redesign: full · scope: Jobs & Cleanup (views/Jobs.tsx, components/SleeveArt.tsx)
  * nav: the shell's · signature: the listening station, the running job's cover as the label of a record turning on a walnut deck under a brass progress ring and a lowered tonearm · states: running, idle, loading, error, last finished, compact second deck
  * axes: dark/roman-serif/warm · posture: operate · contrast: pass (text on --ops-wood: zinc-50 16.6:1, muted 6.75:1; the grain only darkens) · v2.0.0 */
@@ -640,6 +646,70 @@ body {
   }
   .lib-shelf-cover:nth-child(odd) {
     transform: translateY(0.25rem);
+  }
+}
+
+/* Playlists (DESIGN.md "Playlists: mixtapes"): each playlist is a mixtape J-card, its name lettered
+   on sleeve paper under two strips of tape colour. Authored CSS; the tone comes from a hash of the name. */
+@layer components {
+  .mixtape {
+    --mix-a: var(--color-brass-600);
+    --mix-b: var(--color-walnut-700);
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    aspect-ratio: 1;
+    padding: 0.875rem;
+    background-color: var(--color-brass-200);
+    color: var(--color-graphite-950);
+    font-family: var(--font-display);
+  }
+  .mixtape[data-tone="1"] {
+    --mix-a: color-mix(in srgb, var(--color-info) 70%, var(--color-graphite-950));
+    --mix-b: var(--color-brass-600);
+  }
+  .mixtape[data-tone="2"] {
+    --mix-a: var(--color-danger);
+    --mix-b: color-mix(in srgb, var(--color-warning) 80%, var(--color-graphite-950));
+  }
+  .mixtape[data-tone="3"] {
+    --mix-a: color-mix(in srgb, var(--color-success) 55%, var(--color-graphite-950));
+    --mix-b: var(--color-walnut-700);
+  }
+  /* Two strips of tape colour across the top third of the card. */
+  .mixtape::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 16%;
+    height: 16%;
+    background: linear-gradient(var(--mix-a) 0 55%, var(--mix-b) 55% 100%);
+  }
+  .mixtape::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: var(--paper-grain);
+    pointer-events: none;
+  }
+  .mixtape-title {
+    position: relative;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    font-size: clamp(0.8125rem, 1.4vw, 1.25rem);
+    font-weight: 600;
+    line-height: 1.15;
+    overflow-wrap: break-word;
+  }
+  .mixtape.is-small {
+    padding: 0 0 0.375rem;
+    align-items: center;
+  }
+  .mixtape.is-small .mixtape-title {
+    font-size: 0.875rem;
   }
 }
 

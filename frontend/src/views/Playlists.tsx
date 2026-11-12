@@ -178,21 +178,21 @@ function hostMatches(host: string, domain: string): boolean {
 }
 
 function platformLabel(value: string): { label: string; tone: string } {
-  if (!value.trim()) return { label: 'Paste a URL', tone: 'border-graphite-700 bg-graphite-900 text-muted' };
+  if (!value.trim()) return { label: 'Paste a URL', tone: 'border-graphite-700 text-muted' };
   const host = platformHost(value);
   if (hostMatches(host, 'music.youtube.com') || hostMatches(host, 'youtube.com') || hostMatches(host, 'youtu.be')) {
-    return { label: 'YouTube', tone: 'border-red-900 bg-red-950 text-red-300' };
+    return { label: 'YouTube', tone: 'border-graphite-700 text-danger-text' };
   }
   if (hostMatches(host, 'spotify.com')) {
-    return { label: 'Spotify', tone: 'border-emerald-900 bg-emerald-950 text-emerald-300' };
+    return { label: 'Spotify', tone: 'border-graphite-700 text-success' };
   }
   if (hostMatches(host, 'soundcloud.com')) {
-    return { label: 'SoundCloud', tone: 'border-orange-900 bg-orange-950 text-orange-300' };
+    return { label: 'SoundCloud', tone: 'border-graphite-700 text-warning' };
   }
   if (hostMatches(host, 'music.apple.com')) {
-    return { label: 'Apple Music', tone: 'border-rose-900 bg-rose-950 text-rose-300' };
+    return { label: 'Apple Music', tone: 'border-graphite-700 text-danger-text' };
   }
-  return { label: 'URL', tone: 'border-graphite-700 bg-graphite-900 text-zinc-300' };
+  return { label: 'URL', tone: 'border-graphite-700 text-zinc-300' };
 }
 
 function playlistStatusMessage(result: PlaylistCreateResponse | null | undefined): string {
@@ -301,10 +301,10 @@ function qualityColor(quality: string | undefined): 'success' | 'warning' | 'err
 }
 
 function statusTone(status: string): string {
-  if (status === 'matched' || status === 'downloaded' || status === 'waiting_import') return 'border-emerald-900 bg-emerald-950/30 text-emerald-300';
-  if (status === 'searching' || status === 'importing' || status === 'queued') return 'border-sky-900 bg-sky-950/30 text-sky-300';
-  if (status === 'failed' || status === 'source_failed') return 'border-rose-900 bg-rose-950/30 text-rose-300';
-  return 'border-graphite-700 bg-graphite-950/40 text-zinc-300';
+  if (status === 'matched' || status === 'downloaded' || status === 'waiting_import') return 'text-success';
+  if (status === 'searching' || status === 'importing' || status === 'queued') return 'text-info';
+  if (status === 'failed' || status === 'source_failed') return 'text-danger-text';
+  return 'text-zinc-300';
 }
 
 function statusLabel(status: string): string {
@@ -338,7 +338,7 @@ function identityEvidenceLabel(track: PlaylistTrack): string {
 
 function metric(label: string, value: number | string, tone = 'text-zinc-100') {
   return (
-    <div className="rounded border border-graphite-800 bg-graphite-950/60 px-3 py-2">
+    <div className="min-w-0 border-t border-graphite-800 pt-1.5">
       <div className={`text-lg font-semibold tabular-nums ${tone}`}>{value}</div>
       <div className="mt-0.5 text-xs text-muted">{label}</div>
     </div>
@@ -347,8 +347,8 @@ function metric(label: string, value: number | string, tone = 'text-zinc-100') {
 
 function compactStat(label: string, value: number | string, tone = 'text-zinc-300') {
   return (
-    <span className={`inline-flex h-7 items-center rounded-full border border-graphite-800 bg-graphite-950/60 px-2.5 text-xs ${tone}`}>
-      <span className="font-semibold tabular-nums text-zinc-100">{value}</span>
+    <span className={`inline-flex items-baseline text-xs ${tone}`}>
+      <span className="font-semibold tabular-nums">{value}</span>
       <span className="ml-1 text-muted">{label}</span>
     </span>
   );
@@ -825,26 +825,34 @@ function savedPlaylistFilterCount(metrics: SavedPlaylistMetrics, filter: SavedPl
   return 0;
 }
 
-function SavedBadge({ label, tone = 'idle', title }: { label: string; tone?: SavedBadgeTone; title?: string }) {
-  const toneClass = {
-    ok: 'border-emerald-800 bg-emerald-950/40 text-emerald-300',
-    warn: 'border-amber-800 bg-amber-950/40 text-amber-300',
-    danger: 'border-rose-800 bg-rose-950/40 text-rose-300',
-    idle: 'border-graphite-700 bg-graphite-950/50 text-zinc-400',
-    info: 'border-sky-800 bg-sky-950/40 text-sky-300',
-  }[tone];
+// A mixtape J-card: the playlist's name hand-lettered on sleeve paper under two strips of tape colour.
+// Authored CSS only (playlists carry no album ids to draw art from); always decorative.
+function MixtapeSleeve({ name, small = false, className = '' }: { name: string; small?: boolean; className?: string }) {
+  const label = name.trim() || 'Untitled mix';
+  let hash = 0;
+  for (const ch of label) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  const initials = label.split(/\s+/).filter(Boolean).slice(0, 2).map((word) => word[0]?.toUpperCase()).join('');
   return (
-    <span title={title} className={`inline-flex min-h-6 items-center rounded-full border px-2 py-0.5 text-xs font-medium ${toneClass}`}>
+    <span aria-hidden="true" className={`mixtape sleeve ${small ? 'is-small' : ''} ${className}`} data-tone={hash % 4}>
+      <span className="mixtape-title">{small ? initials : label}</span>
+    </span>
+  );
+}
+
+function SavedBadge({ label, tone = 'idle', title }: { label: string; tone?: SavedBadgeTone; title?: string }) {
+  // Words carry the state; the tone only reinforces it. No pill: the badges sit in a run of text.
+  return (
+    <span title={title} className={`inline-flex items-center text-xs font-medium ${savedTextTone(tone)}`}>
       {label}
     </span>
   );
 }
 
 function savedTextTone(tone: SavedBadgeTone): string {
-  if (tone === 'ok') return 'text-emerald-300';
-  if (tone === 'warn') return 'text-amber-300';
-  if (tone === 'danger') return 'text-rose-300';
-  if (tone === 'info') return 'text-sky-300';
+  if (tone === 'ok') return 'text-success';
+  if (tone === 'warn') return 'text-warning';
+  if (tone === 'danger') return 'text-danger-text';
+  if (tone === 'info') return 'text-info';
   return 'text-zinc-300';
 }
 
@@ -855,11 +863,11 @@ function SavedPlaylistRowContext({ summary }: { summary: SavedPlaylistSummary })
       ? summary.lastCheckpointLabel
       : 'No recent activity';
   const activityTone = summary.running
-    ? 'text-sky-300'
+    ? 'text-info'
     : summary.pipelineFailed || summary.lastError
-      ? 'text-rose-300'
+      ? 'text-danger-text'
       : summary.interrupted
-        ? 'text-amber-300'
+        ? 'text-warning'
         : 'text-zinc-400';
 
   return (
@@ -876,7 +884,7 @@ function SavedPlaylistRowContext({ summary }: { summary: SavedPlaylistSummary })
         </span>
       </div>
       {summary.lastError ? (
-        <div className="truncate text-rose-300" title={summary.lastError}>
+        <div className="truncate text-danger-text" title={summary.lastError}>
           Issue: {summary.lastError}
         </div>
       ) : null}
@@ -893,7 +901,7 @@ function SavedPlaylistDetailMetric({
   tone?: string;
 }) {
   return (
-    <div className="rounded border border-graphite-800 bg-graphite-950/50 px-3 py-2">
+    <div className="min-w-0 border-t border-graphite-800 pt-1.5">
       <div className={`text-sm font-semibold tabular-nums ${tone}`}>{typeof value === 'number' ? value.toLocaleString() : value}</div>
       <div className="mt-1 text-xs text-muted">{label}</div>
     </div>
@@ -902,34 +910,34 @@ function SavedPlaylistDetailMetric({
 
 function SavedPlaylistExpandedDetails({ summary }: { summary: SavedPlaylistSummary }) {
   return (
-    <div className="border-t border-graphite-800 bg-graphite-950/30 px-3 py-3">
+    <div className="border-t border-walnut-950 px-3 py-3">
       <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-6">
         <SavedPlaylistDetailMetric label="Total playlist tracks" value={summary.totalTracks} />
-        <SavedPlaylistDetailMetric label="In Beets library" value={summary.libraryMatched} tone="text-emerald-300" />
-        <SavedPlaylistDetailMetric label="Missing from Beets" value={summary.missing} tone={summary.missing ? 'text-rose-300' : 'text-zinc-300'} />
-        <SavedPlaylistDetailMetric label="Downloaded total" value={summary.downloadedTotal} tone={summary.downloadedTotal ? 'text-sky-300' : 'text-zinc-300'} />
-        <SavedPlaylistDetailMetric label="Downloaded waiting import" value={summary.waitingImport} tone={summary.waitingImport ? 'text-amber-300' : 'text-zinc-300'} />
-        <SavedPlaylistDetailMetric label="Imported from downloads" value={summary.importedFromDownloads} tone={summary.importedFromDownloads ? 'text-emerald-300' : 'text-zinc-300'} />
-        <SavedPlaylistDetailMetric label="Active failures" value={summary.activeFailures} tone={summary.activeFailures ? 'text-rose-300' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="In Beets library" value={summary.libraryMatched} tone="text-success" />
+        <SavedPlaylistDetailMetric label="Missing from Beets" value={summary.missing} tone={summary.missing ? 'text-danger-text' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="Downloaded total" value={summary.downloadedTotal} tone={summary.downloadedTotal ? 'text-info' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="Downloaded waiting import" value={summary.waitingImport} tone={summary.waitingImport ? 'text-warning' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="Imported from downloads" value={summary.importedFromDownloads} tone={summary.importedFromDownloads ? 'text-success' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="Active failures" value={summary.activeFailures} tone={summary.activeFailures ? 'text-danger-text' : 'text-zinc-300'} />
         <SavedPlaylistDetailMetric label="Historical failures" value={summary.historicalFailures} tone={summary.historicalFailures ? 'text-zinc-400' : 'text-zinc-300'} />
-        <SavedPlaylistDetailMetric label="Review needed" value={summary.review} tone={summary.review ? 'text-amber-300' : 'text-zinc-300'} />
-        <SavedPlaylistDetailMetric label="Removed" value={summary.removed} tone={summary.removed ? 'text-amber-300' : 'text-zinc-300'} />
-        <SavedPlaylistDetailMetric label="Excluded" value={summary.excluded} tone={summary.excluded ? 'text-amber-300' : 'text-zinc-300'} />
-        <SavedPlaylistDetailMetric label="Plex matched" value={summary.plexKnown ? `${summary.plexMatched.toLocaleString()}/${summary.plexEligible.toLocaleString()}` : 'Not synced yet'} tone={summary.plexNeedsSync ? 'text-amber-300' : 'text-emerald-300'} />
-        <SavedPlaylistDetailMetric label="Pending Plex match" value={summary.plexKnown ? summary.plexPending : '-'} tone={summary.plexPending ? 'text-amber-300' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="Review needed" value={summary.review} tone={summary.review ? 'text-warning' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="Removed" value={summary.removed} tone={summary.removed ? 'text-warning' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="Excluded" value={summary.excluded} tone={summary.excluded ? 'text-warning' : 'text-zinc-300'} />
+        <SavedPlaylistDetailMetric label="Plex matched" value={summary.plexKnown ? `${summary.plexMatched.toLocaleString()}/${summary.plexEligible.toLocaleString()}` : 'Not synced yet'} tone={summary.plexNeedsSync ? 'text-warning' : 'text-success'} />
+        <SavedPlaylistDetailMetric label="Pending Plex match" value={summary.plexKnown ? summary.plexPending : '-'} tone={summary.plexPending ? 'text-warning' : 'text-zinc-300'} />
         <SavedPlaylistDetailMetric label="Last pipeline run" value={summary.lastPipelineLabel} tone="text-zinc-300" />
         <SavedPlaylistDetailMetric label="Last checkpoint" value={summary.lastCheckpointLabel} tone="text-zinc-300" />
       </div>
       {summary.lastError ? (
-        <div className="mt-3 rounded border border-rose-900/70 bg-rose-950/20 px-3 py-2">
-          <div className="text-xs font-semibold text-rose-300">Last error</div>
-          <div className="mt-1 whitespace-normal break-words text-xs text-rose-100">{summary.lastError}</div>
+        <div className="mt-3 border-t border-graphite-800 pt-2">
+          <div className="text-xs font-semibold text-danger-text">Last error</div>
+          <div className="mt-1 whitespace-normal break-words text-xs text-zinc-100">{summary.lastError}</div>
         </div>
       ) : null}
       {summary.plexIssue && summary.plexIssue !== summary.lastError ? (
-        <div className="mt-3 rounded border border-amber-900/70 bg-amber-950/20 px-3 py-2">
-          <div className="text-xs font-semibold text-amber-300">Plex issue</div>
-          <div className="mt-1 whitespace-normal break-words text-xs text-amber-100">{summary.plexIssue}</div>
+        <div className="mt-3 border-t border-graphite-800 pt-2">
+          <div className="text-xs font-semibold text-warning">Plex issue</div>
+          <div className="mt-1 whitespace-normal break-words text-xs text-zinc-100">{summary.plexIssue}</div>
         </div>
       ) : null}
     </div>
@@ -957,7 +965,7 @@ function DownloadConfirmDialog({
     <Dialog open={open} onClose={busy ? () => undefined : onClose} className="relative z-50">
       <DialogBackdrop className="fixed inset-0 bg-graphite-950/70" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-md rounded-md border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
+        <DialogPanel className="w-full max-w-md rounded-md border border-graphite-700 bg-graphite-900 p-5">
           <DialogTitle className="text-base font-semibold text-zinc-100">
             {needsPull ? 'Download missing tracks and sync?' : missing ? 'Download missing tracks and sync?' : 'Sync playlist to Plex?'}
           </DialogTitle>
@@ -998,7 +1006,7 @@ function TrackList({
       <div className={`mb-2 text-xs font-semibold ${tone}`}>
         {title}
       </div>
-      <div className="max-h-80 overflow-auto rounded border border-graphite-800 bg-graphite-950/40">
+      <div className="max-h-80 overflow-auto border-y border-graphite-800">
         {empty ? <div className="px-4 py-5 text-sm text-muted">{children}</div> : children}
       </div>
     </div>
@@ -1055,15 +1063,15 @@ function PlaylistJobProgress({
         ? 'Playlist saved; Plex not configured'
         : 'Playlist sync complete';
   const doneNoticeTone = doneSeverity === 'error'
-    ? 'border-rose-900 bg-rose-950/40 text-rose-300'
+    ? 'text-danger-text'
     : doneSeverity === 'warning'
-      ? 'border-amber-900 bg-amber-950/40 text-amber-300'
+      ? 'text-warning'
       : doneSeverity === 'info'
-        ? 'border-sky-900 bg-sky-950/40 text-sky-300'
-      : 'border-emerald-900 bg-emerald-950/40 text-emerald-300';
+        ? 'text-info'
+        : 'text-success';
 
   return (
-    <div className="rounded border border-graphite-800 bg-graphite-950/40 p-3">
+    <div className="border-y border-graphite-800 py-3">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="text-sm font-medium text-zinc-200">
           {downloadState?.status === 'done'
@@ -1080,10 +1088,10 @@ function PlaylistJobProgress({
       {downloadState ? (
         <div className="mb-3 space-y-2">
           <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
-            {metric('Available', available, 'text-emerald-300')}
-            {metric('Missing', missing, missing ? 'text-rose-300' : 'text-zinc-100')}
-            {metric('Waiting Import', downloaded, downloaded ? 'text-sky-300' : 'text-zinc-100')}
-            {metric('Failed', failed, failed ? 'text-rose-300' : 'text-zinc-100')}
+            {metric('Available', available, 'text-success')}
+            {metric('Missing', missing, missing ? 'text-danger-text' : 'text-zinc-100')}
+            {metric('Waiting Import', downloaded, downloaded ? 'text-info' : 'text-zinc-100')}
+            {metric('Failed', failed, failed ? 'text-danger-text' : 'text-zinc-100')}
             {metric('Round', downloadState.round ? `${downloadState.round}/${downloadState.max_rounds || '?'}` : '-', 'text-brass-300')}
             {metric('Sources', methods, 'text-zinc-300')}
           </div>
@@ -1115,7 +1123,7 @@ function PlaylistJobProgress({
         </div>
       ) : null}
       {trackStatuses.length ? (
-        <div className="mb-3 max-h-52 overflow-auto rounded border border-graphite-800 bg-graphite-950/50">
+        <div className="mb-3 max-h-52 overflow-auto border-y border-graphite-800">
           <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] border-b border-graphite-800 px-3 py-2 text-xs font-semibold text-muted">
             <span>Track</span>
             <span>Source</span>
@@ -1125,22 +1133,22 @@ function PlaylistJobProgress({
             <div key={row.id} className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] items-start gap-2 border-t border-graphite-800 px-3 py-2 text-xs first:border-t-0">
               <div className="min-w-0">
                 <div className="truncate text-zinc-200">{[row.artist, row.title].filter(Boolean).join(' - ')}</div>
-                {canonicalNote(row) ? <div className="truncate text-sky-300">{canonicalNote(row)}</div> : null}
+                {canonicalNote(row) ? <div className="truncate text-info">{canonicalNote(row)}</div> : null}
                 {row.message ? <div className="truncate text-muted">{row.message}</div> : null}
               </div>
               <span className="truncate text-zinc-400">{row.method || '-'}</span>
-              <span className={`rounded border px-2 py-0.5 text-center ${statusTone(row.status)}`}>
+              <span className={`truncate ${statusTone(row.status)}`}>
                 {statusLabel(row.status)}
               </span>
             </div>
           ))}
         </div>
       ) : null}
-      <div className="rounded border border-graphite-800 bg-graphite-950/40 px-3 py-2 text-xs text-muted">
+      <div className="text-xs text-muted">
         Live log output is shown in the top pipeline bar. Open Jobs for the full persisted job log.
       </div>
       {downloadState?.status === 'done' && playlistStatusMessage(downloadState.playlist) ? (
-        <div className={`mt-3 rounded border px-3 py-2 text-sm ${doneNoticeTone}`}>
+        <div className={`mt-3 border-t border-graphite-800 pt-2 text-sm ${doneNoticeTone}`}>
           {playlistStatusMessage(downloadState.playlist)}
           {downloadState.missing_after_import ? ` · ${downloadState.missing_after_import} still missing` : ''}
         </div>
@@ -2359,131 +2367,58 @@ export default function Playlists() {
 
   return (
     <div className="min-w-0 space-y-6 overflow-x-clip">
-      <div>
-        <h1 className="font-display text-2xl font-semibold text-zinc-100">Playlists</h1>
-        <p className="mt-0.5 text-sm text-muted">
-          Source playlist → saved playlist → missing-track download → Beets import → MusicBrainz release-group placement → Plex.
+      <div className="border-b border-graphite-800 pb-4">
+        <h1 className="lib-title">Playlists</h1>
+        <p className="lib-catalog">
+          <span>{`${savedPlaylistMetrics.total.toLocaleString()} saved`}</span>
+          <span>{`${savedPlaylistMetrics.available.toLocaleString()} of ${savedPlaylistMetrics.tracks.toLocaleString()} tracks in Beets`}</span>
+          {savedPlaylistMetrics.needsAction ? (
+            <span className="lib-review is-flag">{`${savedPlaylistMetrics.needsAction.toLocaleString()} need action`}</span>
+          ) : null}
+        </p>
+        <p className="mt-2 max-w-[65ch] text-sm text-muted">
+          Make a playlist from a link, an M3U file or a typed track list, then keep it in sync with Plex.
         </p>
       </div>
 
-      <section className="sticky top-[var(--bw-header-h)] z-[15] rounded border border-graphite-800 bg-graphite-900/95 px-3 py-2.5 backdrop-blur">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
-              <span className="truncate font-medium text-zinc-100">
-                {savedPlaylistName || activePlaylist?.name || 'Select a saved playlist'}
-              </span>
-              <span className="text-muted">·</span>
-              <span className="text-zinc-400">{pipelineAction.replace(/_/g, ' ')}</span>
-              <span className="text-muted">·</span>
-              <span className={pipelineStateLabel === 'interrupted' ? 'text-amber-300' : pipelineStateLabel === 'running' ? 'text-sky-300' : pipelineStateLabel === 'failed' ? 'text-rose-300' : 'text-zinc-400'}>
-                {pipelineStateLabel}
-              </span>
-              {lastCheckpointLabel !== '-' ? (
-                <>
-                  <span className="text-muted">·</span>
-                  <span className="text-xs text-muted">checkpoint {lastCheckpointLabel}</span>
-                </>
-              ) : null}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {compactStat('available', matchedCount, 'text-emerald-300')}
-              {compactStat('missing', missingCount, missingCount ? 'text-rose-300' : 'text-zinc-300')}
-              {compactStat('waiting import', downloadedWaitingCount, downloadedWaitingCount ? 'text-sky-300' : 'text-zinc-300')}
-              {compactStat('failed/review', failedReviewCount, failedReviewCount ? 'text-amber-300' : 'text-zinc-300')}
-              {compactStat('removed/excluded', removedExcludedCount, removedExcludedCount ? 'text-amber-300' : 'text-zinc-300')}
-              {compactStat('Plex synced', plexSyncedCount, plexSyncedCount ? 'text-brass-300' : 'text-zinc-300')}
-              {compactStat('pending Plex', savedDetail?.last_plex?.pending_plex_count ?? activePlaylist?.plex_pending_count ?? 0, (savedDetail?.last_plex?.pending_plex_count ?? activePlaylist?.plex_pending_count ?? 0) ? 'text-amber-300' : 'text-zinc-300')}
-            </div>
-          </div>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-            {pipelineIsActive ? (
-              <>
-                <Button variant="outlined" size="small" onClick={() => void handlePipelineAction('pause')}>
-                  Pause
-                </Button>
-                <Button variant="outlined" color="error" size="small" onClick={() => void handlePipelineAction('stop')}>
-                  Stop
-                </Button>
-              </>
-            ) : (
-              <Button
-                variant="contained"
-                color={hasResumablePipeline ? 'warning' : 'primary'}
-                size="small"
-                disabled={(!savedPlaylistName && !activePlaylist) || engineOffline}
-                onClick={() => {
-                  if (savedPlaylistName) {
-                    void handlePipelineAction(mainPipelineAction);
-                  } else if (activePlaylist) {
-                    void handleSavedPlaylistPipelineAction(activePlaylist, 'resume');
-                  }
-                }}
-              >
-                {mainPipelineLabel}
-              </Button>
-            )}
-            <ActionMenu
-              label="More Actions"
-              actions={pipelineMoreActions}
-              disabled={!savedPlaylistName || pipelineIsActive}
-            />
-          </div>
-        </div>
-
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-graphite-800 pt-2 text-xs">
-          <div className="min-w-0 flex-1 truncate text-zinc-400" title={latestStatusLine}>
-            <span className="text-muted">Now:</span> {latestStatusLine}
-          </div>
-          <button
-            type="button"
-            className="rounded border border-graphite-700 px-2 py-1 text-xs text-zinc-300 hover:border-graphite-500 hover:text-zinc-100"
-            onClick={() => setLogExpanded((value) => !value)}
-          >
-            {logExpanded ? 'Collapse Log' : 'Expand Log'}
-          </button>
-        </div>
-
-        {showLastPipelineError ? (
-          <Alert severity="error" sx={{ mt: 1.5 }}>{savedDetail?.last_pipeline?.error}</Alert>
-        ) : null}
-        {pipelineLog.length ? (
-          <div className="mt-2">
-            <LogViewer
-              className={`${logExpanded ? 'max-h-72' : 'max-h-24'} text-xs leading-5 text-zinc-400`}
-              emptyText="No playlist pipeline log yet."
-              lines={visiblePipelineLog}
-              showControls={false}
-            />
-          </div>
-        ) : null}
-      </section>
-
-      <section className="rounded border border-graphite-800 bg-graphite-900 px-3 py-2.5">
+      {/* The focal point: the bench where a playlist is made. Its J-card takes the name as it is typed. */}
+      <section aria-label="Make a playlist" className="grid grid-cols-[6rem_minmax(0,1fr)] gap-4 sm:grid-cols-[8rem_minmax(0,1fr)] md:gap-6 lg:grid-cols-[11rem_minmax(0,1fr)]">
+        <MixtapeSleeve name={name || savedPlaylistName} className="w-full self-start" />
+        <div className="min-w-0">
         <button
           type="button"
-          className="flex w-full flex-wrap items-center justify-between gap-2 text-left"
+          className="flex w-full flex-wrap items-baseline justify-between gap-x-4 gap-y-1 rounded-sm border-b border-graphite-800 pb-2 text-left focus-visible:ring-2 focus-visible:ring-brass-300"
           aria-expanded={importExpanded}
           aria-label={importExpanded ? 'Hide Add or Import Playlist' : 'Show Add or Import Playlist'}
           onClick={() => setImportExpanded((value) => !value)}
         >
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="text-sm font-semibold text-zinc-400">
+          <span className="flex min-w-0 flex-wrap items-baseline gap-x-3">
+            <span className="font-display text-xl font-semibold text-zinc-100 sm:text-2xl">
               Add or import playlist
             </span>
-            <span className="rounded border border-graphite-800 px-1.5 py-0.5 text-xs text-muted">
+            <span className="text-sm text-brass-300 underline underline-offset-4">
               {importExpanded ? 'Hide' : 'Show'}
             </span>
           </span>
-          <span className="flex min-w-0 flex-wrap items-center justify-end gap-2 text-xs text-muted">
+          <span className="flex min-w-0 flex-wrap items-baseline justify-end gap-x-3 text-xs text-muted">
             {parseResult ? (
-              <span>{matchedCount} matched · {missingCount} missing · {parseResult.total} total</span>
+              <>
+                <span>{matchedCount} matched</span>
+                <span>{missingCount} missing</span>
+                <span>{parseResult.total} total</span>
+              </>
             ) : content ? (
               <span className="truncate">{source === 'url' ? detected.label : SOURCE_OPTIONS.find((option) => option.value === source)?.label}</span>
             ) : null}
             {parsing ? <Chip label="Matching" size="small" color="primary" /> : null}
           </span>
         </button>
+
+        {!importExpanded ? (
+          <p className="mt-3 max-w-[60ch] text-sm text-zinc-300">
+            Paste a playlist link, pick an M3U from the playlists folder, or type one track per line. Preview the matches against Beets before you save it.
+          </p>
+        ) : null}
 
         {importExpanded ? (
           <div className="mt-3">
@@ -2597,8 +2532,10 @@ export default function Playlists() {
             {parsing ? 'Previewing...' : 'Preview Matches'}
           </Button>
           {parseResult ? (
-            <span className="text-sm text-zinc-400">
-              {matchedCount} matched · {missingCount} missing · {parseResult.total} total
+            <span className="flex flex-wrap gap-x-3 text-sm text-zinc-400">
+              <span>{matchedCount} matched</span>
+              <span>{missingCount} missing</span>
+              <span>{parseResult.total} total</span>
             </span>
           ) : null}
         </div>
@@ -2607,10 +2544,100 @@ export default function Playlists() {
         {parseError && <Alert severity="error" sx={{ mt: 2 }}>{parseError}</Alert>}
           </div>
         ) : null}
+        </div>
+      </section>
+
+      {/* The deck: what the selected playlist is doing now. Flat, on rules, pinned under the header. */}
+      <section className="sticky top-[var(--bw-header-h)] z-[15] -mx-3 border-y border-graphite-800 bg-graphite-950 px-3 py-2.5 sm:-mx-4 sm:px-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0 flex-1 basis-full sm:basis-0">
+            <div className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+              <span className="truncate font-display text-base font-semibold text-zinc-100">
+                {savedPlaylistName || activePlaylist?.name || 'Select a saved playlist'}
+              </span>
+              <span className="text-zinc-400">{pipelineAction.replace(/_/g, ' ')}</span>
+              <span className={pipelineStateLabel === 'interrupted' ? 'text-warning' : pipelineStateLabel === 'running' ? 'text-info' : pipelineStateLabel === 'failed' ? 'text-danger-text' : 'text-zinc-400'}>
+                {pipelineStateLabel}
+              </span>
+              {lastCheckpointLabel !== '-' ? (
+                <span className="text-xs text-muted">checkpoint {lastCheckpointLabel}</span>
+              ) : null}
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
+              {compactStat('available', matchedCount, 'text-success')}
+              {compactStat('missing', missingCount, missingCount ? 'text-danger-text' : 'text-zinc-300')}
+              {compactStat('waiting import', downloadedWaitingCount, downloadedWaitingCount ? 'text-info' : 'text-zinc-300')}
+              {compactStat('failed/review', failedReviewCount, failedReviewCount ? 'text-warning' : 'text-zinc-300')}
+              {compactStat('removed/excluded', removedExcludedCount, removedExcludedCount ? 'text-warning' : 'text-zinc-300')}
+              {compactStat('Plex synced', plexSyncedCount, plexSyncedCount ? 'text-brass-300' : 'text-zinc-300')}
+              {compactStat('pending Plex', savedDetail?.last_plex?.pending_plex_count ?? activePlaylist?.plex_pending_count ?? 0, (savedDetail?.last_plex?.pending_plex_count ?? activePlaylist?.plex_pending_count ?? 0) ? 'text-warning' : 'text-zinc-300')}
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            {pipelineIsActive ? (
+              <>
+                <Button variant="outlined" size="small" onClick={() => void handlePipelineAction('pause')}>
+                  Pause
+                </Button>
+                <Button variant="outlined" color="error" size="small" onClick={() => void handlePipelineAction('stop')}>
+                  Stop
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="contained"
+                color={hasResumablePipeline ? 'warning' : 'primary'}
+                size="small"
+                disabled={(!savedPlaylistName && !activePlaylist) || engineOffline}
+                onClick={() => {
+                  if (savedPlaylistName) {
+                    void handlePipelineAction(mainPipelineAction);
+                  } else if (activePlaylist) {
+                    void handleSavedPlaylistPipelineAction(activePlaylist, 'resume');
+                  }
+                }}
+              >
+                {mainPipelineLabel}
+              </Button>
+            )}
+            <ActionMenu
+              label="More Actions"
+              actions={pipelineMoreActions}
+              disabled={!savedPlaylistName || pipelineIsActive}
+            />
+          </div>
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-graphite-800 pt-2 text-xs">
+          <div className="min-w-0 flex-1 truncate text-zinc-400" title={latestStatusLine}>
+            <span className="text-muted">Now:</span> {latestStatusLine}
+          </div>
+          <button
+            type="button"
+            className="min-h-8 rounded px-2 text-xs text-zinc-300 underline underline-offset-4 hover:text-zinc-100 active:text-brass-200"
+            onClick={() => setLogExpanded((value) => !value)}
+          >
+            {logExpanded ? 'Collapse Log' : 'Expand Log'}
+          </button>
+        </div>
+
+        {showLastPipelineError ? (
+          <Alert severity="error" sx={{ mt: 1.5 }}>{savedDetail?.last_pipeline?.error}</Alert>
+        ) : null}
+        {pipelineLog.length ? (
+          <div className="mt-2">
+            <LogViewer
+              className={`${logExpanded ? 'max-h-72' : 'max-h-24'} text-xs leading-5 text-zinc-400`}
+              emptyText="No playlist pipeline log yet."
+              lines={visiblePipelineLog}
+              showControls={false}
+            />
+          </div>
+        ) : null}
       </section>
 
       {!parseResult && (downloadState || downloadError) ? (
-        <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
+        <section aria-label="Playlist job">
           <PlaylistJobProgress
             downloadState={downloadState}
             downloadError={downloadError}
@@ -2623,15 +2650,19 @@ export default function Playlists() {
       ) : null}
 
       {parseResult ? (
-        <section className="space-y-3 rounded border border-graphite-800 bg-graphite-900 p-3">
-          <div className="sticky top-[var(--bw-header-h)] z-10 -mx-3 -mt-3 border-b border-graphite-800 bg-graphite-900/95 px-3 py-2 backdrop-blur">
+        // The open playlist: its tracklist, filed by state, set on rules like a back cover.
+        <section aria-label="Playlist tracks" className="space-y-3">
+          <div className="sticky top-[var(--bw-header-h)] z-10 -mx-3 border-b border-graphite-800 bg-graphite-950 px-3 py-2 sm:-mx-4 sm:px-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
-                <h2 className="truncate text-sm font-semibold text-zinc-100">
+                <h2 className="truncate font-display text-xl font-semibold text-zinc-100">
                   {savedPlaylistName || name || 'Playlist Tracks'}
                 </h2>
-                <div className="mt-0.5 text-xs text-muted">
-                  {matchedCount} matched · {missingCount} missing · {selectedPlaylistTotal} total · {pipelineStateLabel}
+                <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-muted">
+                  <span>{matchedCount} matched</span>
+                  <span>{missingCount} missing</span>
+                  <span>{selectedPlaylistTotal} total</span>
+                  <span>{pipelineStateLabel}</span>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -2671,20 +2702,16 @@ export default function Playlists() {
           {notice ? <Alert severity={notice.severity} onClose={() => setNotice(null)}>{notice.message}</Alert> : null}
           <MusicBrainzUnavailableNotice show={providerStatus?.musicbrainz_unavailable === true} acoustidStatus={providerStatus?.acoustid_status} />
 
-          <div className="flex flex-wrap gap-1.5">
+          <div role="group" aria-label="Tracks by state" className="crate-tabs flex flex-wrap gap-1">
             {trackGroups.map((group) => (
               <button
                 key={group.id}
                 type="button"
-                className={`rounded-full border px-3 py-1 text-xs ${
-                  trackGroup === group.id
-                    ? 'border-brass-400 bg-brass-500/15 text-brass-200'
-                    : 'border-graphite-800 bg-graphite-950/50 text-zinc-400 hover:border-graphite-600 hover:text-zinc-200'
-                }`}
+                className="crate-tab min-h-9 px-3 text-xs transition-colors"
                 aria-pressed={trackGroup === group.id}
                 onClick={() => setTrackGroup(group.id)}
               >
-                {group.label} <span className="tabular-nums text-muted">{group.count}</span>
+                {group.label} <span className="tabular-nums">{group.count}</span>
               </button>
             ))}
           </div>
@@ -2705,7 +2732,7 @@ export default function Playlists() {
           ) : null}
 
           {viewingSavedPlaylist && !savedDetailRowsLoaded ? (
-            <div className="rounded border border-graphite-800 bg-graphite-950/45 p-3 text-sm text-zinc-300">
+            <div className="border-y border-graphite-800 py-3 text-sm text-zinc-300">
               <div className="font-medium text-zinc-100">Loaded playlist summary only.</div>
               <div className="mt-1 text-xs text-muted">
                 Track rows load one page at a time so large playlists do not block the page.
@@ -2725,13 +2752,13 @@ export default function Playlists() {
           ) : null}
 
           {viewingSavedPlaylist && savedDetailRowsLoaded && qualityRows.length && trackGroup === 'failed' ? (
-            <div className="rounded border border-amber-900/50 bg-amber-950/20 p-3">
+            <div className="border-y border-graphite-800 py-3">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-xs font-semibold text-amber-300">
+                  <div className="text-xs font-semibold text-warning">
                     Needs cleanup
                   </div>
-                  <div className="mt-1 text-xs text-amber-100/70">
+                  <div className="mt-1 text-xs text-muted">
                     {qualityRows.length.toLocaleString()} playlist row(s) are playable but need album placement or metadata repair.
                   </div>
                 </div>
@@ -2746,7 +2773,7 @@ export default function Playlists() {
                   {repairingQuality ? 'Queueing...' : `Repair Review Rows (${qualityRepairRows.length})`}
                 </Button>
               </div>
-              <div className="max-h-44 overflow-auto rounded border border-amber-900/40 bg-graphite-950/40">
+              <div className="max-h-44 overflow-auto border-y border-graphite-800">
                 <div className="divide-y divide-graphite-800">
                   {qualityRows.map((track, idx) => (
                     <div key={`quality-${idx}:${track.id}:${track.path || track.title}`} className="px-3 py-2 text-sm">
@@ -2780,7 +2807,7 @@ export default function Playlists() {
                         </div>
                       </div>
                       {qualityPlaceDraft?.itemId === track.id ? (
-                        <div className="mt-3 rounded border border-amber-900/40 bg-graphite-950/50 p-3">
+                        <div className="mt-3 border-t border-graphite-800 pt-3">
                           <div className="grid gap-2 md:grid-cols-2">
                             <TextField
                               label="Artist"
@@ -2885,14 +2912,14 @@ export default function Playlists() {
                   ))}
                 </div>
               </div>
-              <div className="mt-2 text-xs text-amber-100/60">
+              <div className="mt-2 text-xs text-muted">
                 Repair runs in Jobs and will not delete playlist audio.
               </div>
             </div>
           ) : null}
 
           {savedDetailRowsLoaded && trackGroup === 'available' ? (
-            <TrackList title="Available in Beets" tone="text-emerald-400" empty={!matched.length}>
+            <TrackList title="Available in Beets" tone="text-success" empty={!matched.length}>
               {matched.length ? (
                 <div className="divide-y divide-graphite-800">
                   {matched.map((track, idx) => (
@@ -2907,7 +2934,7 @@ export default function Playlists() {
                             {track.album ? ` · ${track.album}` : ''}
                           </div>
                           {canonicalNote(track) ? (
-                            <div className="truncate text-xs text-sky-300">{canonicalNote(track)}</div>
+                            <div className="truncate text-xs text-info">{canonicalNote(track)}</div>
                           ) : null}
                           <div className="mt-1 flex flex-wrap gap-1 text-xs text-muted">
                             {track.pipeline_status ? (
@@ -2946,7 +2973,7 @@ export default function Playlists() {
           {savedDetailRowsLoaded && (trackGroup === 'missing' || trackGroup === 'waiting' || trackGroup === 'failed' || trackGroup === 'pending_plex') ? (
             <TrackList
               title={visibleMissingTitle}
-              tone={trackGroup === 'waiting' ? 'text-sky-400' : trackGroup === 'failed' || trackGroup === 'pending_plex' ? 'text-amber-300' : 'text-rose-400'}
+              tone={trackGroup === 'waiting' ? 'text-info' : trackGroup === 'failed' || trackGroup === 'pending_plex' ? 'text-warning' : 'text-danger-text'}
               empty={!visibleMissingTracks.length}
             >
               {visibleMissingTracks.length ? (
@@ -2961,7 +2988,7 @@ export default function Playlists() {
                           <div className="min-w-0 flex-1">
                             <div className="truncate">{[track.artist, track.title].filter(Boolean).join(' - ') || '(untitled)'}</div>
                             {canonicalNote(track) ? (
-                              <div className="mt-0.5 truncate text-xs text-sky-300">{canonicalNote(track)}</div>
+                              <div className="mt-0.5 truncate text-xs text-info">{canonicalNote(track)}</div>
                             ) : null}
                             {(track.local_path || track.path) ? <div className="mt-0.5 truncate text-xs text-muted">{track.local_path || track.path}</div> : null}
                             {track.translated_plex_path ? <div className="mt-0.5 truncate text-xs text-muted">Plex path: {track.translated_plex_path}</div> : null}
@@ -2970,7 +2997,7 @@ export default function Playlists() {
                               {track.pipeline_source ? <Chip label={track.pipeline_source} size="small" variant="outlined" /> : null}
                             </div>
                             {track.plex_issue || track.reason || track.failure_reason || track.pipeline_message ? (
-                              <div className={`mt-1 text-xs ${isPendingPlexTrack(track) ? 'text-amber-300' : 'text-rose-300'}`}>{track.plex_issue || track.reason || track.failure_reason || track.pipeline_message}</div>
+                              <div className={`mt-1 text-xs ${isPendingPlexTrack(track) ? 'text-warning' : 'text-danger-text'}`}>{track.plex_issue || track.reason || track.failure_reason || track.pipeline_message}</div>
                             ) : null}
                             {identityEvidenceLabel(track) ? (
                               <div className="mt-1 text-xs text-muted">{identityEvidenceLabel(track)}</div>
@@ -2981,9 +3008,9 @@ export default function Playlists() {
                                   <button
                                     key={`${suggestion.source}-${suggestion.artist}-${suggestion.title}-${suggestionIdx}`}
                                     type="button"
-                                    className={`max-w-full truncate rounded border px-2 py-1 text-left text-xs ${
+                                    className={`max-w-full min-h-8 truncate rounded border px-2 py-1 text-left text-xs hover:border-brass-400 active:bg-graphite-800 disabled:cursor-not-allowed disabled:opacity-60 ${
                                       suggestion.safe
-                                        ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200'
+                                        ? 'border-success/60 text-success'
                                         : 'border-graphite-700 bg-graphite-950 text-zinc-300'
                                     }`}
                                     title={suggestion.reason}
@@ -3053,7 +3080,7 @@ export default function Playlists() {
                     );
                   })}
                 </div>
-              ) : <span className="text-emerald-400">
+              ) : <span className="text-success">
                 {trackGroup === 'missing'
                   ? 'No unresolved missing tracks.'
                   : trackGroup === 'waiting'
@@ -3066,7 +3093,7 @@ export default function Playlists() {
           ) : null}
 
           {savedDetailRowsLoaded && trackGroup === 'removed' ? (
-            <TrackList title="Removed / Excluded" tone="text-amber-300" empty={!removedExcluded.length}>
+            <TrackList title="Removed / Excluded" tone="text-warning" empty={!removedExcluded.length}>
               {removedExcluded.length ? (
               <div className="divide-y divide-graphite-800 border-t border-graphite-800">
                 {removedExcluded.map((track, idx) => (
@@ -3102,59 +3129,66 @@ export default function Playlists() {
         </section>
       ) : null}
 
-      <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-semibold text-muted">
+      {/* The second job of the page: keeping saved playlists in step with Plex. */}
+      <section aria-labelledby="playlist-sync-heading" className="grid gap-x-8 gap-y-3 border-y border-graphite-800 py-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+        <div className="min-w-0">
+          <h2 id="playlist-sync-heading" className="font-display text-xl font-semibold text-zinc-100">
+            Sync to Plex
+          </h2>
+          {playlistSyncStatus ? (
+            <p className="mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm text-zinc-300">
+              <span>{playlistSyncStatusLabel(playlistSyncStatus)}</span>
+              {playlistSyncStatus.last_job_id ? (
+                <Link className="text-zinc-300 underline underline-offset-4 hover:text-zinc-50" to={`/jobs?job=${encodeURIComponent(playlistSyncStatus.last_job_id)}`}>
+                  View last sync job
+                </Link>
+              ) : null}
+            </p>
+          ) : (
+            <p className="mt-1 text-sm text-muted">Sync status loads with the saved playlists.</p>
+          )}
+        </div>
+        <Button
+          variant="contained"
+          onClick={() => { void handleSyncAllPlaylists(); }}
+          disabled={startingPlaylistSync || Boolean(playlistSyncJobId) || Boolean(playlistSyncStatus?.running) || engineOffline}
+        >
+          {playlistSyncJobId || playlistSyncStatus?.running ? 'Syncing to Plex...' : 'Sync All to Plex'}
+        </Button>
+        <div className="min-w-0 md:col-span-2">
+          {playlistSyncNotice ? (
+            <Alert severity={playlistSyncNotice.severity} onClose={() => setPlaylistSyncNotice(null)} sx={{ mb: 2 }}>
+              {playlistSyncNotice.message}
+            </Alert>
+          ) : null}
+          {playlistSyncStatus?.last_error ? (
+            <Alert severity="error" sx={{ mb: 2 }}>{playlistSyncStatus.last_error}</Alert>
+          ) : null}
+          <PlaylistSyncSummary status={playlistSyncStatus} />
+        </div>
+      </section>
+
+      <section aria-labelledby="saved-playlists-heading">
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+          <div className="min-w-0">
+            <h2 id="saved-playlists-heading" className="font-display text-xl font-semibold text-zinc-100">
               Saved playlists
             </h2>
             <div className="mt-1 text-xs text-muted">
-              M3U files, manifests, and resumable checkpoints from <code className="text-zinc-400">&lt;music root&gt;/playlists</code>
+              M3U files, manifests, and resumable checkpoints from <code className="text-zinc-300">&lt;music root&gt;/playlists</code>
             </div>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button
-              variant="outlined"
-              onClick={() => {
-                void loadPlaylists();
-                void loadPlaylistSyncStatus();
-              }}
-              disabled={loadingPlaylists}
-            >
-              Refresh Saved Playlists
-            </Button>
-            <Button
-              variant="contained"
-              onClick={() => { void handleSyncAllPlaylists(); }}
-              disabled={startingPlaylistSync || Boolean(playlistSyncJobId) || Boolean(playlistSyncStatus?.running) || engineOffline}
-            >
-              {playlistSyncJobId || playlistSyncStatus?.running ? 'Syncing to Plex...' : 'Sync All to Plex'}
-            </Button>
-          </div>
+          <Button
+            variant="outlined"
+            onClick={() => {
+              void loadPlaylists();
+              void loadPlaylistSyncStatus();
+            }}
+            disabled={loadingPlaylists}
+          >
+            Refresh Saved Playlists
+          </Button>
         </div>
-
-        {playlistSyncStatus ? (
-          <div className="mb-3 text-xs text-muted">
-            {playlistSyncStatusLabel(playlistSyncStatus)}
-            {playlistSyncStatus.last_job_id ? (
-              <>
-                {' · '}
-                <Link className="text-zinc-300 underline hover:text-white" to={`/jobs?job=${encodeURIComponent(playlistSyncStatus.last_job_id)}`}>
-                  View last sync job
-                </Link>
-              </>
-            ) : null}
-          </div>
-        ) : null}
-        {playlistSyncNotice ? (
-          <Alert severity={playlistSyncNotice.severity} onClose={() => setPlaylistSyncNotice(null)} sx={{ mb: 2 }}>
-            {playlistSyncNotice.message}
-          </Alert>
-        ) : null}
-        {playlistSyncStatus?.last_error ? (
-          <Alert severity="error" sx={{ mb: 2 }}>{playlistSyncStatus.last_error}</Alert>
-        ) : null}
-        <PlaylistSyncSummary status={playlistSyncStatus} />
 
         {loadingPlaylists && <LinearProgress sx={{ borderRadius: 1 }} />}
         {panelError(playlistError, engineOffline) && <Alert severity="error">{playlistError}</Alert>}
@@ -3164,13 +3198,11 @@ export default function Playlists() {
 
         {playlists.length > 0 ? (
           <div className="mb-3 space-y-3">
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              <SavedPlaylistDetailMetric label="Saved playlists" value={savedPlaylistMetrics.total} tone="text-zinc-100" />
-              <SavedPlaylistDetailMetric label="Need action" value={savedPlaylistMetrics.needsAction} tone={savedPlaylistMetrics.needsAction ? 'text-amber-300' : 'text-emerald-300'} />
-              <SavedPlaylistDetailMetric label="In Beets" value={`${savedPlaylistMetrics.available.toLocaleString()}/${savedPlaylistMetrics.tracks.toLocaleString()} (${savedPlaylistCoveragePercent}%)`} tone={savedPlaylistMetrics.tracks === savedPlaylistMetrics.available ? 'text-emerald-300' : 'text-sky-300'} />
-              <SavedPlaylistDetailMetric label="Running now" value={savedPlaylistMetrics.running} tone={savedPlaylistMetrics.running ? 'text-sky-300' : 'text-zinc-300'} />
-            </div>
-            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-zinc-300">
+              <span>{`${savedPlaylistCoveragePercent}% of playlist tracks in Beets`}</span>
+              {savedPlaylistMetrics.running ? <span className="text-info">{`${savedPlaylistMetrics.running.toLocaleString()} running now`}</span> : null}
+            </p>
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
               <TextField
                 label="Find playlist"
                 value={savedPlaylistSearch}
@@ -3179,18 +3211,19 @@ export default function Playlists() {
                 className="lg:max-w-sm"
                 fullWidth
               />
-              <div className="flex flex-wrap gap-1.5">
+              <div role="group" aria-label="Filter saved playlists" className="crate-tabs flex flex-wrap gap-1">
                 {SAVED_PLAYLIST_FILTERS.map((filter) => {
                   const count = savedPlaylistFilterCount(savedPlaylistMetrics, filter.key);
                   return (
-                    <Button
+                    <button
                       key={filter.key}
-                      size="small"
-                      variant={savedPlaylistFilter === filter.key ? 'contained' : 'outlined'}
+                      type="button"
+                      className="crate-tab min-h-9 px-3 text-xs transition-colors"
+                      aria-pressed={savedPlaylistFilter === filter.key}
                       onClick={() => setSavedPlaylistFilter(filter.key)}
                     >
-                      {filter.label} {count.toLocaleString()}
-                    </Button>
+                      {filter.label} <span className="tabular-nums">{count.toLocaleString()}</span>
+                    </button>
                   );
                 })}
               </div>
@@ -3210,20 +3243,21 @@ export default function Playlists() {
         ) : null}
 
         {filteredSavedPlaylistRows.length > 0 ? (
-          <div className="divide-y divide-graphite-800 rounded border border-graphite-800">
+          <div className="crate divide-y divide-walnut-950 rounded-sm">
             {filteredSavedPlaylistRows.map(({ playlist, summary }) => {
               const expanded = Boolean(expandedPlaylistRows[playlist.name]);
               const fileBadge = playlistFileBadge(playlist);
               return (
                 <div key={playlist.name}>
-                  <div className={`flex items-center gap-2 px-3 py-2.5 ${expanded ? 'bg-graphite-900/50' : 'hover:bg-graphite-900/30'}`}>
+                  <div className={`flex flex-wrap items-center gap-3 px-3 py-3 sm:flex-nowrap ${expanded ? 'bg-walnut-800' : 'hover:bg-walnut-800'}`}>
+                    <MixtapeSleeve name={playlist.name} small className="w-12 shrink-0 self-start sm:w-14" />
                     {/* Left: name + meta + compact stats — clickable to toggle details */}
                     <div
                       role="button"
                       tabIndex={0}
                       aria-expanded={expanded}
                       aria-label={`${expanded ? 'Collapse' : 'Expand'} details for ${playlist.name}`}
-                      className="min-w-0 flex-1 cursor-pointer"
+                      className="min-w-0 flex-1 cursor-pointer rounded-sm focus-visible:ring-2 focus-visible:ring-brass-300"
                       onClick={() => toggleSavedPlaylistDetails(playlist.name)}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
@@ -3232,8 +3266,8 @@ export default function Playlists() {
                         }
                       }}
                     >
-                      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                        <span className="truncate font-medium text-zinc-200">{playlist.name}</span>
+                      <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                        <span className="truncate font-display text-base font-semibold text-zinc-100">{playlist.name}</span>
                         {fileBadge ? <SavedBadge label={fileBadge.label} tone={fileBadge.tone} /> : null}
                         <SavedBadge label={summary.statusBadge} tone={summary.statusTone} />
                         {playlistCheckpointNote(playlist) ? (
@@ -3243,11 +3277,13 @@ export default function Playlists() {
                           <SavedBadge label={playlistCoverageNote(playlist)} tone="idle" />
                         ) : null}
                       </div>
-                      <div className="mt-0.5 truncate text-xs text-muted">
-                        {summary.sourceLabel} · {summary.sourceStatus} · {summary.updatedLabel}
+                      <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 text-xs text-zinc-400">
+                        <span>{summary.sourceLabel}</span>
+                        <span>{summary.sourceStatus}</span>
+                        <span>{summary.updatedLabel}</span>
                       </div>
                       <SavedPlaylistRowContext summary={summary} />
-                      <div className="mt-1 flex flex-wrap gap-1">
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
                         <SavedBadge
                           label={`${summary.libraryMatched.toLocaleString()}/${summary.totalTracks.toLocaleString()} in Beets`}
                           tone={summary.missing ? 'idle' : 'ok'}
@@ -3276,7 +3312,7 @@ export default function Playlists() {
 
                     {/* Right: primary action button + overflow menu — stop click propagation */}
                     <div
-                      className="flex shrink-0 items-center gap-1.5"
+                      className="flex w-full shrink-0 items-center justify-end gap-1.5 sm:w-auto"
                       onClick={(event) => event.stopPropagation()}
                     >
                       {summary.nextStepKey === 'resume' ? (
