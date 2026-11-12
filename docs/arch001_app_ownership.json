@@ -4998,9 +4998,10 @@
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
     "_acoustid_cached_fingerprint_ids",
-    "_acoustid_lookup_cached_outcome"
+    "_acoustid_lookup_cached_outcome",
+    "raw_fingerprint_outcome"
    ],
-   "caller_count": 2,
+   "caller_count": 3,
    "dependencies": []
   },
   {
@@ -5373,11 +5374,74 @@
    ]
   },
   {
+   "name": "_fpcalc_raw",
+   "module": "backend/acoustid_service.py",
+   "lines": [
+    556,
+    582
+   ],
+   "size": 27,
+   "body_lines": 22,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACOUSTID",
+   "desired_owner": "backend/acoustid_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "raw_fingerprint_outcome"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "raw_fingerprint_outcome",
+   "module": "backend/acoustid_service.py",
+   "lines": [
+    585,
+    608
+   ],
+   "size": 24,
+   "body_lines": 19,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ACOUSTID",
+   "desired_owner": "backend/acoustid_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "local_audio_match"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_audio_cache_file_identity",
+    "_fpcalc_raw"
+   ]
+  },
+  {
+   "name": "local_audio_match",
+   "module": "backend/acoustid_service.py",
+   "lines": [
+    611,
+    623
+   ],
+   "size": 13,
+   "body_lines": 7,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "UNCLASSIFIED",
+   "desired_owner": "UNCLASSIFIED",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "raw_fingerprint_outcome"
+   ]
+  },
+  {
    "name": "_acoustid_multi_file",
    "module": "backend/acoustid_service.py",
    "lines": [
-    553,
-    600
+    626,
+    673
    ],
    "size": 48,
    "body_lines": 39,
@@ -5401,8 +5465,8 @@
    "name": "_normalize_albumartist",
    "module": "backend/acoustid_service.py",
    "lines": [
-    614,
-    631
+    687,
+    704
    ],
    "size": 18,
    "body_lines": 8,
@@ -5432,8 +5496,8 @@
    "name": "_album_track_norm",
    "module": "backend/acoustid_service.py",
    "lines": [
-    639,
-    644
+    712,
+    717
    ],
    "size": 6,
    "body_lines": 5,
@@ -5465,8 +5529,8 @@
    "name": "_album_item_abs_path",
    "module": "backend/acoustid_service.py",
    "lines": [
-    647,
-    651
+    720,
+    724
    ],
    "size": 5,
    "body_lines": 4,
@@ -5493,8 +5557,8 @@
    "name": "_album_track_fingerprint_check",
    "module": "backend/acoustid_service.py",
    "lines": [
-    654,
-    714
+    727,
+    787
    ],
    "size": 61,
    "body_lines": 41,
@@ -5522,8 +5586,8 @@
    "name": "_artist_folder_fingerprint_confirms",
    "module": "backend/acoustid_service.py",
    "lines": [
-    717,
-    756
+    790,
+    829
    ],
    "size": 40,
    "body_lines": 29,
@@ -5548,8 +5612,8 @@
    "name": "_playlist_title_variants",
    "module": "backend/acoustid_service.py",
    "lines": [
-    759,
-    790
+    832,
+    863
    ],
    "size": 32,
    "body_lines": 31,
@@ -5572,8 +5636,8 @@
    "name": "_playlist_token_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    793,
-    799
+    866,
+    872
    ],
    "size": 7,
    "body_lines": 6,
@@ -5594,8 +5658,8 @@
    "name": "_playlist_title_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    802,
-    820
+    875,
+    893
    ],
    "size": 19,
    "body_lines": 18,
@@ -5626,8 +5690,8 @@
    "name": "_playlist_strip_artist_channel_noise",
    "module": "backend/acoustid_service.py",
    "lines": [
-    829,
-    845
+    902,
+    918
    ],
    "size": 17,
    "body_lines": 11,
@@ -5648,8 +5712,8 @@
    "name": "_playlist_artist_name_variants",
    "module": "backend/acoustid_service.py",
    "lines": [
-    848,
-    874
+    921,
+    947
    ],
    "size": 27,
    "body_lines": 26,
@@ -5673,8 +5737,8 @@
    "name": "_playlist_artist_name_pair_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    877,
-    889
+    950,
+    962
    ],
    "size": 13,
    "body_lines": 12,
@@ -5698,8 +5762,8 @@
    "name": "_playlist_artist_name_score",
    "module": "backend/acoustid_service.py",
    "lines": [
-    892,
-    902
+    965,
+    975
    ],
    "size": 11,
    "body_lines": 10,
