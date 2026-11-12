@@ -104,8 +104,9 @@ function Row({ name, state, tone, children }: { name: ReactNode; state: ReactNod
   return (
     <li className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-4 gap-y-0.5 px-3 py-2 sm:grid-cols-[9rem_minmax(0,1fr)_auto]">
       <span className="min-w-0 truncate text-sm font-medium text-zinc-100">{name}</span>
-      <span className="col-span-2 row-start-2 min-w-0 text-xs text-zinc-300 sm:col-span-1 sm:row-start-1 sm:col-start-2">{children}</span>
-      <span className={`flex items-center gap-1 justify-self-end whitespace-nowrap text-xs font-semibold ${TONE_TEXT[tone]}`}>{state}</span>
+      {/* State precedes the detail in the DOM so text and screen readers get "name, state, detail"; grid placement keeps the visual order. */}
+      <span className={`col-start-2 row-start-1 flex items-center gap-1 justify-self-end whitespace-nowrap text-xs font-semibold sm:col-start-3 ${TONE_TEXT[tone]}`}>{state}</span>
+      <span className="col-span-2 col-start-1 row-start-2 min-w-0 text-xs text-zinc-300 sm:col-span-1 sm:row-start-1 sm:col-start-2">{children}</span>
     </li>
   );
 }

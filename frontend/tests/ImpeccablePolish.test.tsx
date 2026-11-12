@@ -23,10 +23,12 @@ vi.mock('../src/api/client', () => ({
     },
     fpcalc: { available: true, path: '/usr/bin/fpcalc' },
     auth: { token_configured: true, token_auto_generated: false, password_configured: true },
+    beets: { available: true, plugin_loader_ok: true, configured_plugins: ['musicbrainz'] },
     integrations: {
       musicbrainz: { configured: false, required: true, state: 'connection_test_failed', category: 'service' },
       lidarr: { configured: false, required: false, state: 'not_configured', category: 'service' },
       plex: { configured: true, required: false, state: 'configured', category: 'service' },
+      zero: { configured: false, required: false, state: 'installed_but_disabled', category: 'beets_plugin', note: 'Plugin is installed but not enabled in config.yaml.' },
     },
   }),
   getSetupEnv: vi.fn().mockResolvedValue({ ok: true, env_file: '/data/.env', exists: true, variables: [] }),
@@ -61,7 +63,8 @@ afterEach(() => {
 
 const stateFor = async (name: string) => {
   const row = (await screen.findByText(name)).closest('li') as HTMLElement;
-  return row.lastElementChild as HTMLElement;
+  // Rows are name, state, detail in the DOM (state before detail for text order and screen readers).
+  return row.children[1] as HTMLElement;
 };
 
 describe('System integration status', () => {
@@ -71,6 +74,13 @@ describe('System integration status', () => {
     expect((await stateFor('lidarr')).className).toContain('text-zinc-300');
     expect((await stateFor('lidarr')).textContent).toContain('Not configured');
     expect((await stateFor('plex')).className).toContain('text-emerald-300');
+  });
+
+  it('reads a plugin row as name then state, before its note (e2e 09 and screen readers)', async () => {
+    render(<MemoryRouter><System /></MemoryRouter>);
+    const row = (await screen.findByText('zero')).closest('li') as HTMLElement;
+    expect(row.textContent).toMatch(/^zero\W*Installed but disabled/);
+    expect(row.textContent).toContain('Plugin is installed but not enabled in config.yaml.');
   });
 
   it('sets the page titles in the display serif', async () => {
