@@ -1,3 +1,12 @@
+/* Hallmark · shape: app screen · genre: atmospheric · theme: locked (DESIGN.md, Record shelf) · redesign: full · scope: the shell
+ * paper: #171310 · accent: #d39e3f · display: Iowan Old Style · body: Inter / system sans
+ * nav: a flat walnut top bar, the wordmark in its own bay, four text tabs, a labelled System menu · signature: the record mark, its tonearm down while a job runs · states: running, failed, restarting, engine offline
+ * axes: dark/roman-serif/warm · posture: operate · contrast: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V3 · weakest: V, the shell keeps the project's top bar on purpose; the variety lives in the record mark and the wordmark bay */
+/* Hallmark · scaffold: not used · the locked Record shelf tokens already live in this @theme block, so no tokens.css or base.css was added */
+/* Hallmark · dismissed 40, 39b, F19 · each lands in the Library and Jobs page bodies (MUI inputs, filter and stat buttons, view weights), outside the shell this redesign owns; listed for their owners */
+/* Hallmark · dropped the brass gradient hairline, the header shadow and blur, and the pulsing status dot · the Flat Shelf Rule; the tonearm and the status words carry running state now */
+/* Hallmark · finish-review: subagent · fix · 8 findings · 6 resolved (colour-only pills, /submissions cue, 320px status, two current marks, stacked rules, comment) · 2 answered (System label kept for the e2e name; tonearm stays still, no motion to pause) */
 @import "tailwindcss";
 
 @theme {
@@ -41,6 +50,12 @@
   /* Contrast-safe tokens (#606): muted >= 4.5:1 and field-border >= 3:1 on bg..surface-3. */
   --color-muted: #ab9d8b;
   --color-field-border: #8f8170;
+  /* State colours (DESIGN.md Semantic): job and evidence state only, always with a word beside them. */
+  --color-warning: #f59e0b;
+  --color-danger: #991b1b;
+  --color-danger-text: #f87171;
+  --color-success: #4ade80;
+  --color-info: #60a5fa;
 }
 
 :root {
@@ -87,13 +102,37 @@ input {
   font: inherit;
 }
 
+body {
+  caret-color: var(--bw-accent);
+}
+
 ::selection {
-  background: rgba(211, 158, 63, 0.45);
-  color: white;
+  background: color-mix(in oklab, var(--bw-accent) 45%, transparent);
+  color: var(--bw-text);
 }
 
 * {
-  scrollbar-color: #63584b #201a16;
+  scrollbar-color: var(--color-graphite-600) var(--bw-surface);
+}
+
+/* The page-title pattern: every screen's one h1 is the display serif. A base-layer default, so a
+   view's own font utility still wins; it fills in the views that set no face. */
+@layer base {
+  main h1 {
+    font-family: var(--font-display);
+    text-wrap: balance;
+    overflow-wrap: break-word;
+    min-width: 0;
+  }
+}
+
+/* Transitions only: loading spinners keep turning, since a frozen spinner reads as a hang. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Unlayered on purpose: it must beat `outline-none` utilities. A utility that must override it needs `!` (#607). */

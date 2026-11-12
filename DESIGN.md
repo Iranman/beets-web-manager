@@ -199,10 +199,19 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - **Disabled:** raised oak fill at reduced opacity.
 
 ### Navigation
-- **Style:** text tabs in the header (Library, Import, Playlists, Jobs) with a 2px brass underline and a faint brass wash when active. A gear menu holds Settings, Library Changes, System, Restart and Sign out. A count badge on Jobs shows running (amber) or failed (red) jobs.
+- **Header:** a flat walnut bar closed by a 1px Shelf Edge border. No shadow, blur or gradient hairline: the header follows the Flat Shelf Rule like any panel.
+- **Wordmark bay:** the record mark and wordmark sit in their own bay, closed on the right by a 1px divider from `sm` up, like the card at the front of a record bin.
+- **Tabs:** text tabs (Library, Import, Playlists, Jobs) with a 2px brass underline and a faint brass wash when active.
+- **System menu:** a full-height header button, a gear plus the word "System" (the word from `md` up). It holds Settings, Library Changes and System, then a divider and the app-level pair, Restart app (danger text) and Sign Out. On a page the menu holds (Settings, Library Changes, System), the button wears the active-tab treatment (brass wash and the same 2px brass underline on the header edge), so every screen has a "you are here" cue.
+- **Job status:** the Jobs tab carries separate pills for running (Info blue, matching the Jobs page) and failed (red) counts, both shown when both apply; each pill names its count for assistive technology and as a tooltip. Beside the System button, a status line spells the counts out ("2 running", "1 failed") at every width, outside the scrolling tabs, so a phone always shows it. Colour is never the only signal.
+
+### Page frame
+- One centred container (max 1536px), 12px gutters on phones and 16px from `sm`.
+- **The One Title Rule:** each screen's single `h1` inside `main` is the display serif. The frame sets it in `styles.css`, so a view only chooses size and colour.
 
 ### Record Mark (signature)
 - A 32px vinyl disc with grooves and a brass centre label beside the wordmark. Decorative; hidden from assistive technology.
+- **The Tonearm Rule:** while any job runs, the header's mark shows a pale-brass tonearm resting on the grooves; it lifts when nothing runs. It is still, never spinning (no motion to pause), and the "N running" text and badge carry the meaning.
 
 ## Do's and Don'ts
 
