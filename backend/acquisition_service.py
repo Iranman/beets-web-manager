@@ -2181,8 +2181,11 @@ def _acq_local_issue(album: Dict[str, Any], health: Dict[str, Any]) -> str:
     return _s(health.get("label") or "Needs acquisition")
 
 
-_LIDARR_WANTED_PAGE_SIZE = 1000
-_LIDARR_WANTED_MAX_PAGES = 100  # 100,000 wanted albums; a paging bug must not loop forever
+# Lidarr builds each record with its full artist (includeArtist, needed for
+# the artist name), so a 1000-record page can take longer than the timeout on
+# a large library; 250 keeps each page well inside it.
+_LIDARR_WANTED_PAGE_SIZE = 250
+_LIDARR_WANTED_MAX_PAGES = 400  # 100,000 wanted albums; a paging bug must not loop forever
 _LIDARR_WANTED_PAGE_TIMEOUT = 60.0  # seconds per page; the lidarr policy retries once
 LIDARR_WANTED_CANCELLED = "Lidarr wanted-list fetch was cancelled"
 
@@ -2192,6 +2195,8 @@ def _lidarr_wanted_error(exc: BaseException) -> str:
     block = provider_boundary.outbound_block(exc, "lidarr")
     if block:  # before the ValueError branch: OutboundPolicyError is one
         return block["error"]
+    if provider_boundary.unresolved_host(exc):  # DNS failure under secure_urlopen
+        return "Could not reach Lidarr"
     err = provider_boundary.classify_exception(exc)
     if err.outcome == provider_boundary.ProviderOutcome.AUTHENTICATION_ERROR:
         return "Lidarr rejected the API key"
@@ -2201,6 +2206,10 @@ def _lidarr_wanted_error(exc: BaseException) -> str:
         return "Lidarr returned an unexpected response"
     if err.status_code is not None and err.status_code < 500:
         return f"Lidarr refused the request (HTTP {err.status_code})"
+    if isinstance(exc, TimeoutError):  # socket.timeout is TimeoutError since 3.10
+        # A read timeout: Lidarr accepted the connection but did not answer.
+        # A connect timeout arrives wrapped in URLError and stays "Could not reach".
+        return "Lidarr did not respond in time (wanted list)"
     return "Could not reach Lidarr"
 
 
@@ -2257,7 +2266,7 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
     never a partial list presented as complete (ACQ-8/9/11).
 
     Needs no request context, so a background job can call it. Pages of
-    1000 are read until ``totalRecords`` is covered, each through
+    250 are read until ``totalRecords`` is covered, each through
     provider_boundary with a 60 s timeout (the lidarr policy retries a
     timeout or 5xx once), and rows are de-duplicated by Lidarr album id.
     Fewer distinct records than the last page's ``totalRecords`` is an

@@ -65,6 +65,8 @@ def _http_error_message(exc: Exception) -> Tuple[str, int]:
     block = provider_boundary.outbound_block(exc, "lidarr")
     if block:  # before the ValueError branch: OutboundPolicyError is one
         return block["error"], 502
+    if provider_boundary.unresolved_host(exc):  # DNS failure under secure_urlopen
+        return "Could not reach Lidarr", 502
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code in (401, 403):
             return "Lidarr rejected the API key", 502
@@ -73,6 +75,8 @@ def _http_error_message(exc: Exception) -> Tuple[str, int]:
         return "Lidarr returned an unexpected response", 502
     if isinstance(exc, RuntimeError):
         return str(exc), 503
+    if isinstance(exc, TimeoutError):  # read timeout; a connect timeout is wrapped in URLError
+        return "Lidarr did not respond in time", 504
     return "Could not reach Lidarr", 502
 
 
@@ -152,6 +156,7 @@ _WANTED_FIXED_ERRORS = frozenset({
     "Lidarr returned an unexpected response",
     "Lidarr rejected the API key",
     "Lidarr is rate limiting requests",
+    "Lidarr did not respond in time (wanted list)",
 })
 
 

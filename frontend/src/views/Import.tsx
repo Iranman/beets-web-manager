@@ -1,7 +1,6 @@
 import { useInterval } from '../lib/hooks';
 import { errorMessage } from '../lib/errors';
 import { Tab, TabGroup, TabList, TabPanel, TabPanels } from '@headlessui/react';
-import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Navigate, useSearchParams } from 'react-router';
@@ -12,6 +11,7 @@ import { HistoryPanel } from '../features/history/HistoryPanel';
 import { ImportReviewPage } from '../features/importReview/ImportReviewPage';
 import type { QueueFilter } from '../features/importReview/ImportReviewPage';
 import { IntakePanel } from '../features/intake/IntakePanel';
+import { SleeveArt, albumArtSources } from '../components/SleeveArt';
 import type { Job, JobListResponse } from '../types/api';
 import LibraryChanges from './LibraryChanges';
 
@@ -49,6 +49,8 @@ type SummaryState = {
   runningJobs: number;
   failedJobs: number;
   latestJob: string;
+  /** The newest import jobs, for the sleeves in the arrivals bin (from the same /api/jobs read). */
+  arrivals: Job[];
 };
 
 const EMPTY_SUMMARY: SummaryState = {
@@ -68,11 +70,8 @@ const EMPTY_SUMMARY: SummaryState = {
   runningJobs: 0,
   failedJobs: 0,
   latestJob: '',
+  arrivals: [],
 };
-
-function cx(...classes: Array<string | false | null | undefined>) {
-  return classes.filter(Boolean).join(' ');
-}
 
 function compact(value: number) {
   return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value);
@@ -105,7 +104,16 @@ function summarizeJobs(jobs: Job[]) {
     runningJobs: importJobs.filter((job) => job.status === 'running').length,
     failedJobs: importJobs.filter((job) => job.status === 'failed' || job.status === 'killed').length,
     latestJob: importJobs[0]?.label || '',
+    arrivals: importJobs.slice(0, 6),
   };
+}
+
+/** The album a finished or running import job names, for its sleeve. */
+function arrivalArt(job: Job) {
+  const meta = (job.metadata ?? {}) as Record<string, unknown>;
+  const id = meta.existing_album_id ?? meta.album_id;
+  const rgid = typeof meta.mb_releasegroupid === 'string' ? meta.mb_releasegroupid : null;
+  return albumArtSources({ albumId: typeof id === 'number' || typeof id === 'string' ? id : null, releaseGroupId: rgid });
 }
 
 function tabBadge(tabId: string, summary: SummaryState) {
@@ -258,75 +266,70 @@ export default function Import() {
   if (movedMissingIdsLink) return <Navigate to={MISSING_IDS_PATH} replace />;
 
   return (
-    <section className="space-y-4">
-      <div className="rounded-md border border-graphite-800 bg-graphite-950/45 px-4 py-3">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h1 className="font-display text-2xl font-semibold text-zinc-100">Workbench</h1>
-            <p className="mt-1 text-sm text-zinc-400">Import music, review matches, fix missing IDs and approve or roll back library changes.</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Chip
-                color={summary.runningJobs ? 'info' : summary.partial ? 'warning' : 'default'}
-                label={summary.loading ? 'Loading...' : nextAction}
-                size="small"
-                variant="outlined"
-              />
-              {summary.reviewTotal ? <Chip color="warning" label={`${compact(summary.reviewTotal)} to review`} size="small" variant="outlined" /> : null}
-              {summary.missingMusic ? <Chip color="info" label={`${compact(summary.missingMusic)} missing`} size="small" variant="outlined" /> : null}
-              {summary.missingMb ? (
-                <Chip
-                  clickable
-                  color="error"
-                  label={`${compact(summary.missingMb)} need IDs`}
-                  size="small"
-                  variant="outlined"
-                  title="Library albums and tracks missing MusicBrainz IDs"
-                  onClick={() => navigateTo('missing-ids')}
-                />
-              ) : null}
-              {summary.failedJobs ? <Chip color="error" label={`${compact(summary.failedJobs)} failed`} size="small" variant="outlined" /> : null}
-              {summary.latestJob ? <Chip label={summary.latestJob} size="small" variant="outlined" /> : null}
-            </div>
-          </div>
-          {summary.merged ? (
-            <div className="text-xs text-zinc-400 lg:text-right">
-              {compact(summary.merged)} queued
-            </div>
-          ) : null}
+    <section className="ops-page space-y-8 pb-10">
+      <header className="ops-masthead">
+        <div className="min-w-0">
+          <h1 className="ops-title">Workbench</h1>
+          <p className="mt-2 max-w-prose text-sm text-zinc-300">Import music, review matches, fix missing IDs and approve or roll back library changes.</p>
         </div>
+        <p className="ops-catalog" aria-label="Workbench status">
+          <span className={summary.runningJobs ? 'text-info' : summary.partial ? 'text-warning' : undefined}>
+            {summary.loading ? 'Loading...' : nextAction}
+          </span>
+          {summary.reviewTotal ? <span className="text-amber-200">{compact(summary.reviewTotal)} to review</span> : null}
+          {summary.missingMusic ? <span>{compact(summary.missingMusic)} missing</span> : null}
+          {summary.missingMb ? (
+            <span>
+              <button
+                type="button"
+                className="min-h-10 text-rose-200 underline underline-offset-4 hover:text-rose-100"
+                title="Library albums and tracks missing MusicBrainz IDs"
+                onClick={() => navigateTo('missing-ids')}
+              >
+                {compact(summary.missingMb)} need IDs
+              </button>
+            </span>
+          ) : null}
+          {summary.failedJobs ? <span className="text-rose-200">{compact(summary.failedJobs)} failed</span> : null}
+          {summary.merged ? <span>{compact(summary.merged)} queued</span> : null}
+        </p>
+      </header>
 
-        {summary.loading ? <LinearProgress sx={{ mt: 1.5, borderRadius: 1 }} /> : null}
-        {summary.error ? <div className="mt-2 text-xs text-rose-300">{summary.error}</div> : null}
-      </div>
+      {summary.loading ? <LinearProgress sx={{ borderRadius: 1 }} /> : null}
+      {summary.error ? <p className="text-sm text-rose-200">{summary.error}</p> : null}
 
       <TabGroup selectedIndex={selectedIndex} onChange={handleTabChange}>
-        <TabList className="grid gap-1 border-b border-graphite-800 sm:flex">
-          {TABS.map(({ id, label }) => {
-            const badge = tabBadge(id, summary);
-            return (
-              <Tab
-                key={id}
-                className={({ selected }) =>
-                  cx(
-                    'flex min-h-11 items-center justify-between gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors sm:justify-start',
-                    selected
-                      ? 'border-brass-400 text-zinc-100'
-                      : 'border-transparent text-zinc-400 hover:border-graphite-700 hover:text-zinc-200',
-                  )
-                }
-              >
-                <span>{label}</span>
-                {badge ? (
-                  <span className="rounded border border-graphite-700 px-1.5 py-0.5 text-xs font-semibold text-zinc-300">
-                    {badge}
-                  </span>
-                ) : null}
-              </Tab>
-            );
-          })}
-        </TabList>
+        {/* The new-arrivals bin: the latest imports lean at the back as sleeves, the six sections stand in front as divider cards. */}
+        <div className="ops-bin">
+          <div className="ops-bin-head">
+            <h2 className="ops-section-title">New arrivals</h2>
+            {summary.arrivals.length ? (
+              <ul className="ops-arrivals" aria-label="Latest imports">
+                {summary.arrivals.map((job, index) => (
+                  <li key={`${index}-${job.job_id}`} title={job.label}>
+                    <SleeveArt size={104} sources={arrivalArt(job)} />
+                    <span className="ops-arrival-label">{(job.label ?? '').replace(/^Import:\s*/i, '')}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-zinc-300">{summary.loading ? 'Checking the bin...' : 'Nothing has arrived yet. Start from Import Source or Find Music.'}</p>
+            )}
+          </div>
+          <TabList className="ops-dividers">
+            {TABS.map(({ id, label }) => {
+              const badge = tabBadge(id, summary);
+              return (
+                <Tab key={id} className="ops-divider">
+                  <span>{label}</span>
+                  {badge ? <span className="ops-divider-count">{badge}</span> : null}
+                </Tab>
+              );
+            })}
+          </TabList>
+        </div>
 
-        <TabPanels className="mt-5">
+        <TabPanels className="mt-8">
           <TabPanel>
             <IntakePanel onJobStarted={() => loadSummary(true)} />
           </TabPanel>

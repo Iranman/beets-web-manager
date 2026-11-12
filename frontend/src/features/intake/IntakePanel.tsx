@@ -1197,20 +1197,19 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
   };
 
   return (
-    <div className="space-y-5">
-      <Card>
-        <CardContent className="space-y-4">
+    <div className="space-y-6">
+      <section className="space-y-4">
           <div>
-            <h2 className="text-base font-semibold text-zinc-100">Import Source</h2>
-            <p className="mt-1 text-sm text-zinc-400">
+            <h2 className="ops-section-title">Import Source</h2>
+            <p className="mt-1 text-sm text-zinc-300">
               Preview the configured downloads/staging folder before starting the backend import job.
             </p>
           </div>
 
           <fieldset className="flex flex-wrap gap-4 text-sm text-zinc-200" disabled={Boolean(jobId) || importing}>
-            <legend className="mb-1 text-xs font-semibold text-muted">Source</legend>
+            <legend className="mb-1 text-sm text-muted">Source</legend>
             {([['local', 'Local folder'], ['qbittorrent', 'qBittorrent']] as const).map(([value, label]) => (
-              <label key={value} className="flex cursor-pointer items-center gap-2">
+              <label key={value} className="flex min-h-10 cursor-pointer items-center gap-2">
                 <input
                   checked={source === value}
                   className="accent-brass-500"
@@ -1309,14 +1308,13 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
           </div>
           {downloadsProblem ? <Alert severity="warning">{downloadsProblem}</Alert> : null}
           {scanning ? (
-            <div className="text-xs text-muted">
-              Scanning the source folder{scanElapsedSeconds > 0 ? ` (${scanElapsedSeconds}s elapsed)` : ''} — a large
+            <div className="text-sm text-muted">
+              Scanning the source folder{scanElapsedSeconds > 0 ? ` (${scanElapsedSeconds}s elapsed)` : ''}. A large
               downloads folder can take a minute or more on the first pass. This is still working.
             </div>
           ) : null}
-        </CardContent>
         {scanning ? <LinearProgress /> : null}
-      </Card>
+      </section>
 
       {preflightError ? <Alert severity="error">{preflightError}</Alert> : null}
       {retryNotice ? <Alert severity="info" onClose={() => setRetryNotice('')}>{retryNotice}</Alert> : null}
@@ -1326,10 +1324,9 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
         <div className="space-y-4">
           <PreflightSummary result={preflight} />
 
-          <Card>
-            <CardContent className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <div className="flex flex-col gap-3 border-y border-graphite-700 py-4 lg:flex-row lg:items-center">
               <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium text-zinc-200">
+                <div className="text-base font-semibold text-zinc-100">
                   {newFolderCount} new folder{newFolderCount !== 1 ? 's' : ''} eligible for Import All
                 </div>
                 <div className="mt-1 text-xs text-muted">
@@ -1349,8 +1346,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
                   Import All
                 </Button>
               </div>
-            </CardContent>
-          </Card>
+          </div>
 
           {importError ? <Alert severity="error">{importError}</Alert> : null}
 
