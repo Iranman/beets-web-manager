@@ -3541,11 +3541,17 @@ def setup_test_ai():
         return jsonify({"ok": False, "status": "not_configured",
                          "error": "No AI API key to test. Enter the API key for this base URL, or set OPENAI_API_KEY (or your provider's key) and retry."}), 200
     try:
-        base_host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+        base_parts = urllib.parse.urlsplit(base_url)
+        base_host = (base_parts.hostname or "").rstrip(".").lower()
     except ValueError:
         # The error text quotes the netloc, password included: never surface it.
         return jsonify({"ok": False, "status": "failed", "error": "The AI base URL is not a valid URL."}), 200
     is_openai_host = base_host == "api.openai.com" or base_host.endswith(".api.openai.com")
+    is_openrouter_host = base_host == "openrouter.ai" or base_host.endswith(".openrouter.ai")
+    if (is_openai_host or is_openrouter_host) and base_parts.scheme.lower() != "https":
+        # A provider key never goes over plain http (#535).
+        return jsonify({"ok": False, "status": "failed",
+                         "error": "The AI base URL for this provider must use https."}), 200
     try:
         req = urllib.request.Request(
             f"{base_url.rstrip('/')}/models/{model}" if is_openai_host else f"{base_url.rstrip('/')}/models",

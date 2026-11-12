@@ -125,6 +125,40 @@ class KeyUrlPairingTests(unittest.TestCase):
                 self.assertEqual(key, "k-generic")
 
 
+class PlainHttpAndTrailingDotTests(unittest.TestCase):
+    """#535 items 2-3: no provider key over http; "host." is "host"."""
+
+    def setUp(self):
+        config_layers._warned_aliases.clear()
+
+    def test_no_key_to_provider_hosts_over_http(self):
+        for url in ("http://api.openai.com/v1", "HTTP://eu.api.openai.com/v1", "http://openrouter.ai/api/v1",
+                    "http://api.openai.com./v1", "http://openrouter.ai./api/v1"):
+            with self.subTest(url):
+                key, _ = _resolve(_env(KEYS, url))
+                self.assertEqual(key, "")
+
+    def test_custom_http_url_is_unchanged(self):
+        # Custom URLs keep their keys, legacy OPENAI_API_KEY fallback included
+        # (#535 item 1 is a separate policy decision).
+        self.assertEqual(_resolve(_env(KEYS, "http://llm.example/v1"))[0], "k-generic")
+        self.assertEqual(_resolve({"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": "http://llm.example/v1"})[0],
+                         "k-openai")
+
+    def test_trailing_dot_host_is_the_provider(self):
+        for url, want in (("https://api.openai.com./v1", "k-openai"), ("https://openrouter.ai./api/v1", "k-openrouter"),
+                          ("https://API.OpenAI.com./v1", "k-openai")):
+            with self.subTest(url):
+                key, endpoint = _resolve(_env(KEYS, url))
+                self.assertEqual(key, want)
+                self.assertTrue(endpoint.startswith(url))
+
+    def test_openai_key_alone_follows_a_trailing_dot_openai_url_without_warning(self):
+        with self.assertNoLogs(config_layers.log, "WARNING"):
+            key, _ = _resolve({"OPENAI_API_KEY": "k-openai", "AI_BASE_URL": "https://api.openai.com./v1"})
+        self.assertEqual(key, "k-openai")
+
+
 class KeyEndpointBindingTests(unittest.TestCase):
     """F3: callers read the key once and the endpoint later (per album, per
     batch); an AI_BASE_URL saved in between must not get the old key."""
@@ -218,6 +252,23 @@ class SetupProbeKeyUrlTests(probe_tests._ProbeHarness):
                 self.post("/api/setup/test/ai", body, auth=True)
                 self.assertTrue(self.sent[0][1].startswith("https://api.openai.com/v1/"), body)
                 self.assertEqual(self.sent[0][2]["authorization"], "Bearer body-key")
+
+    def test_no_stored_key_probed_over_http(self):
+        for url in ("http://api.openai.com/v1", "http://openrouter.ai./api/v1"):
+            with self.subTest(url):
+                self.sent.clear()
+                self.assertEqual(self._probe({**KEYS, "AI_BASE_URL": url})["status"], "not_configured")
+                self.assertEqual(self.sent, [])
+
+    def test_typed_key_not_probed_against_a_provider_over_http(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "", "OPENROUTER_API_KEY": "", "AI_API_KEY": "",
+                                          "AI_BASE_URL": ""}):
+            for url in ("http://api.openai.com/v1", "http://openrouter.ai/api/v1", "http://api.openai.com./v1"):
+                with self.subTest(url):
+                    out = self.post("/api/setup/test/ai", {"api_key": "body-key", "base_url": url}, auth=True)
+                    self.assertEqual(out.get_json()["status"], "failed")
+                    self.assertNotIn("body-key", out.get_data(as_text=True))
+            self.assertEqual(self.sent, [])
 
     def test_openrouter_key_is_not_probed_against_openai(self):
         out = self._probe({"OPENROUTER_API_KEY": "k-openrouter", "AI_BASE_URL": BASES["openai"]})
