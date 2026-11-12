@@ -78,6 +78,15 @@ class SecurityTextRedactionTests(unittest.TestCase):
         self.assert_masked('client_secret: "-----BEGIN\nQQSECRETZZ\n-----END" tail',
                            "client_secret: [REDACTED] tail")
 
+    def test_issue_660_followups(self):
+        # A leading "'" closed within 4 KB spans newlines; a mid-value one ("can't") does not.
+        self.assert_masked("password='QQ\nfake-s20'\nnext", "password=[REDACTED]\nnext")
+        self.assert_masked("token: can't parse\nTraceback 'x'", "token: [REDACTED]\nTraceback 'x'")
+        self.assert_masked("token: 'unclosed\n" + "x" * 5000 + "'", "token: [REDACTED]\n" + "x" * 5000 + "'")
+        # Query values: a closed '"' spans newlines; a segment without "=" is a raw "&".
+        self.assert_masked('x?token="QQ\nfake-s21"&keep=1', "x?token=[REDACTED]&keep=1")
+        self.assert_masked("x?token=QQ&fake-s22&keep=1#f", "x?token=[REDACTED]&keep=1#f")
+
     def test_negotiate_scheme_in_assignment(self):
         self.assert_masked("token=Negotiate fake-s19 tail", "token=[REDACTED] tail")
 
@@ -95,7 +104,9 @@ class SecurityTextRedactionTests(unittest.TestCase):
     def test_linear_time(self):
         for text in ("a-" * 50000, "password=" + '"\\' * 50000, "token=" + "'a" * 50000,
                      "&token" * 30000, "?" + "a" * 100000, "://a:" + "@" * 100000,
-                     "Cookie" * 30000, "x_" * 50000 + "="):
+                     "Cookie" * 30000, "x_" * 50000 + "=", "token='\n" * 30000,
+                     "token='" + "\\'" * 50000, "?token=\"" + "a\n" * 50000, "?token=x" + "&a" * 50000,
+                     "?token=x" + "&a\"" * 30000):
             start = time.perf_counter()
             redact(text)
             self.assertLess(time.perf_counter() - start, 1.0)
