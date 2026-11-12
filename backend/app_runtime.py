@@ -709,7 +709,10 @@ def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
 # A length cap on top of that would only make matching fail (and therefore
 # fail to redact) for any credential longer than the cap, so neither
 # segment is length-limited here.
-_URL_CREDENTIALS_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@:]+:[^\s/@]+@")
+#
+# It is anchored on "://" for any scheme: a "\b[a-z][a-z0-9+.-]*" scheme scan
+# let each "a" of "a-a-a-..." start a scan to the end of the run, O(n^2) (#524).
+_URL_CREDENTIALS_RE = re.compile(r"(://)[^\s/@:]+:[^\s/@]+@")
 
 
 def _redact_security_text(value: Any) -> str:
