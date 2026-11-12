@@ -1,4 +1,4 @@
-// Library > Missing IDs: batch fix of proven matches (#399). The server proves
+// Workbench > Missing IDs: batch fix of proven matches (#399). The server proves
 // each row and decides what may be written; this panel only selects rows, shows
 // that decision, asks for confirmation and follows the jobs.
 import { errorMessage, sentences } from '../../lib/errors';
@@ -464,7 +464,7 @@ function ApplyRows({ result, label }: { result: MissingMbApplyResult; label: (id
       {recovery ? (
         <Alert className="mt-2" severity="error">
           A write could not be verified or rolled back, so the batch stopped. Check the affected album or track before retrying.{' '}
-          <Link to={`/changes?tx=${encodeURIComponent(result.transaction_id)}`}>Open the batch transaction</Link>
+          <Link to={`/import?tab=changes&tx=${encodeURIComponent(result.transaction_id)}`}>Open the batch transaction</Link>
         </Alert>
       ) : null}
       <ul className="mt-2 space-y-1" aria-label="Apply results">
@@ -477,7 +477,7 @@ function ApplyRows({ result, label }: { result: MissingMbApplyResult; label: (id
             <div className="text-xs text-muted">{row.message}</div>
             {row.reasons?.length ? <div className="text-xs text-muted">Why: {row.reasons.map(reasonLabel).join('; ')}</div> : null}
             {(row.transaction_ids ?? []).filter(Boolean).map((id) => (
-              <Link key={id} className="mr-2 text-xs text-sky-400 underline" to={`/changes?tx=${encodeURIComponent(id)}`}>
+              <Link key={id} className="mr-2 text-xs text-sky-400 underline" to={`/import?tab=changes&tx=${encodeURIComponent(id)}`}>
                 Transaction {id}
               </Link>
             ))}

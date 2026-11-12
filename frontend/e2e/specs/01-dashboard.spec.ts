@@ -24,9 +24,9 @@ test('nav tabs and the system menu reach every section, and System reports the r
   await page.goto('/library');
   const nav = page.getByRole('banner');
   for (const [tab, url, heading] of [
-    ['Import', /\/import/, 'Import music'],
+    ['Workbench', /\/import/, 'Workbench'],
     ['Playlists', /\/playlists/, 'Playlists'],
-    ['Jobs', /\/jobs/, 'Job History'],
+    ['Jobs & Cleanup', /\/jobs/, 'Job History'],
     ['Library', /\/library/, 'Browse music library'],
   ] as const) {
     await nav.getByRole('link', { name: new RegExp(`^${tab}`) }).click();
@@ -35,7 +35,7 @@ test('nav tabs and the system menu reach every section, and System reports the r
   }
 
   await nav.getByRole('button', { name: 'System' }).click();
-  await page.getByRole('menuitem', { name: 'System' }).click();
+  await page.getByRole('menuitem', { name: 'Diagnostics' }).click();
   await expect(page).toHaveURL(/\/system/);
   const version = fs.readFileSync('../VERSION', 'utf8').trim();
   await expect(page.getByRole('main').getByText(`Version ${version}`)).toBeVisible();

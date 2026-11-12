@@ -4,7 +4,7 @@ import { Tab, TabGroup, TabList, TabPanel, TabPanels } from '@headlessui/react';
 import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Navigate, useNavigate, useSearchParams } from 'react-router';
+import { Navigate, useSearchParams } from 'react-router';
 import { apiJson, getAcquisitionQueue, getLibraryMissingMbIds, getReviewQueue } from '../api/client';
 import type { AcquisitionQueueCache } from '../api/types';
 import { AcquisitionPanel, type SourceFilter } from '../features/acquisition/AcquisitionPanel';
@@ -13,19 +13,22 @@ import { ImportReviewPage } from '../features/importReview/ImportReviewPage';
 import type { QueueFilter } from '../features/importReview/ImportReviewPage';
 import { IntakePanel } from '../features/intake/IntakePanel';
 import type { Job, JobListResponse } from '../types/api';
+import LibraryChanges from './LibraryChanges';
 
 const TABS = [
   { id: 'intake', label: 'Import Source' },
   { id: 'acquire', label: 'Find Music' },
   { id: 'review', label: 'Review Queue' },
   { id: 'history', label: 'Recently Imported' },
+  { id: 'missing-ids', label: 'Missing IDs' },
+  { id: 'changes', label: 'Library Changes' },
 ] as const;
 
 const TAB_NAMES = TABS.map((tab) => tab.id);
 type TabId = (typeof TABS)[number]['id'];
 const REVIEW_FILTERS: QueueFilter[] = ['all', 'pending_ai', 'skipped'];
 const SOURCE_FILTERS: SourceFilter[] = ['all', 'beets', 'lidarr', 'merged', 'unmonitored'];
-export const MISSING_IDS_PATH = '/library/missing-ids';
+export const MISSING_IDS_PATH = '/import?tab=missing-ids';
 
 type SummaryState = {
   loading: boolean;
@@ -110,6 +113,7 @@ function tabBadge(tabId: string, summary: SummaryState) {
   if (tabId === 'intake') return summary.runningJobs ? compact(summary.runningJobs) : '';
   if (tabId === 'acquire') return summary.acquireTotal ? compact(summary.acquireTotal) : '';
   if (tabId === 'review') return summary.reviewTotal ? compact(summary.reviewTotal) : '';
+  if (tabId === 'missing-ids') return summary.missingMb ? compact(summary.missingMb) : '';
   return '';
 }
 
@@ -129,7 +133,6 @@ export function importNextAction(summary: SummaryState): string {
 }
 
 export default function Import() {
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get('tab') ?? '';
   const filterParam = reviewFilterFromParam(searchParams.get('filter') ?? 'all');
@@ -209,6 +212,8 @@ export default function Import() {
     setSelectedIndex(Math.max(0, TAB_NAMES.indexOf(tabId)));
     const nextParams = new URLSearchParams(searchParams);
     nextParams.delete('q');
+    // A transaction deep link belongs to Library Changes only.
+    if (tabId !== 'changes') nextParams.delete('tx');
     if (tabId === 'intake') {
       nextParams.delete('tab');
       nextParams.delete('filter');
@@ -219,7 +224,7 @@ export default function Import() {
     } else if (tabId === 'review') {
       nextParams.set('tab', tabId);
       nextParams.delete('source');
-    } else if (tabId === 'history') {
+    } else if (tabId === 'history' || tabId === 'missing-ids' || tabId === 'changes') {
       nextParams.set('tab', tabId);
       nextParams.delete('filter');
       nextParams.delete('source');
@@ -249,7 +254,7 @@ export default function Import() {
   }
 
   // Old links to the Review Queue's "Needs MusicBrainz ID" filter: those rows
-  // moved to Library > Missing IDs.
+  // live on the Missing IDs tab.
   if (movedMissingIdsLink) return <Navigate to={MISSING_IDS_PATH} replace />;
 
   return (
@@ -257,7 +262,8 @@ export default function Import() {
       <div className="rounded-md border border-graphite-800 bg-graphite-950/45 px-4 py-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <h1 className="font-display text-2xl font-semibold text-zinc-100">Import music</h1>
+            <h1 className="font-display text-2xl font-semibold text-zinc-100">Workbench</h1>
+            <p className="mt-1 text-sm text-zinc-400">Import music, review matches, fix missing IDs and approve or roll back library changes.</p>
             <div className="mt-2 flex flex-wrap gap-2">
               <Chip
                 color={summary.runningJobs ? 'info' : summary.partial ? 'warning' : 'default'}
@@ -275,7 +281,7 @@ export default function Import() {
                   size="small"
                   variant="outlined"
                   title="Library albums and tracks missing MusicBrainz IDs"
-                  onClick={() => navigate(MISSING_IDS_PATH)}
+                  onClick={() => navigateTo('missing-ids')}
                 />
               ) : null}
               {summary.failedJobs ? <Chip color="error" label={`${compact(summary.failedJobs)} failed`} size="small" variant="outlined" /> : null}
@@ -335,6 +341,24 @@ export default function Import() {
 
           <TabPanel>
             <HistoryPanel />
+          </TabPanel>
+
+          <TabPanel>
+            <section aria-labelledby="missing-ids-title" className="space-y-4">
+              <div>
+                <h2 id="missing-ids-title" className="font-display text-xl font-semibold text-zinc-100">Missing MusicBrainz IDs</h2>
+                <p className="mt-1 max-w-3xl text-sm text-zinc-400">
+                  These albums and tracks are already in your Beets library but have no MusicBrainz release or recording ID,
+                  so duplicate checks, Find Music, and artwork lookups cannot identify them. Pick a match for each one;
+                  nothing changes until you apply it.
+                </p>
+              </div>
+              <ImportReviewPage active mode="missing_ids" />
+            </section>
+          </TabPanel>
+
+          <TabPanel>
+            <LibraryChanges />
           </TabPanel>
         </TabPanels>
       </TabGroup>

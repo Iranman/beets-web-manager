@@ -18,13 +18,13 @@ interface ShellProps {
 
 const TABS: Tab[] = [
   { to: '/library',   label: 'Library' },
-  { to: '/import',    label: 'Import' },
+  { to: '/import',    label: 'Workbench' },
   { to: '/playlists', label: 'Playlists' },
-  { to: '/jobs',      label: 'Jobs' },
+  { to: '/jobs',      label: 'Jobs & Cleanup' },
 ];
 
 // Pages reached from the System menu; the menu button reads as current on them.
-const SYSTEM_MENU_PATHS = ['/config', '/changes', '/system'];
+const SYSTEM_MENU_PATHS = ['/config', '/system'];
 
 const BADGE = 'ml-1.5 rounded-full px-1.5 py-0.5 text-xs font-semibold leading-none tabular-nums';
 
@@ -174,17 +174,9 @@ export default function Shell({ username, onLogout }: ShellProps) {
                 <MenuItem>
                   <button
                     className="flex min-h-9 w-full items-center px-3 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-zinc-50 active:bg-graphite-700 data-[focus]:bg-graphite-800 data-[focus]:text-zinc-50 data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-brass-300"
-                    onClick={() => void navigate('/changes')}
-                  >
-                    Library Changes
-                  </button>
-                </MenuItem>
-                <MenuItem>
-                  <button
-                    className="flex min-h-9 w-full items-center px-3 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-zinc-50 active:bg-graphite-700 data-[focus]:bg-graphite-800 data-[focus]:text-zinc-50 data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-brass-300"
                     onClick={() => void navigate('/system')}
                   >
-                    System
+                    Diagnostics
                   </button>
                 </MenuItem>
                 {/* App-level actions sit apart from the pages above. */}

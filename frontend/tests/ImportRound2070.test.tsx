@@ -144,12 +144,12 @@ describe('Review Queue paging and filters go to the server', () => {
     await waitFor(() => expect(mocked.getReviewQueue).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', offset: REVIEW_PAGE_SIZE })));
   });
 
-  it('links to Library > Missing IDs instead of listing library rows', async () => {
+  it('links to the Missing IDs tab instead of listing library rows', async () => {
     mocked.getReviewQueue.mockResolvedValue({ ok: true, items: [pendingRow('a', 'First Album')], total: 1, counts: { all: 1, pending_ai: 1 } } as never);
     render(<MemoryRouter><ImportReviewPage active /><Probe /></MemoryRouter>);
     await screen.findAllByText('First Album');
     fireEvent.click(screen.getByRole('link', { name: /Missing IDs/ }));
-    await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('/library/missing-ids'));
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('/import?tab=missing-ids'));
   });
 });
 
@@ -271,15 +271,14 @@ describe('Batch import labels and warnings', () => {
 });
 
 describe('Old Review Queue links to library rows', () => {
-  it('/import?tab=review&filter=library_no_mb redirects to /library/missing-ids', async () => {
+  it('/import?tab=review&filter=library_no_mb redirects to the Missing IDs tab', async () => {
     render(
       <MemoryRouter initialEntries={['/import?tab=review&filter=library_no_mb']}>
         <Routes>
-          <Route path="/import" element={<Import />} />
-          <Route path="/library/missing-ids" element={<div>MISSING_IDS</div>} />
+          <Route path="/import" element={<><Import /><Probe /></>} />
         </Routes>
       </MemoryRouter>,
     );
-    expect(await screen.findByText('MISSING_IDS')).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId('probe').textContent).toBe('/import?tab=missing-ids'));
   });
 });

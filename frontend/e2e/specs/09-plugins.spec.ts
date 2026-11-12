@@ -26,10 +26,10 @@ test('Plugin Controls: runtime install stays blocked and a panel opens to its ac
   await page.goto('/config');
   const main = page.getByRole('main');
   await expect(main).toContainText('runtime package installation disabled');
-  await expect(main.getByRole('button', { name: 'Fetch Missing Art' })).toHaveCount(0);
-  const panel = main.getByRole('button', { name: /Album Art \(fetchart\)/ });
+  await expect(main.getByRole('button', { name: 'Check Status' })).toHaveCount(0);
+  const panel = main.getByRole('button', { name: /Plex Direct/ });
   await panel.click();
-  await expect(main.getByRole('button', { name: 'Fetch Missing Art' })).toBeVisible();
+  await expect(main.getByRole('button', { name: 'Check Status' })).toBeVisible();
   await panel.click();
-  await expect(main.getByRole('button', { name: 'Fetch Missing Art' })).toHaveCount(0);
+  await expect(main.getByRole('button', { name: 'Check Status' })).toHaveCount(0);
 });
