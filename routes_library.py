@@ -10,7 +10,7 @@ from backend.security import OutboundPolicyError, resolve_public_target
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from flask import jsonify, request, send_file, redirect
+from flask import jsonify, request, send_file
 from backend.transaction_engine import metadata_diff
 from job_engine import DuplicateJobError, TERMINAL_STATUSES
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_mb_release_id
@@ -25,7 +25,7 @@ from backend.ai_evidence_service import _ai_suggest_genre
 from backend.item_ai_suggest_service import suggest_for_item, suggestion_failure
 from backend.ai_service import _ai_suggest_album_internal, _ai_suggest_folder_internal, _compact_track_ai_candidate, find_match_slot
 from backend.app_runtime import ARTIST_IMAGE_CACHE_DIR, AUDIO_EXT, DOWNLOADS_ROOT, EDITABLE_FIELDS, METADATA_CACHE_ROOT, MUSIC_ROOT, RELEASE_ART_CACHE_DIR, UNMATCHED_DRAFT_ROOT, _ANSI_RE, _DISC_CACHE_TTL, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _app_logger, _path_is_under, _redact_security_text, _s, _safe_path_component, jobs, transactions
-from backend.artwork_service import AlbumArtRequestError, _ALBUM_ART_UPLOAD_MAX_BYTES, _RELEASE_ART_MBID_RE, _album_art_cache, _album_art_cache_lock, _album_art_expected_release_group, _album_art_repair_entry, _album_art_status, _album_dir_for_art, _art_repair_attach_last_run, _art_repair_build_report, _art_repair_save_last, _artist_image_cache_url, _artist_local_art_url, _cache_artist_image, _fetch_album_art, _fetch_artist_image, _repair_album_art, _replace_album_art_bytes, _replace_album_art_from_url, _resolve_album_art_request_album, _save_art_to_disk, _usable_album_art_file, _validate_album_art_bytes
+from backend.artwork_service import AlbumArtRequestError, _ALBUM_ART_UPLOAD_MAX_BYTES, _RELEASE_ART_MBID_RE, _album_art_cache, _album_art_cache_lock, _album_art_expected_release_group, _album_art_repair_entry, _album_art_status, _album_dir_for_art, _art_repair_attach_last_run, _art_repair_build_report, _art_repair_save_last, _artist_image_cache_url, _artist_local_art_url, _cache_artist_image, _fetch_album_art, _fetch_artist_image, _release_art_cache_info, _repair_album_art, _replace_album_art_bytes, _replace_album_art_from_url, _resolve_album_art_request_album, _save_art_to_disk, _usable_album_art_file, _validate_album_art_bytes
 from backend.auth_service import _sanitize_confirmation_reason
 from backend.cleanup_service import album_cleanup_apply_response, _cleanup_artist_alias_source_dirs, _cleanup_template_token_files, _cleanup_template_tokens_for_album
 from backend.dedup_service import _BROWSE_ALLOWED_ROOTS, _album_dedup_quarantine_proven, _album_duplicate_resolver_plan
@@ -1062,21 +1062,19 @@ def artist_image_cache(key):
         return ("", 404)
 
 
+# Cached cover art (METADATA_CACHE_DIR/release-art) is keyed by MBID and
+# rarely changes; let the browser keep it for a week.
+_RELEASE_ART_MAX_AGE = 7 * 24 * 3600
+
+
 @app.get("/api/release-art-cache/<mbid>")
 def release_art_cache(mbid):
-    if not _RELEASE_ART_MBID_RE.match(mbid or ""):
+    # Same lookup as album_art(): validated MBID, bare image name, image MIME only.
+    cached = _release_art_cache_info((mbid or "").lower())
+    if not cached.get("path"):
         return ("", 404)
-    meta_path = RELEASE_ART_CACHE_DIR / f"{mbid}.json"
     try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        image_name = _s(meta.get("image_file", "") or "")
-        if not image_name or Path(image_name).name != image_name:
-            return ("", 404)
-        image_path = RELEASE_ART_CACHE_DIR / image_name
-        if not image_path.exists() or not image_path.is_file():
-            return ("", 404)
-        mime = _s(meta.get("mime", "") or "") or mimetypes.guess_type(image_name)[0] or "image/jpeg"
-        return send_file(str(image_path), mimetype=mime)
+        return send_file(str(cached["path"]), mimetype=cached["mime"], max_age=_RELEASE_ART_MAX_AGE)
     except Exception:
         return ("", 404)
 
@@ -1240,8 +1238,11 @@ def album_art(aid):
             _s(getattr(album, "albumartist", "") or getattr(album, "artist", "") or ""),
             _s(getattr(album, "album", "") or ""),
         )
-        if art_result.get("ok") and art_result.get("url"):
-            return redirect(art_result["url"])
+        # Serve the locally cached copy (downloaded once into
+        # METADATA_CACHE_DIR/release-art) directly: no redirect, no remote hit.
+        cached = _release_art_cache_info(mbid.lower()) if art_result.get("ok") else {}
+        if cached.get("path"):
+            return send_file(str(cached["path"]), mimetype=cached["mime"], max_age=_RELEASE_ART_MAX_AGE)
 
     # 5. No art anywhere: 404, so the page's <img> error handler shows its own
     # placeholder (a 200 transparent image left an empty tile).

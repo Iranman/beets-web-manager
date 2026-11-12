@@ -217,7 +217,7 @@ class ProviderBoundaryOpenerTests(unittest.TestCase):
     def test_opened_public_uses_only_open_public_url_and_records_outcome(self):
         calls = []
 
-        def fake_open_public_url(url, *, headers=None, timeout=None, max_bytes=None):
+        def fake_open_public_url(url, *, headers=None, timeout=None, max_bytes=None, allow_url=None):
             calls.append((url, headers, timeout, max_bytes))
             return _FakeResponse(200, b"body")
 
