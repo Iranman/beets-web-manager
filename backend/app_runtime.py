@@ -720,9 +720,14 @@ SECRET_NAME_PATTERN = (
 # its own value shown, so the line is then masked to its end instead (#670,
 # PR #679 QA). The scan stops at the next quote or whitespace, whose own
 # check covers the rest, so it stays linear.
-_MULTILINE_QUOTE_END += (
+_NAME_AFTER_QUOTE = (
     r"""(?:(?=[^\s"']*?(?<![a-z0-9_-])""" + SECRET_NAME_PATTERN + r"""["']?[ \t]*[:=]\s)[^\r\n]*)?"""
 )
+# A '"' in a query value keeps the closers without "|" and "-": there a
+# rejected '"a"-' leaves its closing '"' to pair with a later one, and so
+# masks the lines up to it (PR #679 QA: 'x?token="a"-\nS"]').
+_QUERY_DQUOTE_END = r"""(?![^\s,.;:!?)\]}>&#"'])""" + _NAME_AFTER_QUOTE
+_MULTILINE_QUOTE_END += _NAME_AFTER_QUOTE
 _SECRET_VALUE_PART = (
     r"""(?:"(?:[^"\\]|\\.)*"|"(?:[^"\\\r\n]|\\.)*|'(?:[^'\\]|\\.|''){0,4096}'""" + _MULTILINE_QUOTE_END
     + r"""|'(?:[^'\\\r\n]|\\.)*'?|[^ \t\r\n\f\v"'])"""
@@ -753,7 +758,7 @@ SECRET_SCHEME_PATTERN = r"(?:Bearer|Basic|Digest|Token|Negotiate)"
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![a-z0-9_-])(?:"
     r"(?<=[?&])(?P<qk>" + SECRET_NAME_PATTERN + r")(?P<qs>=)"
-    r"(?:\"[^\"]{0,4096}\"" + _MULTILINE_QUOTE_END + r"|\"[^\"\r\n]*"
+    r"(?:\"[^\"]{0,4096}\"" + _QUERY_DQUOTE_END + r"|\"[^\"\r\n]*"
     r"|'[^']{0,4096}'" + _MULTILINE_QUOTE_END + r"|'[^'\r\n]*'?|[^&#\s\"'])*"
     r"(?:&[^&#=\s\"']+(?![^&#\s\"']))*"
     r"|(?P<hk>[a-z0-9_-]*?(?:authorization|cookie))(?P<hs>[ \t]*[:=][ \t]*)(?![ \t]*[\"'])[^\r\n]*"

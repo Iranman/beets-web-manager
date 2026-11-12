@@ -111,7 +111,11 @@ class SecurityTextRedactionTests(unittest.TestCase):
         self.assert_masked("password='QQ\nfake-s26'-", "password=[REDACTED]")
         self.assert_masked("password='QQ\nfake-s27'| tail", "password=[REDACTED] tail")
         self.assert_masked("x?token='QQ\nfake-s28'-&keep=1", "x?token=[REDACTED]&keep=1")
-        self.assert_masked('x?token="QQ\nfake-s29"|', "x?token=[REDACTED]")
+
+    def test_issue_670_qa_query_double_quote_keeps_main_closers(self):
+        # PR #679 QA: '"a"' closing before "-" / "|" showed the next line.
+        self.assert_masked('x?token="a"-\nfake-s29"]', "x?token=[REDACTED]")
+        self.assert_masked('x?token="a"|\nfake-s39"', "x?token=[REDACTED]")
 
     def test_issue_670_mid_value_single_quote_spans_newline(self):
         self.assert_masked("x?token=a'QQ\nfake-s30'&keep=1", "x?token=[REDACTED]&keep=1")
@@ -131,7 +135,7 @@ class SecurityTextRedactionTests(unittest.TestCase):
         self.assert_masked("password=QQ'\n'}Authorization: fake-s33\nnext", "password=[REDACTED]\nnext")
         self.assert_masked("password='QQ\nQQ'-token: fake-s34", "password=[REDACTED]")
         self.assert_masked("password='it''s\n'}cookie= fake-s35 x", "password=[REDACTED]")
-        self.assert_masked('x?token="QQ\nQQ"-Authorization: fake-s36', "x?token=[REDACTED]")
+        self.assert_masked('x?token="QQ\nQQ"}Authorization: fake-s36', "x?token=[REDACTED]")
         self.assert_masked("x?token=a'QQ\n'|Cookie: fake-s37", "x?token=[REDACTED]")
         # Without whitespace after the separator the run stays one value.
         self.assert_masked("password='QQ'-token=fake-s38 tail", "password=[REDACTED] tail")
