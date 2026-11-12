@@ -12,7 +12,7 @@ import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { getAlbumTracks, getArtistImageUrl } from '../api/client';
 import { apiGet } from '../lib/api';
-import { useSearchParams } from 'react-router';
+import { useLocation, useNavigate, useSearchParams } from 'react-router';
 import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
@@ -1115,13 +1115,17 @@ export default function Library() {
   // Back and phone swipe-back return to the artists, and a link to an artist opens it.
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedArtistName = searchParams.get('artist') ?? '';
+  // An in-page drill-in marks its history entry, so the in-page back can pop it instead of pushing a
+  // second entry (which would make browser Back re-open the artist).
+  const location = useLocation();
+  const navigate = useNavigate();
   const setSelectedArtistName = useCallback((name: string, replace = false) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       if (name) next.set('artist', name);
       else next.delete('artist');
       return next;
-    }, { replace });
+    }, { replace, state: name && !replace ? { libraryDrillIn: true } : undefined });
   }, [setSearchParams]);
   const [trackSearchLoading, setTrackSearchLoading] = useState(false);
   const [trackSearchError, setTrackSearchError] = useState('');
@@ -1325,7 +1329,8 @@ export default function Library() {
   function backToArtists() {
     if (selectedArtistName) setArtistKey(selectedArtistName);
     setFlowFocus(true);
-    setSelectedArtistName('');
+    if ((location.state as { libraryDrillIn?: boolean } | null)?.libraryDrillIn) navigate(-1);
+    else setSelectedArtistName('', true); // deep link: nothing of ours to pop
   }
 
   const loadFailed = !data && Boolean(error);

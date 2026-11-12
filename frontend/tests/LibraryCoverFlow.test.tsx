@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, useNavigate } from 'react-router';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router';
 import Library from '../src/views/Library';
 import { apiGet } from '../src/lib/api';
 import {
@@ -80,7 +80,13 @@ const album = (overrides: Partial<LibraryAlbum>): LibraryAlbum => ({
 // Stands in for the browser's Back button / a phone's swipe-back.
 function HistoryBack() {
   const navigate = useNavigate();
-  return <button type="button" onClick={() => navigate(-1)}>history back</button>;
+  const location = useLocation();
+  return (
+    <>
+      <button type="button" onClick={() => navigate(-1)}>history back</button>
+      <output data-testid="url">{location.pathname + location.search}</output>
+    </>
+  );
 }
 
 async function renderLibrary(entries: string[] = ['/library']) {
@@ -208,5 +214,67 @@ describe('Library Cover Flow', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull(), { timeout: 2000 });
     expect(screen.getByRole('region', { name: 'Albums' })).toBeTruthy();
     expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
+  });
+
+  it('after clicking a side sleeve, the arrow keys still move the flow', async () => {
+    await renderLibrary();
+    const sleeve = screen.getByRole('button', { name: 'Artist Beta Choir, 2 of 3' });
+    sleeve.focus(); // a real mouse click leaves focus on the sleeve
+    fireEvent.click(sleeve);
+    expect(centred('Artists')).toBe('Artist Beta Choir, 2 of 3');
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
+    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+    fireEvent.keyDown(document.activeElement!, { key: 'Home' });
+    expect(centred('Artists')).toBe('Artist Alpha Band, 1 of 3');
+  });
+
+  it('All artists pops the drill-in entry: browser Back does not re-open the artist and history does not grow', async () => {
+    await renderLibrary(['/elsewhere', '/library']);
+    for (let trip = 0; trip < 2; trip += 1) {
+      await openGammaRay();
+      expect(screen.getByTestId('url').textContent).toBe('/library?artist=Gamma+Ray');
+      fireEvent.click(screen.getByRole('button', { name: /All artists/ }));
+      expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
+      expect(screen.getByTestId('url').textContent).toBe('/library');
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'history back' }));
+    expect(screen.getByTestId('url').textContent).toBe('/elsewhere');
+    expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
+  });
+
+  it('All artists on a deep link clears the artist in place', async () => {
+    await renderLibrary(['/elsewhere', '/library?artist=Beta%20Choir']);
+    fireEvent.click(screen.getByRole('button', { name: /All artists/ }));
+    expect(screen.getByTestId('url').textContent).toBe('/library');
+    fireEvent.click(screen.getByRole('button', { name: 'history back' }));
+    expect(screen.getByTestId('url').textContent).toBe('/elsewhere');
+  });
+
+  it('a vertical wheel scrolls the page; a horizontal wheel or Shift+wheel moves the flow', async () => {
+    await renderLibrary();
+    const flow = screen.getByRole('region', { name: 'Artists' });
+    const vertical = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(vertical); });
+    expect(vertical.defaultPrevented).toBe(false);
+    expect(centred('Artists')).toBe('Artist Alpha Band, 1 of 3');
+
+    const horizontal = new WheelEvent('wheel', { deltaX: 120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(horizontal); });
+    expect(horizontal.defaultPrevented).toBe(true);
+    expect(centred('Artists')).toBe('Artist Beta Choir, 2 of 3');
+
+    const shifted = new WheelEvent('wheel', { deltaY: 120, shiftKey: true, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(shifted); });
+    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+  });
+
+  it('the Next arrow hands focus to the flow when it disables itself at the end', async () => {
+    await renderLibrary();
+    const next = screen.getAllByRole('button', { name: 'Next' })[0];
+    next.focus();
+    fireEvent.click(next);
+    fireEvent.click(next);
+    expect((next as HTMLButtonElement).disabled).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Artists' }));
   });
 });

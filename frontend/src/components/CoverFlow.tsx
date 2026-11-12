@@ -153,14 +153,17 @@ export default function CoverFlow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Wheel needs a non-passive listener to keep the page still while the flow moves.
+  // Only a horizontal wheel (trackpad swipe, or Shift+wheel) moves the flow; a vertical wheel scrolls
+  // the page. Non-passive so a horizontal swipe does not also trigger browser back/forward.
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return undefined;
     let accumulated = 0;
     const onWheel = (event: WheelEvent) => {
       const { centre: at, count: n, onIndexChange: move } = live.current;
-      const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+      const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+      if (!horizontal && !event.shiftKey) return;
+      const delta = horizontal ? event.deltaX : event.deltaY;
       const target = clampIndex(at + Math.sign(delta), n);
       if (!delta || target === at) return; // at an end: let the page scroll on
       event.preventDefault();
@@ -179,7 +182,10 @@ export default function CoverFlow({
   const suppressClick = useRef(false);
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.target !== event.currentTarget) return;
+    // Keys from the flow or a sleeve inside it (a click leaves focus on the sleeve); never from a
+    // dialog or input rendered beneath it in the React tree.
+    const from = event.target as HTMLElement;
+    if (from !== event.currentTarget && !(from.classList?.contains('cf-item') && event.currentTarget.contains(from))) return;
     if (onBack && (event.key === 'Escape' || event.key === 'Backspace')) {
       event.preventDefault();
       onBack();
@@ -195,6 +201,12 @@ export default function CoverFlow({
     if (target === null) return;
     event.preventDefault();
     if (target !== centre) onIndexChange(target);
+  }
+
+  // A nav arrow disables itself at an end; hand focus to the flow so the keyboard keeps working.
+  function step(to: number) {
+    onIndexChange(to);
+    if (to <= 0 || to >= count - 1) stageRef.current?.focus();
   }
 
   const current = count ? item(centre) : undefined;
@@ -291,7 +303,7 @@ export default function CoverFlow({
         className="cf-nav is-prev"
         disabled={centre <= 0}
         type="button"
-        onClick={() => onIndexChange(clampIndex(centre - 1, count))}
+        onClick={() => step(clampIndex(centre - 1, count))}
       >
         <span aria-hidden="true">‹</span>
       </button>
@@ -300,7 +312,7 @@ export default function CoverFlow({
         className="cf-nav is-next"
         disabled={centre >= count - 1}
         type="button"
-        onClick={() => onIndexChange(clampIndex(centre + 1, count))}
+        onClick={() => step(clampIndex(centre + 1, count))}
       >
         <span aria-hidden="true">›</span>
       </button>
