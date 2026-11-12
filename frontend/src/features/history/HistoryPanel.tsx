@@ -34,23 +34,22 @@ function HistoryRow({ entry }: { entry: RecentImport }) {
   const mbUrl = entry.mb_url || (entry.mb_albumid ? `https://musicbrainz.org/release/${entry.mb_albumid}` : '');
 
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 border-t border-graphite-800 px-3 py-3 text-sm">
+    <li className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4 py-3 text-sm">
       <div className="min-w-0 space-y-0.5">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="font-medium text-zinc-200">
-            {entry.artist || '—'}{entry.album ? ` — ${entry.album}` : ''}
-          </span>
-          {entry.year ? <span className="text-muted">({entry.year})</span> : null}
+        <div className="font-display text-lg font-semibold text-zinc-50">{entry.album || 'Unknown album'}</div>
+        <div className="text-zinc-300">
+          {entry.artist || 'Unknown artist'}
+          {entry.year ? <span className="text-muted"> ({entry.year})</span> : null}
         </div>
         {entry.reason && (
-          <div className="text-xs italic text-muted">{entry.reason}</div>
+          <div className="text-sm text-muted">{entry.reason}</div>
         )}
         <div className="truncate font-mono text-xs text-muted">
           {entry.original_folder || entry.original_path || entry.aldir}
         </div>
       </div>
 
-      <div className="flex shrink-0 flex-col items-end gap-1.5">
+      <div className="flex shrink-0 flex-col items-end gap-1">
         {conf in CONF_COLOR && (
           <Chip
             color={CONF_COLOR[conf]}
@@ -59,21 +58,21 @@ function HistoryRow({ entry }: { entry: RecentImport }) {
             variant="outlined"
           />
         )}
-        <span className="text-xs tabular-nums text-muted">
+        <span className="text-sm tabular-nums text-muted">
           {timeAgo(entryTimestamp(entry))}
         </span>
         {mbUrl && (
           <a
-            className="text-xs text-brass-300 hover:text-brass-200"
+            className="inline-flex min-h-10 items-center text-sm text-brass-300 underline underline-offset-4 hover:text-brass-200"
             href={mbUrl}
             rel="noreferrer"
             target="_blank"
           >
-            MusicBrainz ↗
+            MusicBrainz<span className="sr-only"> (opens in a new tab)</span>
           </a>
         )}
       </div>
-    </div>
+    </li>
   );
 }
 
@@ -87,26 +86,28 @@ function HistorySection({
   onClear?: () => void;
 }) {
   return (
-    <div className="rounded border border-graphite-800 bg-graphite-950">
-      <div className="flex items-center justify-between border-b border-graphite-800 px-3 py-2">
-        <span className="text-xs font-semibold text-muted">
+    <div>
+      <div className="flex min-h-10 items-center justify-between border-b border-graphite-700 pb-1">
+        <span className="text-sm text-muted">
           {title} ({entries.length})
         </span>
         {onClear && entries.length > 0 && (
-          <Button color="error" size="small" variant="text" sx={{ fontSize: '0.7rem' }} onClick={onClear}>
+          <Button color="error" size="small" variant="text" onClick={onClear}>
             Clear
           </Button>
         )}
       </div>
       {entries.length === 0 ? (
-        <div className="px-3 py-4 text-sm text-muted">No entries yet.</div>
+        <div className="py-4 text-sm text-muted">No entries yet.</div>
       ) : (
-        entries.map((entry, i) => (
-          <HistoryRow
-            key={`${entryTimestamp(entry) ?? i}-${entry.original_path ?? entry.aldir ?? i}`}
-            entry={entry}
-          />
-        ))
+        <ul className="ops-track-list">
+          {entries.map((entry, i) => (
+            <HistoryRow
+              key={`${i}-${entryTimestamp(entry) ?? ''}-${entry.original_path ?? entry.aldir ?? ''}`}
+              entry={entry}
+            />
+          ))}
+        </ul>
       )}
     </div>
   );
@@ -158,7 +159,7 @@ export function HistoryPanel() {
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <h2 className="text-base font-medium text-zinc-200">Recently imported</h2>
+        <h2 className="ops-section-title">Recently imported</h2>
         <Button size="small" variant="outlined" onClick={load} disabled={loading}>
           Refresh
         </Button>

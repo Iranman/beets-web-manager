@@ -26,6 +26,9 @@
 /* Hallmark · Jobs pre-emit critique: P4 H5 E4 S4 R4 V4 · weakest: P, the cleanup drawers still hold their pre-existing panels unchanged inside */
 /* Hallmark · Jobs waive 26a, 26b · :focus-visible is the global rule at the end of this file; :active and :disabled live in the ops block (.ops-filter, MUI states) */
 /* Hallmark · Jobs answered 74 (graphite and zinc are this project's remapped theme scales), F24 (floating dialogs keep edge plus shadow), 28a (40px sleeves are not the LCP; the platter is) · "—" stays as the unknown-value marker in figures */
+/* Hallmark · shape: app screen · genre: atmospheric · theme: locked (DESIGN.md, Record shelf) · redesign: full · scope: Workbench (views/Import.tsx, features/intake/IntakePanel.tsx, features/history/HistoryPanel.tsx) · signature: the new-arrivals bin, latest imports as sleeves with the six sections standing in front as dividers */
+/* Hallmark · Workbench pre-emit critique: P4 H4 E4 S4 R4 V4 · weakest: P, Review Queue, Find Music and Library Changes keep their pre-existing internals */
+/* Hallmark · Workbench answered 74 (remapped theme scales), F24 (dialogs keep edge plus shadow) · the divider lift is the page's one motion moment and is off under reduced motion */
 @import "tailwindcss";
 
 @theme {
@@ -1193,10 +1196,105 @@ body {
       animation-play-state: paused;
     }
   }
+
+  /* Workbench: the new-arrivals bin. Sleeves of the latest imports lean at the back; the six
+     sections stand in front as divider cards. The selected divider is pulled up out of the bin. */
+  .ops-bin {
+    padding: clamp(1.25rem, 1rem + 1.5vw, 2rem) clamp(1rem, 0.75rem + 1.5vw, 2rem) 0;
+    border-radius: 10px;
+    border: 1px solid var(--ops-wood-rule);
+    background-color: var(--ops-wood);
+    background-image: var(--ops-grain), linear-gradient(180deg, var(--ops-sheen), transparent 45%);
+    background-size: 520px 180px, auto;
+    overflow: hidden;
+  }
+  .ops-bin-head {
+    display: grid;
+    gap: 1rem 2rem;
+    padding-bottom: 1.5rem;
+  }
+  @media (min-width: 64rem) {
+    .ops-bin-head {
+      grid-template-columns: 13rem minmax(0, 1fr);
+      align-items: start;
+    }
+  }
+  .ops-arrivals {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(6.5rem, 1fr));
+    gap: 1rem 0.75rem;
+  }
+  .ops-arrivals > li {
+    display: grid;
+    gap: 0.375rem;
+    min-width: 0;
+    justify-items: start;
+  }
+  .ops-arrival-label {
+    max-width: 100%;
+    font-size: 0.8125rem;
+    line-height: 1.3;
+    color: var(--color-zinc-300);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+  .ops-dividers {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+    gap: 0.375rem;
+    align-items: end;
+  }
+  .ops-divider {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-height: 3.25rem;
+    padding: 0.625rem 0.875rem 0.875rem;
+    border: 1px solid var(--ops-wood-rule);
+    border-bottom: 0;
+    border-radius: 8px 8px 0 0;
+    background: color-mix(in oklab, var(--ops-wood) 70%, var(--bw-surface-2));
+    color: var(--color-zinc-300);
+    text-align: left;
+    cursor: pointer;
+    transform: translateY(0.375rem);
+    transition: transform 220ms ease-out, background-color 150ms ease-out, color 150ms ease-out;
+  }
+  .ops-divider:hover {
+    color: var(--bw-text);
+    background: color-mix(in oklab, var(--ops-wood) 55%, var(--bw-surface-2));
+  }
+  .ops-divider:active {
+    background: color-mix(in oklab, var(--ops-wood) 40%, var(--bw-surface-2));
+  }
+  .ops-divider[data-selected] {
+    color: var(--color-zinc-50);
+    background: var(--bw-bg);
+    box-shadow: inset 0 2px 0 var(--bw-accent);
+    transform: translateY(0);
+  }
+  .ops-divider > span:first-child {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+  }
+  .ops-divider-count {
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-brass-200);
+  }
   @media (prefers-reduced-motion: reduce) {
     .ops-tonearm,
     .ops-ring-progress,
-    .ops-drawer > summary::before {
+    .ops-drawer > summary::before,
+    .ops-divider {
       transition: none;
     }
   }
