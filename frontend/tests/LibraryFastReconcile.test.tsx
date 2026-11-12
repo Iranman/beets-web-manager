@@ -6,13 +6,12 @@ import { apiGet } from '../src/lib/api';
 import type { LibraryResponse } from '../src/types/api';
 
 // Library.tsx fetches /api/library through the low-level apiGet helper, and
-// pulls art-repair / artist-image / album-track data through api/client. Stub
+// pulls artist-image / album-track data through api/client. Stub
 // the client calls as never-resolving so they stay out of the way; the test is
 // only about the /api/library fast-path + background disk reconciliation poll.
 vi.mock('../src/lib/api', () => ({ apiGet: vi.fn() }));
 vi.mock('../src/api/client', () => ({
   getArtistImageUrl: vi.fn(() => new Promise(() => {})),
-  getLibraryArtRepairReport: vi.fn(() => new Promise(() => {})),
   getAlbumTracks: vi.fn(() => new Promise(() => {})),
 }));
 
@@ -52,7 +51,7 @@ describe('Library fast-path + disk reconciliation polling', () => {
     cleanup();
   });
 
-  it('paints immediately from the fast reconciled:false tree and shows a non-blocking disk-check indicator', async () => {
+  it('paints immediately from the fast reconciled:false tree and shows no disk-check status', async () => {
     mockApiGet.mockResolvedValue(libraryResponse({ reconciled: false, reconciling: true }));
     renderLibrary();
     await act(async () => {
@@ -60,9 +59,9 @@ describe('Library fast-path + disk reconciliation polling', () => {
     });
 
     // Imported content rendered without waiting on any disk walk.
-    expect(screen.getByText('1 artists')).toBeTruthy();
-    // Subtle, non-blocking "checking disk" indicator is present.
-    expect(screen.getByText(/Checking disk/)).toBeTruthy();
+    expect(screen.getByText('1 artist')).toBeTruthy();
+    // Browse-only: the background disk check is silent.
+    expect(screen.queryByText(/Checking disk|Disk check/)).toBeNull();
     expect(mockApiGet).toHaveBeenCalledTimes(1);
     expect(mockApiGet.mock.calls[0][0]).toBe('/api/library?include_disk_only=1');
   });
@@ -87,7 +86,6 @@ describe('Library fast-path + disk reconciliation polling', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(screen.getByText(/Checking disk/)).toBeTruthy();
 
     // First poll fires at the 2s base cadence; version unchanged -> still cold.
     await act(async () => {
@@ -95,7 +93,6 @@ describe('Library fast-path + disk reconciliation polling', () => {
     });
     expect(mockApiGet).toHaveBeenCalledTimes(2);
     expect(mockApiGet.mock.calls[1][0]).toBe('/api/library?include_disk_only=1');
-    expect(screen.getByText(/Checking disk/)).toBeTruthy();
 
     // The budget was NOT reset by the stable version, so the next poll backs off
     // to 4s: 2s more elapses with no fetch...
@@ -110,7 +107,6 @@ describe('Library fast-path + disk reconciliation polling', () => {
       await vi.advanceTimersByTimeAsync(2_000);
     });
     expect(mockApiGet).toHaveBeenCalledTimes(3);
-    expect(screen.queryByText(/Checking disk/)).toBeNull();
 
     // Reconciled: polling must stop -- no further requests however long we wait.
     await act(async () => {
@@ -146,17 +142,15 @@ describe('Library fast-path + disk reconciliation polling', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    // Stale cache painted immediately, and because it is still reconciling the
-    // page keeps checking disk.
+    // Stale cache painted immediately; because it is still reconciling the page
+    // keeps polling in the background.
     expect(screen.getByText('2 albums')).toBeTruthy();
-    expect(screen.getByText(/Checking disk/)).toBeTruthy();
 
     // The next background poll brings the refreshed tree; the OPEN page updates.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_000);
     });
     expect(screen.getByText('3 albums')).toBeTruthy();
-    expect(screen.queryByText(/Checking disk/)).toBeNull();
 
     // Fresh (reconciled && !reconciling): polling stops.
     await act(async () => {
@@ -167,7 +161,7 @@ describe('Library fast-path + disk reconciliation polling', () => {
 
   it('stops polling after a bounded number of attempts when a stable version never reconciles', async () => {
     // Stable cold version, reconciliation never completes: poll must back off and
-    // stop at the bounded budget, surfacing a manual retry.
+    // stop at the bounded budget, silently.
     mockApiGet.mockResolvedValue(libraryResponse({ reconciled: false, reconciling: true, library_version: 1 }));
     renderLibrary();
     await act(async () => {
@@ -182,7 +176,6 @@ describe('Library fast-path + disk reconciliation polling', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2_000);
       });
-      if (screen.queryByText(/Disk check incomplete/)) break;
     }
 
     const callsWhenStalled = mockApiGet.mock.calls.length;
@@ -196,15 +189,14 @@ describe('Library fast-path + disk reconciliation polling', () => {
       });
     }
     expect(mockApiGet).toHaveBeenCalledTimes(callsWhenStalled);
-    // A stalled disk check is surfaced with a manual retry, not a spinner.
-    expect(screen.getByText(/Disk check incomplete/)).toBeTruthy();
+    expect(screen.queryByText(/Disk check|retry/i)).toBeNull();
   });
 
   it('stays bounded even if library_version changes on EVERY poll (the old B2 bug)', async () => {
     // Regression guard: the old code reset the poll budget whenever
     // library_version changed, so a backend that churned the version on every
-    // response would poll forever (and the stall/retry UI was unreachable).
-    // With a never-reset budget the poll must still terminate at the stall UI.
+    // response would poll forever. With a never-reset budget the poll must
+    // still terminate.
     let version = 100;
     mockApiGet.mockImplementation(async () =>
       libraryResponse({ reconciled: false, reconciling: true, library_version: version++ }),
@@ -214,20 +206,13 @@ describe('Library fast-path + disk reconciliation polling', () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    let stalled = false;
     for (let i = 0; i < 120; i += 1) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2_000);
       });
-      if (screen.queryByText(/Disk check incomplete/)) {
-        stalled = true;
-        break;
-      }
     }
 
-    // The stall/retry path is reachable despite the churning version...
-    expect(stalled).toBe(true);
-    // ...and polling is bounded (initial + <=15 polls), not infinite.
+    // Polling is bounded (initial + <=15 polls) despite the churning version, not infinite.
     expect(mockApiGet.mock.calls.length).toBeLessThanOrEqual(16);
 
     // And it stays stopped.

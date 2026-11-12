@@ -13,7 +13,6 @@ import type { LibraryAlbum, LibraryResponse } from '../src/types/api';
 vi.mock('../src/lib/api', () => ({ apiGet: vi.fn() }));
 vi.mock('../src/api/client', () => ({
   getArtistImageUrl: vi.fn(() => new Promise(() => {})),
-  getLibraryArtRepairReport: vi.fn(() => new Promise(() => {})),
   getAlbumTracks: vi.fn(() => Promise.resolve({ tracks: [] })),
 }));
 
@@ -113,13 +112,14 @@ describe('Hallmark Library', () => {
     expect(within(dialog).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close']);
   });
 
-  it('flips the album open from its sleeve and back: focus moves in, the cover face is inert, focus returns', async () => {
+  it('flips the album open from its sleeve and back: focus lands on the title, the cover face is inert, focus returns', async () => {
     await renderLibrary();
     fireEvent.click(await screen.findByRole('button', { name: /Radiohead/ }));
     const tile = screen.getAllByRole('article').find((t) => within(t).queryByText('OK Computer'))!;
     expect(within(tile).getByRole('button', { name: 'Open OK Computer' }).getAttribute('aria-haspopup')).toBe('dialog');
     const { trigger, dialog } = await openAlbum('OK Computer');
-    await waitFor(() => expect(document.activeElement).not.toBe(trigger));
+    const heading = within(dialog).getByRole('heading', { name: 'OK Computer' });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
     const front = dialog.querySelector('.flip-front')!;
     expect(front.getAttribute('aria-hidden')).toBe('true');
     expect(front.hasAttribute('inert')).toBe(true);

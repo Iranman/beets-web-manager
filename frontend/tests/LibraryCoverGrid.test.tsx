@@ -10,7 +10,6 @@ import type { LibraryAlbum, LibraryResponse } from '../src/types/api';
 vi.mock('../src/lib/api', () => ({ apiGet: vi.fn() }));
 vi.mock('../src/api/client', () => ({
   getArtistImageUrl: vi.fn(() => new Promise(() => {})),
-  getLibraryArtRepairReport: vi.fn(() => new Promise(() => {})),
   getAlbumTracks: vi.fn(() => new Promise(() => {})),
 }));
 

@@ -25,7 +25,6 @@ import type {
   AutoEnqueueImportResponse,
   ImportReviewRevalidateResponse,
   AiSuggestResponse,
-  ArtRepairReportResponse,
   AiBatchSource,
   AiBatchStatusResponse,
   ApiOkResponse,
@@ -1122,10 +1121,6 @@ export function fetchMissingArt(): Promise<JobStartResponse> {
 
 export function rebuildAlbumArt(): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>('/api/rebuild-album-art', jsonRequest('POST', { confirmed: true }));
-}
-
-export function getLibraryArtRepairReport(): Promise<ArtRepairReportResponse> {
-  return apiJson<ArtRepairReportResponse>('/api/library/art-repair');
 }
 
 export function fetchAlbumArt(albumId: number): Promise<JobStartResponse> {
