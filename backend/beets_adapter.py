@@ -19,6 +19,7 @@ import urllib.parse
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from backend import beets_embedded
+from backend.provider_boundary import redact
 
 log = logging.getLogger("beets.adapter")
 
@@ -31,9 +32,9 @@ class BeetsAdapterError(Exception):
     The message passed here becomes str(ex) and must be a stable, sanitized
     string safe to reach an HTTP response -- never raw upstream HTTP bodies,
     HTML, stack traces, filesystem paths, credentials, or plugin secrets.
-    Raw upstream diagnostic detail belongs only in the server log (see
-    `_request()`'s log.warning calls), never in this message or in
-    `response_data`, which callers may also surface to users.
+    Upstream diagnostic detail goes only to the server log, as a bounded,
+    redacted summary (see `_raise_upstream()`); `response_data` holds at most
+    redacted parsed JSON, since callers may also surface it to users.
     """
 
     def __init__(
@@ -261,17 +262,17 @@ class BeetsAdapter:
         try:
             err_json = json.loads(err_body)
         except Exception:
-            err_json = {"raw": err_body}
-
-        # Raw upstream response bodies (potentially raw HTML error pages,
-        # internal stack traces, or unexpected content) are logged
-        # server-side ONLY -- never embedded in the exception message,
-        # which callers may surface directly in an HTTP response.
-        log.warning("Beets upstream error %s on %s: %s", status, path, err_body[:2000])
+            err_json = None
+        # Upstream bodies are untrusted (#433): keep only redacted parsed
+        # JSON, never a raw body, and log a short redacted summary.
+        err_json = redact(err_json) if isinstance(err_json, dict) else None
 
         # If our own webmanager plugin returned a structured error_code,
         # carry it forward -- it is already a sanitized, stable field.
-        upstream_error_code = err_json.get("error_code") if isinstance(err_json, dict) else None
+        upstream_error_code = err_json.get("error_code") if err_json else None
+        summary = json.dumps(err_json) if err_json else redact(" ".join(err_body.split()))
+        log.warning("Beets upstream error %s on %s (error_code=%s): %s", status, path,
+                    upstream_error_code, summary[:200])
 
         if status == 400:
             raise BeetsAdapterBadRequestError(
