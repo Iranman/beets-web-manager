@@ -22,14 +22,17 @@ const TABS: Tab[] = [
   { to: '/jobs',      label: 'Jobs' },
 ];
 
-function BeetsLogo() {
+// Record-disc mark: black vinyl with grooves and a brass centre label.
+function RecordMark() {
   return (
-    <span className="flex size-8 items-center justify-center rounded-md bg-red-700 text-white shadow-sm shadow-red-950/40 ring-1 ring-red-400/35" aria-hidden="true">
-      <svg aria-hidden="true" className="size-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 7.4c3.5 0 6.1 2.9 5.5 6.3-.5 3.4-2.8 6.2-5.5 6.2s-5-2.8-5.5-6.2c-.6-3.4 2-6.3 5.5-6.3Z" fill="currentColor" />
-        <path d="M12 7.9c-.2-2.5.8-4.1 3-4.8.3 2.3-.8 3.9-3 4.8Z" fill="#fca5a5" />
-        <path d="M11.8 7.9c-2.4-.2-3.9-1.3-4.6-3.2 2.3-.1 3.9.9 4.6 3.2Z" fill="#fecaca" />
-        <path d="M12 7.7V4.4" stroke="#fee2e2" strokeWidth="1.4" strokeLinecap="round" />
+    <span className="flex size-8 items-center justify-center text-brass-400" aria-hidden="true">
+      <svg aria-hidden="true" className="size-8" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="16" cy="16" r="15" fill="#0e0b09" stroke="currentColor" strokeOpacity="0.55" />
+        <circle cx="16" cy="16" r="12" stroke="#3b322a" strokeWidth="0.8" />
+        <circle cx="16" cy="16" r="9.5" stroke="#3b322a" strokeWidth="0.8" />
+        <path d="M6.5 11.5A11 11 0 0 1 11.5 6" stroke="#f6dfae" strokeOpacity="0.35" strokeWidth="1.2" strokeLinecap="round" />
+        <circle cx="16" cy="16" r="6" fill="currentColor" />
+        <circle cx="16" cy="16" r="1.4" fill="#171310" />
       </svg>
     </span>
   );
@@ -100,13 +103,13 @@ export default function Shell({ username, onLogout }: ShellProps) {
 
   return (
     <div className="flex min-h-screen min-w-0 flex-col bg-graphite-950 text-zinc-100">
-      <header className="sticky top-0 z-20 border-b border-red-900/55 bg-graphite-900/96 shadow-sm shadow-red-950/20 backdrop-blur">
-        <div className="relative min-w-0 before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-red-600 before:via-red-500 before:to-transparent">
+      <header className="sticky top-0 z-20 border-b border-graphite-800 bg-graphite-900/96 shadow-sm shadow-black/30 backdrop-blur">
+        <div className="relative min-w-0 before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-brass-600 before:via-brass-400/70 before:to-transparent">
           <div className="mx-auto flex h-[var(--bw-header-h)] max-w-full items-center gap-x-1 px-3 sm:px-4 lg:max-w-screen-2xl">
             <span className="mr-1 flex shrink-0 select-none items-center gap-2 sm:mr-5">
-              <BeetsLogo />
-              <span className="hidden text-sm font-black text-red-300 sm:inline">
-                Beets
+              <RecordMark />
+              <span className="hidden whitespace-nowrap font-display text-base font-semibold text-brass-200 sm:inline">
+                Beets<span className="hidden lg:inline"> Web Manager</span>
               </span>
             </span>
 
@@ -122,8 +125,8 @@ export default function Shell({ username, onLogout }: ShellProps) {
                     [
                       'flex shrink-0 items-center whitespace-nowrap border-b-2 px-2.5 text-[0.82rem] font-medium transition-colors focus-visible:-outline-offset-2! sm:px-3',
                       isActive
-                        ? 'border-red-500 bg-red-950/35 text-white shadow-[inset_0_-1px_0_rgba(239,68,68,0.35)]'
-                        : 'border-transparent text-zinc-300 hover:border-red-700/70 hover:bg-red-950/18 hover:text-white',
+                        ? 'border-brass-400 bg-brass-950/60 text-zinc-50'
+                        : 'border-transparent text-zinc-300 hover:border-brass-700 hover:bg-brass-950/40 hover:text-zinc-50',
                     ].join(' ')
                   }
                 >
@@ -147,7 +150,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
               <Menu>
                 <MenuButton
                   disabled={restarting}
-                  className="flex items-center rounded-md px-1.5 py-1 text-red-300 transition-colors hover:bg-red-950/35 hover:text-white disabled:opacity-40"
+                  className="flex items-center rounded-md px-1.5 py-1 text-brass-300 transition-colors hover:bg-brass-950/60 hover:text-brass-200 disabled:opacity-40"
                   title="System"
                 >
                   <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -157,14 +160,14 @@ export default function Shell({ username, onLogout }: ShellProps) {
                 </MenuButton>
                 <MenuItems
                   anchor="bottom end"
-                  className="z-50 mt-1 min-w-[11rem] rounded-md border border-red-900/50 bg-graphite-850 py-1 shadow-xl shadow-red-950/25"
+                  className="z-50 mt-1 min-w-[11rem] rounded-md border border-graphite-700 bg-graphite-850 py-1 shadow-xl shadow-black/40"
                 >
                   <div className="px-3 py-1.5 text-xs text-zinc-400 border-b border-zinc-800">
                     Signed in as <span className="font-semibold text-white">{username || 'admin'}</span>
                   </div>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-brass-300"
                       onClick={() => void navigate('/config')}
                     >
                       Settings
@@ -172,7 +175,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </MenuItem>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-brass-300"
                       onClick={() => void navigate('/changes')}
                     >
                       Library Changes
@@ -180,7 +183,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </MenuItem>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white data-[focus]:bg-graphite-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-brass-300"
                       onClick={() => void navigate('/system')}
                     >
                       System
@@ -188,7 +191,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </MenuItem>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-950/30 hover:text-red-200 data-[focus]:bg-red-950/30 data-[focus]:text-red-200 data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400 disabled:opacity-50"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-400 hover:bg-red-950/30 hover:text-red-200 data-[focus]:bg-red-950/30 data-[focus]:text-red-200 data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-brass-300 disabled:opacity-50"
                       disabled={restarting}
                       onClick={() => void handleRestart()}
                     >
@@ -197,7 +200,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   </MenuItem>
                   <MenuItem>
                     <button
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white data-[focus]:bg-zinc-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-red-400 border-t border-zinc-800/80"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white data-[focus]:bg-zinc-800 data-[focus]:text-white data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-brass-300 border-t border-zinc-800/80"
                       onClick={() => void handleLogoutClick()}
                     >
                       Sign Out

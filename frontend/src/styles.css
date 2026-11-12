@@ -1,38 +1,61 @@
 @import "tailwindcss";
 
 @theme {
-  --color-graphite-50: #f4f4f5;
-  --color-graphite-100: #e4e4e7;
-  --color-graphite-200: #d4d4d8;
-  --color-graphite-300: #b8bdc7;
-  --color-graphite-400: #8e95a3;
-  --color-graphite-500: #68707f;
-  --color-graphite-600: #56606e;
-  --color-graphite-700: #414a58;
-  --color-graphite-800: #2d3440;
-  --color-graphite-850: #252b35;
-  --color-graphite-900: #1c2027;
-  --color-graphite-950: #13161b;
-  --color-accent-red: #b91c1c;
-  --color-accent-red-bright: #ef4444;
+  /* Record shelf palette (warm dark). The scale keeps the `graphite` name so existing
+     utilities pick up the warm values; it is warm charcoal/brown-black, not blue-grey. */
+  --color-graphite-50: #f6f0e7;
+  --color-graphite-100: #ebe2d5;
+  --color-graphite-200: #dcd0c0;
+  --color-graphite-300: #c4b5a2;
+  --color-graphite-400: #a39481;
+  --color-graphite-500: #7d705f;
+  --color-graphite-600: #63584b;
+  --color-graphite-700: #4b4137;
+  --color-graphite-800: #342c25;
+  --color-graphite-850: #2a231d;
+  --color-graphite-900: #201a16;
+  --color-graphite-950: #171310;
+  /* Neutral text/panel utilities (zinc-*) follow the same warm hue at similar lightness. */
+  --color-zinc-50: #faf6f0;
+  --color-zinc-100: #f3ede4;
+  --color-zinc-200: #e3dace;
+  --color-zinc-300: #d2c6b6;
+  --color-zinc-400: #ab9f8f;
+  --color-zinc-500: #7f7366;
+  --color-zinc-600: #5e554b;
+  --color-zinc-700: #463e36;
+  --color-zinc-800: #2e2721;
+  --color-zinc-900: #1d1814;
+  --color-zinc-950: #120e0b;
+  /* Brass: the record-store accent for brand, primary actions, active nav and focus. */
+  --color-brass-200: #f6dfae;
+  --color-brass-300: #f0cd85;
+  --color-brass-400: #e2b25c;
+  --color-brass-500: #d39e3f;
+  --color-brass-600: #b5822b;
+  --color-brass-700: #8f6420;
+  --color-brass-900: #4a3412;
+  --color-brass-950: #2b1e0b;
+  /* Display face for the wordmark and section headings: system serif, no web font download. */
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   /* Contrast-safe tokens (#606): muted >= 4.5:1 and field-border >= 3:1 on bg..surface-3. */
-  --color-muted: #9aa1ad;
-  --color-field-border: #7c8594;
+  --color-muted: #ab9d8b;
+  --color-field-border: #8f8170;
 }
 
 :root {
-  --bw-bg: #13161b;
-  --bw-surface: #1c2027;
-  --bw-surface-2: #252b35;
-  --bw-surface-3: #2d3440;
-  --bw-border: #414a58;
-  --bw-border-soft: rgba(255, 255, 255, 0.13);
-  --bw-text: #f4f4f5;
-  --bw-muted: #b8bdc7;
-  --bw-muted-2: #8e95a3;
-  --bw-red: #b91c1c;
-  --bw-red-hover: #ef4444;
-  --bw-focus: #f87171;
+  --bw-bg: #171310;
+  --bw-surface: #201a16;
+  --bw-surface-2: #2a231d;
+  --bw-surface-3: #342c25;
+  --bw-border: #4b4137;
+  --bw-border-soft: rgba(246, 222, 180, 0.13);
+  --bw-text: #f6f0e7;
+  --bw-muted: #c4b5a2;
+  --bw-muted-2: #a39481;
+  --bw-accent: #d39e3f;
+  --bw-accent-hover: #e2b25c;
+  --bw-focus: #f0c46a;
   --bw-header-h: 3.5rem;
   color: var(--bw-text);
   background: var(--bw-bg);
@@ -65,12 +88,12 @@ input {
 }
 
 ::selection {
-  background: rgba(185, 28, 28, 0.58);
+  background: rgba(211, 158, 63, 0.45);
   color: white;
 }
 
 * {
-  scrollbar-color: #56606e #1c2027;
+  scrollbar-color: #63584b #201a16;
 }
 
 /* Unlayered on purpose: it must beat `outline-none` utilities. A utility that must override it needs `!` (#607). */

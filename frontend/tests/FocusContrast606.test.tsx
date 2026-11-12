@@ -23,7 +23,7 @@ const surfaces = ['bw-bg', 'bw-surface', 'bw-surface-2', 'bw-surface-3'].map(tok
 
 describe('#606 focus and contrast tokens', () => {
   it('muted text is at least 4.5:1 on every app surface', () => {
-    expect(token('color-muted')).toBe('#9aa1ad');
+    expect(token('color-muted')).toBe('#ab9d8b');
     for (const s of surfaces) expect(contrast(token('color-muted'), s)).toBeGreaterThanOrEqual(4.5);
   });
 
@@ -44,7 +44,7 @@ describe('#606 focus and contrast tokens', () => {
 
   it('gear menu items style the Headless UI keyboard focus state', () => {
     const shell = src('components/layout/Shell.tsx');
-    expect(shell.match(/data-\[focus\]:outline-red-400/g)).toHaveLength(5);
+    expect(shell.match(/data-\[focus\]:outline-brass-300/g)).toHaveLength(5);
   });
 
   it('no zinc-500/600/700 text utilities remain outside the light-surface review panels', () => {
