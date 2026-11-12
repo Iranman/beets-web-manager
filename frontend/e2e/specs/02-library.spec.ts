@@ -52,15 +52,15 @@ test('album details show the tracks stored in Beets, with canonical release-grou
 test('album without IDs shows no issue marker or fix link in Library, and appears under Missing IDs', async ({ page }) => {
   await page.goto('/library');
   const main = page.getByRole('main');
-  await expect(main.getByRole('button', { name: 'Missing MusicBrainz IDs' })).toHaveCount(0);
+  // Role-agnostic: no button, link or text offering a fix anywhere on the page.
+  await expect(main).not.toContainText(/Missing MusicBrainz IDs|Manage on Import/);
   await page.getByRole('button', { name: /Unknown Quantity artwork/ }).click();
   const tile = page.getByRole('article').filter({ hasText: 'Untagged Sessions' });
   await expect(tile).not.toContainText(/Needs IDs|review/);
   await expect(tile.getByRole('button')).toHaveCount(1);
   await tile.getByRole('button', { name: 'Open Untagged Sessions' }).click();
   const dialog = page.getByRole('dialog', { name: 'Untagged Sessions' });
-  await expect(dialog.getByRole('button', { name: 'Manage on Import' })).toHaveCount(0);
-  await expect(dialog).not.toContainText(/Needs IDs|Review information/);
+  await expect(dialog).not.toContainText(/Manage on Import|Missing MusicBrainz IDs|Needs IDs|Review information/);
   await dialog.getByRole('button', { name: 'Close' }).click();
   await expect(dialog).toHaveCount(0);
   await page.goto('/library/missing-ids');
