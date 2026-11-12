@@ -291,12 +291,12 @@ def _is_secret_setting_key(name: str) -> bool:
 # is matched on its own (#593).
 # Spaces around "=" are allowed, as in a libpq DSN ("password = 'x'").
 _SETTING_PARAM_KEY_RE = re.compile(r"([^=&#;?\s]+)(?:(\s*=\s*))?")
-# A secret value ends only where a separator is followed by the next
-# "key=" (#601 F2): any other "&", "#", ";" or whitespace (NBSP too) may be
-# part of the secret, so it stays masked. After ";" the key may hold spaces
-# (ODBC "User Id=", #601 F3). Each separator scans one bounded key: linear.
-_SETTING_NEXT_KEY_RE = re.compile(
-    r"[&#\s][^\s=&#;?'\"{]+\s*=|;\s*[^\s=&#;?'\"{]+(?: [^\s=&#;?'\"{]+){0,3}\s*=")
+# A secret value ends only where "&", "#" or whitespace is followed by the
+# next "key=" (#601 F2): any other separator (NBSP too) may be part of the
+# secret, so it stays masked. A ";" never ends it, as on main: a secret may
+# hold ";X=" and nothing tells that tail from an ODBC ";User Id=", so the
+# rest of an ODBC string is masked too. One bounded key per separator: linear.
+_SETTING_NEXT_KEY_RE = re.compile(r"[&#\s][^\s=&#;?'\"{]+\s*=")
 # A quoted or braced part (ODBC "PWD={a b}") runs to its close, or to the
 # end when unclosed (fail closed).
 _SETTING_VALUE_CLOSE = {"'": "'", '"': '"', "{": "}"}
@@ -322,15 +322,16 @@ _SECRET_PARAM_SUFFIXES = ("key", "token", "secret", "pass", "pwd", "password", "
 _NOT_SECRET_PARAM_WORDS = frozenset((
     "monkey", "donkey", "turkey", "hockey", "jockey", "whiskey", "sortkey",
     "compass", "surpass", "overpass", "underpass", "trespass"))
-# A secret word qualified by one of these is not a secret ("session_count",
-# "cache_bypass", "sort_key"); a bare "bypass" still is (as on main).
-_NOT_SECRET_PARAM_QUALIFIERS = frozenset(("bypass", "count", "sort"))
+# A name that ends in one of these words names a count or a flag, not a
+# secret ("session_count", "auth_bypass"); so does "sort_key". Anywhere else
+# a qualifier exempts nothing (a "bypass" or "sort" prefix, a "*_bypass_key"),
+# and a bare "bypass" is still a secret (as on main).
+_NOT_SECRET_PARAM_LAST_WORDS = frozenset(("bypass", "count"))
 
 
 def _is_secret_param_key(name: str) -> bool:
-    name = urllib.parse.unquote_plus(name).lower().rsplit("/", 1)[-1]
-    words = [w for w in re.split(r"[^a-z0-9]+", name) if w]
-    if len(words) > 1 and _NOT_SECRET_PARAM_QUALIFIERS.intersection(words):
+    words = [w for w in re.split(r"[^a-z0-9]+", urllib.parse.unquote_plus(name).lower()) if w]
+    if len(words) > 1 and (words[-1] in _NOT_SECRET_PARAM_LAST_WORDS or words[-2:] == ["sort", "key"]):
         return False
     forms = set()
     for w in words:
@@ -351,7 +352,7 @@ def _secret_value_end(text: str, pos: int) -> int:
             while i < n and text[i] != close:
                 i += 2 if text[i] == "\\" and close != "}" else 1
             i += 1
-        elif (c in "&#;" or c.isspace()) and _SETTING_NEXT_KEY_RE.match(text, i):
+        elif (c in "&#" or c.isspace()) and _SETTING_NEXT_KEY_RE.match(text, i):
             break
         else:
             i += 1
@@ -389,7 +390,9 @@ def _redact_schemeless_userinfo(token: str) -> str:
     if head != token and _URL_SCHEME_RE.fullmatch(head):
         return token
     userinfo, at, host = head.rpartition("@")
-    if _SETTING_DIGEST_RE.fullmatch(host):
+    # A digest-pinned image is not userinfo, but a ":" other than a
+    # registry port ("reg:5000/img") still is: "u:pw@sha256:..." is cut.
+    if _SETTING_DIGEST_RE.fullmatch(host) and not re.search(r":(?!\d+/)", userinfo):
         return token
     lead = userinfo[:7] if userinfo[:7].lower() == "mailto:" else ""
     user = userinfo[len(lead):]

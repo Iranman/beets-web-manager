@@ -911,6 +911,11 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
             "q_wide_eq": "https://h.invalid/?api_key＝fake-t20",
             "q_wide_q": "https://h.invalid/x？token=fake-t21",
             "name_forms": "tokens=fake-t23 key2=fake-t24 oauth=fake-t25 apisig=fake-t26",
+            # PR #640 QA: a qualifier exempts only a name it ends, and "/"
+            # does not hide a secret word.
+            "qualified": ("https://h.invalid/?bypass_token=fake-t27&bypass_password=fake-t28"
+                          "&sort_token=fake-t29&count_password=fake-t30&cache_bypass_key=fake-t31"),
+            "slash_name": "https://h.invalid/?token/a=fake-t32",
         }
         # #601 F3, #595 item 3: not secrets, so shown as stored.
         plain = {
@@ -921,10 +926,16 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
             "mailto": "mailto:someone@mail.invalid",
             "digest": "ghcr.invalid/org/img@sha256:" + "ab" * 32,
             "digest_port": "reg.invalid:5000/img@sha256:" + "cd" * 32,
+            "q_count": "https://h.invalid/?token_count=5",
         }
         partial = {
-            "odbc": ("Server=a;Password=fake-t22;User Id=y", "Server=a;Password=MASK;User Id=y"),
-            "odbc_brace": ("Driver=x;PWD={fake-t10 fake-t11};Server=y", "Driver=x;PWD=MASK;Server=y"),
+            # PR #640 QA: a ";" never ends a secret (as on main), so the
+            # rest of an ODBC string is masked with it.
+            # (" Id=" starts a new key at the space, as on main.)
+            "odbc": ("Server=a;Password=fake-t22;User Id=y", "Server=a;Password=MASK Id=y"),
+            "odbc_brace": ("Driver=x;PWD={fake-t10 fake-t11};Server=y", "Driver=x;PWD=MASK"),
+            "semi_tail": ("password=fake-t33;SEKRIT=fake-t34", "password=MASK"),
+            "digest_userinfo": ("u:fake-t35@sha256:abcd", "MASK@sha256:abcd"),
         }
         stored_in = {**leaky, **plain, **{k: v[0] for k, v in partial.items()}}
         r = self.client.post("/api/setup/settings", json=stored_in)
