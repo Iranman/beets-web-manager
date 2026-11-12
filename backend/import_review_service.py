@@ -1139,6 +1139,29 @@ def _revalidated_artist_rejection(item: Dict[str, Any], suggestion: Dict[str, An
     return None
 
 
+def _revalidation_has_fresh_acoustid_proof(comparison: Dict[str, Any], preflight: Dict[str, Any]) -> bool:
+    """#602: proven identity from this revalidation's own fingerprint check.
+
+    Threshold: at least one track row is ``acoustid_verified`` (the file's
+    AcoustID recording MBID equals a track MBID of a release inside the
+    selected Release Group, see _candidate_track_build_comparison), and no
+    fingerprint contradicts it (no ``conflicting`` row, no preflight
+    ``acoustid_mismatch``, no blocking MatchingDecision). Only the fresh
+    comparison is read, never the stored suggestion or client input.
+    """
+    # ponytail: folders whose titles all match are never fingerprinted here, so
+    # they stay unresolved (safe over-blocking); widen only with recording-level proof.
+    rows = comparison.get("comparison") if isinstance(comparison.get("comparison"), list) else []
+    statuses = {_s(r.get("status")).strip().lower() for r in rows if isinstance(r, dict)}
+    decision = preflight.get("matching_decision") if isinstance(preflight.get("matching_decision"), dict) else {}
+    return bool(
+        "acoustid_verified" in statuses
+        and "conflicting" not in statuses
+        and not preflight.get("acoustid_mismatch")
+        and not (decision and not decision.get("action_allowed", True))
+    )
+
+
 def _import_review_build_revalidated_match(
     item: Dict[str, Any],
     comparison: Dict[str, Any],
@@ -1165,7 +1188,11 @@ def _import_review_build_revalidated_match(
         # #584/#596: Release Group membership does not resolve the artist;
         # without a stored proof (None, or a non-artist False such as a failed
         # lookup) the identity stays unresolved (not a rejection, not proof).
-        identity_validated = None
+        # #602: only a stored None is promoted, and only on fresh proof.
+        identity_validated = True if (
+            suggestion.get("identity_validated") is None
+            and _revalidation_has_fresh_acoustid_proof(comparison, preflight)
+        ) else None
     identity_ok = identity_validated is not False
     mapping = comparison.get("comparison") if isinstance(comparison.get("comparison"), list) else []
     importable_count = sum(

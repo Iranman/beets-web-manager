@@ -641,6 +641,10 @@
       "DISPLAY_ONLY",
       "Review-row suggestion for a folder Beets skipped: a fixed confidence label of low; the deterministic decision travels in the evidence and gates nothing here."
     ],
+    "backend/import_review_service.py::_revalidation_has_fresh_acoustid_proof": [
+      "SAFE_SPECIALIZED_EVIDENCE",
+      "Issue #602: reports whether this revalidation produced fresh, conflict-free acoustid_verified rows (no acoustid_mismatch, no action_allowed=False); evidence predicate only, it never lowers a threshold and acceptance still goes through the canonical matching decision."
+    ],
     "backend/import_review_service.py::_run_import_review_revalidation": [
       "DISPLAY_ONLY",
       "Revalidation loop moved from the route (F10); eligibility is evaluate_import_eligibility."
