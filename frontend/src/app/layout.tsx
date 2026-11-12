@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import '../styles.css';
 
 export const metadata: Metadata = {
-  title: 'Beets Web Control',
+  title: 'Beets Web Manager',
 };
 
 export default function RootLayout({

@@ -1,38 +1,43 @@
 import { alpha, createTheme } from '@mui/material/styles';
 
+// Record shelf palette: mirrors the tokens in styles.css (warm charcoal surfaces, brass accent).
 const graphite = {
-  bg: '#13161b',
-  surface: '#1c2027',
-  surface2: '#252b35',
-  surface3: '#2d3440',
-  border: '#414a58',
+  bg: '#171310',
+  surface: '#201a16',
+  surface2: '#2a231d',
+  surface3: '#342c25',
+  border: '#4b4137',
   // >= 3:1 against bg..surface-3 (#606).
-  fieldBorder: '#7c8594',
-  borderSoft: 'rgba(255,255,255,0.13)',
-  text: '#f4f4f5',
-  muted: '#b8bdc7',
-  muted2: '#8e95a3',
+  fieldBorder: '#8f8170',
+  borderSoft: 'rgba(246,222,180,0.13)',
+  text: '#f6f0e7',
+  muted: '#c4b5a2',
+  muted2: '#a39481',
 };
 
-const red = {
-  main: '#b91c1c',
-  hover: '#ef4444',
-  dark: '#7f1d1d',
+// Brass accent for brand, primary actions and active states. Dark text on it (>= 4.5:1).
+const brass = {
+  main: '#d39e3f',
+  hover: '#e2b25c',
+  dark: '#b5822b',
+  text: '#1a140e',
 };
+
+const displayFont = '"Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif';
 
 const button = {
-  primaryBg: red.main,
-  primaryHover: red.hover,
-  primaryText: '#ffffff',
-  secondaryBg: '#1f2530',
-  secondaryHover: '#2d3440',
-  secondaryText: '#f8fafc',
-  secondaryBorder: '#a8b0bd',
+  primaryBg: brass.main,
+  primaryHover: brass.hover,
+  primaryText: brass.text,
+  secondaryBg: '#241e19',
+  secondaryHover: '#342c25',
+  secondaryText: '#f8f1e7',
+  secondaryBorder: '#b3a491',
   // Disabled (#610): recessed fill, soft border, muted label (>= 4.5:1 on its fill);
   // reads as unavailable, never as primary. Literal hex: tests/test_import_review_button_contrast.py parses these.
-  disabledBg: '#1c2027',
-  disabledText: '#8e95a3',
-  disabledBorder: '#414a58',
+  disabledBg: '#201a16',
+  disabledText: '#a39481',
+  disabledBorder: '#4b4137',
   dangerBg: '#991b1b',
   dangerHover: '#dc2626',
   dangerText: '#ffffff',
@@ -40,7 +45,7 @@ const button = {
   warningHover: '#92400e',
   warningText: '#fff7ed',
   warningBorder: '#f59e0b',
-  focusRing: '#f87171',
+  focusRing: '#f0c46a',
 };
 
 const disabledButton = {
@@ -49,7 +54,7 @@ const disabledButton = {
   color: button.disabledText,
 };
 
-// Medium-dark graphite theme with clear red accents for brand, primary actions, and active states.
+// Warm dark record-shelf theme with a brass accent for brand, primary actions, and active states.
 export const theme = createTheme({
   palette: {
     mode: 'dark',
@@ -58,10 +63,10 @@ export const theme = createTheme({
       paper: graphite.surface2,
     },
     primary: {
-      main: red.main,
-      light: red.hover,
-      dark: red.dark,
-      contrastText: '#ffffff',
+      main: brass.main,
+      light: brass.hover,
+      dark: brass.dark,
+      contrastText: brass.text,
     },
     secondary: {
       main: graphite.muted,
@@ -93,8 +98,8 @@ export const theme = createTheme({
     fontFamily:
       'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     fontSize: 13,
-    h1: { fontSize: '1.45rem', fontWeight: 650, letterSpacing: 0 },
-    h2: { fontSize: '1.18rem', fontWeight: 650, letterSpacing: 0 },
+    h1: { fontFamily: displayFont, fontSize: '1.5rem', fontWeight: 600, letterSpacing: 0 },
+    h2: { fontFamily: displayFont, fontSize: '1.22rem', fontWeight: 600, letterSpacing: 0 },
     h3: { fontSize: '1rem', fontWeight: 650, letterSpacing: 0 },
   },
   components: {
@@ -150,7 +155,7 @@ export const theme = createTheme({
           backgroundColor: graphite.surface,
           '& .MuiOutlinedInput-notchedOutline': { borderColor: graphite.fieldBorder },
           '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: graphite.muted2 },
-          '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: red.main },
+          '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: brass.main },
           '&.Mui-disabled': { backgroundColor: alpha(graphite.surface3, 0.72) },
         },
         input: {
@@ -162,7 +167,7 @@ export const theme = createTheme({
       styleOverrides: {
         root: {
           color: graphite.muted,
-          '&.Mui-focused': { color: red.hover },
+          '&.Mui-focused': { color: brass.hover },
         },
       },
     },
@@ -188,7 +193,7 @@ export const theme = createTheme({
             border: `1px solid ${button.primaryBg}`,
             color: button.primaryText,
             '&:hover': { backgroundColor: button.primaryHover, borderColor: button.primaryHover },
-            '&:active': { backgroundColor: red.dark, borderColor: red.dark },
+            '&:active': { backgroundColor: brass.dark, borderColor: brass.dark },
           },
           '&.MuiButton-containedError': {
             backgroundColor: button.dangerBg,
@@ -208,7 +213,7 @@ export const theme = createTheme({
             color: button.secondaryText,
             '&:hover': {
               backgroundColor: button.secondaryHover,
-              borderColor: red.hover,
+              borderColor: brass.hover,
               color: button.secondaryText,
             },
             '&:active': { backgroundColor: graphite.surface2 },
@@ -235,8 +240,8 @@ export const theme = createTheme({
           },
           '&.MuiButton-text': {
             color: graphite.text,
-            '&:hover': { color: red.hover, backgroundColor: alpha(red.main, 0.1) },
-            '&:active': { backgroundColor: alpha(red.main, 0.2) },
+            '&:hover': { color: brass.hover, backgroundColor: alpha(brass.main, 0.1) },
+            '&:active': { backgroundColor: alpha(brass.main, 0.2) },
           },
           '&.MuiButton-textWarning': {
             backgroundColor: alpha(button.warningBg, 0.18),
@@ -275,7 +280,7 @@ export const theme = createTheme({
           backgroundColor: graphite.surface3,
         },
         bar: {
-          backgroundColor: red.hover,
+          backgroundColor: brass.hover,
         },
       },
     },
@@ -290,8 +295,8 @@ export const theme = createTheme({
     MuiMenuItem: {
       styleOverrides: {
         root: {
-          '&:hover': { backgroundColor: alpha(red.main, 0.12) },
-          '&.Mui-selected': { backgroundColor: alpha(red.main, 0.18) },
+          '&:hover': { backgroundColor: alpha(brass.main, 0.12) },
+          '&.Mui-selected': { backgroundColor: alpha(brass.main, 0.18) },
         },
       },
     },

@@ -35,7 +35,7 @@ describe('#610 button hierarchy', () => {
   });
 
   it('disabled label stays legible (>= 3:1) on every app surface', () => {
-    for (const s of ['#13161b', '#1c2027', '#252b35', '#2d3440']) {
+    for (const s of ['#171310', '#201a16', '#2a231d', '#342c25']) {
       expect(contrast(disabled.color, s)).toBeGreaterThanOrEqual(3);
     }
   });

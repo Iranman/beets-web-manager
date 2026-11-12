@@ -12,7 +12,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { getAlbumTracks, getArtistImageUrl, getLibraryArtRepairReport } from '../api/client';
 import type { ArtRepairItem, ArtRepairReportResponse } from '../api/types';
@@ -204,6 +204,24 @@ function initials(name: string) {
     .join('');
 }
 
+// Placeholder sleeve for albums without art: a record half out of a plain card sleeve.
+function SleevePlaceholder() {
+  return (
+    <span className="relative flex h-full w-full items-center justify-center bg-graphite-850" data-testid="sleeve-placeholder">
+      <svg aria-hidden="true" className="h-3/4 w-3/4" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="62" cy="50" r="36" fill="#0e0b09" />
+        <circle cx="62" cy="50" r="29" stroke="#3b322a" strokeWidth="1" />
+        <circle cx="62" cy="50" r="22" stroke="#3b322a" strokeWidth="1" />
+        <circle cx="62" cy="50" r="11" fill="#8f6420" />
+        <circle cx="62" cy="50" r="2" fill="#171310" />
+        <rect x="8" y="12" width="56" height="76" rx="2" fill="#342c25" stroke="#4b4137" />
+        <circle cx="36" cy="50" r="10" stroke="#4b4137" strokeWidth="1.5" />
+      </svg>
+      <span className="sr-only">No cover art</span>
+    </span>
+  );
+}
+
 function Artwork({
   src,
   label,
@@ -212,7 +230,7 @@ function Artwork({
 }: {
   src: string;
   label: string;
-  fallback: string;
+  fallback: ReactNode;
   className: string;
 }) {
   const [failed, setFailed] = useState(false);
@@ -232,7 +250,7 @@ function Artwork({
           onError={() => setFailed(true)}
         />
       ) : (
-        <span className="max-w-full truncate px-2 text-center">{fallback}</span>
+        typeof fallback === 'string' ? <span className="max-w-full truncate px-2 text-center">{fallback}</span> : fallback
       )}
     </div>
   );
@@ -516,7 +534,7 @@ function NextRepairPanel({
         <div className="flex min-w-0 gap-3">
           <Artwork
             className="h-16 w-16 rounded-md"
-            fallback="No cover"
+            fallback={<SleevePlaceholder />}
             label={`${title} cover`}
             src={albumArtUrl(album, libraryVersion)}
           />
@@ -577,7 +595,7 @@ function StatusCards({
             className={cx(
               'min-h-[4.75rem] rounded-md border px-3 py-2 text-left transition-colors',
               selected
-                ? 'border-red-400 bg-red-500/10 text-red-100'
+                ? 'border-brass-400 bg-brass-500/10 text-brass-200'
                 : 'border-graphite-800 bg-graphite-950/35 text-zinc-300 hover:border-graphite-600 hover:bg-graphite-900/60',
             )}
             type="button"
@@ -678,7 +696,7 @@ function AlphabetIndex({
             className={cx(
               'h-8 min-w-8 rounded border px-2 text-xs font-semibold transition',
               selected
-                ? 'border-red-400 bg-red-500/15 text-red-100'
+                ? 'border-brass-400 bg-brass-500/15 text-brass-200'
                 : enabled
                   ? 'border-graphite-700 text-zinc-300 hover:border-graphite-500 hover:bg-graphite-900'
                   : 'cursor-not-allowed border-graphite-900 text-muted',
@@ -711,7 +729,7 @@ function ArtistCard({
 
   return (
     <button
-      className="grid min-h-[5.5rem] grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-3 rounded-md border border-graphite-800 bg-graphite-950/35 p-2 text-left transition hover:border-red-400/70 hover:bg-graphite-900/70"
+      className="grid min-h-[5.5rem] grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-3 rounded-md border border-graphite-800 bg-graphite-950/35 p-2 text-left transition hover:border-brass-400/70 hover:bg-graphite-900/70"
       type="button"
       onClick={() => onSelect(artist)}
     >
@@ -817,26 +835,23 @@ function AlbumCard({
   const action = albumPrimaryAction(album, artRepairItemMap);
 
   return (
-    <article className="grid min-h-[8.5rem] grid-cols-[5rem_minmax(0,1fr)] gap-3 rounded-md border border-graphite-800 bg-graphite-950/35 p-2">
+    <article className="flex min-w-0 flex-col rounded-md border border-graphite-800 bg-graphite-900/60 p-2 transition-colors hover:border-brass-700">
+      {/* Sleeve: square cover with a thin edge and shadow, like a record standing on a shelf. */}
       <Artwork
-        className="h-20 w-20 rounded-md"
-        fallback="No cover"
+        className="aspect-square w-full rounded-sm shadow-md shadow-black/50 ring-1 ring-black/40"
+        fallback={<SleevePlaceholder />}
         label={`${title} cover`}
         src={albumArtUrl(album, libraryVersion)}
       />
-      <div className="min-w-0">
-        <div className="flex min-w-0 items-start justify-between gap-2">
-          <div className="min-w-0">
-            <h3 className="line-clamp-2 text-sm font-semibold text-zinc-100">{title}</h3>
-            <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-zinc-400">
-              {showArtist ? <span className="truncate">{artistName}</span> : null}
-              {album.year ? <span>{String(album.year).slice(0, 4)}</span> : null}
-              <span>{numberFmt.format(albumTrackCount(album))} tracks</span>
-            </div>
-          </div>
-          <Chip label={issue} size="small" variant="outlined" />
+      <div className="mt-2 min-w-0 flex-1">
+        <h3 className="line-clamp-2 text-sm font-semibold text-zinc-100" title={title}>{title}</h3>
+        {showArtist ? <div className="truncate text-sm text-zinc-300" title={artistName}>{artistName}</div> : null}
+        <div className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-zinc-400">
+          {album.year ? <span>{String(album.year).slice(0, 4)}</span> : null}
+          <span>{numberFmt.format(albumTrackCount(album))} tracks</span>
         </div>
-        <div className="mt-2">
+        <div className="mt-2 space-y-1.5">
+          <Chip label={issue} size="small" sx={{ maxWidth: '100%' }} variant="outlined" />
           <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
@@ -909,13 +924,13 @@ function AlbumGrid({
     <section className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-base font-semibold text-zinc-100">{title}</h2>
+          <h2 className="font-display text-lg font-semibold text-zinc-100">{title}</h2>
           <p className="mt-0.5 text-sm text-zinc-400">{subtitle}</p>
         </div>
       </div>
       <div className="max-h-[calc(100vh-22rem)] min-h-72 overflow-y-auto rounded-md border border-graphite-800 bg-graphite-950/20 p-2">
         {rows.length ? (
-          <div className="grid gap-2 xl:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,12rem),1fr))] gap-3">
             {rows.map((row) => (
               <AlbumCard
                 key={`${row.artist.name}::${row.album.album_id || row.album.aldir || row.album.album}`}
@@ -966,9 +981,9 @@ function ArtistDetail({
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-400">
-        <button className="text-red-300 hover:text-red-200" type="button" onClick={onBack}>Library</button>
+        <button className="text-brass-300 hover:text-brass-200" type="button" onClick={onBack}>Library</button>
         <span>/</span>
-        <button className="text-red-300 hover:text-red-200" type="button" onClick={onBack}>Artists</button>
+        <button className="text-brass-300 hover:text-brass-200" type="button" onClick={onBack}>Artists</button>
         <span>/</span>
         <span className="text-zinc-200">{name}</span>
       </div>
@@ -1059,7 +1074,7 @@ function AlbumDetailsDialog({
                   <div className="flex min-w-0 gap-3">
                     <Artwork
                       className="h-20 w-20 rounded-md"
-                      fallback="No cover"
+                      fallback={<SleevePlaceholder />}
                       label={`${title} cover`}
                       src={albumArtUrl(album, libraryVersion)}
                     />

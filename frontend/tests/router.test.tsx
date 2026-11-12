@@ -140,9 +140,9 @@ describe('AppRoutes (react-router v8)', () => {
     renderAt('/jobs');
     await waitFor(() => expect(screen.getByText('JOBS_PAGE')).toBeTruthy());
     const jobsLink = screen.getByRole('link', { name: /^Jobs/ });
-    expect(jobsLink.className).toMatch(/border-red-500/);
+    expect(jobsLink.className).toMatch(/border-brass-400/);
     const libraryLink = screen.getByRole('link', { name: /^Library/ });
-    expect(libraryLink.className).not.toMatch(/border-red-500/);
+    expect(libraryLink.className).not.toMatch(/border-brass-400/);
   });
 });
 
