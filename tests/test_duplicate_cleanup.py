@@ -156,6 +156,65 @@ class ReviewedCleanupTests(unittest.TestCase):
         again = dc.apply_reviewed_cleanup(op, adapter=self.adapter, store=self.store, abs_path=lambda p: p)
         self.assertEqual(again["code"], "already_applied")
 
+    def _apply_after(self, change):
+        op = self._plan()["operation_id"]
+        self.store.update(op, status="Approved")
+        change()
+        res = dc.apply_reviewed_cleanup(op, adapter=self.adapter, store=self.store, abs_path=lambda p: p)
+        self.assertFalse(res["ok"], res)
+        self.assertEqual(res["code"], "keeper_changed")
+        self.adapter.quarantine_remove_items.assert_not_called()
+        self.assertIn(22577, self.items)
+        tx = self.store.get(op)
+        self.assertEqual(tx["status"], "Failed")
+        self.assertEqual(tx["metadata"]["keeper_check_failures"], res["refusals"])
+        return res["refusals"]
+
+    def test_apply_refuses_when_keeper_file_deleted_after_review(self):
+        [msg] = self._apply_after(self.keep_path.unlink)
+        self.assertIn("keeper 25264 file is missing", msg)
+
+    def test_apply_refuses_when_keeper_row_removed_after_review(self):
+        [msg] = self._apply_after(lambda: self.items.pop(25264))
+        self.assertIn("keeper 25264 is no longer in the library", msg)
+
+    def test_apply_refuses_when_keeper_file_replaced_after_review(self):
+        def replace():
+            self.keep_path.write_bytes(b"x" * 7)
+        [msg] = self._apply_after(replace)
+        self.assertIn("keeper 25264 file changed since the preview", msg)
+
+    def test_apply_refuses_same_size_replacement_with_new_mtime(self):
+        def replace():
+            st = self.keep_path.stat()
+            self.keep_path.write_bytes(b"z" * st.st_size)
+            import os
+            os.utime(self.keep_path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        [msg] = self._apply_after(replace)
+        self.assertIn("changed since the preview", msg)
+
+    def test_apply_refuses_when_keeper_moved_after_review(self):
+        def move():
+            moved = self.keep_path.with_name("moved.flac")
+            self.keep_path.rename(moved)
+            self.items[25264]["path"] = str(moved)
+        [msg] = self._apply_after(move)
+        self.assertIn("keeper 25264 moved since the preview", msg)
+
+    def test_apply_refuses_preview_without_keeper_stamp(self):
+        def strip():
+            meta = self.store.get(self._op)["metadata"]
+            for p in meta["pairs"]:
+                p.pop("keep_stamp", None)
+            self.store.update(self._op, metadata={"pairs": meta["pairs"]})
+        op = self._plan()["operation_id"]
+        self._op = op
+        strip()
+        self.store.update(op, status="Approved")
+        res = dc.apply_reviewed_cleanup(op, adapter=self.adapter, store=self.store, abs_path=lambda p: p)
+        self.assertEqual(res["code"], "keeper_changed")
+        self.adapter.quarantine_remove_items.assert_not_called()
+
     def test_apply_flags_keeper_identity_drift(self):
         op = self._plan()["operation_id"]
         self.store.update(op, status="Approved")

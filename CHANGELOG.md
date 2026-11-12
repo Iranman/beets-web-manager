@@ -32,6 +32,8 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
+- **Reviewed duplicate cleanup re-checks the keeper before quarantining (#530).** The preview now records the keeper file's size and mtime. Under the apply locks, before the engine call, every keeper must still be in the library at the planned path with that size and mtime. If a keeper was deleted, moved or replaced since the review, the whole cleanup is refused with a per-keeper reason, marked Failed, and nothing is removed. Previews made before this change have no keeper record and must be re-planned.
+
 - **Remaining generated-looking UI labels removed (#612).** The album folder issue tag on Jobs starts with a capital letter ("Duplicate folder, missing art"); the setup wizard's plugin readiness labels use sentence case without a leading check mark; the last 11px labels in setup, Import Review and the recovery card are 12px; and fixed copy no longer uses a decorative " · " join ("Recovery needs verification", "Target exists, needs review", "AcoustID is available after ..."). Data lines joined with " · " are unchanged.
 - **Import Review revalidation now promotes an unresolved artist identity on fresh AcoustID proof (#602).** An item stored with `identity_validated = None` becomes `True` only when this revalidation's own fingerprint check maps at least one local file to a recording MBID on a release inside the selected Release Group (`acoustid_verified` track row), with no conflicting fingerprint, no `acoustid_mismatch`, and no blocking MatchingDecision. Stored or client-supplied evidence is never used, a stored `False` is never promoted, and folders whose titles already match (and so are not fingerprinted) stay unresolved and need a manual import, as before.
 
