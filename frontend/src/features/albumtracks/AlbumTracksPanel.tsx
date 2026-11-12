@@ -265,9 +265,9 @@ export function AlbumTracksPanel() {
           <Switch
             checked={useAi}
             onChange={setUseAi}
-            className="group inline-flex h-5 w-9 items-center rounded-full bg-graphite-700 transition data-[checked]:bg-red-500"
+            className="group inline-flex h-5 w-9 items-center rounded-full bg-graphite-700 transition data-[checked]:bg-brass-500"
           >
-            <span className="size-3.5 translate-x-0.5 rounded-full bg-white transition group-data-[checked]:translate-x-4" />
+            <span className="size-3.5 translate-x-0.5 rounded-full bg-white transition group-data-[checked]:translate-x-4 group-data-[checked]:bg-graphite-950" />
           </Switch>
           AI review
         </label>
@@ -275,9 +275,9 @@ export function AlbumTracksPanel() {
           <Switch
             checked={useFingerprint}
             onChange={setUseFingerprint}
-            className="group inline-flex h-5 w-9 items-center rounded-full bg-graphite-700 transition data-[checked]:bg-red-500"
+            className="group inline-flex h-5 w-9 items-center rounded-full bg-graphite-700 transition data-[checked]:bg-brass-500"
           >
-            <span className="size-3.5 translate-x-0.5 rounded-full bg-white transition group-data-[checked]:translate-x-4" />
+            <span className="size-3.5 translate-x-0.5 rounded-full bg-white transition group-data-[checked]:translate-x-4 group-data-[checked]:bg-graphite-950" />
           </Switch>
           Fingerprint
         </label>

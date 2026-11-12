@@ -1,6 +1,7 @@
 import { errorMessage } from '../lib/errors';
 import { DEFAULT_AI_BASE_URL, aiSetupEnv, effectiveAiBaseUrl } from '../lib/aiSetup';
 import { useEffect, useState } from 'react';
+import { RecordMark } from './RecordMark';
 import { WarningIcon } from './WarningIcon';
 import {
   completeSetup,
@@ -16,19 +17,6 @@ import {
   verifyPlugins,
 } from '../api/client';
 import type { BeetsPluginsReport, SetupStatusResponse } from '../api/types';
-
-function BeetsLogo() {
-  return (
-    <span className="flex size-12 items-center justify-center rounded-xl bg-red-700 text-white shadow-lg shadow-red-950/50 ring-1 ring-red-400/40">
-      <svg aria-hidden="true" className="size-7" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 7.4c3.5 0 6.1 2.9 5.5 6.3-.5 3.4-2.8 6.2-5.5 6.2s-5-2.8-5.5-6.2c-.6-3.4 2-6.3 5.5-6.3Z" fill="currentColor" />
-        <path d="M12 7.9c-.2-2.5.8-4.1 3-4.8.3 2.3-.8 3.9-3 4.8Z" fill="#fca5a5" />
-        <path d="M11.8 7.9c-2.4-.2-3.9-1.3-4.6-3.2 2.3-.1 3.9.9 4.6 3.2Z" fill="#fecaca" />
-        <path d="M12 7.7V4.4" stroke="#fee2e2" strokeWidth="1.4" strokeLinecap="round" />
-      </svg>
-    </span>
-  );
-}
 
 export default function FirstRunSetup() {
   const [currentStep, setCurrentStep] = useState<number>(1);
@@ -267,7 +255,7 @@ export default function FirstRunSetup() {
       <div className="w-full max-w-2xl space-y-6">
         {/* Header */}
         <div className="flex flex-col items-center text-center">
-          <BeetsLogo />
+          <RecordMark className="size-12 drop-shadow-lg" />
           <h1 className="mt-3 text-2xl font-black tracking-tight text-white sm:text-3xl">
             Beets Web Manager Setup
           </h1>
@@ -289,9 +277,11 @@ export default function FirstRunSetup() {
                 }}
                 disabled={!isDone}
                 title={s.title}
+                aria-label={`Step ${s.num}: ${s.title}`}
+                aria-current={isCurrent ? 'step' : undefined}
                 className={`flex size-7 items-center justify-center rounded-lg text-xs font-bold transition-colors ${
                   isCurrent
-                    ? 'bg-red-700 text-white shadow-md ring-2 ring-red-500/50'
+                    ? 'bg-brass-500 text-graphite-950 shadow-md ring-2 ring-brass-300/60'
                     : isDone
                     ? 'bg-zinc-800 text-emerald-400 hover:bg-zinc-700 cursor-pointer'
                     : 'bg-graphite-950 text-muted'
@@ -304,7 +294,7 @@ export default function FirstRunSetup() {
         </div>
 
         {/* Wizard Card Body */}
-        <div className="rounded-2xl border border-red-900/40 bg-graphite-900/90 p-6 shadow-2xl backdrop-blur sm:p-8">
+        <div className="rounded-2xl border border-brass-900/60 bg-graphite-900/90 p-6 shadow-2xl backdrop-blur sm:p-8">
           {/* STEP 1: Welcome */}
           {currentStep === 1 && (
             <div className="space-y-5">
@@ -322,9 +312,9 @@ export default function FirstRunSetup() {
                 </p>
                 <div className="flex items-center justify-center gap-3 text-sm font-mono text-zinc-200">
                   <span className="rounded-lg bg-zinc-800 px-3 py-1.5 border border-zinc-700">Browser</span>
-                  <span className="text-red-500 font-bold">&rarr;</span>
-                  <span className="rounded-lg bg-red-950/80 px-3 py-1.5 border border-red-800/80 text-red-200 font-semibold">beets-web-manager</span>
-                  <span className="text-red-500 font-bold">&rarr;</span>
+                  <span className="text-brass-400 font-bold">&rarr;</span>
+                  <span className="rounded-lg bg-brass-950/80 px-3 py-1.5 border border-brass-700/80 text-brass-200 font-semibold">beets-web-manager</span>
+                  <span className="text-brass-400 font-bold">&rarr;</span>
                   <span className="rounded-lg bg-zinc-800 px-3 py-1.5 border border-zinc-700">Beets (embedded)</span>
                 </div>
               </div>
@@ -333,7 +323,7 @@ export default function FirstRunSetup() {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(2)}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md transition-colors hover:bg-red-600"
+                  className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400"
                 >
                   Get Started &rarr;
                 </button>
@@ -360,7 +350,7 @@ export default function FirstRunSetup() {
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-brass-400 focus:outline-none"
                     required
                   />
                 </div>
@@ -374,7 +364,7 @@ export default function FirstRunSetup() {
                       type={showPassword ? 'text' : 'password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full rounded-lg border border-field-border bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="w-full rounded-lg border border-field-border bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white focus:border-brass-400 focus:outline-none"
                       required
                     />
                     <button
@@ -395,7 +385,7 @@ export default function FirstRunSetup() {
                     type="password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
-                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-brass-400 focus:outline-none"
                     required
                   />
                   {confirmPassword && !passwordsMatch && (
@@ -429,7 +419,7 @@ export default function FirstRunSetup() {
                   type="button"
                   onClick={() => setCurrentStep(3)}
                   disabled={!adminFormValid}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md transition-colors hover:bg-red-600 disabled:opacity-50"
+                  className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400 disabled:cursor-not-allowed disabled:bg-graphite-900 disabled:text-graphite-400 disabled:shadow-none disabled:ring-1 disabled:ring-graphite-700"
                 >
                   Continue &rarr;
                 </button>
@@ -516,7 +506,7 @@ export default function FirstRunSetup() {
                   type="button"
                   onClick={() => setCurrentStep(4)}
                   disabled={!beetsStatus.ok}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md hover:bg-red-600 disabled:opacity-50"
+                  className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400 disabled:cursor-not-allowed disabled:bg-graphite-900 disabled:text-graphite-400 disabled:shadow-none disabled:ring-1 disabled:ring-graphite-700"
                 >
                   Continue &rarr;
                 </button>
@@ -575,7 +565,7 @@ export default function FirstRunSetup() {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(5)}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md hover:bg-red-600"
+                  className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400"
                 >
                   Continue &rarr;
                 </button>
@@ -631,7 +621,7 @@ export default function FirstRunSetup() {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(6)}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md hover:bg-red-600"
+                  className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400"
                 >
                   Continue &rarr;
                 </button>
@@ -660,7 +650,7 @@ export default function FirstRunSetup() {
                     value={acoustidKey}
                     onChange={(e) => setAcoustidKey(e.target.value)}
                     placeholder="Optional application key"
-                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-brass-400 focus:outline-none"
                   />
                 </div>
 
@@ -708,7 +698,7 @@ export default function FirstRunSetup() {
                   <button
                     type="button"
                     onClick={() => setCurrentStep(7)}
-                    className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md hover:bg-red-600"
+                    className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400"
                   >
                     Continue &rarr;
                   </button>
@@ -737,7 +727,7 @@ export default function FirstRunSetup() {
                     value={aiApiKey}
                     onChange={(e) => setAiApiKey(e.target.value)}
                     placeholder="sk-..."
-                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-brass-400 focus:outline-none"
                   />
                 </div>
 
@@ -750,7 +740,7 @@ export default function FirstRunSetup() {
                       type="text"
                       value={aiBaseUrl}
                       onChange={(e) => setAiBaseUrl(e.target.value)}
-                      className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-brass-400 focus:outline-none"
                     />
                   </div>
                   <div>
@@ -761,7 +751,7 @@ export default function FirstRunSetup() {
                       type="text"
                       value={aiModel}
                       onChange={(e) => setAiModel(e.target.value)}
-                      className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                      className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-brass-400 focus:outline-none"
                     />
                   </div>
                 </div>
@@ -810,7 +800,7 @@ export default function FirstRunSetup() {
                   <button
                     type="button"
                     onClick={() => setCurrentStep(8)}
-                    className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md hover:bg-red-600"
+                    className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400"
                   >
                     Continue &rarr;
                   </button>
@@ -974,7 +964,7 @@ export default function FirstRunSetup() {
                 <button
                   type="button"
                   onClick={() => setCurrentStep(9)}
-                  className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md hover:bg-red-600"
+                  className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400"
                 >
                   Continue &rarr;
                 </button>
@@ -1002,7 +992,7 @@ export default function FirstRunSetup() {
                     value={plexUrl}
                     onChange={(e) => setPlexUrl(e.target.value)}
                     placeholder="http://plex.local:32400"
-                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-brass-400 focus:outline-none"
                   />
                 </div>
 
@@ -1015,7 +1005,7 @@ export default function FirstRunSetup() {
                     value={plexToken}
                     onChange={(e) => setPlexToken(e.target.value)}
                     placeholder="Token"
-                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                    className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white focus:border-brass-400 focus:outline-none"
                   />
                 </div>
 
@@ -1063,7 +1053,7 @@ export default function FirstRunSetup() {
                   <button
                     type="button"
                     onClick={() => setCurrentStep(10)}
-                    className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md hover:bg-red-600"
+                    className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400"
                   >
                     Review &rarr;
                   </button>
@@ -1161,7 +1151,7 @@ export default function FirstRunSetup() {
                       type="button"
                       onClick={handleFinishSetup}
                       disabled={finishing}
-                      className="rounded-lg bg-red-700 px-6 py-2.5 text-sm font-bold text-white shadow-md hover:bg-red-600 disabled:opacity-50"
+                      className="rounded-lg bg-brass-500 px-6 py-2.5 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400 disabled:cursor-not-allowed disabled:bg-graphite-900 disabled:text-graphite-400 disabled:shadow-none disabled:ring-1 disabled:ring-graphite-700"
                     >
                       {finishing ? 'Finishing Setup...' : 'Finish Setup'}
                     </button>

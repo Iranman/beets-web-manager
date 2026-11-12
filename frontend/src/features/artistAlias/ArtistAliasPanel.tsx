@@ -58,13 +58,13 @@ function GroupRow({
             className={cx(
               'flex cursor-pointer items-start gap-2 rounded border p-2 text-sm transition',
               selectedCanonical === variant.name
-                ? 'border-red-400 bg-red-400/10 shadow-sm shadow-black/30'
+                ? 'border-brass-400 bg-brass-400/10 shadow-sm shadow-black/30'
                 : 'border-graphite-800/90 hover:border-graphite-700 hover:bg-graphite-900/50',
             )}
           >
             <input
               checked={selectedCanonical === variant.name}
-              className="mt-0.5 shrink-0 accent-red-500"
+              className="mt-0.5 shrink-0 accent-brass-500"
               name={`canonical-${group.mb_artistid}`}
               type="radio"
               value={variant.name}

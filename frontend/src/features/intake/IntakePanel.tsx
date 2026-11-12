@@ -568,7 +568,7 @@ function JobLog({
   const attentionCount = batchState?.folders_attention ?? (reviewCount + warningCount + failedCount);
   const runningMetricLabel = staleWorker ? 'Stale active' : 'AI running';
   const runningMetricValue = staleWorker ? activeFolders.length : batchState?.folders_running ?? 0;
-  const runningMetricTone = staleWorker ? 'text-amber-200' : 'text-red-200';
+  const runningMetricTone = staleWorker ? 'text-amber-200' : 'text-brass-200';
   const lastUpdateText = staleWorker ? 'stale' : formatAgeSeconds(lastUpdateAge ?? heartbeatAge);
   const heartbeatText = staleWorker ? 'stale' : formatAgeSeconds(heartbeatAge);
   const lastCompleted = batchState?.last_completed_folder ? folderName(batchState.last_completed_folder) : '';
@@ -1213,7 +1213,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
               <label key={value} className="flex cursor-pointer items-center gap-2">
                 <input
                   checked={source === value}
-                  className="accent-red-500"
+                  className="accent-brass-500"
                   name="import-source"
                   type="radio"
                   value={value}

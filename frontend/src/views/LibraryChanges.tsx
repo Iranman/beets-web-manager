@@ -470,7 +470,7 @@ export default function LibraryChanges() {
               {rows.map((row) => (
                 <button
                   key={row.id}
-                  className={`grid w-full gap-1 px-3 py-3 text-left hover:bg-graphite-900 ${row.id === selectedId ? 'bg-red-950/25' : 'bg-graphite-950'}`}
+                  className={`grid w-full gap-1 px-3 py-3 text-left hover:bg-graphite-900 ${row.id === selectedId ? 'bg-brass-500/10' : 'bg-graphite-950'}`}
                   onClick={() => setSelectedId(row.id)}
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">

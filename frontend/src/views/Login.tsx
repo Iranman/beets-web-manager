@@ -1,19 +1,7 @@
 import { errorMessage } from '../lib/errors';
 import { useState } from 'react';
 import { login } from '../api/client';
-
-function BeetsLogo() {
-  return (
-    <span className="flex size-14 items-center justify-center rounded-2xl bg-red-700 text-white shadow-xl shadow-red-950/60 ring-1 ring-red-400/40">
-      <svg aria-hidden="true" className="size-8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 7.4c3.5 0 6.1 2.9 5.5 6.3-.5 3.4-2.8 6.2-5.5 6.2s-5-2.8-5.5-6.2c-.6-3.4 2-6.3 5.5-6.3Z" fill="currentColor" />
-        <path d="M12 7.9c-.2-2.5.8-4.1 3-4.8.3 2.3-.8 3.9-3 4.8Z" fill="#fca5a5" />
-        <path d="M11.8 7.9c-2.4-.2-3.9-1.3-4.6-3.2 2.3-.1 3.9.9 4.6 3.2Z" fill="#fecaca" />
-        <path d="M12 7.7V4.4" stroke="#fee2e2" strokeWidth="1.4" strokeLinecap="round" />
-      </svg>
-    </span>
-  );
-}
+import { RecordMark } from '../components/RecordMark';
 
 interface LoginProps {
   onSuccess?: () => void;
@@ -61,7 +49,7 @@ export default function Login({ onSuccess }: LoginProps) {
     <div className="flex min-h-screen flex-col items-center justify-center bg-graphite-950 px-4 py-12 text-zinc-100">
       <div className="w-full max-w-md space-y-6">
         <div className="flex flex-col items-center text-center">
-          <BeetsLogo />
+          <RecordMark className="size-14 drop-shadow-xl" />
           <h1 className="mt-4 text-2xl font-black tracking-tight text-white sm:text-3xl">
             Beets Web Manager
           </h1>
@@ -72,7 +60,7 @@ export default function Login({ onSuccess }: LoginProps) {
 
         <form
           onSubmit={handleSubmit}
-          className="rounded-2xl border border-red-900/40 bg-graphite-900/90 p-6 shadow-2xl backdrop-blur sm:p-8"
+          className="rounded-2xl border border-brass-900/60 bg-graphite-900/90 p-6 shadow-2xl backdrop-blur sm:p-8"
         >
           {errorMsg && (
             <div className="mb-5 rounded-lg border border-red-500/40 bg-red-950/60 p-3.5 text-xs text-red-200 shadow-sm">
@@ -94,7 +82,7 @@ export default function Login({ onSuccess }: LoginProps) {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white placeholder:text-muted focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"
+                className="mt-1.5 w-full rounded-lg border border-field-border bg-graphite-950 px-3.5 py-2.5 text-sm text-white placeholder:text-muted focus:border-brass-400 focus:outline-none focus:ring-1 focus:ring-brass-400"
                 required
                 autoFocus
               />
@@ -113,7 +101,7 @@ export default function Login({ onSuccess }: LoginProps) {
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full rounded-lg border border-field-border bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white placeholder:text-muted focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"
+                  className="w-full rounded-lg border border-field-border bg-graphite-950 py-2.5 pl-3.5 pr-10 text-sm text-white placeholder:text-muted focus:border-brass-400 focus:outline-none focus:ring-1 focus:ring-brass-400"
                   required
                 />
                 <button
@@ -132,7 +120,7 @@ export default function Login({ onSuccess }: LoginProps) {
                   type="checkbox"
                   checked={remember}
                   onChange={(e) => setRemember(e.target.checked)}
-                  className="size-4 rounded border-field-border bg-graphite-950 text-red-600 focus:ring-red-500 focus:ring-offset-graphite-900"
+                  className="size-4 rounded border-field-border bg-graphite-950 accent-brass-500 text-brass-500 focus:ring-brass-400 focus:ring-offset-graphite-900"
                 />
                 Remember me
               </label>
@@ -141,7 +129,7 @@ export default function Login({ onSuccess }: LoginProps) {
             <button
               type="submit"
               disabled={submitting || !username.trim() || !password}
-              className="mt-2 w-full rounded-lg bg-red-700 px-4 py-3 text-sm font-bold text-white shadow-md transition-colors hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-graphite-900 disabled:cursor-not-allowed disabled:opacity-50"
+              className="mt-2 w-full rounded-lg bg-brass-500 px-4 py-3 text-sm font-bold text-graphite-950 shadow-md transition-colors hover:bg-brass-400 focus:outline-none focus:ring-2 focus:ring-brass-300 focus:ring-offset-2 focus:ring-offset-graphite-900 disabled:cursor-not-allowed disabled:bg-graphite-900 disabled:text-graphite-400 disabled:shadow-none disabled:ring-1 disabled:ring-graphite-700"
             >
               {submitting ? 'Signing In...' : 'Sign In'}
             </button>

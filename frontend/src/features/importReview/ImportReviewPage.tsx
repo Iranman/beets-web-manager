@@ -190,37 +190,6 @@ const originFilters: Array<{ id: SourceFilter; label: string }> = [
   { id: 'unknown', label: 'Unknown source' },
 ];
 
-const blockedPanelActionButtonSx = {
-  backgroundColor: '#1f2530',
-  borderColor: '#7f1d1d',
-  color: '#fff7ed',
-  '&:hover': {
-    backgroundColor: '#2d3440',
-    borderColor: '#ef4444',
-    color: '#fff7ed',
-  },
-  '&.Mui-disabled': {
-    backgroundColor: '#3a424f',
-    borderColor: '#9aa3b2',
-    color: '#eef2f7',
-    opacity: 1,
-  },
-  '&.Mui-focusVisible': {
-    boxShadow: '0 0 0 3px rgba(239, 68, 68, 0.42)',
-  },
-} as const;
-
-const blockedPanelWarningButtonSx = {
-  ...blockedPanelActionButtonSx,
-  backgroundColor: '#78350f',
-  borderColor: '#b45309',
-  '&:hover': {
-    backgroundColor: '#92400e',
-    borderColor: '#f59e0b',
-    color: '#fff7ed',
-  },
-} as const;
-
 const typeLabels: Record<ReviewBucket, string> = {
   pending_ai: 'Pending AI',
   skipped: 'Skipped',
@@ -2543,7 +2512,7 @@ function AiSuggestionPanel({
   const hasRgid = Boolean(suggestion?.mb_releasegroupid);
 
   return (
-    <div className="mt-3 rounded border border-red-500/30 bg-red-950/40 p-3">
+    <div className="mt-3 rounded border border-brass-700/50 bg-brass-950/40 p-3">
       {suggestion ? (
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -3221,7 +3190,6 @@ export function ReviewCard({
                       size="small"
                       variant="outlined"
                       color="warning"
-                      sx={blockedPanelWarningButtonSx}
                       onClick={onCleanupFiles}
                       disabled={busy}
                     >
@@ -3238,7 +3206,7 @@ export function ReviewCard({
                RecoveryReviewCard (NEXT section), so the footer here shows only
                the secondary "Find Match" — never a competing primary Import. */}
             <div className={recoveryIdentity ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-2 gap-2'}>
-              <Button size="small" variant="outlined" sx={blockedPanelActionButtonSx} onClick={onSuggest} disabled={busy}>
+              <Button size="small" variant="outlined" onClick={onSuggest} disabled={busy}>
                 Find Match
               </Button>
               {recoveryIdentity ? null : (
@@ -5118,9 +5086,9 @@ export function ImportReviewPage({
                 <Switch
                   checked={evidenceOnly}
                   onChange={setEvidenceOnly}
-                  className="group inline-flex h-7 w-12 items-center rounded-full bg-graphite-600 transition data-[checked]:bg-red-700"
+                  className="group inline-flex h-7 w-12 items-center rounded-full bg-graphite-600 transition data-[checked]:bg-brass-500"
                 >
-                  <span className="size-5 translate-x-1 rounded-full bg-graphite-300 shadow transition group-data-[checked]:translate-x-6" />
+                  <span className="size-5 translate-x-1 rounded-full bg-graphite-300 shadow transition group-data-[checked]:translate-x-6 group-data-[checked]:bg-graphite-950" />
                 </Switch>
               </div>
             )}

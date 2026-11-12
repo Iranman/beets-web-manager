@@ -37,7 +37,7 @@ export function CleanPanelHeader({
 }) {
   return (
     <section className="overflow-hidden rounded-md border border-graphite-700 bg-graphite-900/82 shadow-sm shadow-black/20">
-      <div className="h-px bg-gradient-to-r from-red-700 via-red-700/45 to-transparent" />
+      <div className="h-px bg-gradient-to-r from-brass-600 via-brass-600/45 to-transparent" />
       <div className="p-3.5">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">

@@ -204,18 +204,22 @@ function initials(name: string) {
     .join('');
 }
 
+// Tile actions may wrap onto two lines so two cover columns fit on phones (the theme keeps
+// button labels on one line everywhere else, #607).
+const tileButtonSx = { whiteSpace: 'normal', lineHeight: 1.25, textAlign: 'center' } as const;
+
 // Placeholder sleeve for albums without art: a record half out of a plain card sleeve.
 function SleevePlaceholder() {
   return (
     <span className="relative flex h-full w-full items-center justify-center bg-graphite-850" data-testid="sleeve-placeholder">
       <svg aria-hidden="true" className="h-3/4 w-3/4" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="62" cy="50" r="36" fill="#0e0b09" />
-        <circle cx="62" cy="50" r="29" stroke="#3b322a" strokeWidth="1" />
-        <circle cx="62" cy="50" r="22" stroke="#3b322a" strokeWidth="1" />
-        <circle cx="62" cy="50" r="11" fill="#8f6420" />
-        <circle cx="62" cy="50" r="2" fill="#171310" />
-        <rect x="8" y="12" width="56" height="76" rx="2" fill="#342c25" stroke="#4b4137" />
-        <circle cx="36" cy="50" r="10" stroke="#4b4137" strokeWidth="1.5" />
+        <circle cx="62" cy="50" r="36" className="fill-zinc-950" />
+        <circle cx="62" cy="50" r="29" className="stroke-graphite-800" strokeWidth="1" />
+        <circle cx="62" cy="50" r="22" className="stroke-graphite-800" strokeWidth="1" />
+        <circle cx="62" cy="50" r="11" className="fill-brass-700" />
+        <circle cx="62" cy="50" r="2" className="fill-graphite-950" />
+        <rect x="8" y="12" width="56" height="76" rx="2" className="fill-graphite-800 stroke-graphite-700" />
+        <circle cx="36" cy="50" r="10" className="stroke-graphite-700" strokeWidth="1.5" />
       </svg>
       <span className="sr-only">No cover art</span>
     </span>
@@ -854,13 +858,14 @@ function AlbumCard({
           <Chip label={issue} size="small" sx={{ maxWidth: '100%' }} variant="outlined" />
           <AlbumBadges album={album} artRepairAlbumIds={artRepairAlbumIds} artRepairItemMap={artRepairItemMap} />
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Button size="small" variant="outlined" onClick={() => onDetails(row)}>
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          <Button size="small" sx={tileButtonSx} variant="outlined" onClick={() => onDetails(row)}>
             View details
           </Button>
           {album.album_id ? (
             <Button
               size="small"
+              sx={tileButtonSx}
               variant="outlined"
               color="warning"
               onClick={() => onCleanAlbum?.(row)}
@@ -872,6 +877,7 @@ function AlbumCard({
             album.pending_review ? (
               <Button
                 size="small"
+                sx={tileButtonSx}
                 variant="text"
                 color="info"
                 title={action.title}
@@ -882,6 +888,7 @@ function AlbumCard({
             ) : (
               <Button
                 size="small"
+                sx={tileButtonSx}
                 variant="text"
                 color={action.variant === 'warning' ? 'warning' : 'primary'}
                 title={action.title}
@@ -930,7 +937,7 @@ function AlbumGrid({
       </div>
       <div className="max-h-[calc(100vh-22rem)] min-h-72 overflow-y-auto rounded-md border border-graphite-800 bg-graphite-950/20 p-2">
         {rows.length ? (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,12rem),1fr))] gap-3">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,8.5rem),1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(min(100%,12rem),1fr))]">
             {rows.map((row) => (
               <AlbumCard
                 key={`${row.artist.name}::${row.album.album_id || row.album.aldir || row.album.album}`}
