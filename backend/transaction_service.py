@@ -229,18 +229,21 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
     ok, unbound = True, []
     for row in rows:
         tx_id = str(row["id"])
-        try:
+        try:  # every read of the row and its jobs; settling happens below, outside it
             candidates = _job_candidates(job_store, grouped, tail, row, tx_id)
+            orphan = (not candidates and before is not None
+                      and (row.get("updated_at") or 0) < before and _is_job_wrapper(row))
+            job = _speaking_job(candidates) if candidates else None
         except Exception as ex:  # a corrupt record (#557, #672): this row only, never settled on it
             unreadable[tx_id] = tries = unreadable.get(tx_id, 0) + 1
             if tries <= _UNREADABLE_RETRIES:  # may be transient (a lazy disk load): retry (#664)
                 ok = False
                 _app_logger.warning("transaction %s left unchanged: it or a job record naming it is unreadable (%s)",
-                                    tx_id, type(ex).__name__)
+                                    tx_id, type(ex).__name__, exc_info=tries == 1)
             continue
         unreadable.pop(tx_id, None)  # read cleanly: a later failure gets a fresh budget (#672)
-        if not candidates:
-            if before is not None and (row.get("updated_at") or 0) < before and _is_job_wrapper(row):
+        if job is None:
+            if orphan:
                 try:
                     _orphaned_job_wrapper(store, row, before)
                 except Exception as ex:
@@ -249,7 +252,6 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
                 continue
             unbound.append(tx_id)
             continue
-        job = _speaking_job(candidates)
         if job.status == "running":
             continue
         try:

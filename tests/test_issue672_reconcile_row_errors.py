@@ -11,7 +11,7 @@ from tests.test_m2a_qa_verify import _Sync
 
 
 class ReconcileRowErrorTests(_Sync):
-    def test_corrupt_row_and_good_row_share_the_tick_counter(self):
+    def _corrupt_row_then_good_row(self, corrupt):
         real = self.jobstore()
         bad = self.store.create(operation_type="Playlist Import", status="Running",
                                 reason=ts._JOB_WRAPPER_REASON, metadata={ts._JOB_WRAPPER_MARK: True})
@@ -20,10 +20,10 @@ class ReconcileRowErrorTests(_Sync):
                                 metadata={"transaction": False, "transaction_id": good["id"], "type": "t"})
         self.wait(job)
         self.store.update(good["id"], metadata={"job_id": job.job_id})
-        # hand-corrupted: metadata is not a dict, last written long ago (an orphan candidate)
+        # hand-corrupted, last written long ago (an orphan candidate)
         path = self.store._path(bad["id"])
         path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")),
-                                    "metadata": "corrupt", "updated_at": 0}), encoding="utf-8")
+                                    "updated_at": 0, **corrupt}), encoding="utf-8")
         os.utime(self.store._path(good["id"]), (1000, 1000))
         os.utime(path, (2000, 2000))  # newest first: the corrupt row is read before the good one
 
@@ -48,6 +48,15 @@ class ReconcileRowErrorTests(_Sync):
         tick()  # budget spent: the corrupt row no longer keeps the reconcile due
         self.assertFalse(due.is_set())
         self.assertEqual(self.store.get(bad["id"])["status"], "Running")  # never settled or judged orphaned
+
+    def test_metadata_not_a_dict(self):
+        self._corrupt_row_then_good_row({"metadata": "corrupt"})
+
+    def test_updated_at_not_a_number(self):
+        self._corrupt_row_then_good_row({"updated_at": "corrupt"})
+
+    def test_engine_result_not_a_dict(self):
+        self._corrupt_row_then_good_row({"metadata": {"engine_result": "x"}})
 
     def test_clean_read_drops_the_row_count(self):
         tx = self.store.create(operation_type="Delete", status="Running")
