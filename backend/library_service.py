@@ -1229,7 +1229,7 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
         return False
 
 
-def _reconstruct_track_recording_candidates(item, iid: int):
+def _reconstruct_track_recording_candidates(item, iid: int, *, listenbrainz: bool = True):
     """Rebuild the current-tag snapshot and enriched MB/AcoustID recording
     candidates for a singleton item -- the same trusted candidate-generation
     pipeline /api/items/<iid>/ai-suggest uses (AcoustID lookup + MusicBrainz
@@ -1291,7 +1291,9 @@ def _reconstruct_track_recording_candidates(item, iid: int):
     mb_text_cands = _mb_recording_search(_mb_t, _mb_a, limit=6)
     if not mb_text_cands and _mb_a:
         mb_text_cands = _mb_recording_search(_mb_t, "", limit=6)
-    if not acoustid_cands:  # no fingerprint answer: add the verified, review-only ListenBrainz mapping
+    # No fingerprint answer: add the verified, review-only ListenBrainz mapping.
+    # Callers that can only act on fingerprint proof pass listenbrainz=False.
+    if listenbrainz and not acoustid_cands:
         mb_text_cands = list(mb_text_cands or []) + listenbrainz_recording_candidates(
             _mb_t, _mb_a, current.get("duration_seconds"))["candidates"]
 

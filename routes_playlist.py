@@ -564,12 +564,16 @@ def playlist_resolve_track(name):
     return jsonify(result)
 
 
-def _suggestions_keeping_local(track, index, include_mb: bool, limit: int, state: Dict[str, bool]):
+def _suggestions_keeping_local(track, index, include_mb: bool, limit: int, state: Dict[str, bool],
+                               listenbrainz: bool = False):
     """A MusicBrainz outage keeps the Beets-local suggestions and sets
-    state["musicbrainz_unavailable"]; later tracks skip MusicBrainz."""
+    state["musicbrainz_unavailable"]; later tracks skip MusicBrainz. With
+    ``listenbrainz`` the review-only ListenBrainz mapping is asked too, until
+    its first non-answer (state["listenbrainz_unavailable"])."""
     if include_mb and not state.get("musicbrainz_unavailable"):
         try:
-            return _playlist_suggestions_for_track(track, index, include_musicbrainz=True, limit=limit)
+            return _playlist_suggestions_for_track(track, index, include_musicbrainz=True, limit=limit,
+                                                   listenbrainz_state=state if listenbrainz else None)
         except provider_boundary.ProviderError:
             state["musicbrainz_unavailable"] = True
     return _playlist_suggestions_for_track(track, index, include_musicbrainz=False, limit=limit)
@@ -591,7 +595,7 @@ def playlist_suggestions(name):
     safe_count = 0
     mb_state: Dict[str, bool] = {}
     for track in detail.get("missing") or []:
-        suggestions = _suggestions_keeping_local(track, index, include_mb, limit, mb_state)
+        suggestions = _suggestions_keeping_local(track, index, include_mb, limit, mb_state, listenbrainz=True)
         best = suggestions[0] if suggestions else None
         if best and best.get("safe"):
             safe_count += 1

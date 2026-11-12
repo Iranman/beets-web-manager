@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -40,6 +42,12 @@ LOOKUP_URL = "https://api.listenbrainz.org/1/metadata/lookup/"
 SOURCE = "listenbrainz"
 TIMEOUT_SECONDS = 8
 MAX_BODY_BYTES = 64 * 1024
+#: Answers (a mapping or a clean miss) are reused for CACHE_TTL_SECONDS;
+#: failures never are. Oldest entries go first past CACHE_MAX_ENTRIES.
+CACHE_TTL_SECONDS = 6 * 3600
+CACHE_MAX_ENTRIES = 1024
+_CACHE: Dict[Tuple[str, str], Tuple[float, ProviderResult]] = {}
+_CACHE_LOCK = threading.Lock()
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -97,12 +105,36 @@ def lookup_recording(title: str, artist: str) -> ProviderResult:
     token = _token()
     if not token:
         return ProviderResult(SOURCE, ProviderOutcome.NOT_CONFIGURED, message="ListenBrainz token not configured")
+    key = (lookup_title(title), normalize_artist(artist))
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        cached = _CACHE.get(key)
+        if cached and now - cached[0] < CACHE_TTL_SECONDS:
+            return ProviderResult(SOURCE, cached[1].outcome, data=dict(cached[1].data or {}) or None,
+                                  from_cache=True)
     result = ProviderResult(SOURCE, ProviderOutcome.NO_RESULT)
     for q_title, q_artist in _query_variants(title, artist):
         result = _lookup_once(q_title, q_artist, token)
         if result.outcome != ProviderOutcome.NO_RESULT:
-            return result
+            break  # an answer, or a failure: a failure never gets the cleaned retry
+    if result.outcome in (ProviderOutcome.CONFIRMED, ProviderOutcome.NO_RESULT):
+        with _CACHE_LOCK:
+            _CACHE.pop(key, None)
+            _CACHE[key] = (now, result)
+            while len(_CACHE) > CACHE_MAX_ENTRIES:
+                _CACHE.pop(next(iter(_CACHE)))
     return result
+
+
+def clear_cache() -> None:
+    with _CACHE_LOCK:
+        _CACHE.clear()
+
+
+def answered(status: str) -> bool:
+    """True for "confirmed" / "no_result"; any other status means ListenBrainz
+    could not be asked, and a caller looping over tracks should stop asking."""
+    return status in (ProviderOutcome.CONFIRMED.value, ProviderOutcome.NO_RESULT.value)
 
 
 def _seconds(value: Any) -> float:

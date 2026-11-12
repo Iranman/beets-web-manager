@@ -16,7 +16,7 @@ from backend.app_runtime import _app_logger, AUDIO_EXT, LIB_PATH, MUSIC_ROOT, PL
 from backend.ytdlp_service import _apply_ytdlp_netrc, _download_method_label, _spotiflac_missing_tracks_download, _ytdlp_js_runtime_options, _ytdlp_missing_tracks_download, _ytdlp_remote_components, _ytdlp_source_extractor_args
 from backend.app_runtime import _norm, _redact_security_text, _safe_path_component
 from backend.audio_preferences import load_music_format_preferences as _load_music_format_preferences, validate_audio_file as _validate_audio_file_preferences, handle_rejected_download as _handle_rejected_audio_download
-from backend.listenbrainz_mapping import listenbrainz_recording_candidates
+from backend.listenbrainz_mapping import answered as listenbrainz_answered, listenbrainz_recording_candidates
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release
 from backend.beets_adapter import beets_adapter, lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
@@ -8264,7 +8264,11 @@ def _playlist_suggestions_for_track(track: Dict[str, Any],
                                     index: Dict[str, Any],
                                     *,
                                     include_musicbrainz: bool = True,
-                                    limit: int = 5) -> List[Dict[str, Any]]:
+                                    limit: int = 5,
+                                    listenbrainz_state: Optional[Dict[str, bool]] = None) -> List[Dict[str, Any]]:
+    """``listenbrainz_state``: None never asks ListenBrainz (paths that can
+    only use safe suggestions); a dict shared across one request's tracks
+    stops asking after ListenBrainz's first non-answer."""
     row = _playlist_track_manifest_payload(track)
     artist = _s(row.get("artist") or "").strip()
     title = _s(row.get("title") or "").strip()
@@ -8355,8 +8359,13 @@ def _playlist_suggestions_for_track(track: Dict[str, Any],
     # duration) yet never safe -- it is a suggestion for review only. Without
     # a duration it could not be verified, so it is not asked.
     duration = _playlist_duration_seconds(row.get("duration") or track.get("duration"))
-    if include_musicbrainz and duration and title and artist and not any(s.get("safe") for s in suggestions):
-        for cand in listenbrainz_recording_candidates(title, artist, duration)["candidates"]:
+    lb_state = listenbrainz_state
+    if (include_musicbrainz and lb_state is not None and not lb_state.get("listenbrainz_unavailable")
+            and duration and title and artist and not any(s.get("safe") for s in suggestions)):
+        lb = listenbrainz_recording_candidates(title, artist, duration)
+        if not listenbrainz_answered(lb["status"]):
+            lb_state["listenbrainz_unavailable"] = True
+        for cand in lb["candidates"]:
             _playlist_add_suggestion(
                 suggestions,
                 seen,

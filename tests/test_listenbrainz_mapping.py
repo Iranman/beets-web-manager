@@ -55,6 +55,8 @@ class _Base(unittest.TestCase):
     def setUp(self):
         pb.reset_provider_health()
         self.addCleanup(pb.reset_provider_health)
+        lbm.clear_cache()
+        self.addCleanup(lbm.clear_cache)
         for patcher in (
             mock.patch.dict("os.environ", {"LISTENBRAINZ_TOKEN": TOKEN, "PROVIDER_MAX_ATTEMPTS": ""}),
             mock.patch.dict(pb.POLICIES, {"listenbrainz": pb.ProviderPolicy(2, 0.0)}),
@@ -206,7 +208,8 @@ class PlaylistSuggestionTests(unittest.TestCase):
         from backend import playlist_service as ps
         lb = mock.Mock(return_value=lb_result)
         with mock.patch.object(ps, "_match_track", return_value=None),                 mock.patch.object(ps, "_playlist_recording_search_candidates", return_value=[]),                 mock.patch.object(ps, "listenbrainz_recording_candidates", lb):
-            return ps._playlist_suggestions_for_track(track, {}, include_musicbrainz=True), lb
+            return ps._playlist_suggestions_for_track(track, {}, include_musicbrainz=True,
+                                                      listenbrainz_state={}), lb
 
     def test_listenbrainz_suggestion_is_never_safe(self):
         cand, _ = lbm.verify_mapping(_mapping_body(), title="Here Comes the Sun", artist="The Beatles",
@@ -222,6 +225,104 @@ class PlaylistSuggestionTests(unittest.TestCase):
     def test_not_asked_without_a_duration(self):
         rows, lb = self._suggest({"artist": "The Beatles", "title": "Here Comes the Sun"},
                                  {"status": "confirmed", "candidates": [], "reason": ""})
+        lb.assert_not_called()
+
+
+class CacheTests(_Base):
+    def test_a_repeat_lookup_is_served_from_the_cache(self):
+        with mock.patch.object(urllib.request, "urlopen", return_value=_json(_mapping_body())) as urlopen:
+            first = lbm.lookup_recording("Here Comes the Sun", "The Beatles")
+            again = lbm.lookup_recording("here comes the sun (Remastered)", "THE BEATLES")
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertTrue(again.from_cache)
+        self.assertEqual(again.data, first.data)
+
+    def test_a_clean_miss_is_cached(self):
+        with mock.patch.object(urllib.request, "urlopen", side_effect=[_json({})]) as urlopen:
+            lbm.lookup_recording("song", "artist")
+            self.assertEqual(lbm.lookup_recording("song", "artist").outcome, pb.ProviderOutcome.NO_RESULT)
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_failures_are_not_cached(self):
+        effects = [_http_429(), _http_429(), _json(_mapping_body())]
+        with mock.patch.object(urllib.request, "urlopen", side_effect=effects) as urlopen:
+            self.assertEqual(lbm.lookup_recording("Song", "Artist").outcome, pb.ProviderOutcome.RATE_LIMITED)
+            self.assertEqual(lbm.lookup_recording("Song", "Artist").outcome, pb.ProviderOutcome.CONFIRMED)
+        self.assertEqual(urlopen.call_count, 3)
+
+    def test_the_cache_is_bounded(self):
+        with mock.patch.object(lbm, "CACHE_MAX_ENTRIES", 2),                 mock.patch.object(urllib.request, "urlopen", side_effect=lambda *a, **k: _json({})):
+            for name in ("one", "two", "three"):
+                lbm.lookup_recording(name, "artist")
+        self.assertEqual(len(lbm._CACHE), 2)
+
+
+def _http_429():
+    import urllib.error
+    return urllib.error.HTTPError("https://api.listenbrainz.org/x", 429, "slow", {}, None)
+
+
+class AmplificationTests(_Base):
+    TRACKS = [{"artist": "A", "title": f"Song {n}", "duration": "3:00"} for n in range(3)]
+
+    def _patched(self):
+        from backend import playlist_service as ps
+        return mock.patch.multiple(ps, _match_track=mock.Mock(return_value=None),
+                                   _playlist_recording_search_candidates=mock.Mock(return_value=[]))
+
+    def test_one_429_stops_listenbrainz_for_the_rest_of_the_loop(self):
+        from backend import playlist_service as ps
+        state = {}
+        with self._patched(), mock.patch.object(urllib.request, "urlopen", side_effect=_http_429()) as urlopen:
+            for track in self.TRACKS:
+                ps._playlist_suggestions_for_track(track, {}, listenbrainz_state=state)
+        self.assertEqual(urlopen.call_count, 2)  # one track, the policy's 2 attempts, no cleaned retry
+        self.assertTrue(state["listenbrainz_unavailable"])
+
+    def test_a_plain_miss_does_not_stop_the_loop(self):
+        from backend import playlist_service as ps
+        state = {}
+        with self._patched(), mock.patch.object(urllib.request, "urlopen",
+                                                side_effect=lambda *a, **k: _json({})) as urlopen:
+            for track in self.TRACKS:
+                ps._playlist_suggestions_for_track(track, {}, listenbrainz_state=state)
+        self.assertEqual(urlopen.call_count, 3)  # every track asked; cleaning changes nothing here
+        self.assertFalse(state.get("listenbrainz_unavailable"))
+
+    def test_apply_safe_suggestions_route_never_asks_listenbrainz(self):
+        import app as app_module
+        import routes_playlist
+        from backend import playlist_service as ps
+        from tests._app_family import patch_app_family
+        lb = mock.Mock(side_effect=AssertionError("ListenBrainz asked"))
+        with patch_app_family("app", "_security_auth_disabled", return_value=True), self._patched(),                 mock.patch.object(ps, "listenbrainz_recording_candidates", lb),                 mock.patch.multiple(routes_playlist,
+                                    _playlist_saved_playlist_exists=mock.Mock(return_value=True),
+                                    _playlist_library_index=mock.Mock(return_value={}),
+                                    _playlist_detail_payload=mock.Mock(return_value={"missing": self.TRACKS})):
+            client = app_module.app.test_client()
+            res = client.post("/api/playlists/Mix/apply-safe-suggestions", json={})
+            self.assertEqual(res.status_code, 200)
+            lb.assert_not_called()
+            lb.side_effect, lb.return_value = None, {"status": "no_result", "candidates": [], "reason": ""}
+            self.assertEqual(client.get("/api/playlists/Mix/suggestions").status_code, 200)
+        self.assertEqual(lb.call_count, len(self.TRACKS))  # the review list does ask
+
+    def test_missing_ids_batch_asks_for_candidates_without_listenbrainz(self):
+        from backend import missing_mb_batch
+        item = mock.Mock(album_id=0, mb_trackid="", mb_albumid="", mb_releasegroupid="", path="/x/a.mp3")
+        recon = mock.Mock(return_value=({}, [], "", "a.mp3"))
+        with mock.patch.object(missing_mb_batch, "lib") as lib,                 mock.patch.object(missing_mb_batch, "_reconstruct_track_recording_candidates", recon):
+            lib.get_item.return_value = item
+            missing_mb_batch.prove_item(5)
+        recon.assert_called_once_with(item, 5, listenbrainz=False)
+
+    def test_reconstruct_without_listenbrainz_makes_no_call(self):
+        from backend import library_service as ls
+        item = mock.Mock(title="Song", artist="Artist", albumartist="", album="", year="", track=1, genre="",
+                         label="", mb_trackid="", mb_albumid="", mb_releasegroupid="", length=200.0, path=b"")
+        lb = mock.Mock(side_effect=AssertionError("ListenBrainz asked"))
+        with mock.patch.object(ls, "listenbrainz_recording_candidates", lb),                 mock.patch.object(ls, "_mb_recording_search", return_value=[]),                 mock.patch.object(ls, "_item_ai_abs_path", return_value="", create=True):
+            ls._reconstruct_track_recording_candidates(item, 5, listenbrainz=False)
         lb.assert_not_called()
 
 
