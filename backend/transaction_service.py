@@ -214,8 +214,8 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
     decides how unbound rows are logged; it defaults to ``before is not
     None``, but a retry pass after judging passes it without ``before``.
 
-    A row whose job record raises TypeError (corrupt, or a lazy ``get()`` load
-    that failed) is skipped and re-arms the retry, at most
+    A row whose candidates cannot be read (a corrupt row or job record, or a
+    lazy ``get()`` load that failed; any Exception) is skipped and re-arms the retry, at most
     ``_UNREADABLE_RETRIES`` times per row across the passes that share
     ``unreadable`` (#664); after that it stays Running and no longer counts
     as a failed pass, so a corrupt record cannot keep the reconcile due."""
@@ -231,13 +231,14 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
         tx_id = str(row["id"])
         try:
             candidates = _job_candidates(job_store, grouped, tail, row, tx_id)
-        except TypeError as ex:  # a corrupt job record (#557): this row only, never settled on it
+        except Exception as ex:  # a corrupt record (#557, #672): this row only, never settled on it
             unreadable[tx_id] = tries = unreadable.get(tx_id, 0) + 1
             if tries <= _UNREADABLE_RETRIES:  # may be transient (a lazy disk load): retry (#664)
                 ok = False
-                _app_logger.warning("transaction %s left unchanged: a job record naming it is unreadable (%s)",
+                _app_logger.warning("transaction %s left unchanged: it or a job record naming it is unreadable (%s)",
                                     tx_id, type(ex).__name__)
             continue
+        unreadable.pop(tx_id, None)  # read cleanly: a later failure gets a fresh budget (#672)
         if not candidates:
             if before is not None and (row.get("updated_at") or 0) < before and _is_job_wrapper(row):
                 try:
@@ -266,9 +267,10 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
 
 
 def _job_candidates(job_store, grouped, tail, row: Dict[str, Any], tx_id: str) -> List[Any]:
-    """The jobs that may speak for ``row``, newest first. Raises TypeError on
-    a corrupt record (an unhashable ``job_id``, a ``created_at`` that does not
-    compare); the caller confines that to this row (#557)."""
+    """The jobs that may speak for ``row``, newest first. Raises on a corrupt
+    record (an unhashable ``job_id``, a ``created_at`` that does not compare,
+    a ``metadata`` that is not a dict); the caller confines that to this row
+    (#557, #672)."""
     meta = row.get("metadata") or {}
     candidates = list(grouped.get(tx_id) or [])
     if tail.get(tx_id) and _is_job_wrapper(row):
@@ -318,7 +320,7 @@ def _install_transaction_job_hooks() -> None:
     reconcile_due.set()
     started = time.time()  # a job-wrapper transaction last written before this has no live job here
     orphans = {"judged": False}  # orphans are judged in one successful pass, not every tick
-    unreadable: Dict[str, int] = {}  # per-row TypeError retries, shared by every pass (#664)
+    unreadable: Dict[str, int] = {}  # per-row read-error retries, shared by scan-done passes (#664, #672)
 
     def reconcile_tick():
         """Off the startup path (startup stays O(job window), ARCH-004). Due
@@ -343,7 +345,9 @@ def _install_transaction_job_hooks() -> None:
             judge = settled and not orphans["judged"]
             settled = _reconcile_running_transactions(job_store, tx_store, started if judge else None,
                                                       scan_done=settled or aborted,
-                                                      unreadable=unreadable) and (settled or aborted)
+                                                      # only passes after the scan spend the budget (#672)
+                                                      unreadable=unreadable if settled or aborted else {}
+                                                      ) and (settled or aborted)
             if judge and settled:
                 orphans["judged"] = True
             if settled and (judge or aborted):  # the last pass that reads them (#664)
