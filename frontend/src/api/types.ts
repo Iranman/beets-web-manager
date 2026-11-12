@@ -2876,9 +2876,9 @@ export interface FolderStatsResponse extends ApiOkResponse {
 // ── Config / health ───────────────────────────────────────────────────────────
 
 export interface HealthChecks {
-  library_path: boolean;
-  beet_bin: boolean;
-  music_root: boolean;
+  app: boolean;
+  beets_web: boolean;
+  beets_webmanager_plugin: boolean;
   lidarr_key: boolean;
   discogs_token: boolean;
   slskd_key: boolean;

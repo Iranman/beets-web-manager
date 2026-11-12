@@ -36,18 +36,17 @@ const INTEGRATIONS: Array<{
   label: string;
   description: string;
 }> = [
-  { key: 'library_path',   label: 'Beets library',   description: '/config/musiclibrary.blb' },
-  { key: 'beet_bin',       label: 'beet binary',      description: 'fpcalc / beet in PATH' },
-  { key: 'music_root',     label: 'Music root',       description: 'Library mount (MUSIC_ROOT, default /music)' },
+  { key: 'beets_web',               label: 'Beets library',      description: 'Embedded Beets library reads' },
+  { key: 'beets_webmanager_plugin', label: 'Web Manager plugin', description: 'In-process library operations' },
   { key: 'openai_key',     label: 'OpenAI',           description: 'AI matching + batch import' },
   { key: 'discogs_token',  label: 'Discogs',          description: 'Artist images + discography' },
   { key: 'lidarr_key',     label: 'Lidarr',           description: 'Wanted albums + monitoring' },
   { key: 'slskd_key',      label: 'Soulseek (slskd)', description: 'Missing-track downloads' },
 ];
 
-// Library, beet and music root are required; the rest are optional integrations,
-// so an unset one is neutral, not a failure.
-const REQUIRED_CHECKS = new Set<keyof HealthChecks>(['library_path', 'beet_bin', 'music_root']);
+// The embedded Beets checks are required; the providers are optional integrations,
+// so an unset one is neutral, not a failure. Keys mirror app.py _health_checks.
+const REQUIRED_CHECKS = new Set<keyof HealthChecks>(['beets_web', 'beets_webmanager_plugin']);
 
 function StatusDot({ ok, required }: { ok: boolean; required: boolean }) {
   return (
