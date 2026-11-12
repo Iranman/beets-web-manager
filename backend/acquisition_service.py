@@ -2195,6 +2195,8 @@ def _lidarr_wanted_error(exc: BaseException) -> str:
     block = provider_boundary.outbound_block(exc, "lidarr")
     if block:  # before the ValueError branch: OutboundPolicyError is one
         return block["error"]
+    if provider_boundary.unresolved_host(exc):  # DNS failure under secure_urlopen
+        return "Could not reach Lidarr"
     err = provider_boundary.classify_exception(exc)
     if err.outcome == provider_boundary.ProviderOutcome.AUTHENTICATION_ERROR:
         return "Lidarr rejected the API key"
