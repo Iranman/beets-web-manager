@@ -810,7 +810,7 @@ function ArtistBrowser({
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {visibleArtists.map((artist, index) => (
               <ArtistCard
-                key={`${artist.name}::${artist.path ?? index}`}
+                key={`${artist.name}::${artist.path || index}`}
                 artist={artist}
                 libraryVersion={libraryVersion}
                 onSelect={onSelectArtist}

@@ -107,6 +107,44 @@ class SecurityTextRedactionTests(unittest.TestCase):
         self.assert_masked("x?token='QQ\nfake-s25'&keep=1", "x?token=[REDACTED]&keep=1")
         self.assert_masked("x?token='unclosed\nKeyError: 'foo'\nnext", "x?token=[REDACTED]\nKeyError: 'foo'\nnext")
 
+    def test_issue_670_dash_or_pipe_after_closing_quote(self):
+        self.assert_masked("password='QQ\nfake-s26'-", "password=[REDACTED]")
+        self.assert_masked("password='QQ\nfake-s27'| tail", "password=[REDACTED] tail")
+        self.assert_masked("x?token='QQ\nfake-s28'-&keep=1", "x?token=[REDACTED]&keep=1")
+
+    def test_issue_670_qa_query_double_quote_keeps_main_closers(self):
+        # PR #679 QA: '"a"' closing before "-" / "|" showed the next line.
+        self.assert_masked('x?token="a"-\nfake-s29"]', "x?token=[REDACTED]")
+        self.assert_masked('x?token="a"|\nfake-s39"', "x?token=[REDACTED]")
+
+    def test_issue_670_mid_value_single_quote_spans_newline(self):
+        self.assert_masked("x?token=a'QQ\nfake-s30'&keep=1", "x?token=[REDACTED]&keep=1")
+        self.assert_masked("password=a'QQ\nfake-s31' tail", "password=[REDACTED] tail")
+
+    def test_issue_670_doubled_single_quote(self):
+        self.assert_masked("password='it''s\nfake-s32'", "password=[REDACTED]")
+        self.assert_masked("password='' tail", "password=[REDACTED] tail")
+
+    def test_issue_670_qa_json_close_in_query_value_masks_to_line_end(self):
+        # PR #679 QA: a '"}' / '"]' in a query value still masks to the end of the line.
+        self.assert_masked('x?token=abc"],SECRETTAIL&keep=1', "x?token=[REDACTED]")
+        self.assert_masked('x?token=abc"} SECRETTAIL', "x?token=[REDACTED]")
+
+    def test_issue_670_name_after_closing_quote_masks_line(self):
+        # PR #679 QA fuzz: the value swallowed the next name and showed its value.
+        self.assert_masked("password=QQ'\n'}Authorization: fake-s33\nnext", "password=[REDACTED]\nnext")
+        self.assert_masked("password='QQ\nQQ'-token: fake-s34", "password=[REDACTED]")
+        self.assert_masked("password='it''s\n'}cookie= fake-s35 x", "password=[REDACTED]")
+        self.assert_masked('x?token="QQ\nQQ"}Authorization: fake-s36', "x?token=[REDACTED]")
+        self.assert_masked("x?token=a'QQ\n'|Cookie: fake-s37", "x?token=[REDACTED]")
+        # Without whitespace after the separator the run stays one value.
+        self.assert_masked("password='QQ'-token=fake-s38 tail", "password=[REDACTED] tail")
+
+    def test_issue_670_traceback_after_mid_value_quote_is_kept(self):
+        tail = '\n  File "/app/x.py", line 3, in f\nKeyError: \'foo\'\nnext'
+        self.assert_masked("x?token=can't" + tail, "x?token=[REDACTED]" + tail)
+        self.assert_masked("password=a'b" + tail, "password=[REDACTED]" + tail)
+
     def test_negotiate_scheme_in_assignment(self):
         self.assert_masked("token=Negotiate fake-s19 tail", "token=[REDACTED] tail")
 
@@ -127,7 +165,8 @@ class SecurityTextRedactionTests(unittest.TestCase):
                      "Cookie" * 30000, "x_" * 50000 + "=", "token='\n" * 30000,
                      "token='" + "\\'" * 50000, "?token=\"" + "a\n" * 50000, "?token=x" + "&a" * 50000,
                      "?token=x" + "&a\"" * 30000, "?token='" + "a\n" * 50000, "?token=" + "\"a\n" * 30000,
-                     "password='" + "a\n" * 50000 + "'x", "?token=" + "'a" * 50000):
+                     "password='" + "a\n" * 50000 + "'x", "?token=" + "'a" * 50000,
+                     "?token=a'" + "a\n" * 50000, "password=a" + "'a\n" * 30000, "password='" + "''" * 50000):
             start = time.perf_counter()
             redact(text)
             self.assertLess(time.perf_counter() - start, 1.0)
