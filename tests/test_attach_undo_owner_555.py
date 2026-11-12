@@ -5,6 +5,7 @@ attach (relocation, then repair) exactly once.
 
 Temp stores and fake adapters only; no real library."""
 
+import contextlib
 import os
 from unittest import mock
 
@@ -31,7 +32,9 @@ class RelocatingAdapter(MutAdapter):
         return {"restored_items": len(items)}
 
 
-class AlbumAttachUndoOwnerTests(_RouteEnv):
+class _AttachEnv(_RouteEnv):
+    AUTO_ATTACH = True
+
     def setUp(self):
         super().setUp()
         for p in (mock.patch.object(cw, "_release_group_for_release", side_effect=lambda rel: RG_OF.get(rel, "")),
@@ -49,21 +52,43 @@ class AlbumAttachUndoOwnerTests(_RouteEnv):
         import routes_maintenance
         self.rm = routes_maintenance
         self.before = ({k: dict(v) for k, v in self.ad.albums.items()}, {k: dict(v) for k, v in self.ad.items.items()})
-        self.audit, self.repair, self.relocation = self._attach()
+        if self.AUTO_ATTACH:
+            self.audit, self.repair, self.relocation = self._attach()
 
-    def _attach(self):
-        """What the album attach-recording job does, with this audit row as owner."""
+    def _attach(self, *, relocate_error=None, record_relocation=True):
+        """What the album attach-recording job does (routes_library
+        _item_attach_recording), with this audit row as owner. Returns
+        (audit, repair, relocation or None)."""
         audit = self.store.create(operation_type="MusicBrainz Match", status="Running")["id"]
+        undo = {"type": "album_attach_undo", "item_id": 11}
+
+        def record():
+            self.store.update(audit, rollback={"available": True, "operations": [dict(undo)]})
+
         plan = cw.plan_album_mb_track_repair(
             {"album_id": 1, "track_mbids": {"11": REC_1}, cw.UNDO_OWNER_KEY: audit}, store=self.store)
         repair = plan["operation_id"]
+        undo["repair_operation_id"] = repair
+        record()
         self.assertTrue(cw.apply_album_mb_track_repair(repair, store=self.store)["ok"])
-        rel = cw.relocate_album(1, mode="rename", store=self.store, undo_owner=audit)
+        self.store.update(audit, metadata={"engine_result": {"mutated": True}})
+
+        def on_planned(op_id):
+            if record_relocation:  # False: a crash lost the audit update
+                undo["relocation_operation_id"] = op_id
+                record()
+
+        patcher = (mock.patch.object(self.ad, "relocate_album", side_effect=relocate_error)
+                   if relocate_error else contextlib.nullcontext())
+        with patcher:
+            try:
+                rel = cw.relocate_album(1, mode="rename", store=self.store, undo_owner=audit,
+                                        on_planned=on_planned)
+            except cw.BeetsAdapterError:
+                self.store.update(audit, status="Failed")
+                return audit, repair, None
         self.assertTrue(rel["ok"], rel)
-        self.store.update(audit, status="Completed", metadata={"engine_result": {"mutated": True}}, rollback={
-            "available": True, "operations": [{"type": "album_attach_undo", "item_id": 11,
-                                               "repair_operation_id": repair,
-                                               "relocation_operation_id": rel["operation_id"]}]})
+        self.store.update(audit, status="Completed")
         # The attach really changed the album: metadata and path.
         self.assertEqual((self.ad.items[11]["mb_trackid"], self.ad.items[11]["title"]), (REC_1, "Synced Track"))
         self.assertNotEqual(self.ad.items[11]["path"], self.path)
@@ -77,6 +102,9 @@ class AlbumAttachUndoOwnerTests(_RouteEnv):
             join_jobs(jobs)
         return resp
 
+
+
+class AlbumAttachUndoOwnerTests(_AttachEnv):
     def test_child_rows_refuse_undo_and_point_at_the_audit_row(self):
         for child in (self.repair, self.relocation):
             tx = self.store.get(child)
@@ -126,3 +154,58 @@ class AlbumAttachUndoOwnerTests(_RouteEnv):
         self.assertNotEqual(self.store.get(self.audit)["status"], "Rolled Back")
         self.assertEqual(self.store.get(self.repair)["status"], "Completed")
         self.assertEqual(self.ad.items[11]["mb_trackid"], REC_1)
+
+
+class AttachCrashWindowTests(_AttachEnv):
+    """#555 QA of #677 edge (b): a move step that never reached the audit
+    row's op is still found by its owner key and undone first."""
+    AUTO_ATTACH = False
+
+    def test_relocation_id_is_on_the_audit_row_before_beets_moves(self):
+        seen = {}
+        real = self.ad.relocate_album
+
+        def relocate(*a, **kw):
+            ops = self.store.get(self.current_audit)["rollback"]["operations"]
+            seen["relocation"] = ops[0].get("relocation_operation_id")
+            return real(*a, **kw)
+
+        real_create = self.store.create
+
+        def create(**kw):
+            tx = real_create(**kw)
+            if kw.get("operation_type") == "MusicBrainz Match" and kw.get("status") == "Running":
+                self.current_audit = tx["id"]
+            return tx
+
+        with mock.patch.object(self.store, "create", side_effect=create),                 mock.patch.object(self.ad, "relocate_album", side_effect=relocate):
+            _audit, _repair, relocation = self._attach()
+        self.assertEqual(seen["relocation"], relocation)
+
+    def test_relocate_raising_after_the_plan_refuses_undo_and_keeps_the_repair(self):
+        for record in (True, False):
+            with self.subTest(recorded_on_audit=record):
+                self.ad.items[11].update(self.before[1][11])
+                self.ad.albums[1].update(self.before[0][1])
+                audit, repair, _ = self._attach(relocate_error=cw.BeetsAdapterConnectionError("down"),
+                                                record_relocation=record)
+                owned = cw._owned_steps(self.store, audit)[cw.ALBUM_RELOCATION_FAMILY]
+                self.assertEqual(self.store.get(owned[0])["status"], "Recovery Required")
+                self.assertTrue(self.rm.rollback_eligibility(self.store.get(audit))["allowed"])
+                self._undo(audit)
+                self.assertNotEqual(self.store.get(audit)["status"], "Rolled Back")
+                self.assertIn("relocation_outcome_unknown", " ".join(self.store.get(audit)["logs"]))
+                self.assertEqual(self.store.get(repair)["status"], "Completed")
+                self.assertEqual(self.ad.items[11]["mb_trackid"], REC_1)
+
+    def test_crash_after_the_move_before_the_audit_update_still_moves_back_first(self):
+        audit, repair, relocation = self._attach(record_relocation=False)
+        op = self.store.get(audit)["rollback"]["operations"][0]
+        self.assertNotIn("relocation_operation_id", op)
+        start = len(self.ad.calls)
+        self.assertEqual(self._undo(audit).status_code, 200)
+        self.assertEqual(self.store.get(audit)["status"], "Rolled Back", self.store.get(audit)["logs"])
+        self.assertEqual((self.ad.albums, self.ad.items), self.before)
+        self.assertEqual(self.store.get(relocation)["status"], "Rolled Back")
+        self.assertEqual(self.store.get(repair)["status"], "Rolled Back")
+        self.assertEqual(self.ad.calls[start][0], "relocate_back", self.ad.calls)

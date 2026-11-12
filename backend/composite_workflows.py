@@ -229,6 +229,22 @@ def undo_owner_refusal(tx: Dict[str, Any], undo_owner: Optional[str]) -> Optiona
             "error": undo_owner_reason(owner)}
 
 
+def _owned_steps(st: TransactionStore, owner_id: str) -> Dict[str, List[str]]:
+    """{mutation_family: [operation ids]} of every row whose Undo ``owner_id`` owns."""
+    found: Dict[str, List[str]] = {}
+    offset = 0
+    while True:
+        # The id is in the metadata the query searches; the exact key is re-checked.
+        rows, total = st.list(query=owner_id, limit=500, offset=offset)
+        for row in rows:
+            meta = st.get(row["id"]).get("metadata") or {}
+            if meta.get(UNDO_OWNER_KEY) == owner_id:
+                found.setdefault(_s(meta.get("mutation_family")), []).append(row["id"])
+        offset += len(rows)
+        if not rows or offset >= total:
+            return found
+
+
 def rollback_album_attach(
     owner_id: str,
     repair_id: Optional[str],
@@ -241,9 +257,22 @@ def rollback_album_attach(
     restored, each through its own executor (locks, CAS claim, rollback
     request, verification). Stops at the first step that does not finish, so
     the repair is never restored over files still at the relocated paths. A
-    retry skips steps already Rolled Back."""
+    retry skips steps already Rolled Back.
+
+    The step ids recorded on the audit row are merged with every row that
+    names ``owner_id`` as its Undo owner, so a step whose id never reached
+    the audit row (a crash) is still undone, never orphaned."""
     st = _get_store(store)
     done: List[str] = []
+    steps = _owned_steps(st, owner_id)
+    relocations = set(steps.get(ALBUM_RELOCATION_FAMILY, [])) | ({relocation_id} if relocation_id else set())
+    repairs = set(steps.get(ALBUM_MB_TRACK_REPAIR_FAMILY, [])) | ({repair_id} if repair_id else set())
+    if len(relocations) > 1 or len(repairs) > 1:
+        return {"ok": False, "done": done, "code": "attach_steps_ambiguous",
+                "error": f"This attach owns more steps than expected (moves {sorted(relocations)}, repairs "
+                         f"{sorted(repairs)}); nothing was restored. Check them by hand."}
+    relocation_id = next(iter(relocations), None)
+    repair_id = next(iter(repairs), None)
     if relocation_id:
         rel = st.get(relocation_id)
         rel_meta = rel.get("metadata") or {}
@@ -4762,16 +4791,26 @@ def relocate_album(
     adapter: Optional[BeetsAdapter] = None,
     store: Optional[TransactionStore] = None,
     undo_owner: Optional[str] = None,
+    on_planned: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Rename / move one album as one audited, reversible transaction: plan,
     record the operator's request as the approval, apply through Beets.
-    ``undo_owner``: the outer transaction whose Undo reverses this move (#555)."""
+    ``undo_owner``: the outer transaction whose Undo reverses this move (#555).
+    ``on_planned(operation_id)`` runs before anything moves, so the owner
+    records this step first; if it raises, the plan is cancelled unapplied."""
     st = _get_store(store)
     plan = plan_album_relocation(album_id=int(album_id), mode=mode, adapter=adapter, store=st,
                                  undo_owner=undo_owner)
     if not plan.get("ok"):
         return {"ok": False, "error": plan.get("error") or "Relocation plan rejected", "code": plan.get("code")}
     op_id = plan["operation_id"]
+    if on_planned is not None:
+        try:
+            on_planned(op_id)
+        except Exception:
+            st.transition(op_id, "Preview", "Cancelled",
+                          append_logs=["The owning transaction could not record this move; nothing was moved."])
+            raise
     from backend.resource_locks import approve_preview, cancel_unclaimed_on_error
     if approve_preview(st, op_id, f"operator album {plan.get('mode') or mode}") is None:
         return {"ok": False, "code": "not_preview", "operation_id": op_id,

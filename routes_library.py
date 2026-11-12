@@ -753,9 +753,9 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
                                 else:
                                     engine_error = a_res.get("error") or "apply_album_mb_track_repair failed"
                             else:
-                                # No operation_id with ok=True means there was
-                                # nothing to change -- not a failure.
-                                applied = True
+                                # A successful plan always has an operation id;
+                                # without one there is no step to undo (#555).
+                                engine_error = "plan_album_mb_track_repair returned no operation id"
                         else:
                             engine_error = p_res.get("error") or "plan_album_mb_track_repair rejected"
                 except AttachRecordingCancelled:
@@ -772,10 +772,14 @@ def _item_attach_recording(iid: int, payload: Dict[str, Any]):
                     raise RuntimeError(f"Engine track repair transaction failed, refusing local fallback mutation: {safe_engine_error}")
 
                 if aid > 0:
-                    relocate_result = composite_workflows.relocate_album(aid, mode="rename", undo_owner=audit_id)
-                    if relocate_result.get("operation_id"):
-                        album_undo["relocation_operation_id"] = relocate_result["operation_id"]
+                    def _record_relocation(op_id: str) -> None:
+                        # Recorded before Beets moves anything (#555 QA): a
+                        # crash mid-move still leaves the step on this row.
+                        album_undo["relocation_operation_id"] = op_id
                         _record_album_attach_undo()
+
+                    relocate_result = composite_workflows.relocate_album(
+                        aid, mode="rename", undo_owner=audit_id, on_planned=_record_relocation)
                     _require_attach_stage_success(relocate_result, "attach recording relocation")
 
                 # Truthfulness: never claim the candidate-expected identity

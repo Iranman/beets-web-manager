@@ -1429,7 +1429,7 @@ def api_transaction_rollback(transaction_id):
                         transaction_id, op.get("repair_operation_id"), op.get("relocation_operation_id"))
                     restored = bool(res.get("ok"))
                     log.append(f"  [rollback] Album attach undo: steps rolled back {res.get('done') or []}"
-                               + ("" if restored else f"; stopped: {res.get('error')}"))
+                               + ("" if restored else f"; stopped ({res.get('code')}): {res.get('error')}"))
                 elif op.get("type") == "recording_id_restore":
                     restored = _run_item_recording_id_restore(item_id, fields, log, cancel_event=cancel_event)
                 else:
