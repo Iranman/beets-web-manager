@@ -82,4 +82,26 @@ describe('Library cover-art grid', () => {
     fireEvent.error(within(tile).getByRole('img', { name: 'Kid A cover' }));
     expect(within(tile).getByTestId('sleeve-placeholder')).toBeTruthy();
   });
+
+  it('tries the folder image the scan found when the album art route fails, then the sleeve', async () => {
+    vi.mocked(apiGet).mockResolvedValue({
+      ok: true,
+      reconciled: true,
+      artists: [{ name: 'Radiohead', albums: [album({ album_id: 7, album: 'Amnesiac', aldir: '/music/d', disk_art: '/music/d/cover.jpg' })] }],
+      stats: { artists: 1, albums: 1, tracks: 11 },
+      library_version: 2,
+    } as LibraryResponse);
+    render(<MemoryRouter><Library /></MemoryRouter>);
+    await act(async () => {});
+    fireEvent.click(await screen.findByRole('button', { name: /Radiohead/ }));
+
+    const tile = screen.getAllByRole('article').find((t) => within(t).queryByText('Amnesiac'))!;
+    const img = within(tile).getByRole('img', { name: 'Amnesiac cover' });
+    expect(img.getAttribute('src')).toMatch(/^\/api\/albums\/7\/art/);
+    fireEvent.error(img);
+    expect(within(tile).getByRole('img', { name: 'Amnesiac cover' }).getAttribute('src'))
+      .toBe('/api/disk-art?path=%2Fmusic%2Fd%2Fcover.jpg&v=2');
+    fireEvent.error(within(tile).getByRole('img', { name: 'Amnesiac cover' }));
+    expect(within(tile).getByTestId('sleeve-placeholder')).toBeTruthy();
+  });
 });

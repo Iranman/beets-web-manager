@@ -123,6 +123,12 @@ function albumArtUrl(album: LibraryAlbum, libraryVersion?: number) {
   return addVersion(`/api/disk-art?path=${encodeURIComponent(diskArt)}`, libraryVersion);
 }
 
+// Folder image the library scan found on disk, tried when the album art route fails.
+function albumDiskArtFallbackUrl(album: LibraryAlbum, libraryVersion?: number) {
+  if (!album.album_id || !album.disk_art) return '';
+  return addVersion(`/api/disk-art?path=${encodeURIComponent(album.disk_art)}`, libraryVersion);
+}
+
 function artistArtUrl(artist: LibraryArtist, libraryVersion?: number) {
   const direct = artist.artist_image_url || artist.image_url || '';
   if (direct) return addVersion(direct, libraryVersion);
@@ -228,30 +234,34 @@ function SleevePlaceholder() {
 
 function Artwork({
   src,
+  fallbackSrc = '',
   label,
   fallback,
   className,
 }: {
   src: string;
+  fallbackSrc?: string;
   label: string;
   fallback: ReactNode;
   className: string;
 }) {
-  const [failed, setFailed] = useState(false);
+  const [failures, setFailures] = useState(0);
 
   useEffect(() => {
-    setFailed(false);
-  }, [src]);
+    setFailures(0);
+  }, [src, fallbackSrc]);
+
+  const current = failures === 0 ? src : failures === 1 ? fallbackSrc : '';
 
   return (
     <div className={cx('flex shrink-0 items-center justify-center overflow-hidden bg-graphite-900 text-xs font-semibold text-zinc-300', className)}>
-      {src && !failed ? (
+      {current ? (
         <img
           alt={label}
           className="h-full w-full object-cover"
           loading="lazy"
-          src={src}
-          onError={() => setFailed(true)}
+          src={current}
+          onError={() => setFailures((n) => n + 1)}
         />
       ) : (
         typeof fallback === 'string' ? <span className="max-w-full truncate px-2 text-center">{fallback}</span> : fallback
@@ -540,6 +550,7 @@ function NextRepairPanel({
             className="h-16 w-16 rounded-md"
             fallback={<SleevePlaceholder />}
             label={`${title} cover`}
+            fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
             src={albumArtUrl(album, libraryVersion)}
           />
           <div className="min-w-0">
@@ -845,6 +856,7 @@ function AlbumCard({
         className="aspect-square w-full rounded-sm shadow-md shadow-black/50 ring-1 ring-black/40"
         fallback={<SleevePlaceholder />}
         label={`${title} cover`}
+        fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
         src={albumArtUrl(album, libraryVersion)}
       />
       <div className="mt-2 min-w-0 flex-1">
@@ -1083,6 +1095,7 @@ function AlbumDetailsDialog({
                       className="h-20 w-20 rounded-md"
                       fallback={<SleevePlaceholder />}
                       label={`${title} cover`}
+                      fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
                       src={albumArtUrl(album, libraryVersion)}
                     />
                     <div className="min-w-0">
