@@ -1,4 +1,4 @@
-import { errorMessage, sentences } from '../../lib/errors';
+import { errorMessage } from '../../lib/errors';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -14,21 +14,17 @@ import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import React, { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import {
-  applyTransaction,
-  approveTransaction,
-  getTransaction,
   getUntrackedCandidates,
   getUntrackedInventorySummary,
   planUntrackedRecovery,
-  rollbackTransaction,
   startUntrackedInventory,
 } from '../../api/client';
 import type {
   UntrackedCandidatesResponse,
   UntrackedInventorySummaryResponse,
   UntrackedRecoveryPlanResponse,
-  UntrackedTransactionResponse,
 } from '../../api/types';
 import { CleanSection } from '../../components/CleanPanel';
 
@@ -44,7 +40,8 @@ const CATEGORIES = [
 /**
  * Untracked files (ARCH-021). The backend owns every decision -- action,
  * eligibility, safety result, reason -- and re-proves identity when a plan
- * is made; this panel only lists, filters and asks for confirmation.
+ * is made; this panel only lists, filters and makes plans. Approving, applying
+ * and rolling back a plan happen in one place: Workbench > Library Changes.
  */
 export const UntrackedRecoverySection: React.FC = () => {
   const [summary, setSummary] = useState<UntrackedInventorySummaryResponse['summary'] | null>(null);
@@ -54,9 +51,6 @@ export const UntrackedRecoverySection: React.FC = () => {
   const [plan, setPlan] = useState<UntrackedRecoveryPlanResponse | null>(null);
   const [message, setMessage] = useState<{ severity: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  // Server verdict for the plan's transaction (rollback.allowed, #228); null
-  // until it has been read after Apply.
-  const [rollbackState, setRollbackState] = useState<{ allowed: boolean; reason: string } | null>(null);
 
   const loadSummary = useCallback(async () => {
     try {
@@ -98,24 +92,6 @@ export const UntrackedRecoverySection: React.FC = () => {
     }
   };
 
-  const loadRollbackState = async (id: string) => {
-    try {
-      const res = await getTransaction(id);
-      const rb = res.transaction?.rollback;
-      setRollbackState({
-        allowed: rb?.allowed === true,
-        reason: typeof rb?.allowed === 'boolean'
-          ? rb.allowed_reason || ''
-          : 'Rollback unavailable: the server did not report whether this plan can be rolled back.',
-      });
-    } catch (err) {
-      setRollbackState({
-        allowed: false,
-        reason: sentences(`Could not check whether this plan can be rolled back: ${errorMessage(err, 'request failed')}`, 'Open it in Library Changes to review its status.'),
-      });
-    }
-  };
-
   const startInventory = () =>
     run(async () => {
       const res = await startUntrackedInventory();
@@ -126,41 +102,6 @@ export const UntrackedRecoverySection: React.FC = () => {
     run(async () => {
       const res = await planUntrackedRecovery(action, [path]);
       setPlan(res);
-      setRollbackState(null);
-    });
-
-  const approveAndApply = () =>
-    run(async () => {
-      if (!plan?.operation_id) return;
-      const id = plan.operation_id;
-      try {
-        await approveTransaction(id);
-        const res = (await applyTransaction(id)) as unknown as UntrackedTransactionResponse;
-        setMessage({ severity: res.ok ? 'success' : 'error', text: `Apply: ${res.status ?? ''} ${(res.verification_problems ?? []).join('; ')}` });
-        await loadRows();
-      } finally {
-        // Re-read even after a failed apply: it may have changed files.
-        await loadRollbackState(id);
-      }
-    });
-
-  const rollback = () =>
-    run(async () => {
-      if (!plan?.operation_id) return;
-      const id = plan.operation_id;
-      let res: UntrackedTransactionResponse;
-      try {
-        res = (await rollbackTransaction(id)) as unknown as UntrackedTransactionResponse;
-      } catch (err) {
-        // Refused (409 resource_busy) or failed (500): re-read the server
-        // verdict so "Roll back" reflects rollback.allowed, not a stale value.
-        await loadRollbackState(id);
-        throw err;
-      }
-      setMessage({ severity: res.ok ? 'success' : 'error', text: `Rollback: ${res.status ?? ''}` });
-      setPlan(null);
-      setRollbackState(null);
-      await loadRows();
     });
 
   return (
@@ -192,22 +133,12 @@ export const UntrackedRecoverySection: React.FC = () => {
             <>
               <Typography variant="subtitle2">Plan {plan.operation_id} ({plan.action ?? 'quarantine'}) -- review the evidence:</Typography>
               <Box component="pre" sx={{ fontSize: '0.75rem', whiteSpace: 'pre-wrap' }}>{JSON.stringify(plan.evidence ?? plan.files ?? {}, null, 1)}</Box>
-              <Box sx={{ display: 'flex', gap: 1 }}>
-                <Button variant="contained" color="warning" onClick={approveAndApply} disabled={busy}>Approve and apply</Button>
-                <Button
-                  variant="outlined"
-                  onClick={rollback}
-                  disabled={busy || !rollbackState?.allowed}
-                  aria-describedby={rollbackState?.allowed ? undefined : 'untracked-rollback-reason'}
-                >
-                  Roll back
-                </Button>
-              </Box>
-              {!rollbackState?.allowed && (
-                <Typography id="untracked-rollback-reason" variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                  {rollbackState?.reason || 'Roll back becomes available after this plan is applied.'}
-                </Typography>
-              )}
+              <Typography variant="body2">
+                Nothing has changed yet.{' '}
+                <Link className="text-brass-300 underline underline-offset-4 hover:text-brass-200" to={`/import?tab=changes&tx=${encodeURIComponent(plan.operation_id ?? '')}`}>
+                  Review, approve or roll back this plan in Library Changes
+                </Link>
+              </Typography>
             </>
           ) : (
             <Alert severity="warning">Refused ({plan.code}): {plan.error}</Alert>

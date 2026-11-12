@@ -553,6 +553,7 @@ def _wanted_page(records, total=None):
     return _Resp({"page": 1, "records": records, "totalRecords": len(records) if total is None else total})
 
 
+_PAGE = acq._LIDARR_WANTED_PAGE_SIZE
 _WANTED = {"id": 7, "title": "Album", "releaseDate": "1999-01-01T00:00:00Z", "albumType": "Album",
            "monitored": True, "foreignAlbumId": RG, "artist": {"artistName": "Artist"}}
 
@@ -579,7 +580,10 @@ class LidarrWantedTests(_BoundaryCase):
         cases = [([http_error(401)], "Lidarr rejected the API key"),
                  ([http_error(429)] * 2, "Lidarr is rate limiting requests"),
                  ([http_error(503)] * 2, "Could not reach Lidarr"),
-                 ([socket.timeout("slow")] * 2, "Could not reach Lidarr"),
+                 ([socket.timeout("slow")] * 2, "Lidarr did not respond in time (wanted list)"),
+                 ([TimeoutError("read")] * 2, "Lidarr did not respond in time (wanted list)"),
+                 ([urllib.error.URLError(TimeoutError("connect"))] * 2, "Could not reach Lidarr"),
+                 ([urllib.error.URLError(ConnectionRefusedError("refused"))] * 2, "Could not reach Lidarr"),
                  ([urllib.error.URLError("Name or service not known")] * 2, "Could not reach Lidarr"),
                  ([_Resp(b"<html>")], "Lidarr returned an unexpected response"),
                  ([_Resp({"records": "nope"})], "Lidarr returned an unexpected response"),
@@ -588,36 +592,66 @@ class LidarrWantedTests(_BoundaryCase):
             with self.subTest(reason=reason):
                 self.assertEqual(self._fetch(effects), ([], reason))
 
+    def test_secure_urlopen_dns_failure_is_unreachable_not_a_block(self):  # QA F2
+        from backend import security
+        def resolves_to(ip):
+            return lambda host, port, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+        cases = [(mock.Mock(side_effect=socket.gaierror(-2, "Name or service not known")), "Could not reach Lidarr"),
+                 # A real allowlist denial keeps its outbound-block message.
+                 (resolves_to("10.0.0.5"), "Lidarr is blocked by the outbound network policy."),
+                 # A refusal no entry can fix is still not "unreachable".
+                 (resolves_to("169.254.169.254"), "Lidarr returned an unexpected response")]
+        with mock.patch.object(urllib.request, "urlopen", security.secure_urlopen):
+            for lookup, reason in cases:
+                with self.subTest(reason=reason), mock.patch.object(security.socket, "getaddrinfo", lookup),                         self.assertLogs("beets_web.security", level="WARNING"):
+                    rows, error = acq._acq_fetch_lidarr_wanted()
+                self.assertEqual(rows, [])
+                self.assertTrue(error.startswith(reason), error)
+                self.assertNotIn("lidarr.test", error)
+
+    def test_wanted_route_passes_the_timeout_text_through(self):  # QA F1
+        import routes_lidarr
+        reason = "Lidarr did not respond in time (wanted list)"
+        with mock.patch.object(routes_lidarr, "_lidarr_config_error", return_value=""),                 mock.patch.object(routes_lidarr, "_acq_fetch_lidarr_wanted", return_value=([], reason)),                 app_module.app.test_request_context("/api/wanted/lidarr"):
+            response, status = routes_lidarr.wanted_lidarr()
+        self.assertEqual(status, 502)
+        self.assertEqual(response.get_json()["error"], reason)
+
     def test_a_failed_later_page_is_not_a_partial_success(self):
-        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
-        self.assertEqual(self._fetch([_wanted_page(full, total=1500)] + [socket.timeout("slow")] * 2),
+        full = [dict(_WANTED, id=i) for i in range(1, _PAGE + 1)]
+        self.assertEqual(self._fetch([_wanted_page(full, total=_PAGE + 1)] + [socket.timeout("slow")] * 2),
+                         ([], "Lidarr did not respond in time (wanted list)"))
+        self.assertEqual(self._fetch([_wanted_page(full, total=_PAGE + 1)]
+                                     + [urllib.error.URLError(ConnectionRefusedError("refused"))] * 2),
                          ([], "Could not reach Lidarr"))
 
     def test_short_page_with_unchanged_total_is_not_complete(self):  # QA F4
-        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
-        more = [dict(_WANTED, id=i) for i in range(1001, 2001)]
-        self.assertEqual(self._fetch([_wanted_page(full, total=2500), _wanted_page([], total=2500)]),
+        full = [dict(_WANTED, id=i) for i in range(1, _PAGE + 1)]
+        more = [dict(_WANTED, id=i) for i in range(_PAGE + 1, 2 * _PAGE + 1)]
+        total = 2 * _PAGE + _PAGE // 2
+        self.assertEqual(self._fetch([_wanted_page(full, total=total), _wanted_page([], total=total)]),
                          ([], "Lidarr returned an unexpected response"))
         # Final page short of what totalRecords promises is just as incomplete.
-        self.assertEqual(self._fetch([_wanted_page(full, total=2500), _wanted_page(more, total=2500),
-                                      _wanted_page([], total=2500)]),
+        self.assertEqual(self._fetch([_wanted_page(full, total=total), _wanted_page(more, total=total),
+                                      _wanted_page([], total=total)]),
                          ([], "Lidarr returned an unexpected response"))
         # A short first page contradicting its own totalRecords too.
         self.assertEqual(self._fetch([_wanted_page([_WANTED], total=5)]),
                          ([], "Lidarr returned an unexpected response"))
 
     def test_short_page_is_accepted_when_total_records_moved(self):  # QA F4
-        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
+        full = [dict(_WANTED, id=i) for i in range(1, _PAGE + 1)]
         # The moving pass is read again (ARCH-028 N2); the stable re-read is the list.
-        rows, error = self._fetch([_wanted_page(full, total=1500), _wanted_page([], total=1000),
-                                   _wanted_page(full, total=1000)])
-        self.assertEqual((len(rows), error), (1000, ""))
+        rows, error = self._fetch([_wanted_page(full, total=_PAGE + _PAGE // 2), _wanted_page([], total=_PAGE),
+                                   _wanted_page(full, total=_PAGE)])
+        self.assertEqual((len(rows), error), (_PAGE, ""))
 
     def test_moved_total_with_rows_missing_is_not_complete(self):  # QA #379 N3
-        full = [dict(_WANTED, id=i) for i in range(1, 1001)]
-        short = [dict(_WANTED, id=i) for i in range(1001, 1501)]
-        moving = [_wanted_page(full, total=2000), _wanted_page(short, total=1600)]
-        self.assertEqual(self._fetch(moving + [_wanted_page(full, total=2000), _wanted_page(short, total=1600)]),
+        full = [dict(_WANTED, id=i) for i in range(1, _PAGE + 1)]
+        short = [dict(_WANTED, id=i) for i in range(_PAGE + 1, _PAGE + _PAGE // 2 + 1)]
+        moving = [_wanted_page(full, total=2 * _PAGE), _wanted_page(short, total=_PAGE + _PAGE // 2 + 100)]
+        self.assertEqual(self._fetch(moving + [_wanted_page(full, total=2 * _PAGE),
+                                               _wanted_page(short, total=_PAGE + _PAGE // 2 + 100)]),
                          ([], "Lidarr returned an unexpected response"))
 
     def test_missing_total_records_is_malformed(self):  # ACQ-9: paging needs it
@@ -645,12 +679,26 @@ class LidarrWantedTests(_BoundaryCase):
         self.assertIn("pageSize=2", opened[0][0])
         self.assertIn("monitored=true", opened[0][0])
 
-    def test_default_page_size_is_1000(self):
+    def test_default_page_size_fits_the_timeout_and_keeps_the_cap(self):
         url = []
         with mock.patch.object(urllib.request, "urlopen",
                                side_effect=lambda req, timeout=None: url.append(req.full_url) or _wanted_page([])):
             self.assertEqual(acq.fetch_lidarr_wanted(), ([], ""))
-        self.assertIn("pageSize=1000", url[0])
+        # 1000-record pages with includeArtist outran the 60 s timeout on a large Lidarr.
+        self.assertIn("pageSize=250", url[0])
+        self.assertIn("includeArtist=true", url[0])  # _lidarr_wanted_row needs artistName
+        self.assertEqual(acq._LIDARR_WANTED_PAGE_SIZE * acq._LIDARR_WANTED_MAX_PAGES, 100_000)
+
+    def test_a_list_of_many_default_pages_is_read_in_full(self):
+        total = 3 * _PAGE + 7
+        recs = [dict(_WANTED, id=i) for i in range(1, total + 1)]
+
+        def fake(req, timeout=None):
+            page = int(req.full_url.split("page=")[1].split("&")[0])
+            return _wanted_page(recs[(page - 1) * _PAGE:page * _PAGE], total=total)
+        with mock.patch.object(urllib.request, "urlopen", side_effect=fake) as urlopen:
+            rows, error = acq.fetch_lidarr_wanted()
+        self.assertEqual((len(rows), error, urlopen.call_count), (total, "", 4))
 
     def test_one_retry_on_timeout_then_success(self):  # ACQ-11
         rows, error = self._fetch([socket.timeout("slow"), _wanted_page([_WANTED])])
@@ -921,8 +969,15 @@ class LidarrRouteHelperTests(_BoundaryCase):  # QA F-5
     def test_failure_modes(self):
         self.assertEqual(self._message([http_error(401)]), ("Lidarr rejected the API key", 502))
         self.assertEqual(self._message([http_error(429)] * 2), ("Lidarr returned HTTP 429", 502))
-        self.assertEqual(self._message([socket.timeout("slow")] * 2), ("Could not reach Lidarr", 502))
+        self.assertEqual(self._message([socket.timeout("slow")] * 2), ("Lidarr did not respond in time", 504))
+        self.assertEqual(self._message([urllib.error.URLError(TimeoutError("connect"))] * 2),
+                         ("Could not reach Lidarr", 502))
         self.assertEqual(self._message([_Resp(b"<html>")]), ("Lidarr returned an unexpected response", 502))
+
+    def test_secure_urlopen_dns_failure_is_unreachable(self):  # QA F2
+        from backend import security
+        with mock.patch.object(security.socket, "getaddrinfo", side_effect=socket.gaierror(-2, "unknown")),                 self.assertLogs("beets_web.security", level="WARNING"):
+            self.assertEqual(self._message(security.secure_urlopen), ("Could not reach Lidarr", 502))
 
 
 # -- download root: BA-12-------------------------------------------------------------

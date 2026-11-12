@@ -68,7 +68,7 @@ test('album without IDs shows no issue marker or fix link in Library, and appear
   await expect(dialog).not.toContainText(/Manage on Import|Missing MusicBrainz IDs|Needs IDs|Review information/);
   await dialog.getByRole('button', { name: 'Close' }).click();
   await expect(dialog).toHaveCount(0);
-  await page.goto('/library/missing-ids');
+  await page.goto('/import?tab=missing-ids');
   await expect(page.getByRole('main')).toContainText('Untagged Sessions');
   await expect(page.getByRole('main')).not.toContainText('Glass Horizons');
 });

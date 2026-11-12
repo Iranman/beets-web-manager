@@ -29,13 +29,11 @@ vi.mock('../src/api/client', () => ({
 // fetching, which is exercised elsewhere (existing Python static tests,
 // manual browser smoke testing).
 vi.mock('../src/views/Library', () => ({ default: () => <div>LIBRARY_PAGE</div> }));
-vi.mock('../src/views/LibraryChanges', () => ({ default: () => <div>CHANGES_PAGE</div> }));
-vi.mock('../src/views/LibraryMissingIds', () => ({ default: () => <div>MISSING_IDS_PAGE</div> }));
 function MockImportPage() {
   const [params] = useSearchParams();
   return (
     <div>
-      IMPORT_PAGE tab={params.get('tab') ?? ''} filter={params.get('filter') ?? ''} source={params.get('source') ?? ''}
+      IMPORT_PAGE tab={params.get('tab') ?? ''} filter={params.get('filter') ?? ''} source={params.get('source') ?? ''} tx={params.get('tx') ?? ''}
     </div>
   );
 }
@@ -89,6 +87,16 @@ describe('AppRoutes (react-router v8)', () => {
     await waitFor(() => expect(screen.getByText('JOBS_PAGE')).toBeTruthy());
   });
 
+  // Library Changes and Missing IDs moved into the Workbench (/import); old links keep their query.
+  it.each([
+    ['/changes', 'IMPORT_PAGE tab=changes filter= source= tx='],
+    ['/changes?tx=tx-7', 'IMPORT_PAGE tab=changes filter= source= tx=tx-7'],
+    ['/library/missing-ids', 'IMPORT_PAGE tab=missing-ids filter= source= tx='],
+  ])('redirects %s to its Workbench tab', async (path, expectedText) => {
+    renderAt(path);
+    await waitFor(() => expect(screen.getByText(expectedText)).toBeTruthy());
+  });
+
   it('redirects /setup to /system', async () => {
     renderAt('/setup');
     await waitFor(() => expect(screen.getByText('SYSTEM_PAGE')).toBeTruthy());
@@ -96,9 +104,7 @@ describe('AppRoutes (react-router v8)', () => {
 
   it.each([
     ['/library', 'LIBRARY_PAGE'],
-    ['/changes', 'CHANGES_PAGE'],
-    ['/library/missing-ids', 'MISSING_IDS_PAGE'],
-    ['/import', 'IMPORT_PAGE tab= filter= source='],
+    ['/import', 'IMPORT_PAGE tab= filter= source= tx='],
     ['/playlists', 'PLAYLISTS_PAGE'],
     ['/jobs', 'JOBS_PAGE'],
     ['/config', 'CONFIG_PAGE'],
@@ -117,7 +123,7 @@ describe('AppRoutes (react-router v8)', () => {
   it('keeps query parameters available to the rendered route (dynamic/detail state in this app is query-param-based, not path-param-based)', async () => {
     renderAt('/import?tab=review&filter=unmatched&source=lidarr');
     await waitFor(() =>
-      expect(screen.getByText('IMPORT_PAGE tab=review filter=unmatched source=lidarr')).toBeTruthy(),
+      expect(screen.getByText('IMPORT_PAGE tab=review filter=unmatched source=lidarr tx=')).toBeTruthy(),
     );
   });
 
@@ -126,7 +132,7 @@ describe('AppRoutes (react-router v8)', () => {
     await waitFor(() => expect(screen.getByText('LIBRARY_PAGE')).toBeTruthy());
     const expected: Record<string, string> = {
       Library: '/library',
-      Import: '/import',
+      Workbench: '/import',
       Playlists: '/playlists',
       Jobs: '/jobs',
     };
