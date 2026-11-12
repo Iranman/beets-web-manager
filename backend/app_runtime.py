@@ -680,9 +680,19 @@ EDITABLE_FIELDS = [
 ]
 
 
+# Extent of a secret value, shared with routes_setup's diagnostic redactor
+# (#524, #647). The value runs to ASCII whitespace (an NBSP may be part of
+# it); a quoted part may hold spaces and runs to its closing quote, honoring
+# backslash escapes, or to the end when unclosed. Trailing punctuation is
+# over-masked rather than leaked. Nothing follows it in a pattern and the
+# alternatives start on different characters, so matching stays linear.
+SECRET_VALUE_PATTERN = r"""(?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^ \t\r\n\f\v"'])+"""
+
+# The key may close its own quote before the separator ({"password": ...}).
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
-    r"(\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?(\[REDACTED\]|[^\s,;}\]\"]+)"
+    r"([\"']?\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?" + SECRET_VALUE_PATTERN,
+    re.DOTALL,
 )
 
 
@@ -693,8 +703,6 @@ _REDACTED_SECRET = "[REDACTED]"
 
 
 def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
-    if match.group(3) == _REDACTED_SECRET:
-        return match.group(0)
     return f"{match.group(1)}{match.group(2)}{_REDACTED_SECRET}"
 
 

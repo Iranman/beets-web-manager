@@ -39,6 +39,7 @@ from flask import jsonify, request, session
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
 from backend import config_layers  # noqa: E402
+from backend.app_runtime import SECRET_VALUE_PATTERN  # noqa: E402
 from backend.build_info import build_info  # noqa: E402
 from backend.web_manager_config_store import (  # noqa: E402
     WebManagerConfigStore,
@@ -1842,12 +1843,8 @@ _SECRET_KV_RE = re.compile(
     # "[REDACTED],y" the ",y" is still part of the secret (#524).
     (?!['"]?(?:(?:bearer|basic)\s+)?\[redacted\]['"]?(?:\s|$))
     ((?:(?:bearer|basic)\s+)?)
-    # The value runs to ASCII whitespace (an NBSP may be part of it); a quoted
-    # part may hold spaces and runs to its closing quote, or to the end when
-    # unclosed (#524). The alternatives start on different characters, so
-    # matching stays linear.
-    (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\ \t\r\n\f\v"'])+
-    """,
+    # The value extent is shared with app_runtime (#524, #647).
+    """ + SECRET_VALUE_PATTERN,
     re.VERBOSE | re.DOTALL,
 )
 
