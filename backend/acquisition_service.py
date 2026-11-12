@@ -534,7 +534,15 @@ class _AlbumDownloadRun:
         resume_result = self._recovery_resume_short_circuit()
         if resume_result is not None:
             return resume_result
-        self._recovery_refuse_while_import_runs()
+        # #556: hold the recovery's staged folder from the running-import check
+        # through the restage and this run's own import, so a Review or
+        # advancer import cannot start on it in between (and this retry is
+        # refused while one of those holds it).
+        with recovery_service.staging_reservation(_s(self.req.recovery_stage_prefix), self.log):
+            self._recovery_refuse_while_import_runs()
+            return self._execute_reserved()
+
+    def _execute_reserved(self) -> Dict[str, Any]:
         self._resolve_release()
         already_complete = self._reconcile_existing_album()
         if already_complete is not None:

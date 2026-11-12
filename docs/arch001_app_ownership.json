@@ -28563,10 +28563,10 @@
    "module": "backend/import_service.py",
    "lines": [
     3722,
-    3772
+    3774
    ],
-   "size": 51,
-   "body_lines": 47,
+   "size": 53,
+   "body_lines": 49,
    "route": null,
    "mutation_capable": false,
    "domain": "IMPORT",
@@ -28587,8 +28587,8 @@
    "name": "start_folder_import_with_id",
    "module": "backend/import_service.py",
    "lines": [
-    3777,
-    4151
+    3779,
+    4153
    ],
    "size": 375,
    "body_lines": 364,
@@ -28649,8 +28649,8 @@
    "name": "_coerce_library_import_all_album",
    "module": "backend/import_service.py",
    "lines": [
-    4160,
-    4187
+    4162,
+    4189
    ],
    "size": 28,
    "body_lines": 27,
@@ -28674,8 +28674,8 @@
    "name": "_library_import_all_retry_payload",
    "module": "backend/import_service.py",
    "lines": [
-    4190,
-    4198
+    4192,
+    4200
    ],
    "size": 9,
    "body_lines": 8,
@@ -28697,8 +28697,8 @@
    "name": "_library_import_all_record",
    "module": "backend/import_service.py",
    "lines": [
-    4201,
-    4212
+    4203,
+    4214
    ],
    "size": 12,
    "body_lines": 10,
@@ -28721,8 +28721,8 @@
    "name": "_library_import_all_read_last",
    "module": "backend/import_service.py",
    "lines": [
-    4215,
-    4223
+    4217,
+    4225
    ],
    "size": 9,
    "body_lines": 8,
@@ -28742,8 +28742,8 @@
    "name": "_library_import_all_write_last",
    "module": "backend/import_service.py",
    "lines": [
-    4226,
-    4231
+    4228,
+    4233
    ],
    "size": 6,
    "body_lines": 5,
@@ -28762,8 +28762,8 @@
    "name": "_resolve_import_source_path",
    "module": "backend/import_service.py",
    "lines": [
-    4239,
-    4273
+    4241,
+    4275
    ],
    "size": 35,
    "body_lines": 16,
@@ -29088,8 +29088,8 @@
    "name": "_download_identity_deferral",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1681,
-    1721
+    1689,
+    1729
    ],
    "size": 41,
    "body_lines": 18,
@@ -29110,8 +29110,8 @@
    "name": "_validate_wanted_download_identity_before_import",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1724,
-    1890
+    1732,
+    1898
    ],
    "size": 167,
    "body_lines": 147,
@@ -29139,8 +29139,8 @@
    "name": "_separate_deferred_slot_files",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1893,
-    1960
+    1901,
+    1968
    ],
    "size": 68,
    "body_lines": 48,
@@ -29157,8 +29157,8 @@
    "name": "_acq_text_key",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1965,
-    1966
+    1973,
+    1974
    ],
    "size": 2,
    "body_lines": 1,
@@ -29180,8 +29180,8 @@
    "name": "_acq_display_year",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1969,
-    1971
+    1977,
+    1979
    ],
    "size": 3,
    "body_lines": 2,
@@ -29203,8 +29203,8 @@
    "name": "_acq_release_text_key",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1974,
-    1979
+    1982,
+    1987
    ],
    "size": 6,
    "body_lines": 5,
@@ -29227,8 +29227,8 @@
    "name": "_acq_release_identity",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1982,
-    1991
+    1990,
+    1999
    ],
    "size": 10,
    "body_lines": 7,
@@ -29250,8 +29250,8 @@
    "name": "_acq_release_group_url",
    "module": "backend/acquisition_service.py",
    "lines": [
-    1994,
-    1998
+    2002,
+    2006
    ],
    "size": 5,
    "body_lines": 2,
@@ -29275,8 +29275,8 @@
    "name": "_acq_album_has_no_track_rows",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2001,
-    2007
+    2009,
+    2015
    ],
    "size": 7,
    "body_lines": 6,
@@ -29299,8 +29299,8 @@
    "name": "_acq_expected_track_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2010,
-    2023
+    2018,
+    2031
    ],
    "size": 14,
    "body_lines": 13,
@@ -29326,8 +29326,8 @@
    "name": "_acq_imported_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2026,
-    2037
+    2034,
+    2045
    ],
    "size": 12,
    "body_lines": 11,
@@ -29352,8 +29352,8 @@
    "name": "_acq_track_missing_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2040,
-    2043
+    2048,
+    2051
    ],
    "size": 4,
    "body_lines": 3,
@@ -29374,8 +29374,8 @@
    "name": "_acq_is_extra_only_complete",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2046,
-    2056
+    2054,
+    2064
    ],
    "size": 11,
    "body_lines": 10,
@@ -29399,8 +29399,8 @@
    "name": "_acq_is_leftover_only_complete",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2059,
-    2068
+    2067,
+    2076
    ],
    "size": 10,
    "body_lines": 9,
@@ -29424,8 +29424,8 @@
    "name": "_acq_missing_count",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2071,
-    2090
+    2079,
+    2098
    ],
    "size": 20,
    "body_lines": 19,
@@ -29451,8 +29451,8 @@
    "name": "_acq_health",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2093,
-    2141
+    2101,
+    2149
    ],
    "size": 49,
    "body_lines": 48,
@@ -29480,8 +29480,8 @@
    "name": "_acq_needs_acquisition",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2144,
-    2149
+    2152,
+    2157
    ],
    "size": 6,
    "body_lines": 4,
@@ -29504,8 +29504,8 @@
    "name": "_acq_locally_satisfies_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2152,
-    2163
+    2160,
+    2171
    ],
    "size": 12,
    "body_lines": 10,
@@ -29530,8 +29530,8 @@
    "name": "_acq_local_issue",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2166,
-    2173
+    2174,
+    2181
    ],
    "size": 8,
    "body_lines": 7,
@@ -29554,8 +29554,8 @@
    "name": "_lidarr_wanted_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2182,
-    2196
+    2190,
+    2204
    ],
    "size": 15,
    "body_lines": 13,
@@ -29574,8 +29574,8 @@
    "name": "_lidarr_wanted_page",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2199,
-    2215
+    2207,
+    2223
    ],
    "size": 17,
    "body_lines": 14,
@@ -29594,8 +29594,8 @@
    "name": "_lidarr_wanted_row",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2218,
-    2242
+    2226,
+    2250
    ],
    "size": 25,
    "body_lines": 21,
@@ -29617,8 +29617,8 @@
    "name": "fetch_lidarr_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2245,
-    2322
+    2253,
+    2330
    ],
    "size": 78,
    "body_lines": 59,
@@ -29641,8 +29641,8 @@
    "name": "_acq_fetch_lidarr_wanted",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2325,
-    2326
+    2333,
+    2334
    ],
    "size": 2,
    "body_lines": 1,
@@ -29663,8 +29663,8 @@
    "name": "_acq_item_mbid",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2329,
-    2333
+    2337,
+    2341
    ],
    "size": 5,
    "body_lines": 4,
@@ -29688,8 +29688,8 @@
    "name": "_acq_can_download",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2336,
-    2350
+    2344,
+    2358
    ],
    "size": 15,
    "body_lines": 14,
@@ -29711,8 +29711,8 @@
    "name": "_acq_action_flags",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2353,
-    2375
+    2361,
+    2383
    ],
    "size": 23,
    "body_lines": 22,
@@ -29735,8 +29735,8 @@
    "name": "_acq_queue_counts",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2378,
-    2391
+    2386,
+    2399
    ],
    "size": 14,
    "body_lines": 13,
@@ -29759,8 +29759,8 @@
    "name": "_build_acquisition_queue_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2394,
-    2529
+    2402,
+    2537
    ],
    "size": 136,
    "body_lines": 129,
@@ -29797,8 +29797,8 @@
    "name": "_download_sources_status",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2536,
-    2553
+    2544,
+    2561
    ],
    "size": 18,
    "body_lines": 13,
@@ -29821,8 +29821,8 @@
    "name": "_acq_queue_load",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2581,
-    2600
+    2589,
+    2608
    ],
    "size": 20,
    "body_lines": 17,
@@ -29843,8 +29843,8 @@
    "name": "_acq_queue_save",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2603,
-    2609
+    2611,
+    2617
    ],
    "size": 7,
    "body_lines": 6,
@@ -29863,8 +29863,8 @@
    "name": "_acq_queue_persist",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2615,
-    2622
+    2623,
+    2630
    ],
    "size": 8,
    "body_lines": 5,
@@ -29886,8 +29886,8 @@
    "name": "acquisition_queue_snapshot",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2625,
-    2652
+    2633,
+    2660
    ],
    "size": 28,
    "body_lines": 26,
@@ -29910,8 +29910,8 @@
    "name": "_acq_queue_build_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2655,
-    2698
+    2663,
+    2706
    ],
    "size": 44,
    "body_lines": 43,
@@ -29937,8 +29937,8 @@
    "name": "start_acquisition_queue_build",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2701,
-    2718
+    2709,
+    2726
    ],
    "size": 18,
    "body_lines": 14,
@@ -29961,8 +29961,8 @@
    "name": "_acq_done_matches",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2721,
-    2725
+    2729,
+    2733
    ],
    "size": 5,
    "body_lines": 4,
@@ -29984,8 +29984,8 @@
    "name": "acquisition_queue_mark_done",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2728,
-    2754
+    2736,
+    2762
    ],
    "size": 27,
    "body_lines": 23,
@@ -30012,8 +30012,8 @@
    "name": "download_entered_library",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2757,
-    2765
+    2765,
+    2773
    ],
    "size": 9,
    "body_lines": 4,
@@ -30033,8 +30033,8 @@
    "name": "_mark_queue_done_after",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2768,
-    2776
+    2776,
+    2784
    ],
    "size": 9,
    "body_lines": 6,
@@ -30056,8 +30056,8 @@
    "name": "refresh_acquisition_queue",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2779,
-    2796
+    2787,
+    2804
    ],
    "size": 18,
    "body_lines": 11,
@@ -30079,8 +30079,8 @@
    "name": "ensure_acquisition_queue_fresh",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2799,
-    2810
+    2807,
+    2818
    ],
    "size": 12,
    "body_lines": 8,
@@ -30102,8 +30102,8 @@
    "name": "_acq_row_album_type",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2816,
-    2820
+    2824,
+    2828
    ],
    "size": 5,
    "body_lines": 3,
@@ -30124,8 +30124,8 @@
    "name": "_acq_row_unmonitored",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2823,
-    2825
+    2831,
+    2833
    ],
    "size": 3,
    "body_lines": 2,
@@ -30144,8 +30144,8 @@
    "name": "acquisition_queue_page",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2828,
-    2857
+    2836,
+    2865
    ],
    "size": 30,
    "body_lines": 25,
@@ -30169,8 +30169,8 @@
    "name": "_acq_download_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2863,
-    2884
+    2871,
+    2892
    ],
    "size": 22,
    "body_lines": 20,
@@ -30191,8 +30191,8 @@
    "name": "_acq_start_download_job",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2887,
-    2892
+    2895,
+    2900
    ],
    "size": 6,
    "body_lines": 5,
@@ -30215,8 +30215,8 @@
    "name": "_acq_trim_batch_log",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2895,
-    2901
+    2903,
+    2909
    ],
    "size": 7,
    "body_lines": 6,
@@ -30235,8 +30235,8 @@
    "name": "_acq_download_all_record",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2904,
-    2926
+    2912,
+    2934
    ],
    "size": 23,
    "body_lines": 15,
@@ -30255,8 +30255,8 @@
    "name": "_save_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2929,
-    2936
+    2937,
+    2944
    ],
    "size": 8,
    "body_lines": 7,
@@ -30275,8 +30275,8 @@
    "name": "_load_acq_download_all_last",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2939,
-    2946
+    2947,
+    2954
    ],
    "size": 8,
    "body_lines": 7,
@@ -30295,8 +30295,8 @@
    "name": "_qbit_status_payload",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2949,
-    2963
+    2957,
+    2971
    ],
    "size": 15,
    "body_lines": 14,
@@ -30316,8 +30316,8 @@
    "name": "_qbit_login_cookie",
    "module": "backend/acquisition_service.py",
    "lines": [
-    2966,
-    2998
+    2974,
+    3006
    ],
    "size": 33,
    "body_lines": 32,
@@ -30337,8 +30337,8 @@
    "name": "_qbit_request_json",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3001,
-    3009
+    3009,
+    3017
    ],
    "size": 9,
    "body_lines": 7,
@@ -30358,8 +30358,8 @@
    "name": "_qbit_post",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3012,
-    3019
+    3020,
+    3027
    ],
    "size": 8,
    "body_lines": 7,
@@ -30378,8 +30378,8 @@
    "name": "_qbit_path_alias_pairs",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3022,
-    3032
+    3030,
+    3040
    ],
    "size": 11,
    "body_lines": 10,
@@ -30398,8 +30398,8 @@
    "name": "_qbit_map_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3035,
-    3051
+    3043,
+    3059
    ],
    "size": 17,
    "body_lines": 8,
@@ -30421,8 +30421,8 @@
    "name": "_qbit_allowed_repair_path",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3054,
-    3061
+    3062,
+    3069
    ],
    "size": 8,
    "body_lines": 7,
@@ -30443,8 +30443,8 @@
    "name": "_qbit_candidate_target_paths",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3064,
-    3096
+    3072,
+    3104
    ],
    "size": 33,
    "body_lines": 31,
@@ -30467,8 +30467,8 @@
    "name": "qbit_import_filter",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3104,
-    3108
+    3112,
+    3116
    ],
    "size": 5,
    "body_lines": 1,
@@ -30487,8 +30487,8 @@
    "name": "qbit_import_inventory",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3111,
-    3151
+    3119,
+    3159
    ],
    "size": 41,
    "body_lines": 29,
@@ -30512,8 +30512,8 @@
    "name": "_library_file_candidates_for_qbit",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3154,
-    3200
+    3162,
+    3208
    ],
    "size": 47,
    "body_lines": 46,
@@ -30535,8 +30535,8 @@
    "name": "_qbit_scene_text",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3209,
-    3213
+    3217,
+    3221
    ],
    "size": 5,
    "body_lines": 4,
@@ -30558,8 +30558,8 @@
    "name": "_qbit_torrent_scene_artist_slug",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3216,
-    3218
+    3224,
+    3226
    ],
    "size": 3,
    "body_lines": 2,
@@ -30580,8 +30580,8 @@
    "name": "_qbit_torrent_album_guess",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3221,
-    3231
+    3229,
+    3239
    ],
    "size": 11,
    "body_lines": 10,
@@ -30603,8 +30603,8 @@
    "name": "_qbit_track_guess_from_scene_file",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3234,
-    3256
+    3242,
+    3264
    ],
    "size": 23,
    "body_lines": 22,
@@ -30627,8 +30627,8 @@
    "name": "_library_file_candidates_for_qbit_metadata",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3259,
-    3348
+    3267,
+    3356
    ],
    "size": 90,
    "body_lines": 87,
@@ -30655,8 +30655,8 @@
    "name": "_qbit_hardlink_public_error",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3366,
-    3380
+    3374,
+    3388
    ],
    "size": 15,
    "body_lines": 6,
@@ -30675,8 +30675,8 @@
    "name": "_qbit_hardlink_missing_impl",
    "module": "backend/acquisition_service.py",
    "lines": [
-    3383,
-    3619
+    3391,
+    3627
    ],
    "size": 237,
    "body_lines": 231,
