@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation, useNavigate } from 'react-router';
 import Library from '../src/views/Library';
 import { apiGet } from '../src/lib/api';
-import {
+import { useState } from 'react';
+import CoverFlow, {
   baseWidth,
   clampIndex,
   coverOpacity,
@@ -226,6 +227,30 @@ describe('Library Cover Flow', () => {
     expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
     fireEvent.keyDown(document.activeElement!, { key: 'Home' });
     expect(centred('Artists')).toBe('Artist Alpha Band, 1 of 3');
+  });
+
+  it('after clicking a side sleeve, focus survives the sleeve leaving the window', () => {
+    function Harness() {
+      const [index, setIndex] = useState(0);
+      return (
+        <CoverFlow
+          count={50}
+          index={index}
+          item={(at) => ({ key: `k${at}`, label: `Item ${at}`, title: `T${at}`, subtitle: '', art: null })}
+          label="Many"
+          onActivate={() => {}}
+          onIndexChange={setIndex}
+        />
+      );
+    }
+    render(<Harness />);
+    const stage = screen.getByRole('region', { name: 'Many' });
+    const sleeve = screen.getByRole('button', { name: 'Item 2' });
+    sleeve.focus(); // a real mouse click focuses the sleeve
+    fireEvent.click(sleeve);
+    for (let i = 0; i < 12; i += 1) fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
+    expect(stage.contains(document.activeElement)).toBe(true);
+    expect(centred('Many')).toBe('Item 14');
   });
 
   it('All artists pops the drill-in entry: browser Back does not re-open the artist and history does not grow', async () => {
