@@ -3738,7 +3738,9 @@ def _folder_import_in_slot(do: Callable[..., Any], log: list, cancel_event: Any,
             log.append(f"[import] Import slot acquired — starting… selected_files={len(selected_source_files)}")
             # The slot, held durably: one import at a time across processes.
             with job_contract.held("import-slot", log=log, cancel_event=cancel_event):
-                result = do(log, cancel_event)
+                # #556: a recovery's staged folder is not restaged under this import.
+                with recovery_service.staging_reservation(folder_path, log):
+                    result = do(log, cancel_event)
             if auto_import_idempotency_key:
                 _import_review_auto_update(
                     auto_import_idempotency_key,

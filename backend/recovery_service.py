@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional
 
 import backend.job_contract as job_contract
@@ -42,6 +44,58 @@ ADVANCER_JOB_TYPE = "recovery-advance"
 # Bounded: a run drains at most this many carriers so one job never scans the
 # whole backlog unbounded. The next run picks up the rest (oldest-first).
 DEFAULT_ADVANCE_LIMIT = 25
+
+
+_REC_STAGE_RE = re.compile(r"rec-[0-9a-f]{16}")
+
+
+class StagingFolderBusy(RuntimeError):
+    """Another download or import holds this recovery's staged folder (#556)."""
+
+
+def staging_prefix_for(folder_or_prefix: str) -> str:
+    """The ``rec-<hex>`` recovery staging prefix a folder (or prefix) belongs
+    to: from its name when it carries one, else from the carrier bound to it.
+    "" when neither applies (not a recovery folder)."""
+    m = _REC_STAGE_RE.search(os.path.basename(_s(folder_or_prefix).rstrip("/\\")))
+    if m:
+        return m.group(0)
+    if not _s(folder_or_prefix).strip():
+        return ""
+    try:
+        carrier = recovery_carrier.load_for_folder(folder_or_prefix)
+    except Exception:
+        return ""
+    key = _s((carrier or {}).get("recovery_identity_key")).strip().lower()
+    return ("rec-" + key[:16]) if key else ""
+
+
+@contextmanager
+def staging_reservation(folder_or_prefix: str, log: Optional[List[str]] = None):
+    """#556: reserve a recovery's deterministic ``rec-<hex>`` staging folders
+    for the whole time one job restages or reads them. The acquisition retry
+    holds it from its running-import check through restage and its own import;
+    a folder import (Review or the advancer's hand-off) holds it for the import
+    job; the advancer holds it while it re-verifies the files. A busy folder is
+    refused at once with StagingFolderBusy -- never waited on -- and nothing on
+    disk is touched. A durable lock (job_contract), so it also holds across
+    processes; a dead holder's lock expires with its heartbeat. A no-op for a
+    folder that is not a recovery's."""
+    prefix = staging_prefix_for(folder_or_prefix)
+    if not prefix:
+        yield
+        return
+    try:
+        handle = job_contract.enter(f"staging-{prefix}", log=log, wait_seconds=0,
+                                    fail_fast_in_process=True)
+    except job_contract.WorkflowBusyError as ex:
+        raise StagingFolderBusy(
+            f"The staged files of recovery {prefix} are in use by another download or import "
+            "job; nothing was changed. Retry when that job has finished.") from ex
+    try:
+        yield
+    finally:
+        handle.close()
 
 
 def _attach_decision(carrier_id: str, decision: Dict[str, Any], reason: str) -> None:
@@ -174,7 +228,18 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
             summary["skipped"] += 1
             summary["carriers"].append({"carrier_id": cid, "outcome": "skipped_not_advanceable"})
             continue
-        evaluation = _reevaluate_carrier(fresh, log)
+        # #556: the staged folder is the one an acquisition retry restages;
+        # re-verify only while no retry or import holds it, else defer.
+        key = _s(fresh.get("recovery_identity_key")).strip().lower()
+        try:
+            with staging_reservation(("rec-" + key[:16]) if key else "", log):
+                evaluation = _reevaluate_carrier(fresh, log)
+        except StagingFolderBusy:
+            log.append(f"[recovery-advance] carrier {cid}: staged files in use by another job; "
+                       "deferred to the next run.")
+            summary["skipped"] += 1
+            summary["carriers"].append({"carrier_id": cid, "outcome": "skipped_staging_busy"})
+            continue
         decision = evaluation["decision"]
         _attach_decision(cid, decision, evaluation["reason"])
         if evaluation["ok"]:
