@@ -8,7 +8,7 @@ The project uses Semantic Versioning.
 
 ### Changed
 
-- **wlg "Force Re-tag All" now asks first.** It overwrites every genre tag, so it shows the same kind of confirmation as the lastgenre force run.
+- **Dead plugin Run buttons removed.** Settings > Plugin Controls no longer shows Run controls for ytimport, wlg (including "Force Re-tag All"), aisauce and ytupdate. They called `POST /api/plugins/run`, which the security work removed, so every click failed. A plugin that is not installed is still listed as unavailable, and Plex controls are unchanged.
 - **Workbench and Jobs & Cleanup: every action has one home.** The Import tab is now **Workbench**, the page for library actions: alongside Import Source, Find Music, Review Queue and Recently Imported it gains **Missing IDs** (was Library > Missing IDs) and **Library Changes** (was in the System menu), with the same previews, confirmations, approval, rollback and exports. The Jobs tab is now **Jobs & Cleanup**, which already held the Clean All and cleanup tools. Old links keep working: `/changes` (with its `?tx=` transaction link) opens the Library Changes tab and `/library/missing-ids` opens the Missing IDs tab; `/clean` still opens Jobs & Cleanup. The System menu keeps Settings, System, Restart app and Sign Out. Genre tagging (lastgenre) and missing album art (fetchart) were offered twice, under Settings > Plugin Controls and on Jobs & Cleanup; they now run only from Jobs & Cleanup, which keeps the confirmation on Force re-tag all, and Plugin Controls links there. Routes `/import` and `/jobs`, the API and every mutation flow are unchanged.
 
 ### Added

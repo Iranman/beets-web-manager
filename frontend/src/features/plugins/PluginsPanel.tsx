@@ -3,13 +3,11 @@ import { Disclosure, DisclosureButton, DisclosurePanel } from '@headlessui/react
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
-import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import {
   getPlexStatus,
   refreshPlex,
-  runPlugin,
   getPluginInstallLog,
   getPluginStatus,
 } from '../../api/client';
@@ -79,33 +77,6 @@ function commandStatus(
     enabled: Boolean(payload?.enabled?.[name]),
     runnable: installed,
   };
-}
-
-function PluginBadges({ status }: { status?: PluginCommandStatus }) {
-  if (!status) {
-    return <Chip label="Checking" size="small" variant="outlined" />;
-  }
-  return (
-    <span className="flex flex-wrap items-center gap-1">
-      <Chip
-        color={status.runnable ? 'success' : 'error'}
-        label={status.runnable ? 'Runnable' : 'Missing'}
-        size="small"
-        variant="outlined"
-      />
-      <Chip
-        color={status.enabled ? 'success' : 'default'}
-        label={status.enabled ? 'Config enabled' : 'Temp config'}
-        size="small"
-        variant="outlined"
-      />
-    </span>
-  );
-}
-
-function PluginUnavailable({ status }: { status?: PluginCommandStatus }) {
-  if (!status || status.runnable) return null;
-  return <p className="text-xs text-red-400">Plugin is not installed in this app environment.</p>;
 }
 
 function MissingPluginSummary({ items }: { items: Array<{ name: PluginCommandName; label: string }> }) {
@@ -178,239 +149,16 @@ function PlexPlugin() {
   );
 }
 
-// ── YouTube Import (ytimport) ─────────────────────────────────────────────────
-
-function YtImportPlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }) {
-  const [url, setUrl] = useState('');
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const { job } = useJobPoll(jobId);
-
-  async function run(args: string[], label: string) {
-    setError('');
-    setJobId(null);
-    try {
-      const { job_id } = await runPlugin(args, label);
-      setJobId(job_id);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  const busy = job?.status === 'running';
-  const locked = busy || !pluginStatus?.runnable;
-
-  return (
-    <PluginSection title="YouTube Import (ytimport)" badges={<PluginBadges status={pluginStatus} />}>
-      <PluginUnavailable status={pluginStatus} />
-      <div className="flex flex-wrap gap-2">
-        <TextField
-          className="w-full sm:max-w-sm"
-          disabled={locked}
-          label="YouTube URL"
-          placeholder="https://youtube.com/watch?v=…"
-          size="small"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-        />
-        <Button
-          disabled={locked || !url.trim()}
-          size="small"
-          variant="outlined"
-          onClick={() => void run(['ytimport', '--no-likes', url.trim()], `YT: import URL`)}
-        >
-          Import URL
-        </Button>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          disabled={locked}
-          size="small"
-          variant="outlined"
-          onClick={() => void run(['ytimport', '--likes', '--max-likes', '50'], 'YT: import 50 liked songs')}
-        >
-          Import 50 Liked Songs
-        </Button>
-        {statusChip(job?.status)}
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </div>
-      <p className="text-xs text-muted">Requires <code>/config/ytmusicapi.json</code> (OAuth or headers from ytmusicapi).</p>
-      <JobLog job={job} />
-    </PluginSection>
-  );
-}
-
-export const WLG_FORCE_CONFIRM = 'Overwrite all existing genre tags across the library using wlg? This will modify tags on all albums.';
-
-// ── Genre Tagging (wlg) ───────────────────────────────────────────────────────
-
-function WlgPlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }) {
-  const [query, setQuery] = useState('');
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const { job } = useJobPoll(jobId);
-
-  async function run(args: string[], label: string) {
-    setError('');
-    setJobId(null);
-    try {
-      const { job_id } = await runPlugin(args, label);
-      setJobId(job_id);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  const busy = job?.status === 'running';
-  const locked = busy || !pluginStatus?.runnable;
-
-  return (
-    <PluginSection title="Genre Tagging (wlg)" badges={<PluginBadges status={pluginStatus} />}>
-      <PluginUnavailable status={pluginStatus} />
-      <div className="flex flex-wrap gap-2">
-        <TextField
-          className="w-full sm:max-w-sm"
-          disabled={locked}
-          label="Beets query (blank = all)"
-          placeholder="artist:Radiohead"
-          size="small"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <Button
-          disabled={locked}
-          size="small"
-          variant="outlined"
-          onClick={() => {
-            const args = query.trim() ? ['wlg', query.trim()] : ['wlg'];
-            const label = query.trim() ? `wlg: fetch genres [${query.trim()}]` : 'wlg: fetch genres';
-            void run(args, label);
-          }}
-        >
-          Run
-        </Button>
-        <Button
-          color="warning"
-          disabled={locked}
-          size="small"
-          variant="outlined"
-          onClick={() => {
-            // Same guard as the lastgenre force run in Jobs & Cleanup: it overwrites every genre tag.
-            if (!window.confirm(WLG_FORCE_CONFIRM)) return;
-            void run(['wlg', '-f'], 'wlg: force re-tag all genres');
-          }}
-        >
-          Force Re-tag All
-        </Button>
-        {statusChip(job?.status)}
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </div>
-      <JobLog job={job} />
-    </PluginSection>
-  );
-}
-
-// ── AI Metadata (aisauce) ─────────────────────────────────────────────────────
-
-function AisaucePlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }) {
-  const [query, setQuery] = useState('');
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const { job } = useJobPoll(jobId);
-
-  async function run() {
-    setError('');
-    setJobId(null);
-    const args = query.trim() ? ['aisauce', query.trim()] : ['aisauce'];
-    const label = query.trim() ? `aisauce: clean metadata [${query.trim()}]` : 'aisauce: clean metadata';
-    try {
-      const { job_id } = await runPlugin(args, label);
-      setJobId(job_id);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  const busy = job?.status === 'running';
-  const locked = busy || !pluginStatus?.runnable;
-
-  return (
-    <PluginSection title="AI Metadata (aisauce)" badges={<PluginBadges status={pluginStatus} />}>
-      <PluginUnavailable status={pluginStatus} />
-      <Alert severity="info" sx={{ py: 0, fontSize: '0.75rem' }}>
-        Set <code>aisauce.providers[0].api_key</code> in config.yaml before use.
-      </Alert>
-      <div className="flex flex-wrap gap-2">
-        <TextField
-          className="w-full sm:max-w-sm"
-          disabled={locked}
-          label="Beets query (blank = all)"
-          placeholder="album:Californication"
-          size="small"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <Button disabled={locked} size="small" variant="outlined" onClick={() => void run()}>
-          Run
-        </Button>
-        {statusChip(job?.status)}
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </div>
-      <JobLog job={job} />
-    </PluginSection>
-  );
-}
-
-// ── YouTube View Counts (ytupdate) ────────────────────────────────────────────
-
-function YtUpdatePlugin({ pluginStatus }: { pluginStatus?: PluginCommandStatus }) {
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const { job } = useJobPoll(jobId);
-
-  async function run() {
-    setError('');
-    setJobId(null);
-    try {
-      const { job_id } = await runPlugin(['ytupdate'], 'ytupdate: sync view counts');
-      setJobId(job_id);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  const locked = job?.status === 'running' || !pluginStatus?.runnable;
-
-  return (
-    <PluginSection title="YouTube View Counts (ytupdate)" badges={<PluginBadges status={pluginStatus} />}>
-      <PluginUnavailable status={pluginStatus} />
-      <p className="text-xs text-muted">
-        Requires <code>/config/oauth.json</code> from ytmusicapi OAuth.
-      </p>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={locked} size="small" variant="outlined" onClick={() => void run()}>
-          Update View Counts
-        </Button>
-        {statusChip(job?.status)}
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </div>
-      <JobLog job={job} />
-    </PluginSection>
-  );
-}
-
 // ── PluginsPanel ──────────────────────────────────────────────────────────────
 
 export function PluginsPanel() {
   const [pluginStatus, setPluginStatus] = useState<PluginStatusResponse | null>(null);
   const [installLog, setInstallLog] = useState<string[]>([]);
   const [statusError, setStatusError] = useState('');
-  const ytimportStatus = commandStatus(pluginStatus, 'ytimport');
-  const wlgStatus = commandStatus(pluginStatus, 'wlg');
-  const aisauceStatus = commandStatus(pluginStatus, 'aisauce');
-  const ytupdateStatus = commandStatus(pluginStatus, 'ytupdate');
   const unavailable = [
+    { name: 'ytimport' as const, label: 'ytimport' },
     { name: 'wlg' as const, label: 'wlg' },
+    { name: 'aisauce' as const, label: 'aisauce' },
     { name: 'ytupdate' as const, label: 'ytupdate' },
   ].filter((item) => {
     const status = commandStatus(pluginStatus, item.name);
@@ -449,10 +197,9 @@ export function PluginsPanel() {
       <p className="text-xs text-muted">
         Genre tagging and album art are run from <Link className="text-brass-300 underline" to="/jobs">Jobs &amp; Cleanup</Link>.
       </p>
-      {ytimportStatus?.runnable ? <YtImportPlugin pluginStatus={ytimportStatus} /> : null}
-      {aisauceStatus?.runnable ? <AisaucePlugin pluginStatus={aisauceStatus} /> : null}
-      {wlgStatus?.runnable ? <WlgPlugin pluginStatus={wlgStatus} /> : null}
-      {ytupdateStatus?.runnable ? <YtUpdatePlugin pluginStatus={ytupdateStatus} /> : null}
+      {/* ytimport, wlg, aisauce and ytupdate had Run buttons here that called POST /api/plugins/run,
+          which SEC-002 removed (no generic beet-command endpoint). They are gone until each gets its
+          own job endpoint; a missing install still shows below. */}
       <MissingPluginSummary items={unavailable} />
     </section>
   );
