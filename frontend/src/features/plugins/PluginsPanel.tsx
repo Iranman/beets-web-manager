@@ -5,9 +5,8 @@ import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import {
-  fetchMissingArt,
-  fixGenres,
   getPlexStatus,
   refreshPlex,
   runPlugin,
@@ -174,81 +173,6 @@ function PlexPlugin() {
           {statusMsg}
         </p>
       )}
-      <JobLog job={job} />
-    </PluginSection>
-  );
-}
-
-// ── Core Beets maintenance ────────────────────────────────────────────────────
-
-function LastgenrePlugin() {
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const { job } = useJobPoll(jobId);
-  const busy = job?.status === 'running';
-
-  async function run(opts: { force?: boolean; useAi?: boolean }) {
-    setError('');
-    setJobId(null);
-    try {
-      const { job_id } = await fixGenres(opts);
-      setJobId(job_id);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  return (
-    <PluginSection
-      title="Genre Tagging (lastgenre)"
-      badges={<Chip color="success" label="Config enabled" size="small" variant="outlined" />}
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={busy} size="small" variant="outlined" onClick={() => void run({})}>
-          Tag Missing
-        </Button>
-        <Button disabled={busy} size="small" variant="outlined" onClick={() => void run({ useAi: true })}>
-          Tag Missing + AI
-        </Button>
-        <Button color="warning" disabled={busy} size="small" variant="outlined" onClick={() => void run({ force: true })}>
-          Force Re-tag All
-        </Button>
-        {statusChip(job?.status)}
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </div>
-      <JobLog job={job} />
-    </PluginSection>
-  );
-}
-
-function FetchartPlugin() {
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [error, setError] = useState('');
-  const { job } = useJobPoll(jobId);
-
-  async function run() {
-    setError('');
-    setJobId(null);
-    try {
-      const { job_id } = await fetchMissingArt();
-      setJobId(job_id);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  return (
-    <PluginSection
-      title="Album Art (fetchart)"
-      badges={<Chip color="success" label="Config enabled" size="small" variant="outlined" />}
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={job?.status === 'running'} size="small" variant="outlined" onClick={() => void run()}>
-          Fetch Missing Art
-        </Button>
-        {statusChip(job?.status)}
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </div>
       <JobLog job={job} />
     </PluginSection>
   );
@@ -515,8 +439,10 @@ export function PluginsPanel() {
         <LogViewer className="max-h-24 text-xs text-muted" text={installLog.join('\n')} />
       ) : null}
       <PlexPlugin />
-      <LastgenrePlugin />
-      <FetchartPlugin />
+      {/* Genre tagging (lastgenre) and missing art (fetchart) run from Jobs & Cleanup, their one home. */}
+      <p className="text-xs text-muted">
+        Genre tagging and album art are run from <Link className="text-brass-300 underline" to="/jobs">Jobs &amp; Cleanup</Link>.
+      </p>
       {ytimportStatus?.runnable ? <YtImportPlugin pluginStatus={ytimportStatus} /> : null}
       {aisauceStatus?.runnable ? <AisaucePlugin pluginStatus={aisauceStatus} /> : null}
       {wlgStatus?.runnable ? <WlgPlugin pluginStatus={wlgStatus} /> : null}

@@ -5030,8 +5030,8 @@ export function ImportReviewPage({
                   {countFor(counts, id)} {label}
                 </span>
               ))}
-              <Link to="/library/missing-ids" className="text-sky-300 underline underline-offset-2">
-                Library albums and tracks missing IDs are in Library: Missing IDs
+              <Link to="/import?tab=missing-ids" className="text-sky-300 underline underline-offset-2">
+                Library albums and tracks missing IDs are under Missing IDs
               </Link>
             </>
           )}

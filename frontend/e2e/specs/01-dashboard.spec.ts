@@ -32,9 +32,9 @@ test('nav tabs and the system menu reach every section, and System reports the r
   await page.goto('/library');
   const nav = page.getByRole('banner');
   for (const [tab, url, heading] of [
-    ['Import', /\/import/, 'Import music'],
+    ['Workbench', /\/import/, 'Workbench'],
     ['Playlists', /\/playlists/, 'Playlists'],
-    ['Jobs', /\/jobs/, 'Job History'],
+    ['Jobs & Cleanup', /\/jobs/, 'Job History'],
     ['Library', /\/library/, 'Browse music library'],
   ] as const) {
     await nav.getByRole('link', { name: new RegExp(`^${tab}`) }).click();

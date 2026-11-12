@@ -3,14 +3,14 @@ import { NO_FRONTEND_PORT, PASSWORD } from '../env';
 
 const DEEP_LINKS: [string, string][] = [
   ['/library', 'Browse music library'],
-  ['/library/missing-ids', 'Missing MusicBrainz IDs'],
-  ['/import', 'Import music'],
-  ['/import?tab=review', 'Import music'],
+  ['/import?tab=missing-ids', 'Missing MusicBrainz IDs'],
+  ['/import', 'Workbench'],
+  ['/import?tab=review', 'Workbench'],
   ['/playlists', 'Playlists'],
   ['/jobs', 'Job History'],
   ['/config', 'Settings'],
   ['/system', 'System'],
-  ['/changes', 'Library Changes'],
+  ['/import?tab=changes', 'Library Changes'],
   ['/submissions', 'Submission'],
 ];
 
@@ -31,6 +31,10 @@ test('tab survives a refresh; old and unknown routes redirect', async ({ page })
   await expect(page.getByRole('tab', { name: /Review Queue/ })).toHaveAttribute('aria-selected', 'true');
   await page.goto('/clean');
   await expect(page).toHaveURL(/\/jobs$/);
+  await page.goto('/changes?tx=tx-1');
+  await expect(page).toHaveURL(/\/import\?tx=tx-1&tab=changes$/);
+  await page.goto('/library/missing-ids');
+  await expect(page).toHaveURL(/\/import\?tab=missing-ids$/);
   await page.goto('/no/such/page');
   await expect(page).toHaveURL(/\/library$/);
 });

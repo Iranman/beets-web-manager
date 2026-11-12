@@ -38,7 +38,7 @@ describe('Hallmark app shell', () => {
     jobs.running = 2;
     jobs.failed = 1;
     renderAt('/library');
-    expect(screen.getByRole('link', { name: /^Jobs\s*\(2 running\)\s*\(1 failed\)$/ })).toBeTruthy();
+    expect(screen.getByRole('link', { name: /^Jobs & Cleanup\s*\(2 running\)\s*\(1 failed\)$/ })).toBeTruthy();
     expect(screen.getByText('2 running')).toBeTruthy();
     expect(screen.getByText('1 failed')).toBeTruthy();
     expect(screen.getByTestId('record-tonearm')).toBeTruthy();
@@ -48,13 +48,13 @@ describe('Hallmark app shell', () => {
     jobs.running = 0;
     jobs.failed = 0;
     renderAt('/library');
-    expect(screen.getByRole('link', { name: 'Jobs' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Jobs & Cleanup' })).toBeTruthy();
     expect(screen.queryByTestId('record-tonearm')).toBeNull();
   });
 
   it('marks the System menu button as current on a page it holds', () => {
     jobs.running = 0;
-    renderAt('/changes');
+    renderAt('/config');
     expect(screen.getByRole('button', { name: 'System' }).className).toContain('border-brass-400 bg-brass-950/60');
     cleanup();
     renderAt('/library');

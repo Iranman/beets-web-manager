@@ -52,7 +52,7 @@ test('album without IDs offers the repair path and appears under Missing IDs', a
   await page.goto('/library');
   await page.getByRole('button', { name: /Unknown Quantity artwork/ }).click();
   await expect(page.getByRole('article').filter({ hasText: 'Untagged Sessions' })).toContainText(/Needs IDs/);
-  await page.goto('/library/missing-ids');
+  await page.goto('/import?tab=missing-ids');
   await expect(page.getByRole('main')).toContainText('Untagged Sessions');
   await expect(page.getByRole('main')).not.toContainText('Glass Horizons');
 });

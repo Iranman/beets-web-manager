@@ -9,8 +9,6 @@ import Config from './views/Config';
 import Import from './views/Import';
 import Jobs from './views/Jobs';
 import Library from './views/Library';
-import LibraryChanges from './views/LibraryChanges';
-import LibraryMissingIds from './views/LibraryMissingIds';
 import Login from './views/Login';
 import Playlists from './views/Playlists';
 import Submissions from './views/Submissions';
@@ -24,6 +22,15 @@ interface AppRoutesProps {
   username?: string;
   onLogout?: () => void;
   onLoginSuccess?: () => void;
+}
+
+/** Library Changes and Missing IDs moved into the Workbench (/import); old links keep their
+ * query (Library Changes' ?tx=) and land on the matching Workbench tab. */
+function WorkbenchRedirect({ tab }: { tab: 'changes' | 'missing-ids' }) {
+  const [params] = useSearchParams();
+  const next = new URLSearchParams(params);
+  next.set('tab', tab);
+  return <Navigate to={`/import?${next.toString()}`} replace />;
 }
 
 /** The Clean page moved to Jobs; old links keep naming their panel with ?tab=. */
@@ -80,8 +87,8 @@ export function AppRoutes({
       >
         <Route index element={<Navigate to="/library" replace />} />
         <Route path="library" element={<Library />} />
-        <Route path="library/missing-ids" element={<LibraryMissingIds />} />
-        <Route path="changes" element={<LibraryChanges />} />
+        <Route path="library/missing-ids" element={<WorkbenchRedirect tab="missing-ids" />} />
+        <Route path="changes" element={<WorkbenchRedirect tab="changes" />} />
         <Route path="import" element={<Import />} />
         <Route path="clean" element={<CleanRedirect />} />
         <Route path="playlists" element={<Playlists />} />
