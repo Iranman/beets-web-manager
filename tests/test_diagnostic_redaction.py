@@ -56,8 +56,17 @@ class DiagnosticRedactionTests(unittest.TestCase):
     def test_surrounding_text_is_kept(self):
         redact = self.redactors[True]
         self.assertEqual(redact("connect failed: password=x,y next"), "connect failed: password=[REDACTED] next")
-        self.assertEqual(redact("ok\nAuthorization: Bearer x y\nnext"), "ok\nAuthorization: [REDACTED]\nnext")
+        # #654: the scheme survives both passes.
+        self.assertEqual(redact("ok\nAuthorization: Bearer x y\nnext"), "ok\nAuthorization: Bearer [REDACTED]\nnext")
         self.assertEqual(redact("https://u:x@host/p"), "https://[redacted]@host/p")
+
+    def test_issue_654_residuals(self):
+        for text in ("https://u:FAKEX@FAKEY@host/p", "access_token=FAKEX db_password=FAKEY",
+                     "Cookie: a=FAKEX; b=FAKEY", "Authorization: Digest username=u, response=FAKEX"):
+            for real, redact in self.redactors.items():
+                out = redact(text)
+                self.assertNotIn("FAKE", out, (real, text))
+                self.assertEqual(redact(out), out, (real, text))
 
     def test_crafted_input_is_linear(self):
         for n in (100_000, 1_000_000):

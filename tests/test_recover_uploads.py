@@ -1623,7 +1623,9 @@ class AuthorizationAndProvenance(unittest.TestCase):
                 "asserted_basis": "licensed_permission", "asserted_note": note,
                 "verified": False,
             })
-            self.assertEqual(rec["asserted_note"], "[REDACTED]", note)
+            # A secret name keeps its name before the mask (#654).
+            name = note.split("=", 1)[0]
+            self.assertIn(rec["asserted_note"], ("[REDACTED]", f"{name}=[REDACTED]"), note)
             self.assertNotIn("SECRETTOKEN12345", rec["asserted_note"])
         # and the legitimate F5 signed-param stripping still works; prose untouched
         rec2 = recover_service._sanitize_authorization_record({

@@ -1110,6 +1110,62 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         stored = self.module._load_settings()
         self.assertEqual((stored["ai_api_key"], stored["plex_token"]), ("fake-key-645", "fake-newtok-645"))
 
+    def test_settings_masking_residuals_657(self):
+        # #657 items 1, 2, 4: encoded colons and "@" in digest-pinned userinfo,
+        # and secret names before a count/flag qualifier.
+        leaky = {
+            "reg_enc": "reg.invalid:5000/u%3Afake-v01@sha256:abcd",
+            "reg_enc_lower": "localhost:5000/u%3afake-v02@sha256:abcd",
+            "reg_wide": "reg.invalid:5000/u：fake-v03@sha256:abcd",
+            "at_enc": "u:fake-v04%40sha256:abcd",
+            "at_wide": "u:fake-v05＠sha256:abcd",
+            "double_enc": "u%253Afake-v06@sha256:abcd",
+            "q_count_param": "https://h.invalid/?token_count=fake-v07",
+            "token_count": "fake-v08",
+            "password_bypass": "fake-v09",
+        }
+        # Policy: a dotted or localhost registry with a port and a path is an
+        # image reference by its form, so it is shown.
+        plain = {"reg_image": "reg.invalid:5000/img@sha256:abcd"}
+        r = self.client.post("/api/setup/settings", json={**leaky, **plain})
+        self.assertTrue(r.get_json()["ok"])
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        body = json.dumps(got, ensure_ascii=False)
+        for value in leaky.values():
+            for secret in re.findall(r"fake-v\d\d", value):
+                self.assertNotIn(secret, body)
+        self.assertEqual(got["q_count_param"], f"https://h.invalid/?token_count={mask}")
+        self.assertEqual((got["token_count"], got["password_bypass"]), (mask, mask))
+        self.assertEqual(got["reg_image"], plain["reg_image"])
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        self.assertEqual(self.module._load_settings(), {**leaky, **plain})
+
+    def test_url_moved_to_schemeless_host_657(self):
+        # #657 item 3: a URL changed to a host with no scheme or port kept the
+        # masked secret, because the new value has no origin.
+        stored_in = {"ai_base_url": "https://ai.invalid/v1", "ai_api_key": "fake-key-657",
+                     "svc": {"url": "https://svc.invalid/api", "password": "fake-pw-657", "note": "n"}}
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        for edit in ({"ai_base_url": "evil.invalid/v1"},
+                     {"ai_base_url": "evil"},
+                     {"svc": {"url": "evil.invalid/api", "password": mask, "note": "n"}},
+                     {"svc": {"url": ["evil.invalid/api"], "password": mask, "note": "n"}}):
+            r = self.client.post("/api/setup/settings", json={**got, **edit, "expected_revision": rev})
+            self.assertEqual(r.status_code, 400, edit)
+            self.assertEqual(r.get_json()["code"], "settings_unmatched_mask")
+        self.assertEqual(self.module._load_settings(), stored_in)
+        # A cleared URL, or an edited non-URL sibling, keeps the secret.
+        r = self.client.post("/api/setup/settings", json={
+            **got, "ai_base_url": "", "svc": {**got["svc"], "note": "changed"}, "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        stored = self.module._load_settings()
+        self.assertEqual((stored["ai_api_key"], stored["svc"]["password"]), ("fake-key-657", "fake-pw-657"))
+
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
         self.assertEqual(r.status_code, 400)

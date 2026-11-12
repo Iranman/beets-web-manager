@@ -39,7 +39,7 @@ from flask import jsonify, request, session
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
 from backend import config_layers  # noqa: E402
-from backend.app_runtime import SECRET_VALUE_PATTERN  # noqa: E402
+from backend.app_runtime import SECRET_NAME_PATTERN, SECRET_VALUE_PATTERN  # noqa: E402
 from backend.build_info import build_info  # noqa: E402
 from backend.web_manager_config_store import (  # noqa: E402
     WebManagerConfigStore,
@@ -406,6 +406,17 @@ def _redact_secret_params(text: str) -> str:
 _URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
 
 
+def _decode_setting_text(text: str) -> str:
+    """``text`` %-decoded (double encoding too) and NFKC-normalized (#657)."""
+    # ponytail: three decode rounds; a deeper encoding is not decoded.
+    for _ in range(3):
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return unicodedata.normalize("NFKC", text)
+
+
 def _redact_schemeless_userinfo(token: str) -> str:
     # "user:pass@host" with no "://" (#585). Only the part before any "://"
     # can be this token's userinfo; a token that starts with "scheme://" is
@@ -415,16 +426,20 @@ def _redact_schemeless_userinfo(token: str) -> str:
     if head != token and _URL_SCHEME_RE.fullmatch(head):
         return token
     userinfo, at, host = head.rpartition("@")
-    # A ":" written as "%3A" or a full-width colon is still a ":" (#642).
-    colon = ":" in unicodedata.normalize("NFKC", urllib.parse.unquote(userinfo))
+    # A ":" written as "%3A", "%253A" or a full-width colon is still a ":"
+    # (#642, #657).
+    decoded = _decode_setting_text(userinfo)
+    colon = ":" in decoded
     # A digest-pinned image is not userinfo, but a ":" other than a dotted
     # or localhost registry's port ("reg.x:5000/img") still is (#642):
-    # "u:pw@sha256:..." and "u:5000/pw@sha256:..." are cut.
-    if _SETTING_DIGEST_RE.fullmatch(host) and (not colon or _SETTING_REGISTRY_RE.fullmatch(userinfo)):
+    # "u:pw@sha256:..." and "u:5000/pw@sha256:..." are cut, and so is
+    # "reg.x:5000/u%3Apw@sha256:..." (#657). A plain "reg.x:5000/pw@sha256:..."
+    # is a registry image by its form and is shown.
+    if _SETTING_DIGEST_RE.fullmatch(host) and (not colon or _SETTING_REGISTRY_RE.fullmatch(decoded)):
         return token
     lead = userinfo[:7] if userinfo[:7].lower() == "mailto:" else ""
     user = userinfo[len(lead):]
-    colon = colon and ":" in unicodedata.normalize("NFKC", urllib.parse.unquote(user))
+    colon = colon and ":" in _decode_setting_text(user)
     if user and (colon or "/" in host):
         return lead + (_CUT if colon else _CUT_USER) + at + host + token[len(head):]
     return token
@@ -456,9 +471,10 @@ def _cut_setting_text(value: str) -> Optional[str]:
     # userinfo the cuts missed; mask the whole value. A plain email stays.
     # Only the real cuts are dropped first (#599 N2). An encoded user-only
     # token with a path also masks the whole value.
-    check = unicodedata.normalize("NFKC", urllib.parse.unquote(
-        redacted.replace(_CUT + "@", "").replace(_CUT, "").replace(_CUT_USER, "")))
-    check = _SETTING_MAILTO_RE.sub("", _SETTING_DIGEST_RE.sub("", check))
+    # Only a literal "@" pins a digest: digests are dropped before decoding,
+    # so "u:S%40sha256:..." and "u:S＠sha256:..." leave an "@" (#657).
+    check = _SETTING_DIGEST_RE.sub("", redacted.replace(_CUT + "@", "").replace(_CUT, "").replace(_CUT_USER, ""))
+    check = _SETTING_MAILTO_RE.sub("", _decode_setting_text(check))
     at = check.rfind("@")
     if (at > 0 and ":" in check[:at]) or _SETTING_USER_TOKEN_RE.search(check):
         return None
@@ -547,6 +563,20 @@ def _url_origins(value: Any) -> List[Any]:
     return [] if origin is None else [origin]
 
 
+def _lost_origin(before: Any, after: Any) -> bool:
+    """A string where ``before`` held a URL now holds text with no origin,
+    such as a schemeless "evil.invalid/v1" (#657): that is a moved URL too.
+    An emptied value or an unchanged list entry is not."""
+    if isinstance(after, dict):
+        base = before if isinstance(before, dict) else {}
+        return any(_lost_origin(base.get(k, _MISSING), v) for k, v in after.items())
+    if isinstance(after, list):
+        return any(_lost_origin(before, v) for v in after
+                   if not (isinstance(before, list) and v in before))
+    return (isinstance(after, str) and bool(after.strip()) and _url_origin(after) is None
+            and bool(_url_origins(before)))
+
+
 def _carries_secret(key: Any, value: Any) -> bool:
     return value is not _MISSING and _mask_setting_value(value, _is_secret_setting_key(str(key))) != value
 
@@ -569,7 +599,7 @@ def _check_url_origins(posted: dict, out: dict, base: dict, top: bool) -> None:
         return
     for m, v in out.items():
         before = _url_origins(base.get(m, _MISSING))
-        if all(o in before for o in _url_origins(v)):
+        if all(o in before for o in _url_origins(v)) and not _lost_origin(base.get(m, _MISSING), v):
             continue
         group = _name_group(m)
         if top:
@@ -1925,8 +1955,8 @@ _SECRET_KV_RE = re.compile(
     # Start only where a name run starts, never inside one: "\b" let each
     # "a" of "a-a-a-..." start a scan to the end of the run, O(n^2) (#524).
     (?<![a-z0-9_-])
-    ([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|passwd|passphrase|secret|authorization|auth|cookie
-        |(?<![a-z0-9])(?:pass|pwd)))  # whole word or suffix only: not bypass, compass
+    # The name is shared with app_runtime (#654).
+    (""" + SECRET_NAME_PATTERN + r""")
     (["']?\s*[:=]\s*)
     # Already redacted only when the placeholder ends the value: in
     # "[REDACTED],y" the ",y" is still part of the secret (#524).
@@ -1968,8 +1998,9 @@ _COOKIE_HEADER_RE = re.compile(r"(?im)\b(Set-Cookie|Cookie)(\s*:\s*)[^\r\n]*")
 
 # Credentials embedded in a URL's userinfo, e.g. https://user:password@host/
 # Anchored on "://" for any scheme: a "\b[a-z][a-z0-9+.-]*" scheme scan was
-# O(n^2) on "a-a-a-..." (#524).
-_URL_CREDENTIAL_RE = re.compile(r"(://)[^\s/@]+@")
+# O(n^2) on "a-a-a-..." (#524). The userinfo runs to the last "@" before a
+# "/" or whitespace: a password may hold "@" (#654).
+_URL_CREDENTIAL_RE = re.compile(r"(://)[^\s/]+@")
 
 # Defense-in-depth cleanup: collapses a `[redacted]`/`[REDACTED]` marker
 # followed by one or more stray `]` characters back down to a single clean
