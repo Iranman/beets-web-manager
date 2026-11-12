@@ -493,6 +493,10 @@
       "CANONICAL_FINAL_DECISION",
       "NEW canonical download verification."
     ],
+    "backend/matching/recording.py::_verify_audio_against_hits": [
+      "CANONICAL_FINAL_DECISION",
+      "Body of verify_audio_against_request (canonical download verification) over one hit list; the public wrapper runs it on all hits and on strong-sourced hits only (strong_only_agrees)."
+    ],
     "backend/matching/track_alignment.py::<module>": [
       "CANONICAL_FINAL_DECISION",
       "Canonical alignment."

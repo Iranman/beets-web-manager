@@ -161,22 +161,24 @@ def _hit_weak(hit: Any) -> bool:
 
 
 def strong_only_agrees(fn: Callable[[List[Any]], Any], hits: List[Any], default: Any,
-                       key: Callable[[Any], Any] = lambda verdict: verdict) -> Any:
+                       key: Callable[[Any], Any] = lambda verdict: verdict,
+                       blocks: Callable[[Any], bool] = lambda verdict: False) -> Any:
     """``fn``'s verdict on the hits, kept only when the hits without
     ``weak_sources`` reach the same verdict (compared by ``key``; the
-    strong-only verdict is returned); otherwise ``default``.
+    strong-only verdict is returned). When they differ, a strong-only
+    verdict that ``blocks`` (a conflict) is kept; otherwise ``default``.
 
     A weakly sourced recording (helpers_mb._acoustid_parse_candidates) can
-    therefore never on its own confirm a recording or contradict one: a
-    verdict that exists only because of it falls back to ``default``
-    (review), and it cannot turn a verdict that needs it absent into a
-    confirmation either. With no weak hit this is exactly ``fn(hits)``."""
+    only make the result stricter: on its own it never confirms a recording,
+    never contradicts one (a verdict that exists only because of it falls
+    back to ``default``, review), and never removes a conflict the strong
+    hits prove. With no weak hit this is exactly ``fn(hits)``."""
     full = fn(hits)
     strong = [hit for hit in hits if not _hit_weak(hit)]
     if len(strong) == len(hits):
         return full
     lean = fn(strong)
-    return lean if key(lean) == key(full) else default
+    return lean if key(lean) == key(full) or blocks(lean) else default
 
 
 def _acoustid_status_for_target(local: Dict[str, Any], target_recording_id: str) -> Tuple[AcoustIDStatus, List[str], List[str]]:
@@ -184,7 +186,8 @@ def _acoustid_status_for_target(local: Dict[str, Any], target_recording_id: str)
     if hits is None:
         return AcoustIDStatus.UNAVAILABLE, [], []
     return strong_only_agrees(lambda rows: _acoustid_status_for_hits(rows, target_recording_id), hits,
-                              (AcoustIDStatus.AMBIGUOUS, [], []), key=lambda verdict: verdict[0])
+                              (AcoustIDStatus.AMBIGUOUS, [], []), key=lambda verdict: verdict[0],
+                              blocks=lambda verdict: bool(verdict[2]))
 
 
 def _acoustid_status_for_hits(hits: List[Dict[str, Any]], target_recording_id: str) -> Tuple[AcoustIDStatus, List[str], List[str]]:

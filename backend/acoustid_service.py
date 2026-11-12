@@ -410,8 +410,10 @@ def _acoustid_verify_match(file_path: str, artist: str, title: str) -> str:
             return "confirmed"
         return "unverified" if agreeing else "mismatch"
 
-    # A weakly sourced recording neither confirms nor contradicts on its own.
-    return strong_only_agrees(_verdict, [c for c in (cands or []) if isinstance(c, dict)], "unverified")
+    # A weakly sourced recording neither confirms nor contradicts on its own,
+    # and never clears a mismatch the strong hits prove.
+    return strong_only_agrees(_verdict, [c for c in (cands or []) if isinstance(c, dict)], "unverified",
+                              blocks=lambda verdict: verdict == "mismatch")
 
 
 def _acoustid_top_tier(cands: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:

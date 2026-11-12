@@ -164,5 +164,40 @@ class LookupRequestTests(unittest.TestCase):
         self.assertNotIn(FAKE_KEY, result.message)
 
 
+class WeakHitNeverClearsAStrongConflictTests(unittest.TestCase):
+    """QA #702: a file embedded with its own Recording ID, a strong
+    fingerprint naming a different recording, and a weak hit for its own
+    recording must stay a hard conflict (it used to become auto-acceptable)."""
+
+    def test_embedded_id_with_strong_other_and_weak_own_stays_blocked(self):
+        from backend.matching import DEFAULT_MATCH_POLICY
+        from tests.test_mtr_deterministic_slot import SUBSET_POLICY, _evaluate, _file
+        strong_other = {"recording_id": "rec-112-3", "score": 0.97, "weak_sources": False}
+        for own_score in (0.96, 0.85):
+            with self.subTest(own_score=own_score):
+                weak_own = {"recording_id": "rec-112-2", "score": own_score, "weak_sources": True}
+                result = _evaluate([_file("Only You", 2, 255, acoustid_hits=[strong_other, weak_own],
+                                          recording_id="rec-112-2")])
+                self.assertIn("acoustid_conflict", result.conflicts)
+                self.assertFalse(result.can_auto_accept(SUBSET_POLICY))
+                self.assertFalse(result.can_auto_accept(DEFAULT_MATCH_POLICY))
+
+    def test_strong_conflict_kept_by_every_weak_aware_check(self):
+        hits = [_hit(REC_B, score=97), _hit(REC_A, score=96, weak=True)]
+        status, _positives, conflicts = _acoustid_status_for_target({"acoustid_hits": hits}, REC_A)
+        self.assertEqual((status, conflicts), (AcoustIDStatus.CONFLICT, ["acoustid_conflict"]))
+        self.assertEqual(acoustid_evidence_from_hits(hits, REC_A).status, AcoustIDStatus.CONFLICT)
+        verdict = verify_audio_against_request(
+            [_hit(REC_B, score=97, title="Different"), _hit(REC_A, score=96, weak=True)],
+            expected_recording_id=REC_A, expected_title="Song")
+        self.assertEqual(verdict["decision"], "reject")
+
+    def test_strong_ambiguity_conflict_kept(self):
+        hits = [_hit(REC_A, score=97), _hit(REC_B, score=96), _hit("c0000000-0000-0000-0000-00000000000c",
+                                                                    score=99, weak=True)]
+        status, _positives, conflicts = _acoustid_status_for_target({"acoustid_hits": hits}, REC_A)
+        self.assertEqual((status, conflicts), (AcoustIDStatus.AMBIGUOUS, ["acoustid_ambiguous"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -613,7 +613,8 @@ def verify_audio_against_request(
     full = run(rows)
     default = {**full, "decision": "review", "status": AcoustIDStatus.AMBIGUOUS.value, "conflicts": [],
                "reason": "Only a weakly sourced AcoustID link supports this result; review."}
-    return strong_only_agrees(run, rows, default, key=lambda verdict: verdict["decision"])
+    return strong_only_agrees(run, rows, default, key=lambda verdict: verdict["decision"],
+                              blocks=lambda verdict: verdict["decision"] == "reject" or bool(verdict["conflicts"]))
 
 
 def _verify_audio_against_hits(
