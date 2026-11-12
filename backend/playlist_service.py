@@ -16,6 +16,7 @@ from backend.app_runtime import _app_logger, AUDIO_EXT, LIB_PATH, MUSIC_ROOT, PL
 from backend.ytdlp_service import _apply_ytdlp_netrc, _download_method_label, _spotiflac_missing_tracks_download, _ytdlp_js_runtime_options, _ytdlp_missing_tracks_download, _ytdlp_remote_components, _ytdlp_source_extractor_args
 from backend.app_runtime import _norm, _redact_security_text, _safe_path_component
 from backend.audio_preferences import load_music_format_preferences as _load_music_format_preferences, validate_audio_file as _validate_audio_file_preferences, handle_rejected_download as _handle_rejected_audio_download
+from backend.listenbrainz_mapping import listenbrainz_recording_candidates
 from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _mb_release_search, _clean_for_mb, _resolve_release_group_to_release
 from backend.beets_adapter import beets_adapter, lib, BeetsUnavailableError
 import backend.composite_workflows as composite_workflows
@@ -8346,6 +8347,31 @@ def _playlist_suggestions_for_track(track: Dict[str, Any],
                     "year": _s(cand.get("year") or "").strip(),
                     "title_score": round(title_score, 3),
                     "artist_score": round(artist_score, 3),
+                },
+            )
+
+    # Text-only resolution found nothing safe: ask the ListenBrainz mapping.
+    # Its candidate is MusicBrainz-verified (title, artist, tracklist,
+    # duration) yet never safe -- it is a suggestion for review only. Without
+    # a duration it could not be verified, so it is not asked.
+    duration = _playlist_duration_seconds(row.get("duration") or track.get("duration"))
+    if include_musicbrainz and duration and title and artist and not any(s.get("safe") for s in suggestions):
+        for cand in listenbrainz_recording_candidates(title, artist, duration)["candidates"]:
+            _playlist_add_suggestion(
+                suggestions,
+                seen,
+                artist=_playlist_primary_artist_name(cand.get("artist") or ""),
+                title=_s(cand.get("title") or "").strip(),
+                source="listenbrainz",
+                confidence=float(cand.get("score") or 0) / 100.0,
+                safe=False,
+                reason="ListenBrainz mapping confirmed by MusicBrainz; review before use",
+                extra={
+                    "mb_trackid": _s(cand.get("mb_trackid") or "").strip(),
+                    "mb_url": _s(cand.get("mb_url") or "").strip(),
+                    "album": _s(cand.get("album") or "").strip(),
+                    "year": _s(cand.get("year") or "").strip(),
+                    "review_required": True,
                 },
             )
 
