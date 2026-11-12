@@ -54,7 +54,8 @@ class ArtistStageLoadingFlashTests(unittest.TestCase):
         # and footer text must both use the artist-aware label instead of
         # disagreeing with the readiness card's own stage name.
         self.assertIn("const stageLabel = artistStageActive ? (target?.preflight.current_stage_label", SUBMISSIONS_SOURCE)
-        self.assertIn("<Chip label={stageLabel}", SUBMISSIONS_SOURCE)
+        # The header shows it in the masthead status line (Hallmark redesign, #691).
+        self.assertIn("{stageLabel}</span>", SUBMISSIONS_SOURCE)
         self.assertIn("${target.summary.title || 'Untitled'} / ${stageLabel}`", SUBMISSIONS_SOURCE)
 
 
