@@ -861,7 +861,8 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         for value in cases.values():
             for secret in re.findall(r"fake-r\d\d", value):
                 self.assertNotIn(secret, body)
-        self.assertEqual(got["free"], f"note api_key={mask} here")
+        # #601 F2: a trailing word may be part of a spaced secret, so it is masked.
+        self.assertEqual(got["free"], f"note api_key={mask}")
         self.assertEqual(got["dsn"], f"host=db.invalid password={mask} user=x")
         self.assertEqual(got["dsn_quoted"], f"host=db.invalid password={mask} user=x")
         self.assertEqual(got["user_only"], f"{mask}@git.invalid/org/repo")
@@ -895,6 +896,87 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         self.assertTrue(r.get_json()["ok"])
         self.assertEqual(self.module._load_settings(), stored_in)
 
+    def test_settings_masking_residuals_601_595(self):
+        # #601 F1/F2 and #595 item 1: no part of a secret is shown.
+        leaky = {
+            "f1": "u:fake-t01 fake-t02:fake-t03@h.invalid",
+            "hash": "password=fake-t04#fake-t05",
+            "amp": "password=fake-t06&fake-t07",
+            "escaped_space": "password=fake-t08\\ fake-t09",
+            "nbsp": "password=fake-t12 fake-t13",
+            "bearer": "Authorization=Bearer fake-t14",
+            "q_hash": "https://h.invalid/?token=fake-t15#fake-t16",
+            "q_space": "https://h.invalid/?token=fake-t17 fake-t18",
+            "q_enc_eq": "https://h.invalid/?api_key%3Dfake-t19",
+            "q_wide_eq": "https://h.invalid/?api_key＝fake-t20",
+            "q_wide_q": "https://h.invalid/x？token=fake-t21",
+            "name_forms": "tokens=fake-t23 key2=fake-t24 oauth=fake-t25 apisig=fake-t26",
+            # PR #640 QA: a qualifier exempts only a name it ends, and "/"
+            # does not hide a secret word.
+            "qualified": ("https://h.invalid/?bypass_token=fake-t27&bypass_password=fake-t28"
+                          "&sort_token=fake-t29&count_password=fake-t30&cache_bypass_key=fake-t31"),
+            "slash_name": "https://h.invalid/?token/a=fake-t32",
+        }
+        # #601 F3, #595 item 3: not secrets, so shown as stored.
+        plain = {
+            "path": "/music/monkey=banana/album",
+            "words": "design=a author=b keyboard=c session_count=3 auth_bypass=1 password_bypass=1",
+            "plurals": "authors=a monkeys=b keywords=c designs=d",
+            "q_words": "https://h.invalid/?author=x&keyword=y&sort_key=z",
+            "mailto": "mailto:someone@mail.invalid",
+            "digest": "ghcr.invalid/org/img@sha256:" + "ab" * 32,
+            "digest_port": "reg.invalid:5000/img@sha256:" + "cd" * 32,
+            "q_count": "https://h.invalid/?token_count=5",
+        }
+        partial = {
+            # PR #640 QA: a ";" never ends a secret (as on main), so the
+            # rest of an ODBC string is masked with it.
+            # (" Id=" starts a new key at the space, as on main.)
+            "odbc": ("Server=a;Password=fake-t22;User Id=y", "Server=a;Password=MASK Id=y"),
+            "odbc_brace": ("Driver=x;PWD={fake-t10 fake-t11};Server=y", "Driver=x;PWD=MASK"),
+            "semi_tail": ("password=fake-t33;SEKRIT=fake-t34", "password=MASK"),
+            "digest_userinfo": ("u:fake-t35@sha256:abcd", "MASK@sha256:abcd"),
+        }
+        stored_in = {**leaky, **plain, **{k: v[0] for k, v in partial.items()}}
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        self.assertTrue(r.get_json()["ok"])
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        body = json.dumps(got, ensure_ascii=False)
+        for value in stored_in.values():
+            for secret in re.findall(r"fake-t\d\d", value):
+                self.assertNotIn(secret, body)
+        for key, value in plain.items():
+            self.assertEqual(got[key], value, key)
+        for key, (_, expected) in partial.items():
+            self.assertEqual(got[key], expected.replace("MASK", mask), key)
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(self.module._load_settings(), stored_in)
+
+    def test_moved_mask_is_refused_and_literal_mask_is_kept(self):
+        # #595 item 5, #601 F5: a mask posted under another key was saved
+        # literally; #601 F4: a value with no secret may hold "********".
+        stored_in = {"feed_url": "https://u:fake-pw-m1@feed.invalid/a", "note": "a",
+                     "db": {"host": "db.invalid", "password": "fake-pw-m2"}}
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        for edit in ({"other_url": got["feed_url"]},
+                     {"copy": mask},
+                     {"db": {"host": "db.invalid", "login": mask}},
+                     {"db": {"host": "db.invalid", "passwd": mask}}):
+            r = self.client.post("/api/setup/settings", json={**edit, "expected_revision": rev})
+            self.assertEqual(r.status_code, 400, edit)
+            self.assertEqual(r.get_json()["code"], "settings_unmatched_mask")
+        self.assertEqual(self.module._load_settings(), stored_in)
+        r = self.client.post("/api/setup/settings", json={
+            "note": f"see {mask} here", "new_note": f"x{mask}y", "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        stored = self.module._load_settings()
+        self.assertEqual((stored["note"], stored["new_note"]), (f"see {mask} here", f"x{mask}y"))
+
     def test_ambiguous_masked_list_entry_is_refused(self):
         # #593 QA F2: entries identical once masked were paired by position.
         urls = ["https://alice:fake-pw-a@h.invalid", "https://bob:fake-pw-b@h.invalid"]
@@ -910,6 +992,46 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         r = self.client.post("/api/setup/settings", json={**got, "expected_revision": rev})
         self.assertTrue(r.get_json()["ok"])
         self.assertEqual(self.module._load_settings()["urls"], urls)
+
+    def test_url_origin_change_refuses_masked_sibling_credential(self):
+        # #641: a masked sibling secret was kept when its URL moved host.
+        svc = {"url": "https://svc.invalid:8443/api", "password": "fake-pw-641"}
+        stored_in = {"ai_base_url": "https://ai.invalid/v1", "ai_api_key": "fake-key-641",
+                     "svc": svc, "svcs": [dict(svc)]}
+        r = self.client.post("/api/setup/settings", json=stored_in)
+        rev = r.get_json()["revision"]
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        mask = self.module._SECRET_MASK
+        moved = {"https://evil.invalid/v1": "host", "http://ai.invalid/v1": "scheme",
+                 "https://ai.invalid:8080/v1": "port"}
+        for url, what in moved.items():
+            for edit in ({"ai_base_url": url, "ai_api_key": mask},
+                         {"svc": {"url": url, "password": mask}},
+                         {"svcs": [{"url": url, "password": mask}]}):
+                r = self.client.post("/api/setup/settings", json={**got, **edit, "expected_revision": rev})
+                self.assertEqual(r.status_code, 400, (what, edit))
+                self.assertEqual(r.get_json()["code"], "settings_unmatched_mask")
+        self.assertEqual(self.module._load_settings(), stored_in)
+        # Same origin, other path: the mask still restores the secret.
+        r = self.client.post("/api/setup/settings", json={
+            **got, "ai_base_url": "https://ai.invalid/v2", "svc": {**got["svc"], "url": "https://svc.invalid:8443/v2"},
+            "expected_revision": rev})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        stored = self.module._load_settings()
+        self.assertEqual((stored["ai_api_key"], stored["svc"]["password"]), ("fake-key-641", "fake-pw-641"))
+        # A new host with a newly entered secret is accepted.
+        r = self.client.post("/api/setup/settings", json={
+            **got, "ai_base_url": "https://new.invalid/v1", "ai_api_key": "fake-new-641",
+            "svc": {"url": "https://new.invalid/api", "password": "fake-newpw-641"},
+            "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        stored = self.module._load_settings()
+        self.assertEqual((stored["ai_api_key"], stored["svc"]["password"]), ("fake-new-641", "fake-newpw-641"))
+        # Unchanged origin round trip restores everything.
+        got = self.client.get("/api/setup/settings").get_json()["settings"]
+        r = self.client.post("/api/setup/settings", json={**got, "expected_revision": r.get_json()["revision"]})
+        self.assertTrue(r.get_json()["ok"], r.get_json())
+        self.assertEqual(self.module._load_settings(), stored)
 
     def test_settings_rejects_non_object_payload(self):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])

@@ -291,11 +291,15 @@ def _is_secret_setting_key(name: str) -> bool:
 # is matched on its own (#593).
 # Spaces around "=" are allowed, as in a libpq DSN ("password = 'x'").
 _SETTING_PARAM_KEY_RE = re.compile(r"([^=&#;?\s]+)(?:(\s*=\s*))?")
-# A secret value runs to "&", "#" or whitespace; a raw "?" or ";" is part of
-# it (#599 N1). A quoted part may hold spaces and runs to its closing quote,
-# or to the end when unclosed (fail closed); text right after it continues
-# the value. The three alternatives start on different characters: linear.
-_SETTING_SECRET_VALUE_RE = re.compile(r"(?:'(?:\\.|[^'\\])*'?|\"(?:\\.|[^\"\\])*\"?|[^&#\s'\"])+")
+# A secret value ends only where "&", "#" or whitespace is followed by the
+# next "key=" (#601 F2): any other separator (NBSP too) may be part of the
+# secret, so it stays masked. A ";" never ends it, as on main: a secret may
+# hold ";X=" and nothing tells that tail from an ODBC ";User Id=", so the
+# rest of an ODBC string is masked too. One bounded key per separator: linear.
+_SETTING_NEXT_KEY_RE = re.compile(r"[&#\s][^\s=&#;?'\"{]+\s*=")
+# A quoted or braced part (ODBC "PWD={a b}") runs to its close, or to the
+# end when unclosed (fail closed).
+_SETTING_VALUE_CLOSE = {"'": "'", '"': '"', "{": "}"}
 
 # Stand in for each cut until the fail-closed check has run, so a literal
 # "********" in the stored value is never mistaken for a cut (#599 N2).
@@ -304,25 +308,73 @@ _SETTING_SECRET_VALUE_RE = re.compile(r"(?:'(?:\\.|[^'\\])*'?|\"(?:\\.|[^\"\\])*
 _CUT, _CUT_USER = "\x00", "\x01"
 # After the cuts: a user-only "TOKEN@host/path" written with %40 or U+FF20.
 _SETTING_USER_TOKEN_RE = re.compile(r"[^\s@]@[^\s@]*/")
+# Not userinfo: a digest-pinned image ("img@sha256:...") and "mailto:" (#595).
+_SETTING_DIGEST_RE = re.compile(r"@?sha(?:256|384|512):[0-9a-fA-F]+")
+_SETTING_MAILTO_RE = re.compile(r"(?i)\bmailto:")
+
+# Parameter names are matched by whole words (#601 F3, #595): "api_key",
+# "X-API-Token", "pwd", and run-together words ending in a secret word
+# ("apikey", "authToken"), with a plural or number ("tokens", "key2").
+# "monkey", "author", "design", "keyword" are not.
+_SECRET_PARAM_WORDS = frozenset(config_layers._SECRET_QUERY_KEYS + config_layers._SECRET_KEY_WORDS + (
+    "authorization", "credentials", "sessionid"))
+_SECRET_PARAM_SUFFIXES = ("key", "token", "secret", "pass", "pwd", "password", "passwd", "auth", "sig")
+_NOT_SECRET_PARAM_WORDS = frozenset((
+    "monkey", "donkey", "turkey", "hockey", "jockey", "whiskey", "sortkey",
+    "compass", "surpass", "overpass", "underpass", "trespass"))
+# A name that ends in one of these words names a count or a flag, not a
+# secret ("session_count", "auth_bypass"); so does "sort_key". Anywhere else
+# a qualifier exempts nothing (a "bypass" or "sort" prefix, a "*_bypass_key"),
+# and a bare "bypass" is still a secret (as on main).
+_NOT_SECRET_PARAM_LAST_WORDS = frozenset(("bypass", "count"))
 
 
 def _is_secret_param_key(name: str) -> bool:
-    # "cache_bypass"/"proxy-bypass" are not secrets, but a bare "bypass"
-    # still holds "pass" (as on main): only a prefixed bypass is dropped.
-    # ponytail: substring words; token matching is #601 F3.
-    name = re.sub(r"(?<=[a-z0-9])[_.-]?bypass", "", urllib.parse.unquote_plus(name).lower())
-    return any(w in name for w in config_layers._SECRET_QUERY_KEYS + config_layers._SECRET_KEY_WORDS)
+    words = [w for w in re.split(r"[^a-z0-9]+", urllib.parse.unquote_plus(name).lower()) if w]
+    if len(words) > 1 and (words[-1] in _NOT_SECRET_PARAM_LAST_WORDS or words[-2:] == ["sort", "key"]):
+        return False
+    forms = set()
+    for w in words:
+        w = w.rstrip("0123456789")
+        forms.update((w, w[:-1]) if w.endswith("s") else (w,))
+    return any(w in _SECRET_PARAM_WORDS
+               or (w.endswith(_SECRET_PARAM_SUFFIXES) and w not in _NOT_SECRET_PARAM_WORDS)
+               for w in forms)
 
 
-def _redact_secret_params(text: str) -> str:
-    out, done, pos = [], 0, 0
+def _secret_value_end(text: str, pos: int) -> int:
+    i, n = pos, len(text)
+    while i < n:
+        c = text[i]
+        close = _SETTING_VALUE_CLOSE.get(c)
+        if close:
+            i += 1
+            while i < n and text[i] != close:
+                i += 2 if text[i] == "\\" and close != "}" else 1
+            i += 1
+        elif (c in "&#" or c.isspace()) and _SETTING_NEXT_KEY_RE.match(text, i):
+            break
+        else:
+            i += 1
+    return min(i, n)
+
+
+def _secret_param_spans(text: str) -> Iterable[Tuple[int, int]]:
+    pos = 0
     while (m := _SETTING_PARAM_KEY_RE.search(text, pos)):
         pos = m.end()
         if m.group(2) is not None and _is_secret_param_key(m.group(1)):
-            v = _SETTING_SECRET_VALUE_RE.match(text, pos)
-            if v:
-                out.append(text[done:pos] + _CUT)
-                done = pos = v.end()
+            end = _secret_value_end(text, pos)
+            if end > pos:
+                yield pos, end
+                pos = end
+
+
+def _redact_secret_params(text: str) -> str:
+    out, done = [], 0
+    for start, end in _secret_param_spans(text):
+        out.append(text[done:start] + _CUT)
+        done = end
     return "".join(out) + text[done:]
 
 
@@ -338,17 +390,37 @@ def _redact_schemeless_userinfo(token: str) -> str:
     if head != token and _URL_SCHEME_RE.fullmatch(head):
         return token
     userinfo, at, host = head.rpartition("@")
-    if userinfo and (":" in userinfo or "/" in host):
-        return (_CUT if ":" in userinfo else _CUT_USER) + at + host + token[len(head):]
+    # A digest-pinned image is not userinfo, but a ":" other than a
+    # registry port ("reg:5000/img") still is: "u:pw@sha256:..." is cut.
+    if _SETTING_DIGEST_RE.fullmatch(host) and not re.search(r":(?!\d+/)", userinfo):
+        return token
+    lead = userinfo[:7] if userinfo[:7].lower() == "mailto:" else ""
+    user = userinfo[len(lead):]
+    if user and (":" in user or "/" in host):
+        return lead + (_CUT if ":" in user else _CUT_USER) + at + host + token[len(head):]
     return token
 
 
-def _redact_setting_url(value: str) -> str:
+def _cut_setting_text(value: str) -> Optional[str]:
+    """``value`` with each secret part replaced by a cut sentinel, or None
+    when the whole value must be masked."""
     if _CUT in value or _CUT_USER in value:
-        return _SECRET_MASK
+        return None
     redacted = config_layers.redact_url_userinfo_in_text(value, _CUT)
-    redacted = re.sub(r"\S+", lambda m: _redact_schemeless_userinfo(m.group(0)), redacted)
-    # Secret-named parameters (?api_key=..., #585), by the config editor's rule.
+    spaced = False
+
+    def schemeless(m: "re.Match[str]") -> str:
+        nonlocal spaced
+        out = _redact_schemeless_userinfo(m.group(0))
+        # A password may hold spaces, so text before a cut scheme-less
+        # token may be the start of it (#601 F1): mask the whole value.
+        spaced = spaced or (out != m.group(0) and bool(m.string[:m.start()].strip()))
+        return out
+
+    redacted = re.sub(r"\S+", schemeless, redacted)
+    if spaced:
+        return None
+    # Secret-named parameters (?api_key=..., #585), by whole-word names.
     redacted = _redact_secret_params(redacted)
     # Fail closed (#593): an "@" left after the cuts, once %-decoded and
     # NFKC-normalized (%40, U+FF20), with a ":" before it may still be
@@ -357,10 +429,30 @@ def _redact_setting_url(value: str) -> str:
     # token with a path also masks the whole value.
     check = unicodedata.normalize("NFKC", urllib.parse.unquote(
         redacted.replace(_CUT + "@", "").replace(_CUT, "").replace(_CUT_USER, "")))
+    check = _SETTING_MAILTO_RE.sub("", _SETTING_DIGEST_RE.sub("", check))
     at = check.rfind("@")
     if (at > 0 and ":" in check[:at]) or _SETTING_USER_TOKEN_RE.search(check):
-        return _SECRET_MASK
-    return redacted.replace(_CUT, _SECRET_MASK).replace(_CUT_USER, _SECRET_MASK)
+        return None
+    # A secret parameter written with "%3D" or a full-width "=" / "?" (#595)
+    # is only found once decoded: mask the whole value.
+    decoded = unicodedata.normalize("NFKC", urllib.parse.unquote(redacted))
+    if any(decoded[s:e] != _CUT for s, e in _secret_param_spans(decoded)):
+        return None
+    return redacted
+
+
+def _redact_setting_url(value: str) -> str:
+    cut = _cut_setting_text(value)
+    return _SECRET_MASK if cut is None else cut.replace(_CUT, _SECRET_MASK).replace(_CUT_USER, _SECRET_MASK)
+
+
+def _mask_in_secret_spot(value: str) -> bool:
+    """A literal mask sits where GET would cut a secret: it is a copied
+    placeholder, not a value (#601 F5, #595 item 5)."""
+    # A value masked whole has no partial GET form to copy a mask from, and
+    # a stored secret may itself hold "********" (#599 N2).
+    cut = _cut_setting_text(value)
+    return cut is not None and cut.count(_SECRET_MASK) < value.count(_SECRET_MASK)
 
 
 def _mask_setting_value(value: Any, secret: bool = False) -> Any:
@@ -386,11 +478,25 @@ def _mask_secret_settings(settings: dict) -> dict:
 _MISSING = object()
 
 
+def _url_origin(value: Any) -> Any:
+    """(scheme, host, port) of a URL string, else None (#641)."""
+    if not isinstance(value, str) or "://" not in value:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(value.strip())
+        return (parts.scheme.lower(), parts.hostname, parts.port) if parts.netloc else None
+    except ValueError:
+        return value.strip()  # an unparsable port: compare the raw text
+
+
 def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> Any:
     """POST inverse of _mask_setting_value: wherever ``posted`` is exactly
     what GET returned for ``stored``, keep ``stored`` (#522, #570). A mask
     with nothing stored behind it resolves to _MISSING (the key is dropped)."""
     if secret and posted == _SECRET_MASK:
+        if stored is _MISSING:
+            # A mask under a renamed or new key has no secret behind it (#601 F5).
+            raise ValueError("a masked value has no stored secret; re-enter the secret in full")
         return stored
     if isinstance(posted, dict):
         if stored is not _MISSING and not isinstance(stored, dict) and _SECRET_MASK in json.dumps(posted):
@@ -403,6 +509,12 @@ def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> A
             restored = _restore_masked_setting(v, base.get(k, _MISSING), _is_secret_setting_key(str(k)))
             if restored is not _MISSING:
                 out[k] = restored
+        # #641: a URL moved to another scheme, host or port must not carry the
+        # stored credential beside it; the mask is refused, a new one is taken.
+        moved = any(_url_origin(v) not in (None, _url_origin(base.get(k))) for k, v in out.items())
+        if moved and any(_is_secret_setting_key(str(k)) and _SECRET_MASK in json.dumps(v)
+                         for k, v in posted.items()):
+            raise ValueError("a URL's host, scheme or port changed; re-enter its credential in full")
         return out
     if isinstance(posted, list):
         # Entries are matched by identity, not position (#585): a posted entry
@@ -432,10 +544,13 @@ def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> A
     if isinstance(posted, str) and posted != stored:
         if isinstance(stored, str) and posted == _redact_setting_url(stored):
             return stored
-        if _SECRET_MASK in posted and stored is not _MISSING:
-            # Edited around a mask, or a mask posted for a non-string value
-            # (#599 N3): saving it would replace the stored secret with the
-            # mask itself. A new key has nothing to lose, so it may hold one.
+        if _SECRET_MASK in posted and (
+                secret or posted == _SECRET_MASK or _mask_in_secret_spot(posted)
+                or (stored is not _MISSING and _mask_setting_value(stored) != stored)):
+            # Edited around a mask, a mask posted for a non-string value
+            # (#599 N3), or a mask moved to another key (#595 item 5, #601
+            # F5): saving it would store the mask instead of the secret. A
+            # literal mask in a value with no secret is kept (#601 F4).
             raise ValueError("a masked value was edited; re-enter the secret in full")
     return posted
 

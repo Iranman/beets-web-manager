@@ -11,7 +11,9 @@ reviewed proposal it also checks paths, file size and slot evidence have
 not drifted. A pair that fails any check is skipped and stays in review;
 its validation is never relaxed.
 
-Apply requires an Approved transaction. The Beets engine removes each row
+Apply requires an Approved transaction and, under the apply locks, refuses
+the whole cleanup unless every keeper is still the reviewed file (same item,
+path, size and mtime). The Beets engine removes each row
 and moves its file into the engine quarantine (never deleted), refusing the
 whole request if any file's SHA-256 changed since planning. Afterwards the
 keeper rows, files and album slots are verified and the library item count
@@ -57,6 +59,15 @@ def _sha256(path: str) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _file_stamp(path: str) -> Optional[Dict[str, int]]:
+    """Size and mtime of a file, or None when it is not a regular file."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns} if Path(path).is_file() else None
 
 
 def _norm(path: Any) -> str:
@@ -196,6 +207,7 @@ def verify_pair(
         "release_relation": relation,
         "keep_reason": decision.get("keep_reason") or "",
         "keep_identity": _identity(keep),
+        "keep_stamp": _file_stamp(keep_path),
         "delete_identity": _identity(drop),
         **({"retire_album": retire_row} if decision.get("retire_album_id") else {}),
     }
@@ -294,6 +306,12 @@ def apply_reviewed_cleanup(
                                attempt_owner(operation_id), timeout=10):
         if claim_approved(st, operation_id) is None:
             return {"ok": False, "code": "not_approved", "error": claim_refusal(st, operation_id)}
+        refusals = keeper_refusals(pairs, ad, to_abs)
+        if refusals:
+            st.update(operation_id, status="Failed", metadata={"keeper_check_failures": refusals},
+                      append_logs=[f"Refused, nothing was removed: {r}" for r in refusals])
+            return {"ok": False, "code": "keeper_changed", "operation_id": operation_id, "status": "Failed",
+                    "error": "A keeper changed since the preview; re-plan the cleanup.", "refusals": refusals}
         stats = ad.get_stats() or {}
         items_before, albums_before = int(stats.get("items") or 0), int(stats.get("albums") or 0)
         # Recorded before the engine call: a restart mid-call is finished from
@@ -311,6 +329,31 @@ def apply_reviewed_cleanup(
             st.update(operation_id, status="Failed", append_logs=["Engine quarantine-remove failed; nothing was removed."])
             raise
         return finish_reviewed_cleanup(operation_id, res, adapter=ad, store=st, abs_path=to_abs)
+
+
+def keeper_refusals(pairs: Iterable[Dict[str, Any]], adapter: BeetsAdapter, abs_path: AbsPath) -> List[str]:
+    """Why a planned keeper is no longer the reviewed copy, one line per pair.
+
+    Run under the apply locks right before the engine call: the keeper must
+    still be in the library at the planned path with the size and mtime the
+    preview recorded. A preview without that record is refused too (#530)."""
+    out: List[str] = []
+    for p in pairs:
+        kid = p.get("keep_item_id")
+        keep = adapter.get_item(int(kid))
+        if not keep:
+            out.append(f"keeper {kid} is no longer in the library")
+            continue
+        path = abs_path(_decode_path(keep.get("path")))
+        if _norm(path) != _norm(p.get("keep_path")):
+            out.append(f"keeper {kid} moved since the preview ({p.get('keep_path')} -> {path})")
+            continue
+        stamp = _file_stamp(path)
+        if stamp is None:
+            out.append(f"keeper {kid} file is missing: {path}")
+        elif not p.get("keep_stamp") or stamp != p["keep_stamp"]:
+            out.append(f"keeper {kid} file changed since the preview: {path}")
+    return out
 
 
 def finish_reviewed_cleanup(
