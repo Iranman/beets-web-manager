@@ -3661,7 +3661,7 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     (confirmed import), which tags, writes and places the files. Web Manager
     does not retag the result (ARCH-024). A preserved torrent source is
     copied, never moved, and so is a folder holding a hardlinked file (checked
-    right before planning, N10); ``copy_source`` forces a copy too.
+    before audio validation, #594); ``copy_source`` forces a copy too.
     Runs directly -- safe for background threads."""
     if _pending_review_is_quality_upgrade(folder_path):
         raise RuntimeError(QUALITY_UPGRADE_INFORMATIONAL["error"])
@@ -3702,6 +3702,11 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     # the first place.
     # The AI-chosen candidate is imported as chosen: never swapped for another
     # Release (or Release Group) here.
+    # #594: the hardlink check runs before validation, so a rejected
+    # hardlinked file is kept, never quarantined or deleted.
+    if not preserve_torrent_source and _has_hardlinked_file(folder_path):
+        preserve_torrent_source = True
+        log.append("  Hardlinked source (another copy shares these files): copying instead of moving.")
     _validate_import_source_audio(folder_path, log, reject_downloads=True,
                                   preserve_source=preserve_torrent_source)
     mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
@@ -3715,9 +3720,6 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
                            "import could not be verified. Import was not started.")
     log.append(f"[import] Canonical MusicBrainz release-group ID: {resolved_releasegroupid}")
 
-    if not preserve_torrent_source and _has_hardlinked_file(folder_path):
-        preserve_torrent_source = True
-        log.append("  Hardlinked source (another copy shares these files): copying instead of moving.")
     plan_res = composite_workflows.plan_confirmed_import({
         "source_folder": folder_path,
         "mb_albumid": mb_albumid,
