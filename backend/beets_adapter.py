@@ -23,6 +23,7 @@ from backend import beets_embedded
 log = logging.getLogger("beets.adapter")
 
 _IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,200}")  # the plugin's own rule (#308)
+_ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")  # e.g. BEETS_NOT_FOUND
 
 
 class BeetsAdapterError(Exception):
@@ -31,9 +32,8 @@ class BeetsAdapterError(Exception):
     The message passed here becomes str(ex) and must be a stable, sanitized
     string safe to reach an HTTP response -- never raw upstream HTTP bodies,
     HTML, stack traces, filesystem paths, credentials, or plugin secrets.
-    Raw upstream diagnostic detail belongs only in the server log (see
-    `_request()`'s log.warning calls), never in this message or in
-    `response_data`, which callers may also surface to users.
+    No part of an upstream error body is logged or kept (#433); `response_data`
+    holds at most ``{"error_code": ...}``, since callers may surface it.
     """
 
     def __init__(
@@ -257,21 +257,17 @@ class BeetsAdapter:
     @staticmethod
     def _raise_upstream(status: int, path: str, raw_body: bytes) -> None:
         """Map an error status from Beets to the adapter's exceptions."""
-        err_body = raw_body.decode("utf-8", errors="replace")
         try:
-            err_json = json.loads(err_body)
+            err_json = json.loads(raw_body.decode("utf-8", errors="replace"))
         except Exception:
-            err_json = {"raw": err_body}
-
-        # Raw upstream response bodies (potentially raw HTML error pages,
-        # internal stack traces, or unexpected content) are logged
-        # server-side ONLY -- never embedded in the exception message,
-        # which callers may surface directly in an HTTP response.
-        log.warning("Beets upstream error %s on %s: %s", status, path, err_body[:2000])
-
-        # If our own webmanager plugin returned a structured error_code,
-        # carry it forward -- it is already a sanitized, stable field.
-        upstream_error_code = err_json.get("error_code") if isinstance(err_json, dict) else None
+            err_json = None
+        # Upstream bodies are untrusted (#433): never log or keep any of the
+        # body. Only a well-formed error_code from our webmanager plugin is
+        # carried forward; it is a stable, sanitized field.
+        code = err_json.get("error_code") if isinstance(err_json, dict) else None
+        upstream_error_code = code if isinstance(code, str) and _ERROR_CODE_RE.fullmatch(code) else None
+        err_json = {"error_code": upstream_error_code} if upstream_error_code else None
+        log.warning("Beets upstream error %s on %s (error_code=%s)", status, path, upstream_error_code)
 
         if status == 400:
             raise BeetsAdapterBadRequestError(
