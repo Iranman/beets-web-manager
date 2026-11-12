@@ -64,7 +64,7 @@ function HistoryRow({ entry }: { entry: RecentImport }) {
         </span>
         {mbUrl && (
           <a
-            className="text-[0.7rem] text-red-400 hover:text-red-300"
+            className="text-[0.7rem] text-brass-300 hover:text-brass-200"
             href={mbUrl}
             rel="noreferrer"
             target="_blank"

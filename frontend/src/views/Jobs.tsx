@@ -521,14 +521,15 @@ function WorkflowCard({
           <button
             key={a.value}
             type="button"
+            aria-pressed={sel === idx}
             onClick={() => setSel(idx)}
             className={cx(
               'rounded px-2.5 py-1 text-xs font-medium transition-colors',
               sel === idx
                 ? a.dangerous
                   ? 'bg-red-800/60 text-red-100 ring-1 ring-red-700'
-                  : 'bg-red-600/70 text-white ring-1 ring-red-500'
-                : 'bg-graphite-800 text-zinc-400 hover:bg-graphite-700 hover:text-zinc-200',
+                  : 'bg-brass-500/15 text-brass-200 ring-1 ring-brass-400'
+                : 'bg-graphite-800 text-zinc-300 hover:bg-graphite-700 hover:text-zinc-50',
             )}
           >
             {a.label}
@@ -574,11 +575,12 @@ function SelectorBar({
         <button
           key={label}
           type="button"
+          aria-pressed={selected === idx}
           onClick={() => onChange(idx)}
           className={cx(
             'rounded px-3 py-1.5 text-xs font-medium transition-colors',
             selected === idx
-              ? 'bg-red-500/15 text-zinc-100 ring-1 ring-red-400/40'
+              ? 'bg-brass-500/15 text-brass-200 ring-1 ring-brass-400'
               : 'bg-graphite-900/60 text-zinc-400 hover:bg-graphite-800 hover:text-zinc-200',
           )}
         >
@@ -1063,7 +1065,7 @@ function AlbumFolderCleanupPanel({
   const detailStats = [
     { label: 'Empty folders', value: count('empty_folders'), tone: 'text-sky-300 border-sky-900/50 bg-sky-950/15' },
     { label: 'Duplicate tracks', value: count('duplicate_tracks'), tone: 'text-orange-300 border-orange-900/50 bg-orange-950/15' },
-    { label: 'Artwork to move', value: count('artwork_moved'), tone: 'text-red-300 border-red-900/50 bg-red-950/15' },
+    { label: 'Artwork to move', value: count('artwork_moved'), tone: 'text-brass-300 border-brass-900/50 bg-brass-950/15' },
     { label: 'Files to move', value: count('files_moved'), tone: 'text-zinc-300 border-graphite-800 bg-graphite-950/40' },
     { label: 'Folders removed', value: count('folders_deleted'), tone: 'text-zinc-300 border-graphite-800 bg-graphite-950/40' },
   ].filter((stat) => stat.value > 0);
@@ -1167,8 +1169,9 @@ function AlbumFolderCleanupPanel({
                 type="button"
                 className={cx(
                   'rounded px-2 py-0.5 text-xs font-medium',
-                  filter === value ? 'bg-red-600/70 text-white' : 'bg-graphite-800 text-zinc-400 hover:bg-graphite-700 hover:text-zinc-200',
+                  filter === value ? 'bg-brass-500/15 text-brass-200 ring-1 ring-brass-400' : 'bg-graphite-800 text-zinc-300 hover:bg-graphite-700 hover:text-zinc-50',
                 )}
+                aria-pressed={filter === value}
                 onClick={() => setFilter(value)}
               >
                 {value === 'review' ? 'Needs review' : value[0].toUpperCase() + value.slice(1)}
@@ -1863,7 +1866,7 @@ function PathReference({ path }: { path: PathHit }) {
     <div className="mt-1 rounded border border-graphite-800 bg-graphite-950/60 px-2 py-1.5 text-[0.72rem]">
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate text-zinc-400">{expanded ? path.full : path.short}</span>
-        <button className="shrink-0 text-red-300 hover:text-red-200" type="button" onClick={() => setExpanded((value) => !value)}>
+        <button className="shrink-0 text-brass-300 hover:text-brass-200" type="button" onClick={() => setExpanded((value) => !value)}>
           {expanded ? 'Hide' : 'Full path'}
         </button>
         <button className="shrink-0 text-muted hover:text-zinc-300" type="button" onClick={() => void copyPath()}>
@@ -2328,8 +2331,9 @@ function ConsoleHistory({
               type="button"
               className={cx(
                 'rounded px-1.5 py-0.5 text-xs font-medium transition-colors',
-                status === opt.value ? 'bg-red-600/60 text-white' : 'text-muted hover:text-zinc-400',
+                status === opt.value ? 'bg-brass-500/15 text-brass-200 ring-1 ring-brass-400' : 'text-muted hover:text-zinc-200',
               )}
+              aria-pressed={status === opt.value}
               onClick={() => setStatus(opt.value)}
             >
               {opt.label}
@@ -2348,7 +2352,7 @@ function ConsoleHistory({
               key={job.job_id}
               className={cx(
                 'grid gap-2 border-b border-graphite-800/50 px-2.5 py-2 text-xs last:border-b-0 md:grid-cols-[minmax(0,1fr)_auto]',
-                selectedJobId === job.job_id ? 'bg-red-900/25' : 'hover:bg-graphite-800/30',
+                selectedJobId === job.job_id ? 'bg-brass-500/10' : 'hover:bg-graphite-800/30',
               )}
             >
               <button className="min-w-0 text-left" type="button" onClick={() => onSelectJob(job)}>

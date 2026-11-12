@@ -4,6 +4,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router';
 import { getHealth, logout, restartApp } from '../../api/client';
 import { useEngineProbe, useGlobalJobs } from '../../lib/hooks';
 import { EngineOfflineBanner, EngineOfflineContext } from '../EngineOfflineBanner';
+import { RecordMark } from '../RecordMark';
 
 interface Tab {
   to: string;
@@ -21,22 +22,6 @@ const TABS: Tab[] = [
   { to: '/playlists', label: 'Playlists' },
   { to: '/jobs',      label: 'Jobs' },
 ];
-
-// Record-disc mark: black vinyl with grooves and a brass centre label.
-function RecordMark() {
-  return (
-    <span className="flex size-8 items-center justify-center text-brass-400" aria-hidden="true">
-      <svg aria-hidden="true" className="size-8" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="16" cy="16" r="15" fill="#0e0b09" stroke="currentColor" strokeOpacity="0.55" />
-        <circle cx="16" cy="16" r="12" stroke="#3b322a" strokeWidth="0.8" />
-        <circle cx="16" cy="16" r="9.5" stroke="#3b322a" strokeWidth="0.8" />
-        <path d="M6.5 11.5A11 11 0 0 1 11.5 6" stroke="#f6dfae" strokeOpacity="0.35" strokeWidth="1.2" strokeLinecap="round" />
-        <circle cx="16" cy="16" r="6" fill="currentColor" />
-        <circle cx="16" cy="16" r="1.4" fill="#171310" />
-      </svg>
-    </span>
-  );
-}
 
 function JobsBadge({ running, failed }: { running: number; failed: number }) {
   if (running > 0) {

@@ -255,7 +255,7 @@ function AcquisitionRow({
             {mbid ? <span className="font-mono">{mbid}</span> : null}
             {local?.aldir ? <span className="max-w-3xl truncate font-mono">{local.aldir}</span> : null}
             {wanted?.mb_url ? (
-              <a className="text-red-400 hover:text-red-300" href={wanted.mb_url} rel="noreferrer" target="_blank">
+              <a className="text-brass-300 hover:text-brass-200" href={wanted.mb_url} rel="noreferrer" target="_blank">
                 MusicBrainz
               </a>
             ) : null}
@@ -689,7 +689,7 @@ export function AcquisitionPanel({
           <label className="flex items-center gap-2 rounded border border-graphite-700 px-2 py-1.5 text-sm text-zinc-400">
             <span>Method</span>
             <select
-              className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
+              className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-brass-400"
               value={batchMethod}
               onChange={(event) => setBatchMethod(event.target.value as BatchMethod)}
             >
@@ -711,7 +711,7 @@ export function AcquisitionPanel({
           <label className="flex cursor-pointer items-center gap-2 rounded border border-graphite-700 px-3 py-1.5 text-sm text-zinc-400">
             <input
               checked={batchMissingFirst}
-              className="accent-red-500"
+              className="accent-brass-500"
               type="checkbox"
               onChange={(event) => setBatchMissingFirst(event.target.checked)}
             />
@@ -720,7 +720,7 @@ export function AcquisitionPanel({
           <label className="flex cursor-pointer items-center gap-2 rounded border border-graphite-700 px-3 py-1.5 text-sm text-zinc-400">
             <input
               checked={batchYtdlpFallbackActive}
-              className="accent-red-500"
+              className="accent-brass-500"
               disabled={batchMethod !== 'slskd' || !ytdlpEnabled}
               type="checkbox"
               title={batchYtdlpFallbackBlocked ? ytdlpMessage : fallbackReasons || undefined}
@@ -887,7 +887,7 @@ export function AcquisitionPanel({
                   className={[
                     'px-3 py-2 text-sm transition-colors',
                     sourceFilter === option.value
-                      ? 'bg-red-500 text-white'
+                      ? 'bg-brass-500 text-graphite-950'
                       : 'bg-graphite-950 text-zinc-300 hover:bg-graphite-900',
                   ].join(' ')}
                   type="button"
@@ -900,7 +900,7 @@ export function AcquisitionPanel({
             <label className="flex items-center gap-2 rounded border border-graphite-700 px-2 text-sm text-zinc-400">
               <span>Album type</span>
               <select
-                className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
+                className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-brass-400"
                 value={albumType}
                 onChange={(event) => { setAlbumType(event.target.value); setOffset(0); }}
               >
@@ -913,7 +913,7 @@ export function AcquisitionPanel({
             <label className="flex items-center gap-2 rounded border border-graphite-700 px-2 text-sm text-zinc-400">
               <span>Sort</span>
               <select
-                className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-red-400"
+                className="rounded border border-field-border bg-graphite-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-brass-400"
                 value={sort}
                 onChange={(event) => { setSort(event.target.value as AcquisitionQueueSort); setOffset(0); }}
               >
@@ -925,7 +925,7 @@ export function AcquisitionPanel({
             <label className="flex cursor-pointer items-center gap-2 rounded border border-graphite-700 px-3 text-sm text-zinc-400">
               <input
                 checked={showUnmonitored}
-                className="accent-red-500"
+                className="accent-brass-500"
                 type="checkbox"
                 onChange={(event) => { setShowUnmonitored(event.target.checked); setOffset(0); }}
               />

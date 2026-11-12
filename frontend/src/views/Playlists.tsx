@@ -1084,7 +1084,7 @@ function PlaylistJobProgress({
             {metric('Missing', missing, missing ? 'text-rose-300' : 'text-zinc-100')}
             {metric('Waiting Import', downloaded, downloaded ? 'text-sky-300' : 'text-zinc-100')}
             {metric('Failed', failed, failed ? 'text-rose-300' : 'text-zinc-100')}
-            {metric('Round', downloadState.round ? `${downloadState.round}/${downloadState.max_rounds || '?'}` : '-', 'text-red-300')}
+            {metric('Round', downloadState.round ? `${downloadState.round}/${downloadState.max_rounds || '?'}` : '-', 'text-brass-300')}
             {metric('Sources', methods, 'text-zinc-300')}
           </div>
           <LinearProgress
@@ -2392,7 +2392,7 @@ export default function Playlists() {
               {compactStat('waiting import', downloadedWaitingCount, downloadedWaitingCount ? 'text-sky-300' : 'text-zinc-300')}
               {compactStat('failed/review', failedReviewCount, failedReviewCount ? 'text-amber-300' : 'text-zinc-300')}
               {compactStat('removed/excluded', removedExcludedCount, removedExcludedCount ? 'text-amber-300' : 'text-zinc-300')}
-              {compactStat('Plex synced', plexSyncedCount, plexSyncedCount ? 'text-red-300' : 'text-zinc-300')}
+              {compactStat('Plex synced', plexSyncedCount, plexSyncedCount ? 'text-brass-300' : 'text-zinc-300')}
               {compactStat('pending Plex', savedDetail?.last_plex?.pending_plex_count ?? activePlaylist?.plex_pending_count ?? 0, (savedDetail?.last_plex?.pending_plex_count ?? activePlaylist?.plex_pending_count ?? 0) ? 'text-amber-300' : 'text-zinc-300')}
             </div>
           </div>
@@ -2504,7 +2504,7 @@ export default function Playlists() {
                 setParseError('');
                 setParseResult(null);
               }}
-              className="h-9 rounded border border-graphite-700 bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-red-400"
+              className="h-9 rounded border border-graphite-700 bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-brass-400"
             >
               {SOURCE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -2516,7 +2516,7 @@ export default function Playlists() {
             <select
               value={downloadMethod}
               onChange={(event) => setDownloadMethod(event.target.value)}
-              className="h-9 rounded border border-field-border bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-red-400"
+              className="h-9 rounded border border-field-border bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-brass-400"
             >
               {DOWNLOAD_METHOD_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -2561,7 +2561,7 @@ export default function Playlists() {
                 setParseResult(null);
                 if (!name.trim()) setName(event.target.value);
               }}
-              className="h-10 rounded border border-graphite-700 bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-red-400"
+              className="h-10 rounded border border-graphite-700 bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-brass-400"
             >
               <option value="">Select a playlist from the configured folder</option>
               {playlists.map((playlist) => (
@@ -2678,9 +2678,10 @@ export default function Playlists() {
                 type="button"
                 className={`rounded-full border px-3 py-1 text-xs ${
                   trackGroup === group.id
-                    ? 'border-red-500 bg-red-950/40 text-red-200'
+                    ? 'border-brass-400 bg-brass-500/15 text-brass-200'
                     : 'border-graphite-800 bg-graphite-950/50 text-zinc-400 hover:border-graphite-600 hover:text-zinc-200'
                 }`}
+                aria-pressed={trackGroup === group.id}
                 onClick={() => setTrackGroup(group.id)}
               >
                 {group.label} <span className="tabular-nums text-muted">{group.count}</span>

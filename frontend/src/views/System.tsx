@@ -1369,8 +1369,8 @@ export default function System() {
             input: {
               sx: {
                 alignItems: 'flex-start',
-                bgcolor: '#020617',
-                color: '#d1d5db',
+                bgcolor: 'var(--bw-bg)',
+                color: 'var(--bw-text)',
                 fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
                 fontSize: '0.78rem',
                 lineHeight: 1.55,

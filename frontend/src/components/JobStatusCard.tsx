@@ -57,8 +57,8 @@ export function JobStatusCard({ job, runningLabel, logLines = 2, className = '' 
           sx={{
             height: 3,
             borderRadius: 0,
-            backgroundColor: 'rgba(245,158,11,0.12)',
-            '& .MuiLinearProgress-bar': { backgroundColor: '#b91c1c' },
+            backgroundColor: 'rgba(211,158,63,0.15)',
+            '& .MuiLinearProgress-bar': { backgroundColor: 'var(--bw-accent)' },
           }}
         />
       ) : null}

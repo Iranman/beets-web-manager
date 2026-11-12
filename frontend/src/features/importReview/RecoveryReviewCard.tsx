@@ -420,7 +420,7 @@ export function RecoveryReviewCard({
                 data-recovery-action-mode={actionAllowed ? 'auto' : 'manual'}
                 className={
                   actionAllowed
-                    ? 'rounded bg-red-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:bg-graphite-700 disabled:text-graphite-300'
+                    ? 'rounded bg-brass-500 px-3 py-1.5 text-sm font-semibold text-graphite-950 hover:bg-brass-400 disabled:cursor-not-allowed disabled:bg-graphite-700 disabled:text-graphite-300'
                     : 'rounded border border-field-border bg-graphite-900 px-3 py-1.5 text-sm font-semibold text-graphite-50 hover:bg-graphite-800 disabled:cursor-not-allowed disabled:border-graphite-700 disabled:text-muted'
                 }
               >

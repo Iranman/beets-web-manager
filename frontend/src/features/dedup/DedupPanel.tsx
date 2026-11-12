@@ -49,7 +49,7 @@ function DupRow({
     <label className="grid cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-start gap-3 border-t border-graphite-800/80 px-3 py-2.5 transition first:border-t-0 hover:bg-graphite-900/50">
       <input
         checked={selected}
-        className="mt-0.5 accent-red-500"
+        className="mt-0.5 accent-brass-500"
         type="checkbox"
         onChange={onToggle}
       />
@@ -349,7 +349,7 @@ export function DedupPanel() {
             <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-400">
               <input
                 checked={selected.size === duplicates.length}
-                className="accent-red-500"
+                className="accent-brass-500"
                 type="checkbox"
                 onChange={toggleAll}
               />

@@ -96,14 +96,25 @@ class ImportReviewButtonContrastTests(unittest.TestCase):
         self.assertIn("disabled:text-muted", IMPORT_REVIEW_SOURCE)
         # #611: light-theme zinc text must not come back.
         self.assertNotIn("text-zinc-", IMPORT_REVIEW_SOURCE)
-    def test_blocked_panel_actions_use_local_contrast_styles(self):
-        self.assertIn("blockedPanelActionButtonSx", IMPORT_REVIEW_SOURCE)
-        self.assertIn("blockedPanelWarningButtonSx", IMPORT_REVIEW_SOURCE)
-        self.assertIn("sx={blockedPanelActionButtonSx}", IMPORT_REVIEW_SOURCE)
-        self.assertIn("sx={blockedPanelWarningButtonSx}", IMPORT_REVIEW_SOURCE)
-        self.assertIn("backgroundColor: '#1f2530'", IMPORT_REVIEW_SOURCE)
-        self.assertIn("backgroundColor: '#78350f'", IMPORT_REVIEW_SOURCE)
-        self.assertIn("opacity: 1", IMPORT_REVIEW_SOURCE)
+    def test_blocked_panel_actions_use_theme_tokens(self):
+        # The blocked-panel buttons take the theme's outlined / outlinedWarning
+        # styles (theme.ts tokens), not page-local hex colours.
+        page = (_REVIEW_FEATURE / "ImportReviewPage.tsx").read_text(encoding="utf-8")
+        self.assertNotIn("blockedPanelActionButtonSx", page)
+        self.assertNotIn("blockedPanelWarningButtonSx", page)
+        self.assertNotRegex(page, r"(backgroundColor|borderColor|color): '#[0-9a-fA-F]{3,8}'")
+        self.assertIn('<Button size="small" variant="outlined" onClick={onSuggest} disabled={busy}>', page)
+        self.assertIn('variant="outlined"\n                      color="warning"', page)
+        self.assertIn("backgroundColor: button.secondaryBg", THEME_SOURCE)
+        self.assertIn("borderColor: button.secondaryBorder", THEME_SOURCE)
+        self.assertIn("backgroundColor: button.warningBg", THEME_SOURCE)
+        self.assertIn("borderColor: button.warningBorder", THEME_SOURCE)
+        for text_token, bg_token in (
+            ("secondaryText", "secondaryHover"),
+            ("warningText", "warningHover"),
+        ):
+            ratio = _contrast_ratio(_hex_token(text_token), _hex_token(bg_token))
+            self.assertGreaterEqual(ratio, 4.5, f"{text_token} on {bg_token} contrast is {ratio:.2f}")
 
 
 if __name__ == "__main__":

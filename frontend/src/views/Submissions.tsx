@@ -573,7 +573,7 @@ export default function Submissions() {
       <div className="mt-3 flex items-center gap-1 rounded-md border border-graphite-800 bg-graphite-900/70 px-3 py-2">
         {STEPS.map((label, index) => (
           <div key={label} className="flex min-w-0 flex-1 items-center gap-1">
-            <div className={['flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-1.5 text-xs font-semibold', index === activeStep ? 'bg-red-600 text-white' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-muted'].join(' ')}>{index + 1}</div>
+            <div className={['flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-1.5 text-xs font-semibold', index === activeStep ? 'bg-brass-500 text-graphite-950' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-muted'].join(' ')}>{index + 1}</div>
             <span className={['min-w-0 truncate text-[0.7rem]', index === activeStep ? 'text-zinc-100' : 'hidden text-muted sm:inline'].join(' ')}>{label}</span>
             {index < STEPS.length - 1 ? <div className={['mx-1 h-px flex-1', index < activeStep ? 'bg-emerald-800' : 'bg-graphite-800'].join(' ')} /> : null}
           </div>
@@ -597,7 +597,7 @@ export default function Submissions() {
               const missing = item.blocked_reason ? 1 : 0;
               const trackCount = selected && target && !targetLoading ? tracks.length : (item.tracks || item.evidence?.folder?.track_count || 0);
               return (
-                <button key={id} type="button" onClick={() => selectItem(item)} className={['w-full rounded border px-3 py-2 text-left transition-colors', selected ? 'border-red-500 bg-red-950/35 text-zinc-100' : 'border-graphite-800 bg-graphite-950/40 text-zinc-300 hover:border-graphite-700 hover:bg-graphite-850'].join(' ')}>
+                <button key={id} type="button" aria-pressed={selected} onClick={() => selectItem(item)} className={['w-full rounded border px-3 py-2 text-left transition-colors', selected ? 'border-brass-400 bg-brass-950/35 text-zinc-100' : 'border-graphite-800 bg-graphite-950/40 text-zinc-300 hover:border-graphite-700 hover:bg-graphite-850'].join(' ')}>
                   <div className="truncate text-sm font-semibold">{itemTitle(item)}</div>
                   <div className="mt-1 truncate text-xs text-muted">{itemArtist(item) || 'unknown artist'}{item.year ? ` / ${item.year}` : ''}</div>
                   <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-zinc-400">
@@ -814,7 +814,7 @@ export default function Submissions() {
               </div>
               <p className="mt-1 text-sm text-zinc-400">Likely existing releases from the current review evidence.</p>
               <div className="mt-3 space-y-2">
-                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-red-600" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-xs text-muted">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
+                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-brass-400" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-xs text-muted">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
                 {!selectedCandidateCount ? (discogsCandidate ? (
                   <Alert severity="info" action={<Button color="inherit" size="small" onClick={() => { markDuplicatesReviewed(); if (discogsCandidate.discogs_url) reprocessReferenceUrl(discogsCandidate.discogs_url); }}>Use as reference</Button>}>
                     No MusicBrainz match, but Discogs has a possible one: {discogsCandidate.artist || 'Unknown artist'} - {discogsCandidate.album || 'Unknown album'}{discogsCandidate.year ? ` (${discogsCandidate.year})` : ''}.

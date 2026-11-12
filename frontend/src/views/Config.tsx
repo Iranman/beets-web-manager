@@ -111,7 +111,7 @@ function CoverageBar({ label, present, total }: { label: string; present: number
         variant="determinate"
         value={pct}
         color={color}
-        sx={{ height: 6, borderRadius: 3, backgroundColor: '#1e293b' }}
+        sx={{ height: 6, borderRadius: 3, backgroundColor: 'var(--bw-surface-3)' }}
       />
     </div>
   );
