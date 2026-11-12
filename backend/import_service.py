@@ -3628,7 +3628,7 @@ def _is_app_staging_folder(folder: Path) -> bool:
     """#554: ``folder`` is a real (non-symlink) top-level folder of the app's
     recovery staging root, where only the app writes those sidecars."""
     root = recovery_service._staging_root()
-    return bool(root) and not os.path.islink(folder) and         os.path.realpath(os.path.dirname(os.path.normpath(str(folder)))) == root
+    return bool(root) and not os.path.islink(folder) and os.path.realpath(os.path.dirname(os.path.normpath(str(folder)))) == root
 
 
 def _folder_import_clean_source(log: list, source_folder_path: str, album_ids: List[int], selected_subset_import: bool,
