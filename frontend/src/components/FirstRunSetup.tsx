@@ -481,12 +481,12 @@ export default function FirstRunSetup() {
                     <button
                       type="button"
                       onClick={() => setShowBeetsDetails(!showBeetsDetails)}
-                      className="text-[11px] underline text-red-400 hover:text-red-200"
+                      className="text-xs underline text-red-400 hover:text-red-200"
                     >
                       {showBeetsDetails ? 'Hide technical details' : 'Show technical details'}
                     </button>
                     {showBeetsDetails && (
-                      <div className="font-mono text-[11px] text-zinc-400 bg-black/50 p-2 rounded border border-zinc-800">
+                      <div className="font-mono text-xs text-zinc-400 bg-black/50 p-2 rounded border border-zinc-800">
                         Beets: {setupStatus?.beets?.path || 'Beets inside Web Manager'}<br />
                         Available: {setupStatus?.beets?.available ? 'Yes' : 'No'}
                       </div>
@@ -543,7 +543,7 @@ export default function FirstRunSetup() {
                   <div key={item.key} className="rounded-xl border border-zinc-800 bg-graphite-950 p-3.5 flex items-center justify-between text-xs">
                     <div>
                       <span className="font-semibold text-white block">{item.name}</span>
-                      <span className="font-mono text-zinc-400 text-[11px]">{item.path}</span>
+                      <span className="font-mono text-zinc-400 text-xs">{item.path}</span>
                     </div>
                     <div>
                       {item.writable !== undefined ? (
@@ -845,8 +845,8 @@ export default function FirstRunSetup() {
                     <div>
                       <div className="text-sm font-bold">
                         {pluginsReport.all_required_healthy
-                          ? `All ${pluginsReport.required_count} Required Plugins Healthy`
-                          : `${pluginsReport.required_healthy_count} of ${pluginsReport.required_count} Required Plugins Ready`}
+                          ? `All ${pluginsReport.required_count} required plugins healthy`
+                          : `${pluginsReport.required_healthy_count} of ${pluginsReport.required_count} required plugins ready`}
                       </div>
                       <div className="text-xs opacity-80">
                         {pluginsReport.all_required_healthy
@@ -884,7 +884,7 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold text-zinc-300">
                     Required core plugins ({pluginsReport?.categories?.required?.length || 0})
                   </h3>
-                  <span className="text-[11px] text-muted">Auto-configured for Web Manager</span>
+                  <span className="text-xs text-muted">Auto-configured for Web Manager</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {(pluginsReport?.categories?.required || []).map((plugin) => (
@@ -894,9 +894,9 @@ export default function FirstRunSetup() {
                     >
                       <div className="min-w-0 pr-2">
                         <div className="font-semibold text-white truncate">{plugin.display_name || plugin.name}</div>
-                        <div className="text-[11px] text-zinc-400 truncate">{plugin.description}</div>
+                        <div className="text-xs text-zinc-400 truncate">{plugin.description}</div>
                       </div>
-                      <span className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-bold ${
+                      <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-bold ${
                         plugin.healthy
                           ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                           : 'bg-amber-950/80 text-amber-400 border border-amber-800'
@@ -914,16 +914,16 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold text-zinc-300">
                     Bundled Web Manager extensions
                   </h3>
-                  <span className="text-[11px] text-muted">Shared /config/beetsplug</span>
+                  <span className="text-xs text-muted">Shared /config/beetsplug</span>
                 </div>
                 <div className="rounded-lg border border-zinc-800 bg-graphite-950 p-3 flex items-center justify-between text-xs">
                   <div>
                     <div className="font-semibold text-white">discpath (Multi-Disc Subfolders)</div>
-                    <div className="text-[11px] text-zinc-400">
+                    <div className="text-xs text-zinc-400">
                       Web Manager multi-disc album directory formatting (<code>disc_subfolder</code> template field).
                     </div>
                   </div>
-                  <span className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-bold ${
+                  <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-bold ${
                     pluginsReport?.categories?.required?.find((p) => p.name === 'discpath')?.healthy
                       ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                       : 'bg-amber-950/80 text-amber-400 border border-amber-800'
@@ -939,7 +939,7 @@ export default function FirstRunSetup() {
                   <h3 className="text-xs font-bold text-zinc-300">
                     Optional & integration plugins ({((pluginsReport?.categories?.optional?.length || 0) + (pluginsReport?.categories?.integration?.length || 0))})
                   </h3>
-                  <span className="text-[11px] text-muted">Enabled on demand via settings / token</span>
+                  <span className="text-xs text-muted">Enabled on demand via settings / token</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {[...(pluginsReport?.categories?.optional || []), ...(pluginsReport?.categories?.integration || [])].map((plugin) => (
@@ -949,9 +949,9 @@ export default function FirstRunSetup() {
                     >
                       <div className="min-w-0 pr-2">
                         <div className="font-semibold text-white truncate">{plugin.display_name || plugin.name}</div>
-                        <div className="text-[11px] text-zinc-400 truncate">{plugin.description}</div>
+                        <div className="text-xs text-zinc-400 truncate">{plugin.description}</div>
                       </div>
-                      <span className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-bold ${
+                      <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-bold ${
                         plugin.enabled
                           ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                           : 'bg-zinc-800 text-zinc-400'
@@ -1117,8 +1117,8 @@ export default function FirstRunSetup() {
                       <span className="text-zinc-400">Beets Plugins</span>
                       <span className={`font-semibold ${pluginsReport?.all_required_healthy ? 'text-emerald-400' : 'text-amber-400'}`}>
                         {pluginsReport?.all_required_healthy
-                          ? `✓ All ${pluginsReport.required_count} Required Plugins Ready`
-                          : `${pluginsReport?.required_healthy_count || 0}/${pluginsReport?.required_count || 0} Required Plugins Ready`}
+                          ? `All ${pluginsReport.required_count} required plugins ready`
+                          : `${pluginsReport?.required_healthy_count || 0}/${pluginsReport?.required_count || 0} required plugins ready`}
                       </span>
                     </div>
                     <div className="py-2 flex justify-between items-center">

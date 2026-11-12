@@ -60,8 +60,8 @@ function bucketLabel(bucket: FolderActionBucket): string {
     case 'safe_rename':         return 'Safe rename';
     case 'safe_empty_source':   return 'Safe remove empty';
     case 'missing_rgid':        return 'Missing Release Group ID';
-    case 'target_exists_no_db': return 'Target exists · review';
-    case 'target_exists_db':    return 'Target exists · DB repair';
+    case 'target_exists_no_db': return 'Target exists, needs review';
+    case 'target_exists_db':    return 'Target exists, needs DB repair';
     case 'db_tracked':          return 'DB repair needed';
     case 'needs_review':        return 'Needs review';
   }
