@@ -684,33 +684,27 @@ EDITABLE_FIELDS = [
 # (#524, #647). The value runs to ASCII whitespace (an NBSP may be part of
 # it); a quoted part may hold spaces and runs to its closing quote, honoring
 # backslash escapes. A '"' part spans newlines (a PEM block) and stops at
-# the end of the line only when unclosed; a "'" part stops there, so a
-# "can't" does not hide the traceback below it (#654). Only a "'" that
-# opens the value spans newlines, when it closes within 4096 characters
-# and that closing "'" ends the value (#660: 'QQ\nSECRET'). The first later
-# "'" in a traceback usually opens a quote (KeyError: 'foo'), so an unclosed
-# leading "'" stops at the end of its line instead of hiding the traceback
-# (#662). A longer multi-line single-quoted value, or one whose closing "'"
-# is followed by a letter, shows its tail after the first line. Trailing
-# punctuation is over-masked rather than leaked. Nothing follows it in a
-# pattern, so a closed '"' is never re-scanned; the one unclosed '"' left in
-# a text is scanned twice, and a leading "'" scans at most 4096 characters
-# ahead once per match, so matching stays linear.
-_SECRET_VALUE_PART = (
-    r"""(?:"(?:[^"\\]|\\.)*"|"(?:[^"\\\r\n]|\\.)*|'(?:[^'\\\r\n]|\\.)*'?|[^ \t\r\n\f\v"'])"""
-)
-# A quote that may span newlines must close the value: whitespace,
-# punctuation or the end of the text follows it, not the letter after an
-# opening quote (#662).
-_MULTILINE_QUOTE_END = r"""(?![^\s,.;:!?)\]}>&#"'])"""
-SECRET_VALUE_PATTERN = (
-    r"""(?:'(?:[^'\\]|\\.){0,4096}'""" + _MULTILINE_QUOTE_END + "|" + _SECRET_VALUE_PART + ")"
-    + _SECRET_VALUE_PART + "*"
-)
-
-# Authorization schemes masked with the value after them, shared with
-# routes_setup's diagnostic redactor (#660).
-SECRET_SCHEME_PATTERN = r"(?:Bearer|Basic|Digest|Token|Negotiate)"
+# the end of the line only when unclosed. A "'" part, at the start of the
+# value or inside it (#670: a'QQ\nSECRET'), spans newlines only when it
+# closes within 4096 characters and that closing "'" ends the value (see
+# _MULTILINE_QUOTE_END; #660, #662); a doubled "''" inside it is an escaped
+# quote (#670: 'it''s\nSECRET'). Otherwise it stops at the end of its line,
+# so a "can't" does not hide the traceback below it (#654): the first later
+# "'" in a traceback usually opens a quote (KeyError: 'foo'), so the letter
+# after it rules it out as a closing one. A longer multi-line single-quoted
+# value, or one whose closing "'" is followed by a character outside that
+# set, shows its tail after the first line. Trailing punctuation is
+# over-masked rather than leaked. Nothing follows it in a pattern, so a
+# closed '"' is never re-scanned; the one unclosed '"' left in a text is
+# scanned twice, and each "'" scans at most 4096 characters ahead, so
+# matching stays linear.
+#
+# A quote that may span newlines must close the value: whitespace, the end
+# of the text or one of , . ; : ! ? ) ] } > & # " ' | - follows it. Any
+# other character (a letter, digit, "/", "=", "(", "*", "@" ...) is taken as
+# the start of a quoted word after an opening quote, so the quote does not
+# span newlines (#662, #670).
+_MULTILINE_QUOTE_END = r"""(?![^\s,.;:!?)\]}>&#"'|-])"""
 
 # A secret-bearing name, shared with routes_setup's diagnostic redactor
 # (#654): any prefix ("access_token", "db_password"), "pass"/"pwd" only as a
@@ -721,13 +715,38 @@ SECRET_NAME_PATTERN = (
     r"[a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|passwd|passphrase|secret"
     r"|authorization|auth|cookie|credentials?|sig(?:nature)?|(?<![a-z0-9])(?:pass|pwd))"
 )
+# After such a closing quote, a secret name whose separator is followed by
+# whitespace ("'a\nb'}Authorization: S") would be swallowed by the value and
+# its own value shown, so the line is then masked to its end instead (#670,
+# PR #679 QA). The scan stops at the next quote or whitespace, whose own
+# check covers the rest, so it stays linear.
+_NAME_AFTER_QUOTE = (
+    r"""(?:(?=[^\s"']*?(?<![a-z0-9_-])""" + SECRET_NAME_PATTERN + r"""["']?[ \t]*[:=]\s)[^\r\n]*)?"""
+)
+# A '"' in a query value keeps the closers without "|" and "-": there a
+# rejected '"a"-' leaves its closing '"' to pair with a later one, and so
+# masks the lines up to it (PR #679 QA: 'x?token="a"-\nS"]').
+_QUERY_DQUOTE_END = r"""(?![^\s,.;:!?)\]}>&#"'])""" + _NAME_AFTER_QUOTE
+_MULTILINE_QUOTE_END += _NAME_AFTER_QUOTE
+_SECRET_VALUE_PART = (
+    r"""(?:"(?:[^"\\]|\\.)*"|"(?:[^"\\\r\n]|\\.)*|'(?:[^'\\]|\\.|''){0,4096}'""" + _MULTILINE_QUOTE_END
+    + r"""|'(?:[^'\\\r\n]|\\.)*'?|[^ \t\r\n\f\v"'])"""
+)
+SECRET_VALUE_PATTERN = _SECRET_VALUE_PART + "+"
+
+# Authorization schemes masked with the value after them, shared with
+# routes_setup's diagnostic redactor (#660).
+SECRET_SCHEME_PATTERN = r"(?:Bearer|Basic|Digest|Token|Negotiate)"
 
 # One pass, three forms (#654); the leftmost match wins, so each span is
 # masked once and the output is a fixed point:
 # - a query parameter ("?access_token=x&keep=1"): the value stops at "&",
 #   "#" or whitespace outside quotes, so the following parameters survive;
-#   a '"', or a "'" that opens the value, spans newlines when it closes the
-#   value within 4096 characters (#660, #662), and a following segment
+#   a '"' or "'" anywhere in the value spans newlines when it closes the
+#   value within 4096 characters (#660, #662, #670: a'QQ\nSECRET'); an
+#   unclosed '"' runs to the end of its line, so the closing '"' of an
+#   enclosing JSON string is over-masked rather than risk a leak
+#   ('{"url": "x?token=QQ"}' loses its '"}', #670); a following segment
 #   without "=" is taken as a raw "&" inside the value ("?token=a&b&keep=1",
 #   #660), also before a closing quote ('{"u": "?token=a&b"}', #662), so a
 #   valueless flag right after a secret is masked too (fail closed);
@@ -738,8 +757,9 @@ SECRET_NAME_PATTERN = (
 #   quote first ({"password": ...}).
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![a-z0-9_-])(?:"
-    r"(?<=[?&])(?P<qk>" + SECRET_NAME_PATTERN + r")(?P<qs>=)(?:'[^']{0,4096}'" + _MULTILINE_QUOTE_END + r")?"
-    r"(?:\"[^\"]{0,4096}\"" + _MULTILINE_QUOTE_END + r"|\"[^\"\r\n]*|'[^'\r\n]*'?|[^&#\s\"'])*"
+    r"(?<=[?&])(?P<qk>" + SECRET_NAME_PATTERN + r")(?P<qs>=)"
+    r"(?:\"[^\"]{0,4096}\"" + _QUERY_DQUOTE_END + r"|\"[^\"\r\n]*"
+    r"|'[^']{0,4096}'" + _MULTILINE_QUOTE_END + r"|'[^'\r\n]*'?|[^&#\s\"'])*"
     r"(?:&[^&#=\s\"']+(?![^&#\s\"']))*"
     r"|(?P<hk>[a-z0-9_-]*?(?:authorization|cookie))(?P<hs>[ \t]*[:=][ \t]*)(?![ \t]*[\"'])[^\r\n]*"
     r"|(?P<k>" + SECRET_NAME_PATTERN + r")(?P<s>[\"']?\s*[:=]\s*)"

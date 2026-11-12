@@ -173,7 +173,7 @@ class ReleaseArtDownloadTests(unittest.TestCase):
 
     def test_cover_art_archive_redirect_is_followed_and_pinned(self):
         responses = [
-            _FakeResponse(307, headers={"Location": "https://ia.archive.example.test/front-250.png"}),
+            _FakeResponse(307, headers={"Location": "https://ia800.us.archive.org/front-250.png"}),
             _FakeResponse(200, _png_bytes(), {"Content-Type": "image/png"}),
         ]
         sent = []
@@ -187,13 +187,13 @@ class ReleaseArtDownloadTests(unittest.TestCase):
             url = musicbrainz_service._release_art_download(
                 self.mbid, f"https://coverartarchive.org/release-group/{self.mbid}/front-250", "coverartarchive")
         self.assertTrue(url)
-        self.assertEqual(sent, [("coverartarchive.org", _PUBLIC), ("ia.archive.example.test", _PUBLIC)])
+        self.assertEqual(sent, [("coverartarchive.org", _PUBLIC), ("ia800.us.archive.org", _PUBLIC)])
 
     def test_provider_supplied_url_to_cgnat_host_is_not_fetched(self):
         with mock.patch("backend.security.socket.getaddrinfo", fake_getaddrinfo("100.64.0.7")), \
                 mock.patch("backend.security._send_pinned") as send:
             self.assertEqual(musicbrainz_service._release_art_download(
-                self.mbid, "https://img.discogs.example.test/r.png", "discogs"), "")
+                self.mbid, "https://i.discogs.com/r.png", "discogs"), "")
         send.assert_not_called()
 
 

@@ -69,7 +69,10 @@ class DiagnosticRedactionTests(unittest.TestCase):
                      "password='FAKEX\nFAKEY'\nnext", "token=Negotiate FAKEX tail", "api_key: Digest FAKEX",
                      'x?token="FAKEX\nFAKEY"&keep=1', "x?token=FAKEX&FAKEY&keep=1",
                      # #662
-                     '{"url": "x?token=FAKEX&FAKEY"}', "x?token='FAKEX\nFAKEY'&keep=1"):
+                     '{"url": "x?token=FAKEX&FAKEY"}', "x?token='FAKEX\nFAKEY'&keep=1",
+                     # #670
+                     "password='FAKEX\nFAKEY'-", "password='FAKEX\nFAKEY'|", "x?token=a'FAKEX\nFAKEY'&keep=1",
+                     "password='it''s\nFAKEY'", "password=a'FAKEX\nFAKEY' tail"):
             for real, redact in self.redactors.items():
                 out = redact(text)
                 self.assertNotIn("FAKE", out, (real, text))
@@ -89,6 +92,7 @@ class DiagnosticRedactionTests(unittest.TestCase):
                 "x://" + "b:" * (n // 2), "https://" + "a-" * (n // 2), "password='" + "\\" * n,
                 "Authorization:" + " " * n, "a_" * (n // 2), "pass-" * (n // 5),
                 "token='\n" * (n // 8), "token='" + "\\'" * (n // 2), "?token=x" + "&a" * (n // 2),
+                "password=a" + "'a\n" * (n // 3), "password='" + "''" * (n // 2),
             ):
                 for real, redact in self.redactors.items():
                     start = time.perf_counter()

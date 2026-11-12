@@ -8,9 +8,9 @@ vi.mock('../src/api/client', () => ({
   getHealthDetail: vi.fn().mockResolvedValue({
     ok: true,
     checks: {
-      library_path: true,
-      beet_bin: true,
-      music_root: false,
+      app: true,
+      beets_web: true,
+      beets_webmanager_plugin: false,
       lidarr_key: false,
       discogs_token: false,
       slskd_key: true,
@@ -42,7 +42,7 @@ describe('Settings integration status', () => {
     render(<Config />);
     await screen.findByText('Lidarr');
 
-    expect(dotFor('Music root').className).toContain('bg-red-500');
+    expect(dotFor('Web Manager plugin').className).toContain('bg-red-500');
     expect(dotFor('Lidarr').className).not.toContain('bg-red-500');
     expect(dotFor('Lidarr').className).toContain('border-graphite-500');
     expect(dotFor('Beets library').className).toContain('bg-emerald-400');

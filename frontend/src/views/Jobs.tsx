@@ -2422,7 +2422,7 @@ function JobStatusBar({
           className={cx('relative inline-flex h-5 w-9 items-center rounded-full transition-colors', autoRefresh ? 'bg-brass-500' : 'bg-graphite-700')}
           onChange={onAutoRefresh}
         >
-          <span className={cx('inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform', autoRefresh ? 'translate-x-4' : 'translate-x-0.5')} />
+          <span className={cx('inline-block h-3.5 w-3.5 rounded-full transition-transform', autoRefresh ? 'translate-x-4 bg-brass-950' : 'translate-x-0.5 bg-white')} />
         </Switch>
         <span className="text-xs text-zinc-300">Auto-refresh</span>
       </label>

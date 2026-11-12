@@ -560,7 +560,8 @@ def opened(provider: str, request: Any, *, timeout: Optional[float] = None, max_
 def opened_public(provider: str, url: str, *, timeout: Optional[float] = None,
                   headers: Optional[Dict[str, str]] = None, max_bytes: Optional[int] = None,
                   max_attempts: Optional[int] = None,
-                  sleep: Callable[[float], None] = time.sleep) -> Iterator[Any]:
+                  sleep: Callable[[float], None] = time.sleep,
+                  allow_url: Optional[Callable[[str], bool]] = None) -> Iterator[Any]:
     """GET a URL supplied by a user or by a provider response, at ``provider``.
 
     Same policy, bounded retries, classification and health record as
@@ -575,7 +576,8 @@ def opened_public(provider: str, url: str, *, timeout: Optional[float] = None,
     while True:
         attempts += 1
         try:
-            response = open_public_url(url, headers=headers, timeout=timeout, max_bytes=max_bytes)
+            response = open_public_url(url, headers=headers, timeout=timeout, max_bytes=max_bytes,
+                                       allow_url=allow_url)
             break
         except Exception as exc:  # classified, recorded, then retried or re-raised unchanged
             if not _after_failure(provider, policy, exc, attempts=attempts, limit=limit, sleep=sleep):
