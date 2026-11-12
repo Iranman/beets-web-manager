@@ -58,6 +58,7 @@ class SecurityTextRedactionTests(unittest.TestCase):
                            "GET https://h.invalid/x?oauth_token=[REDACTED]&keep=1#f failed")
         self.assert_masked("https://h.invalid/?a=1&db_password=fake-s13&b=2",
                            "https://h.invalid/?a=1&db_password=[REDACTED]&b=2")
+        self.assert_masked('?token="fake-s16 fake-s17"&x=1', "?token=[REDACTED]&x=1")
 
     def test_url_password_with_at_sign(self):
         # #654: the part after the first "@" was shown.
