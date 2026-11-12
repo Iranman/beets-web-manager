@@ -63,3 +63,83 @@ def duplicate_is_already_in_library(ev: Any) -> Tuple[bool, str]:
     if recs <= lib_recs:
         return True, "recordings_present_in_release_group"
     return False, "torrent_has_recordings_not_in_library"
+
+
+# --- Local fingerprint evidence (supporting only) ---------------------------
+#
+# Compares two raw Chromaprint fingerprints (``fpcalc -raw``) to say whether
+# two files carry the same audio. SUPPORTING evidence for duplicate grouping
+# only: it never overrides a MusicBrainz or AcoustID identity and never on
+# its own authorises a merge or delete -- those still need the MB/AcoustID
+# identity gates (e.g. ``same_recording_proof``). Pure: no I/O.
+#
+# The offset search is adapted from pyacoustid's ``_match_fingerprints``
+# (https://github.com/beetbox/pyacoustid, acoustid.py):
+#   Copyright (C) 2011 Adrian Sampson. Permission is hereby granted, free of
+#   charge, to any person obtaining a copy of this software and associated
+#   documentation files (the "Software"), to deal in the Software without
+#   restriction, including without limitation the rights to use, copy,
+#   modify, merge, publish, distribute, sublicense, and/or sell copies of the
+#   Software, and to permit persons to whom the Software is furnished to do
+#   so, subject to the following conditions: The above copyright notice and
+#   this permission notice shall be included in all copies or substantial
+#   portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT
+#   WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. (MIT License)
+# Changed here: the best offset is then scored by bit-error rate over the
+# overlapping window, and the result is a three-way verdict.
+
+SAME_AUDIO = "same_audio"
+DIFFERENT_AUDIO = "different_audio"
+INCONCLUSIVE = "inconclusive"
+
+#: Bit-error rate at or below which two aligned fingerprints are the same audio
+#: (re-encodes of one master land well under this; unrelated audio is ~0.5).
+SAME_AUDIO_MAX_BIT_ERROR_RATE = 0.15
+#: Bit-error rate at or above which two aligned fingerprints are different audio.
+DIFFERENT_AUDIO_MIN_BIT_ERROR_RATE = 0.35
+#: Fewest overlapping fingerprint items (~0.124 s each) worth judging.
+MIN_OVERLAP_ITEMS = 40
+#: Offset search window and per-item vote tolerance (pyacoustid's values).
+MAX_ALIGN_OFFSET = 120
+MAX_ITEM_BIT_ERROR = 2
+
+
+def _clean_fp(fp: Any) -> list:
+    if not isinstance(fp, (list, tuple)):
+        return []
+    out = []
+    for v in fp:
+        if isinstance(v, bool) or not isinstance(v, int):
+            return []
+        out.append(v & 0xFFFFFFFF)
+    return out
+
+
+def _best_offset(a: list, b: list) -> int:
+    """Offset ``i - j`` with the most near-identical item pairs (pyacoustid)."""
+    counts: dict = {}
+    for i, x in enumerate(a):
+        for j in range(max(0, i - MAX_ALIGN_OFFSET), min(len(b), i + MAX_ALIGN_OFFSET)):
+            if (x ^ b[j]).bit_count() <= MAX_ITEM_BIT_ERROR:
+                counts[i - j] = counts.get(i - j, 0) + 1
+    return max(counts, key=lambda k: (counts[k], -abs(k))) if counts else 0
+
+
+def compare_raw_fingerprints(fp_a: Any, fp_b: Any) -> Tuple[str, dict]:
+    """Return (verdict, details) for two raw fingerprints; malformed input or
+    too little overlap is ``inconclusive``, never an error."""
+    a, b = _clean_fp(fp_a), _clean_fp(fp_b)
+    if not a or not b:
+        return INCONCLUSIVE, {"reason": "fingerprint_missing"}
+    offset = _best_offset(a, b)
+    pairs = [a[i] ^ b[i - offset] for i in range(max(0, offset), min(len(a), len(b) + offset))]
+    details = {"offset": offset, "overlap": len(pairs)}
+    if len(pairs) < MIN_OVERLAP_ITEMS:
+        return INCONCLUSIVE, {**details, "reason": "overlap_too_short"}
+    ber = sum(x.bit_count() for x in pairs) / (32 * len(pairs))
+    details["bit_error_rate"] = round(ber, 4)
+    if ber <= SAME_AUDIO_MAX_BIT_ERROR_RATE:
+        return SAME_AUDIO, details
+    if ber >= DIFFERENT_AUDIO_MIN_BIT_ERROR_RATE:
+        return DIFFERENT_AUDIO, details
+    return INCONCLUSIVE, {**details, "reason": "bit_error_rate_between_thresholds"}
