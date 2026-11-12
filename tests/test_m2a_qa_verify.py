@@ -42,6 +42,7 @@ class _Sync(_RouteEnv):
             p.start()
             self.addCleanup(p.stop)
         ts._install_transaction_job_hooks()
+        ts.start_transaction_reconcile_schedule()  # the server entrypoint's step (#631)
 
     def wait(self, job):
         deadline = time.time() + 5

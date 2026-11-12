@@ -537,6 +537,35 @@ class AiImportReleaseTests(unittest.TestCase):
         self.assertEqual(planned["mb_releasegroupid"], RG)
         self.assertIs(planned["use_move"], True)
 
+    def test_ai_import_keeps_a_rejected_hardlinked_file(self):
+        # #594: the hardlink check runs before validation, so "delete" handling
+        # leaves a rejected hardlinked (seeding) file in place.
+        import backend.ai_service as ai
+        import backend.library_service as libsvc
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name) / "Artist - Album"
+        folder.mkdir()
+        track = folder / "01.flac"
+        track.write_bytes(b"x")
+        try:
+            os.link(track, Path(tmp.name) / "seed.flac")
+        except OSError as ex:  # pragma: no cover - filesystem without hardlinks
+            self.skipTest(f"hardlinks unsupported: {ex}")
+        report = {"rejected": [{"path": str(track), "message": "Rejected download", "reasons": ["format"]}]}
+        log: list = []
+        with mock.patch.object(ai, "_preserve_torrent_source_path", return_value=False), \
+                mock.patch.object(libsvc, "_preserve_torrent_source_file", return_value=False), \
+                mock.patch.object(ai, "_music_format_preferences",
+                                  return_value={"rejected_download_handling": "delete"}), \
+                mock.patch.object(ai, "_validate_audio_tree_preferences", return_value=report), \
+                mock.patch.object(ai.composite_workflows, "plan_confirmed_import") as plan:
+            with self.assertRaises(RuntimeError):
+                ai._ai_import_folder(str(folder), REL, {}, log)
+        self.assertEqual((track.read_bytes(), os.stat(track).st_nlink), (b"x", 2))
+        self.assertTrue(any("left in place" in line for line in log), log)
+        plan.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

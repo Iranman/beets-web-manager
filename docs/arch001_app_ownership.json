@@ -387,10 +387,10 @@
    "module": "app.py",
    "lines": [
     455,
-    464
+    465
    ],
-   "size": 10,
-   "body_lines": 3,
+   "size": 11,
+   "body_lines": 4,
    "route": null,
    "mutation_capable": false,
    "domain": "BOOTSTRAP",
@@ -400,15 +400,16 @@
    "caller_count": 0,
    "dependencies": [
     "_legacy_local_scan_enabled",
-    "start_auto_scan_schedule"
+    "start_auto_scan_schedule",
+    "start_transaction_reconcile_schedule"
    ]
   },
   {
    "name": "render_index",
    "module": "app.py",
    "lines": [
-    485,
-    495
+    486,
+    496
    ],
    "size": 11,
    "body_lines": 9,
@@ -428,8 +429,8 @@
    "name": "react_index_response",
    "module": "app.py",
    "lines": [
-    498,
-    508
+    499,
+    509
    ],
    "size": 11,
    "body_lines": 10,
@@ -451,8 +452,8 @@
    "name": "react_spa_fallback",
    "module": "app.py",
    "lines": [
-    512,
-    525
+    513,
+    526
    ],
    "size": 14,
    "body_lines": 12,
@@ -475,8 +476,8 @@
    "name": "__getattr__",
    "module": "app.py",
    "lines": [
-    573,
-    583
+    574,
+    584
    ],
    "size": 11,
    "body_lines": 10,
@@ -493,8 +494,8 @@
    "name": "_load_route_module",
    "module": "app.py",
    "lines": [
-    601,
-    614
+    602,
+    615
    ],
    "size": 14,
    "body_lines": 13,
@@ -33986,11 +33987,11 @@
    "name": "_install_transaction_job_hooks",
    "module": "backend/transaction_service.py",
    "lines": [
-    281,
-    444
+    284,
+    448
    ],
-   "size": 164,
-   "body_lines": 163,
+   "size": 165,
+   "body_lines": 164,
    "route": null,
    "mutation_capable": false,
    "domain": "TRANSACTIONS",
@@ -34005,11 +34006,31 @@
    ]
   },
   {
-   "name": "transaction_cancel_eligibility",
+   "name": "start_transaction_reconcile_schedule",
    "module": "backend/transaction_service.py",
    "lines": [
     451,
-    468
+    461
+   ],
+   "size": 11,
+   "body_lines": 7,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "IMPORT_RECONCILIATION",
+   "desired_owner": "backend/import_reconciliation_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "start_background_schedules"
+   ],
+   "caller_count": 1,
+   "dependencies": []
+  },
+  {
+   "name": "transaction_cancel_eligibility",
+   "module": "backend/transaction_service.py",
+   "lines": [
+    468,
+    485
    ],
    "size": 18,
    "body_lines": 12,
@@ -34029,8 +34050,8 @@
    "name": "_sync_transactions_from_jobs",
    "module": "backend/transaction_service.py",
    "lines": [
-    471,
-    480
+    488,
+    497
    ],
    "size": 10,
    "body_lines": 9,
@@ -34049,8 +34070,8 @@
    "name": "_item_transaction_fields",
    "module": "backend/transaction_service.py",
    "lines": [
-    485,
-    496
+    502,
+    513
    ],
    "size": 12,
    "body_lines": 11,
@@ -34071,8 +34092,8 @@
    "name": "_item_metadata_transaction_payload",
    "module": "backend/transaction_service.py",
    "lines": [
-    499,
-    529
+    516,
+    546
    ],
    "size": 31,
    "body_lines": 30,
@@ -34094,8 +34115,8 @@
    "name": "_start_metadata_apply_transaction",
    "module": "backend/transaction_service.py",
    "lines": [
-    532,
-    586
+    549,
+    603
    ],
    "size": 55,
    "body_lines": 54,
@@ -42515,7 +42536,7 @@
  "summary": {
   "BOOTSTRAP": {
    "functions": 19,
-   "lines": 243
+   "lines": 244
   },
   "AUTH": {
    "functions": 2,
@@ -42526,7 +42547,7 @@
    "lines": 11
   }
  },
- "app_py_lines": 646,
+ "app_py_lines": 647,
  "extracted_modules": [
   "backend/app_runtime.py",
   "backend/auth_service.py",
