@@ -1,15 +1,14 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UntrackedRecoverySection } from '../src/features/libraryHealth/UntrackedRecoverySection';
 import {
   applyTransaction,
   approveTransaction,
-  getTransaction,
   getUntrackedCandidates,
   planUntrackedRecovery,
   rollbackTransaction,
 } from '../src/api/client';
-import type { TransactionDetail } from '../src/api/types';
 
 vi.mock('../src/api/client', () => ({
   applyTransaction: vi.fn(),
@@ -22,92 +21,25 @@ vi.mock('../src/api/client', () => ({
   startUntrackedInventory: vi.fn(),
 }));
 
-const txWith = (rollback: TransactionDetail['rollback']) => ({
-  ok: true,
-  transaction: {
-    id: 'op-1', created_at: 0, updated_at: 0, operation_type: 'untracked', status: 'Completed', dry_run: false,
-    summary: '', confidence: {}, counts: {}, rollback, changes: [], changes_total: 0,
-  } as TransactionDetail,
-});
-
-async function renderWithPlan() {
-  vi.mocked(getUntrackedCandidates).mockResolvedValue({
-    ok: true, total: 1, offset: 0, limit: 50,
-    rows: [{ path: '/m/a.flac', action: 'quarantine', action_eligibility: 'eligible', reason: 'dup' }],
-  } as never);
-  vi.mocked(planUntrackedRecovery).mockResolvedValue({ ok: true, operation_id: 'op-1', action: 'quarantine' });
-  render(<UntrackedRecoverySection />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Plan' }));
-  return (await screen.findByRole('button', { name: 'Roll back' })) as HTMLButtonElement;
-}
-
-describe('UntrackedRecoverySection rollback gating (#250 QA F4)', () => {
+// One home per action: Jobs > Untracked files only makes plans. Approve, apply
+// and roll back (with their confirmations and the server's rollback.allowed
+// gate, #228/#250) live in Workbench > Library Changes and are tested there.
+describe('UntrackedRecoverySection hands plans to Library Changes', () => {
   afterEach(() => { vi.resetAllMocks(); cleanup(); });
 
-  it('keeps Roll back disabled before apply and explains why', async () => {
-    const button = await renderWithPlan();
-    expect(button.disabled).toBe(true);
-    const reason = document.getElementById(button.getAttribute('aria-describedby')!);
-    expect(reason?.textContent).toMatch(/after this plan is applied/);
-    expect(getTransaction).not.toHaveBeenCalled();
-  });
-
-  it('enables Roll back when the transaction reports rollback.allowed after apply', async () => {
-    await renderWithPlan();
-    vi.mocked(approveTransaction).mockResolvedValue({ ok: true } as never);
-    vi.mocked(applyTransaction).mockResolvedValue({ ok: true, status: 'Completed' } as never);
-    vi.mocked(getTransaction).mockResolvedValue(txWith({ available: true, allowed: true, allowed_code: 'allowed', allowed_reason: '' }));
-    vi.mocked(rollbackTransaction).mockResolvedValue({ ok: true, status: 'Rolled Back' } as never);
-    fireEvent.click(screen.getByRole('button', { name: 'Approve and apply' }));
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Roll back' }) as HTMLButtonElement).disabled).toBe(false));
-    expect(getTransaction).toHaveBeenCalledWith('op-1');
-    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }));
-    await waitFor(() => expect(rollbackTransaction).toHaveBeenCalledWith('op-1'));
-  });
-
-  it('shows the server reason and stays disabled when not allowed after a failed apply', async () => {
-    await renderWithPlan();
-    vi.mocked(approveTransaction).mockResolvedValue({ ok: true } as never);
-    vi.mocked(applyTransaction).mockRejectedValue(new Error('Apply failed'));
-    vi.mocked(getTransaction).mockResolvedValue(txWith({
-      available: false, allowed: false, allowed_code: 'not_applied', allowed_reason: 'Nothing was applied, so there is nothing to roll back.',
-    }));
-    fireEvent.click(screen.getByRole('button', { name: 'Approve and apply' }));
-    await screen.findByText('Nothing was applied, so there is nothing to roll back.');
-    expect((screen.getByRole('button', { name: 'Roll back' }) as HTMLButtonElement).disabled).toBe(true);
-  });
-
-  it('re-reads rollback.allowed after a refused rollback (#245 N1)', async () => {
-    await renderWithPlan();
-    vi.mocked(approveTransaction).mockResolvedValue({ ok: true } as never);
-    vi.mocked(applyTransaction).mockResolvedValue({ ok: true, status: 'Completed' } as never);
-    vi.mocked(getTransaction).mockResolvedValueOnce(txWith({ available: true, allowed: true, allowed_code: 'allowed', allowed_reason: '' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Approve and apply' }));
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Roll back' }) as HTMLButtonElement).disabled).toBe(false));
-
-    vi.mocked(rollbackTransaction).mockRejectedValue(Object.assign(new Error('Library is busy'), { httpStatus: 409 }));
-    vi.mocked(getTransaction).mockResolvedValueOnce(txWith({
-      available: true, allowed: false, allowed_code: 'resource_busy', allowed_reason: 'Another operation holds the library lock.',
-    }));
-    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }));
-    await screen.findByText('Another operation holds the library lock.');
-    expect(getTransaction).toHaveBeenCalledTimes(2);
-    expect((screen.getByRole('button', { name: 'Roll back' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Library is busy')).toBeTruthy();
-  });
-
-  it('a new plan resets the rollback-allowed state (#245 N2)', async () => {
-    await renderWithPlan();
-    vi.mocked(approveTransaction).mockResolvedValue({ ok: true } as never);
-    vi.mocked(applyTransaction).mockResolvedValue({ ok: true, status: 'Completed' } as never);
-    vi.mocked(getTransaction).mockResolvedValue(txWith({ available: true, allowed: true, allowed_code: 'allowed', allowed_reason: '' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Approve and apply' }));
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Roll back' }) as HTMLButtonElement).disabled).toBe(false));
-
-    vi.mocked(planUntrackedRecovery).mockResolvedValue({ ok: true, operation_id: 'op-2', action: 'quarantine' });
-    fireEvent.click(screen.getByRole('button', { name: 'Plan' }));
-    await waitFor(() => expect(planUntrackedRecovery).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Roll back' }) as HTMLButtonElement).disabled).toBe(true));
-    expect(screen.getByText(/after this plan is applied/)).toBeTruthy();
+  it('links a new plan to its Library Changes entry and offers no inline mutation', async () => {
+    vi.mocked(getUntrackedCandidates).mockResolvedValue({
+      ok: true, total: 1, offset: 0, limit: 50,
+      rows: [{ path: '/m/a.flac', action: 'quarantine', action_eligibility: 'eligible', reason: 'dup' }],
+    } as never);
+    vi.mocked(planUntrackedRecovery).mockResolvedValue({ ok: true, operation_id: 'op 1', action: 'quarantine' });
+    render(<MemoryRouter><UntrackedRecoverySection /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Plan' }));
+    const link = await screen.findByRole('link', { name: /in Library Changes/ });
+    expect(link.getAttribute('href')).toBe('/import?tab=changes&tx=op%201');
+    expect(screen.queryByRole('button', { name: /Approve|Apply|Roll back/ })).toBeNull();
+    expect(approveTransaction).not.toHaveBeenCalled();
+    expect(applyTransaction).not.toHaveBeenCalled();
+    expect(rollbackTransaction).not.toHaveBeenCalled();
   });
 });

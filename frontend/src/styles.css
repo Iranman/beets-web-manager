@@ -20,6 +20,12 @@
  * dismissed 39b · a saved-playlist row is a disclosure for the whole record (name, state, figures), not a button; its height is its content
  * dismissed 74 · the zinc-* scale is the warm theme token set
  */
+/* Hallmark · shape: app screen · genre: atmospheric · theme: locked (DESIGN.md, Record shelf) · redesign: full · scope: Jobs & Cleanup (views/Jobs.tsx, components/SleeveArt.tsx)
+ * nav: the shell's · signature: the listening station, the running job's cover as the label of a record turning on a walnut deck under a brass progress ring and a lowered tonearm · states: running, idle, loading, error, last finished, compact second deck
+ * axes: dark/roman-serif/warm · posture: operate · contrast: pass (text on --ops-wood: zinc-50 16.6:1, muted 6.75:1; the grain only darkens) · v2.0.0 */
+/* Hallmark · Jobs pre-emit critique: P4 H5 E4 S4 R4 V4 · weakest: P, the cleanup drawers still hold their pre-existing panels unchanged inside */
+/* Hallmark · Jobs waive 26a, 26b · :focus-visible is the global rule at the end of this file; :active and :disabled live in the ops block (.ops-filter, MUI states) */
+/* Hallmark · Jobs answered 74 (graphite and zinc are this project's remapped theme scales), F24 (floating dialogs keep edge plus shadow), 28a (40px sleeves are not the LCP; the platter is) · "—" stays as the unknown-value marker in figures */
 @import "tailwindcss";
 
 @theme {
@@ -724,3 +730,481 @@ body {
     display: none;
   }
 }
+/* ── Hallmark ops pages (Jobs, Import, Submissions) ─────────────────────────────────────────────
+   One record shop: Jobs is the listening station (the running job on the platter), Import the
+   new-arrivals bin, Submissions the checking counter. Open composition on rules and spacing; the
+   one wooden surface per page is the focal object. Owned by the ops-pages redesign; other pages
+   add their own blocks rather than editing this one. */
+:root {
+  --ops-wood: #20150e;
+  --ops-wood-rule: rgba(246, 222, 180, 0.14);
+  --ops-rule: rgba(246, 222, 180, 0.1);
+  --ops-paper: #e6d9c2;
+  --ops-paper-ink: #8a7660;
+  --ops-vinyl: #0b0806;
+  --ops-groove: #241c16;
+  --ops-sheen: rgba(255, 240, 215, 0.07);
+  --ops-edge: rgba(0, 0, 0, 0.45);
+  --ops-tonearm: #f6dfae;
+  /* Interim walnut grain until a shared wood material lands: stretched fractal noise, darkening only. */
+  --ops-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='520' height='180'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.005 0.34' numOctaves='3' seed='11'/%3E%3CfeColorMatrix values='0 0 0 0 0.02 0 0 0 0 0.01 0 0 0 0 0 0 0 0 1.1 -0.38'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+}
+
+@layer components {
+  /* Page frame: a masthead on a rule, the title in the display serif, counts as a catalogue line. */
+  .ops-masthead {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem 2rem;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--bw-border);
+  }
+  .ops-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 2rem;
+    font-weight: 600;
+    line-height: 1.1;
+    color: var(--bw-text);
+  }
+  .ops-section-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 1.375rem;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--bw-text);
+    overflow-wrap: break-word;
+    min-width: 0;
+  }
+  .ops-catalog {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 0;
+    font-size: 0.9375rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--bw-text);
+  }
+  .ops-catalog > span {
+    padding: 0 0.875rem;
+    border-left: 1px solid var(--bw-border);
+  }
+  .ops-catalog > span:first-child {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  /* Controls: 40px tall, 44px where the pointer is a finger. */
+  .ops-page .MuiButton-sizeSmall {
+    min-height: 2.5rem;
+  }
+  @media (pointer: coarse) {
+    .ops-page .MuiButton-sizeSmall,
+    .ops-filter,
+    .ops-field {
+      min-height: 2.75rem;
+    }
+  }
+  .ops-field {
+    height: 2.5rem;
+    padding: 0 0.75rem;
+    border: 1px solid var(--color-field-border);
+    border-radius: 6px;
+    background: var(--bw-surface);
+    color: var(--bw-text);
+    font-size: 0.875rem;
+  }
+  .ops-field::placeholder {
+    color: var(--color-muted);
+  }
+  .ops-field:hover {
+    border-color: var(--bw-muted-2);
+  }
+  .ops-field:focus {
+    border-color: var(--bw-accent);
+  }
+  .ops-field:disabled {
+    background: var(--bw-bg);
+    color: var(--bw-muted-2);
+    border-color: var(--bw-border);
+    cursor: not-allowed;
+  }
+  .ops-filter {
+    min-height: 2.5rem;
+    padding: 0 0.75rem;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    color: var(--bw-muted);
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: color 120ms ease-out, border-color 120ms ease-out;
+  }
+  .ops-filter:hover {
+    color: var(--bw-text);
+  }
+  .ops-filter:active {
+    color: var(--bw-accent-hover);
+  }
+  .ops-filter.is-on {
+    color: var(--bw-text);
+    border-bottom-color: var(--bw-accent);
+  }
+  .ops-filter:disabled {
+    color: var(--bw-muted-2);
+    cursor: not-allowed;
+  }
+
+  /* Figures set on a rule: label over value, no boxes. */
+  .ops-figures {
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+    border-top: 1px solid var(--bw-border);
+  }
+  .ops-figures > div {
+    padding: 0.625rem 0.75rem 0.25rem 0;
+    min-width: 0;
+  }
+  .ops-figures dt {
+    font-size: 0.8125rem;
+    color: var(--color-muted);
+  }
+  .ops-figures dd {
+    margin: 0.125rem 0 0;
+    font-size: 1.0625rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--bw-text);
+    overflow-wrap: anywhere;
+  }
+
+  /* Track lists: rows parted by soft rules, never boxed. */
+  .ops-track-list {
+    margin: 0;
+    padding-left: 0;
+    list-style: none;
+  }
+  .ops-track-list > li + li {
+    border-top: 1px solid var(--ops-rule);
+  }
+
+  /* Asymmetric split: a narrow heading column beside the work. */
+  .ops-split {
+    display: grid;
+    gap: 1.25rem 3rem;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  @media (min-width: 64rem) {
+    .ops-split {
+      grid-template-columns: 15rem minmax(0, 1fr);
+    }
+    .ops-split-aside {
+      position: sticky;
+      top: calc(var(--bw-header-h) + 1.5rem);
+      align-self: start;
+    }
+  }
+
+  /* Drawers: closed sections as rows on rules, a turning chevron, no boxes. */
+  .ops-drawers {
+    border-top: 1px solid var(--bw-border);
+  }
+  .ops-drawer {
+    border-bottom: 1px solid var(--bw-border);
+  }
+  .ops-drawer > summary {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 3.5rem;
+    list-style: none;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--bw-text);
+  }
+  .ops-drawer > summary::-webkit-details-marker {
+    display: none;
+  }
+  .ops-drawer > summary::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-right: 2px solid var(--bw-muted);
+    border-bottom: 2px solid var(--bw-muted);
+    transform: rotate(-45deg);
+    transition: transform 160ms ease-out;
+  }
+  .ops-drawer[open] > summary::before {
+    transform: rotate(45deg);
+  }
+  .ops-drawer > summary:hover::before {
+    border-color: var(--bw-accent);
+  }
+  .ops-drawer-caution {
+    border-top: 1px solid var(--bw-border);
+  }
+  .ops-drawer-caution > summary {
+    color: var(--color-brass-200);
+  }
+  .ops-drawer-caution > summary::before {
+    border-color: var(--color-warning);
+  }
+
+  /* Ledger rows (job history). */
+  .ops-ledger-row {
+    transition: background-color 120ms ease-out;
+  }
+  .ops-ledger-row:hover {
+    background: color-mix(in oklab, var(--bw-surface-2) 55%, transparent);
+  }
+  .ops-ledger-row.is-selected {
+    background: color-mix(in oklab, var(--bw-accent) 9%, transparent);
+    box-shadow: inset 2px 0 0 var(--bw-accent);
+  }
+
+  /* Clean All phases as one side of a record: numbered tracks on a rule. */
+  .ops-pipeline {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    border-top: 1px solid var(--bw-border);
+  }
+  .ops-pipeline > li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.375rem;
+    padding: 0.625rem 1.125rem 0.375rem 0;
+    font-size: 0.875rem;
+    color: var(--bw-muted);
+  }
+  .ops-pipeline-no {
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--bw-muted-2);
+  }
+  .ops-pipeline > li.is-current {
+    color: var(--color-brass-200);
+    font-weight: 600;
+    box-shadow: inset 0 2px 0 var(--bw-accent);
+  }
+
+  /* Sleeves: the album cover at a fixed size, or authored sleeve paper with a record half out. */
+  .ops-sleeve {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    overflow: hidden;
+    border-radius: 3px;
+    background: var(--ops-paper);
+    outline: 1px solid var(--ops-edge);
+    outline-offset: -1px;
+  }
+  .ops-sleeve-img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .ops-sleeve-blank {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .ops-sleeve-blank .ops-vinyl {
+    fill: var(--ops-vinyl);
+  }
+  .ops-sleeve-blank .ops-groove {
+    fill: none;
+    stroke: var(--ops-groove);
+    stroke-width: 1;
+  }
+  .ops-sleeve-blank .ops-label {
+    fill: var(--bw-accent);
+  }
+  .ops-sleeve-blank .ops-paper {
+    fill: var(--ops-paper);
+  }
+  .ops-sleeve-blank .ops-print {
+    stroke: var(--ops-paper-ink);
+    stroke-width: 2;
+    stroke-linecap: round;
+  }
+
+  /* The listening station: the page's one wooden surface, the running job on its platter. */
+  .ops-station {
+    padding: clamp(1.25rem, 1rem + 1.5vw, 2.25rem);
+    border-radius: 10px;
+    border: 1px solid var(--ops-wood-rule);
+    background-color: var(--ops-wood);
+    background-image: var(--ops-grain), linear-gradient(180deg, var(--ops-sheen), transparent 45%);
+    background-size: 520px 180px, auto;
+  }
+  .ops-station-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+  }
+  .ops-deck-stack > * + * {
+    margin-top: 2rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--ops-wood-rule);
+  }
+  .ops-deck {
+    display: grid;
+    gap: 1.75rem 2.5rem;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  @media (min-width: 48rem) {
+    .ops-deck {
+      grid-template-columns: minmax(13rem, 20rem) minmax(0, 1fr);
+      align-items: start;
+    }
+    .ops-deck-compact {
+      grid-template-columns: 8rem minmax(0, 1fr);
+    }
+  }
+  .ops-now-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 1.75rem;
+    font-weight: 600;
+    line-height: 1.15;
+    color: var(--bw-text);
+    overflow-wrap: break-word;
+    min-width: 0;
+  }
+  @media (min-width: 80rem) {
+    .ops-now-title {
+      font-size: 2.125rem;
+    }
+  }
+
+  .ops-platter {
+    position: relative;
+    width: min(100%, 17rem);
+    aspect-ratio: 1;
+    margin-inline: auto;
+  }
+  @media (min-width: 48rem) {
+    .ops-platter {
+      width: 100%;
+      margin-inline: 0;
+    }
+  }
+  .ops-platter-sm {
+    width: 8rem;
+    margin-inline: 0;
+  }
+  .ops-record {
+    position: absolute;
+    inset: 5%;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background-color: var(--ops-vinyl);
+    background-image: conic-gradient(from 20deg, transparent 0 18%, var(--ops-sheen) 24%, transparent 31% 66%, var(--ops-sheen) 72%, transparent 79%);
+    box-shadow: 0 0 0 1px var(--ops-edge);
+  }
+  .ops-grooves {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .ops-grooves circle {
+    fill: none;
+    stroke: var(--ops-groove);
+    stroke-width: 0.6;
+  }
+  .ops-record > .ops-record-label {
+    width: 38% !important;
+    height: 38% !important;
+    border-radius: 50%;
+    outline: 0;
+    background: var(--bw-accent);
+    grid-area: 1 / 1;
+    position: relative;
+  }
+  .ops-record-label .ops-sleeve-blank {
+    display: none;
+  }
+  .ops-spindle {
+    grid-area: 1 / 1;
+    position: relative;
+    width: 4%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: var(--bw-bg);
+  }
+  .ops-platter-ring,
+  .ops-tonearm {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  .ops-ring-track {
+    fill: none;
+    stroke: var(--ops-wood-rule);
+    stroke-width: 1;
+  }
+  .ops-ring-progress {
+    fill: none;
+    stroke: var(--bw-accent);
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    transition: stroke-dasharray 400ms ease-out;
+  }
+  .ops-tonearm-pivot {
+    fill: var(--ops-tonearm);
+  }
+  .ops-tonearm-arm {
+    fill: none;
+    stroke: var(--ops-tonearm);
+    stroke-width: 2.2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .ops-tonearm {
+    transform-origin: 94% 8%;
+    transition: transform 600ms ease-out;
+  }
+  .ops-tonearm[data-down="false"] {
+    transform: rotate(-24deg);
+  }
+
+  /* The one motion moment: the record turns while its job plays. Paused on hover, still under reduced motion. */
+  @media (prefers-reduced-motion: no-preference) {
+    .ops-platter[data-playing="true"] .ops-record {
+      animation: ops-spin 5.4s linear infinite;
+    }
+    .ops-station:hover .ops-record,
+    .ops-station:focus-within .ops-record {
+      animation-play-state: paused;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ops-tonearm,
+    .ops-ring-progress,
+    .ops-drawer > summary::before {
+      transition: none;
+    }
+  }
+}
+
+@keyframes ops-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* ── end Hallmark ops pages ─────────────────────────────────────────────────────────────────── */
