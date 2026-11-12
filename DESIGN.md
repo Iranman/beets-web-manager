@@ -215,7 +215,7 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 
 ### Crate materials (Library; reusable on other pages)
 - **Walnut wood** is the crate: `.crate` in `styles.css` sets `--color-walnut-900` with `--wood-grain`, an authored SVG `feTurbulence` grain inlined as a data URI (no image file, allowed by `img-src data:`). Tokens: `walnut-950` (bottom board), `walnut-900` (crate floor), `walnut-800` (row hover), `walnut-700` (divider tabs, rules on wood). Keep the grain at its current alpha: art and text lead. Text on wood is `zinc-100`/`zinc-300` (well over 4.5:1 on `walnut-700`); never put `zinc-600` or `muted` small text on `walnut-700` without checking.
-- **Crate dividers** (`.crate-divider`, `.crate-tab`) are walnut tabs with a serif letter in `brass-200`; the selected tab gets a 2px brass top edge and `aria-pressed`.
+- **Crate dividers** (`.crate-divider`, `.crate-tab`) are walnut tabs with a serif letter in `brass-200`; the selected tab gets a 2px brass top edge and `aria-pressed`. Below `sm` (640px) the A to Z tabs are one row that scrolls sideways, so the crate stays above the fold on a phone; from `sm` up they wrap.
 - **Paper** (`--paper-grain` on cover faces, `--cardstock-grain` on the back cover) is only for sleeves. Never on panels or crates.
 - **Sleeves have depth** (`.sleeve`): two offset edges of the sleeves behind and a soft drop. This is the one exception to the Flat Shelf Rule, because a sleeve is an object, not a panel.
 
@@ -233,7 +233,7 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - The small print along the foot: artist, title, year, track count, total time and a catalogue number made from the release group ID (omitted when there is none).
 - Focus moves to the back cover's title on open and returns to the sleeve on close. The front face is `inert` and `aria-hidden`. Under `prefers-reduced-motion` there is no rotation: the back crossfades in and out (180ms).
 - This is the Library's one authored motion. Nothing animates on load or at rest.
-- The Library is browse-only, a simple overview: counts, search, scope, sort, A to Z and the artist/album navigation. No fix links or buttons to Import, Jobs or Missing IDs, no review pills, badges, stamps or notes. The one issue marker anywhere on the page is a missing track on the back cover: struck through in the soft ink with a small "missing" mark (`.is-missing`, `.sleeve-track-note`).
+- The Library is browse-only, a simple overview: counts, search, scope, sort, A to Z and the artist/album navigation. No fix links or buttons to Import, Jobs or Missing IDs, no review pills, badges, stamps or notes. The background disk check polls silently; there is no status line for it. The one issue marker anywhere on the page is a missing track on the back cover: struck through in the soft ink with a small "missing" mark (`.is-missing`, `.sleeve-track-note`).
 
 ## Do's and Don'ts
 

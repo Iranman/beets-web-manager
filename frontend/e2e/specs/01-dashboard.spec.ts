@@ -11,8 +11,9 @@ test('landing page summarises the synthetic library as a browse-only overview', 
   await expect(main.getByText('4 albums', { exact: true })).toBeVisible();
   await expect(main.getByText('8 tracks', { exact: true })).toBeVisible();
   // Library is browse-only: no repair focal block and no issue filter tabs.
-  await expect(main.getByRole('region', { name: 'Next repair' })).toHaveCount(0);
-  await expect(main.getByRole('group', { name: 'Filter the library by issue' })).toHaveCount(0);
+  // Role-agnostic, so a link, heading or plain text with the same name also fails.
+  await expect(main.getByText('Next repair')).toHaveCount(0);
+  await expect(main.getByLabel('Filter the library by issue')).toHaveCount(0);
 
   const albums = await libraryAlbums(page);
   expect(albums).toHaveLength(4);

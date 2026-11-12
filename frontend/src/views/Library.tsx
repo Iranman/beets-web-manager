@@ -6,11 +6,10 @@ import {
   DialogTitle,
 } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
-import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { getAlbumTracks, getArtistImageUrl } from '../api/client';
 import { apiGet } from '../lib/api';
 import { useInterval } from '../lib/hooks';
@@ -28,6 +27,7 @@ type AlbumRow = {
 };
 
 const numberFmt = new Intl.NumberFormat();
+const countLabel = (n: number, noun: string) => `${numberFmt.format(n)} ${noun}${n === 1 ? '' : 's'}`;
 const ARTIST_LETTERS: ArtistLetter[] = ['all', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '#'];
 
 const artistSortOptions: Array<{ value: ArtistSort; label: string }> = [
@@ -178,9 +178,6 @@ function initials(name: string) {
     .map((part) => part[0]?.toUpperCase())
     .join('');
 }
-
-// Tile actions may wrap onto two lines so two cover columns fit on phones (the theme keeps
-// button labels on one line everywhere else, #607).
 
 // Placeholder sleeve for albums without art: a record half out of a plain card sleeve.
 function SleevePlaceholder() {
@@ -399,11 +396,11 @@ function AlphabetIndex({
   available: Set<ArtistLetter>;
   onChange: (letter: ArtistLetter) => void;
 }) {
-  // Crate divider tabs standing on the bin's edge, one per initial; they wrap onto more rows on a phone.
+  // Crate divider tabs standing on the bin's edge, one per initial: one scrolling row on a phone, wrapping from sm up.
   return (
     <div
       aria-label="Artists by initial"
-      className="crate-tabs flex flex-wrap gap-1"
+      className="crate-tabs flex gap-1 overflow-x-auto sm:flex-wrap sm:overflow-x-visible"
       role="group"
     >
       {ARTIST_LETTERS.map((letter) => {
@@ -460,7 +457,7 @@ function ArtistCard({
         <span className="block truncate text-sm font-semibold text-zinc-100 group-hover:text-brass-200">{name}</span>
         <span className="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-400">
           <span className="tabular-nums">
-            {numberFmt.format(artist.albums.length)} albums - {numberFmt.format(countTracks(artist))} tracks
+            {countLabel(artist.albums.length, 'album')} - {countLabel(countTracks(artist), 'track')}
           </span>
         </span>
       </span>
@@ -664,8 +661,8 @@ function ArtistDetail({
           <h2 className="font-display text-3xl font-semibold text-zinc-50 [overflow-wrap:anywhere] sm:text-4xl">{name}</h2>
           {/* The same catalogue line as the page header, scoped to this artist. */}
           <p className="lib-catalog">
-            <span>{`${numberFmt.format(artist.albums.length)} albums`}</span>
-            <span>{`${numberFmt.format(countTracks(artist))} tracks`}</span>
+            <span>{countLabel(artist.albums.length, 'album')}</span>
+            <span>{countLabel(countTracks(artist), 'track')}</span>
           </p>
         </div>
       </div>
@@ -752,6 +749,7 @@ function AlbumDetailsDialog({
   // The back cover is printed over the album's own art (the same URL as the front, so no new
   // fetch); when there is no art, or it fails, it falls back to plain aged paper.
   const [backArtFailures, setBackArtFailures] = useState(0);
+  const titleRef = useRef<HTMLHeadingElement | null>(null);
 
   useEffect(() => {
     setClosing(false);
@@ -780,7 +778,7 @@ function AlbumDetailsDialog({
   // Opening an album pulls its sleeve from the crate and turns it over: the front (the same cover as
   // in the crate) rotates away and the back cover, printed with the tracklist, faces the listener.
   return (
-    <Dialog className="relative z-50" open={Boolean(row)} onClose={() => requestClose()}>
+    <Dialog className="relative z-50" initialFocus={titleRef} open={Boolean(row)} onClose={() => requestClose()}>
       <DialogBackdrop className="sleeve-table fixed inset-0" />
       <div className="fixed inset-0 overflow-y-auto p-3 sm:p-6">
         <div className="flex min-h-full items-center justify-center">
@@ -809,7 +807,7 @@ function AlbumDetailsDialog({
                   <header className="sleeve-head">
                     <div className="min-w-0">
                       <p className="sleeve-artist">{artistName}</p>
-                      <DialogTitle className="sleeve-title focus:outline-none" data-autofocus tabIndex={-1}>
+                      <DialogTitle ref={titleRef} className="sleeve-title focus:outline-none" tabIndex={-1}>
                         {title}
                       </DialogTitle>
                     </div>
@@ -857,7 +855,7 @@ function AlbumDetailsDialog({
                         <span>{artistName}</span>
                         <span>{title}</span>
                         {album.year ? <span className="tabular-nums">{String(album.year).slice(0, 4)}</span> : null}
-                        <span>{`${numberFmt.format(albumTrackCount(album))} tracks`}</span>
+                        <span>{countLabel(albumTrackCount(album), 'track')}</span>
                         {totalSeconds ? <span className="tabular-nums">{`Total time ${formatLength(totalSeconds)}`}</span> : null}
                         {catalog ? <span className="tabular-nums">{catalog}</span> : null}
                       </p>
@@ -934,7 +932,8 @@ export default function Library() {
   // advanced engine tree has landed -- then stop. Polls are background fetches so
   // they never show the blocking spinner. The budget is NOT reset when
   // library_version changes: a backend that churned the version on every poll
-  // would otherwise poll forever; instead it terminates at the stall/retry UI.
+  // would otherwise poll forever; instead it stops at the budget, and the next visit polls again.
+  // The Library shows no status for this (owner rule: browse-only, no issue indicators).
   const RECONCILE_POLL_BASE_MS = 2_000;
   const RECONCILE_POLL_MAX_MS = 15_000;
   const MAX_RECONCILE_POLLS = 15;
@@ -947,8 +946,6 @@ export default function Library() {
     needsReconcile && reconcilePolls < MAX_RECONCILE_POLLS
       ? Math.min(RECONCILE_POLL_BASE_MS * 2 ** reconcilePolls, RECONCILE_POLL_MAX_MS)
       : null;
-  const reconcilePollActive = reconcilePollDelay !== null;
-  const reconcileStalled = needsReconcile && !reconcilePollActive;
 
   useInterval(() => {
     setReconcilePolls((n) => n + 1);
@@ -1092,29 +1089,12 @@ export default function Library() {
             <h1 className="lib-title">Browse music library</h1>
             <p className="lib-catalog">
               {/* No library loaded yet, or the load failed: counts are unknown, not zero. */}
-              <span>{`${data ? numberFmt.format(data.stats.artists) : '—'} artists`}</span>
-              <span>{`${data ? numberFmt.format(data.stats.albums) : '—'} albums`}</span>
-              <span>{`${data ? numberFmt.format(data.stats.tracks) : '—'} tracks`}</span>
+              <span>{data ? countLabel(data.stats.artists, 'artist') : '— artists'}</span>
+              <span>{data ? countLabel(data.stats.albums, 'album') : '— albums'}</span>
+              <span>{data ? countLabel(data.stats.tracks, 'track') : '— tracks'}</span>
             </p>
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-muted">
               <span>{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
-              {reconcilePollActive ? (
-                <span className="flex items-center gap-1 text-warning" aria-live="polite">
-                  <CircularProgress size={12} color="inherit" />
-                  Checking disk for missing &amp; not-imported files…
-                </span>
-              ) : reconcileStalled ? (
-                <span className="flex items-center gap-1 text-zinc-400" aria-live="polite">
-                  Disk check incomplete
-                  <button
-                    type="button"
-                    className="inline-flex min-h-8 items-center px-1 text-zinc-300 underline hover:text-zinc-100 active:text-brass-300"
-                    onClick={() => setReconcilePolls(0)}
-                  >
-                    retry
-                  </button>
-                </span>
-              ) : null}
             </div>
           </div>
           {/* Inside an artist the shelf steps aside so the artist's own header leads. */}
