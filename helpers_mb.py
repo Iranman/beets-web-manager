@@ -1,6 +1,6 @@
 """MusicBrainz / AcoustID API helpers — no app.py dependencies."""
 import backend.provider_boundary as provider_boundary
-import gzip, json, logging, os, re, shutil, subprocess, threading, time
+import gzip, json, logging, math, os, re, shutil, subprocess, threading, time
 import urllib.error, urllib.parse, urllib.request
 from backend.security import install_secure_urllib
 install_secure_urllib()
@@ -681,7 +681,7 @@ def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     out = []
     seen_mbids: set = set()
     for result in (data.get("results") or [])[:5]:
-        confidence = int(round((result.get("score") or 0) * 100))
+        confidence = _acoustid_score_percent(result.get("score"))
         acoustid_id = str(result.get("id") or "")
         for rec in (result.get("recordings") or []):
             mb_id = rec.get("id", "")
@@ -748,8 +748,18 @@ def _acoustid_sources(value: Any) -> Optional[int]:
         return None
     try:
         return max(0, int(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # json.loads accepts Infinity / 1e400
         return None
+
+
+def _acoustid_score_percent(value: Any) -> int:
+    """AcoustID result score (0..1) as an integer percent; a missing,
+    non-numeric or non-finite score is 0 (below every floor), never an error."""
+    try:
+        score = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return int(round(score * 100)) if math.isfinite(score) else 0
 
 
 ACOUSTID_NOT_CONFIGURED_MESSAGE = (

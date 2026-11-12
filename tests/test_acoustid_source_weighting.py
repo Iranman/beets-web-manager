@@ -68,6 +68,23 @@ class ParseTests(unittest.TestCase):
         self.assertEqual([(r["sources"], r["weak_sources"]) for r in out], [(None, False), (1, False)])
 
 
+    def test_non_finite_sources_is_unknown(self):
+        for raw in ("Infinity", "1e400", "-Infinity", "NaN"):
+            with self.subTest(raw=raw):
+                data = json.loads('{"status": "ok", "results": [{"id": "aid", "score": 0.97, "recordings": ['
+                                  f'{{"id": "{REC_A}", "sources": {raw}}}, {{"id": "{REC_B}", "sources": 2}}]}}]}}')
+                out = helpers_mb._acoustid_parse_candidates(data)
+                self.assertEqual([(r["sources"], r["weak_sources"]) for r in out], [(None, False), (2, False)])
+
+    def test_non_finite_score_is_zero(self):
+        for raw in ("Infinity", "1e400", "-Infinity", "NaN"):
+            with self.subTest(raw=raw):
+                data = json.loads('{"status": "ok", "results": [{"id": "aid", "score": ' + raw
+                                  + f', "recordings": [{{"id": "{REC_A}", "sources": 3}}]}}]}}')
+                out = helpers_mb._acoustid_parse_candidates(data)
+                self.assertEqual([r["score"] for r in out], [0])
+
+
 class CanonicalEvidenceTests(unittest.TestCase):
     def test_weak_target_alone_is_not_a_verified_mapping(self):
         hits = [_hit(REC_A, weak=True), _hit(REC_B, score=50)]
