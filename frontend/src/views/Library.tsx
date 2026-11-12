@@ -264,7 +264,8 @@ function Artwork({
           onError={() => setFailures((n) => n + 1)}
         />
       ) : (
-        typeof fallback === 'string' ? <span className="max-w-full truncate px-2 text-center">{fallback}</span> : fallback
+        // Initials keep the image's accessible name, so a card named by its art reads the same either way.
+        typeof fallback === 'string' ? <span aria-label={label} className="max-w-full truncate px-2 text-center" role="img">{fallback}</span> : fallback
       )}
     </div>
   );

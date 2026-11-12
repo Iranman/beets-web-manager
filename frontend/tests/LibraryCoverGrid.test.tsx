@@ -104,4 +104,20 @@ describe('Library cover-art grid', () => {
     fireEvent.error(within(tile).getByRole('img', { name: 'Amnesiac cover' }));
     expect(within(tile).getByTestId('sleeve-placeholder')).toBeTruthy();
   });
+
+  it('keeps the artist card named by its artwork when initials stand in for the image', async () => {
+    vi.mocked(apiGet).mockResolvedValue({
+      ok: true,
+      reconciled: true,
+      artists: [{ name: 'Radiohead', albums: [album({ album: 'Loose Folder', aldir: '/music/b' })] }],
+      stats: { artists: 1, albums: 1, tracks: 12 },
+      library_version: 1,
+    } as LibraryResponse);
+    render(<MemoryRouter><Library /></MemoryRouter>);
+    await act(async () => {});
+
+    const card = await screen.findByRole('button', { name: /Radiohead artwork/ });
+    expect(card.querySelector('img')).toBeNull();
+    expect(within(card).getByRole('img', { name: 'Radiohead artwork' }).textContent).toBe('R');
+  });
 });
