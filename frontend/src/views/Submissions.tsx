@@ -9,6 +9,7 @@ import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import ArtistResolutionCard from '../components/ArtistResolutionCard';
+import { SleeveArt, albumArtSources } from '../components/SleeveArt';
 import SubmissionReadinessCard, { ACTION_LABEL, readinessSummary } from '../components/SubmissionReadinessCard';
 import {
   addSubmissionReferenceUrl,
@@ -548,48 +549,48 @@ export default function Submissions() {
   })();
 
   return (
-    <section className="md:pb-24">
-      <div className="rounded-md border border-graphite-800 bg-graphite-950/45 px-4 py-3">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-zinc-100">MusicBrainz and AcoustID</h1>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Chip label={stageLabel} color={stage === 'Complete' ? 'success' : stage.includes('Ready') ? 'info' : 'default'} size="small" variant="outlined" />
-              {activeAlbumId ? <Chip label={`Album ${activeAlbumId}`} size="small" variant="outlined" /> : null}
-              {activeItemId && !activeAlbumId ? <Chip label={`Item ${activeItemId}`} size="small" variant="outlined" /> : null}
-              <Chip label={`${targetLoading || !target ? (selectedItem?.tracks || 0) : tracks.length} tracks`} size="small" variant="outlined" />
-              {resolvedState ? <Chip label={RESOLVED_STATE_LABEL[resolvedState] || resolvedState} size="small" variant="outlined" color={isBlockedState ? 'error' : 'default'} /> : null}
-            </div>
-          </div>
+    <section className="ops-page space-y-6 md:pb-24">
+      <header className="ops-masthead">
+        <div className="min-w-0">
+          <h1 className="ops-title">Submissions</h1>
+          <p className="mt-2 max-w-prose text-sm text-zinc-300">Check a release against MusicBrainz and AcoustID before it goes in the racks.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+          <p className="ops-catalog" aria-label="Submission status">
+            <span className={stage === 'Complete' ? 'text-emerald-300' : stage.includes('Ready') ? 'text-info' : undefined}>{stageLabel}</span>
+            {activeAlbumId ? <span>Album {activeAlbumId}</span> : null}
+            {activeItemId && !activeAlbumId ? <span>Item {activeItemId}</span> : null}
+            <span>{targetLoading || !target ? (selectedItem?.tracks || 0) : tracks.length} tracks</span>
+            {resolvedState ? <span className={isBlockedState ? 'text-rose-200' : undefined}>{RESOLVED_STATE_LABEL[resolvedState] || resolvedState}</span> : null}
+          </p>
           <Button component={Link} to="/import?tab=review" size="small" variant="outlined">Back to Review</Button>
         </div>
-        {(loading || targetLoading) ? <LinearProgress sx={{ mt: 1.5, borderRadius: 1 }} /> : null}
-        {error ? <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert> : null}
-        {targetError ? <Alert severity="error" sx={{ mt: 2 }}>{targetError}</Alert> : null}
-        {message ? <Alert severity="info" sx={{ mt: 2 }} onClose={() => setMessage('')}>{message}</Alert> : null}
-      </div>
+      </header>
+      {(loading || targetLoading) ? <LinearProgress sx={{ borderRadius: 1 }} /> : null}
+      {error ? <Alert severity="error">{error}</Alert> : null}
+      {targetError ? <Alert severity="error">{targetError}</Alert> : null}
+      {message ? <Alert severity="info" onClose={() => setMessage('')}>{message}</Alert> : null}
 
-      {/* Compact workflow stepper */}
-      <div className="mt-3 flex items-center gap-1 rounded-md border border-graphite-800 bg-graphite-900/70 px-3 py-2">
+      {/* The checking steps, numbered on one rule; the current one in brass. */}
+      <ol className="ops-pipeline" aria-label="Submission steps">
         {STEPS.map((label, index) => (
-          <div key={label} className="flex min-w-0 flex-1 items-center gap-1">
-            <div className={['flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-1.5 text-xs font-semibold', index === activeStep ? 'bg-brass-500 text-graphite-950' : index < activeStep ? 'bg-emerald-900 text-emerald-200' : 'bg-graphite-800 text-muted'].join(' ')}>{index + 1}</div>
-            <span className={['min-w-0 truncate text-[0.7rem]', index === activeStep ? 'text-zinc-100' : 'hidden text-muted sm:inline'].join(' ')}>{label}</span>
-            {index < STEPS.length - 1 ? <div className={['mx-1 h-px flex-1', index < activeStep ? 'bg-emerald-800' : 'bg-graphite-800'].join(' ')} /> : null}
-          </div>
+          <li key={label} aria-current={index === activeStep ? 'step' : undefined} className={index === activeStep ? 'is-current' : index < activeStep ? 'is-done' : undefined}>
+            <span className="ops-pipeline-no">{index + 1}</span>
+            <span>{label}</span>
+          </li>
         ))}
-      </div>
+      </ol>
 
-      <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[22rem_minmax(0,1fr)]">
-        <aside className="space-y-3 rounded-md border border-graphite-800 bg-graphite-900/70 p-3">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[22rem_minmax(0,1fr)] xl:gap-8">
+        <aside className="min-w-0 space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold text-zinc-100">Review Queue</h2>
+            <h2 className="ops-section-title">Review Queue</h2>
             <Button size="small" variant="text" onClick={() => void loadQueue()}>Refresh</Button>
           </div>
-          <div className="flex flex-wrap gap-1">
-            {FILTERS.map((name) => <Button key={name} size="small" variant={filter === name ? 'contained' : 'outlined'} onClick={() => setFilter(name)}>{name}</Button>)}
+          <div className="flex flex-wrap gap-x-3" role="group" aria-label="Filter the queue">
+            {FILTERS.map((name) => <button key={name} type="button" aria-pressed={filter === name} className={filter === name ? 'ops-filter is-on' : 'ops-filter'} onClick={() => setFilter(name)}>{name}</button>)}
           </div>
-          <div className="max-h-[38rem] space-y-2 overflow-auto pr-1">
+          <div className="max-h-[38rem] overflow-auto border-t border-graphite-700 pr-1">
             {visibleItems.map((item) => {
               const id = reviewItemId(item);
               const selected = id === selectedId || item.id === selectedId;
@@ -597,40 +598,51 @@ export default function Submissions() {
               const missing = item.blocked_reason ? 1 : 0;
               const trackCount = selected && target && !targetLoading ? tracks.length : (item.tracks || item.evidence?.folder?.track_count || 0);
               return (
-                <button key={id} type="button" aria-pressed={selected} onClick={() => selectItem(item)} className={['w-full rounded border px-3 py-2 text-left transition-colors', selected ? 'border-brass-400 bg-brass-950/35 text-zinc-100' : 'border-graphite-800 bg-graphite-950/40 text-zinc-300 hover:border-graphite-700 hover:bg-graphite-850'].join(' ')}>
-                  <div className="truncate text-sm font-semibold">{itemTitle(item)}</div>
-                  <div className="mt-1 truncate text-xs text-muted">{itemArtist(item) || 'unknown artist'}{item.year ? ` / ${item.year}` : ''}</div>
-                  <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-zinc-400">
+                <button key={id} type="button" aria-pressed={selected} onClick={() => selectItem(item)} className={['ops-ledger-row grid w-full grid-cols-[3rem_minmax(0,1fr)] gap-x-3 border-b border-graphite-800 py-3 pl-1 text-left', selected ? 'is-selected text-zinc-50' : 'text-zinc-300'].join(' ')}>
+                  <SleeveArt size={48} sources={albumArtSources({ albumId: item.album_id ?? null, releaseGroupId: item.mb_releasegroupid ?? null })} />
+                  <span className="min-w-0">
+                  <span className="block truncate text-sm font-semibold">{itemTitle(item)}</span>
+                  <span className="mt-0.5 block truncate text-sm text-muted">{itemArtist(item) || 'unknown artist'}{item.year ? ` / ${item.year}` : ''}</span>
+                  <span className="mt-1 grid grid-cols-2 gap-1 text-xs text-zinc-400">
                     <span>{trackCount} tracks</span>
                     <span>{item.album_id ? 'album' : 'singleton/folder'}</span>
                     <span className="truncate">{status}</span>
                     <span>{missing} missing</span>
-                  </div>
-                  <div className="mt-1 truncate font-mono text-xs text-muted">{item.source_folder || item.path || item.folder || ''}</div>
+                  </span>
+                  <span className="mt-1 block truncate font-mono text-xs text-muted">{item.source_folder || item.path || item.folder || ''}</span>
+                  </span>
                 </button>
               );
             })}
-            {!visibleItems.length && !loading && !error ? <div className="rounded border border-graphite-800 bg-graphite-950/35 p-3 text-sm text-zinc-400">No items match this filter.</div> : null}
+            {!visibleItems.length && !loading && !error ? <p className="py-4 text-sm text-zinc-400">No items match this filter.</p> : null}
           </div>
         </aside>
 
         <div className="space-y-4">
-          {/* A. Selected item header + submission summary */}
-          <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
-            <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-              <div className="min-w-0">
-                <h2 className="truncate text-xl font-semibold text-zinc-100">{target?.summary.title || itemTitle(selectedItem)}</h2>
-                <div className="mt-1 text-sm text-zinc-400">{target?.summary.albumartist || itemArtist(selectedItem) || 'Unknown artist'}</div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {isBeetsTarget ? <Chip size="small" variant="outlined" label="Beets" /> : null}
-                  {draft.metadata && Object.keys(draft.metadata).length ? <Chip size="small" variant="outlined" label="Draft edits" /> : null}
-                  {selectedCandidateCount ? <Chip size="small" variant="outlined" label={`${selectedCandidateCount} MB candidates`} /> : null}
-                </div>
+          {/* A. The checking counter: the selected release on walnut, its sleeve set down on it. */}
+          <section className="ops-counter" aria-label="Release being checked">
+            <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
+              <SleeveArt
+                key={selectedId || 'none'}
+                className="ops-counter-sleeve shrink-0"
+                size={144}
+                alt={target?.summary.cover_art_url ? 'Cover art' : ''}
+                sources={[
+                  ...(target?.summary.cover_art_url ? [target.summary.cover_art_url] : []),
+                  ...albumArtSources({ albumId: selectedItem?.album_id ?? (activeAlbumId || null), releaseGroupId: selectedItem?.mb_releasegroupid ?? null }),
+                ]}
+              />
+              <div className="min-w-0 flex-1">
+                <h2 className="ops-now-title">{target?.summary.title || itemTitle(selectedItem)}</h2>
+                <div className="mt-1 text-base text-zinc-300">{target?.summary.albumartist || itemArtist(selectedItem) || 'Unknown artist'}</div>
+                <p className="ops-catalog mt-3">
+                  {isBeetsTarget ? <span>In Beets</span> : null}
+                  {draft.metadata && Object.keys(draft.metadata).length ? <span>Draft edits</span> : null}
+                  {selectedCandidateCount ? <span>{selectedCandidateCount} MB candidates</span> : null}
+                </p>
+                {target ? <p className="mt-3 max-w-prose text-sm text-zinc-200">{submissionSentence}</p> : null}
               </div>
-              {target?.summary.cover_art_url ? <img key={target.summary.cover_art_url} alt="Cover art" src={target.summary.cover_art_url} className="h-24 w-24 rounded border border-graphite-800 object-cover" onError={(e) => { e.currentTarget.hidden = true; }} /> : null}
             </div>
-
-            {target ? <p className="mt-3 rounded border border-graphite-800 bg-graphite-950/40 p-3 text-sm text-zinc-300">{submissionSentence}</p> : null}
 
             {target ? (
               <div className="mt-3 grid gap-3 md:grid-cols-3">
@@ -660,17 +672,17 @@ export default function Submissions() {
               </div>
             ) : null}
 
-            <details className="mt-3 rounded border border-graphite-800 bg-graphite-950/35 p-3 text-xs text-zinc-400">
+            <details className="mt-3 border-t border-graphite-700 pt-3 text-xs text-zinc-400">
               <summary className="cursor-pointer text-zinc-200">What will be submitted?</summary>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div><div className="font-semibold text-zinc-300">MusicBrainz</div><ul className="mt-1 list-disc pl-4"><li>Release metadata</li><li>{tracks.length}-track listing</li><li>Artist credit</li><li>Release date</li><li>Format</li><li>Artwork reference</li></ul></div>
                 <div><div className="font-semibold text-zinc-300">AcoustID</div><ul className="mt-1 list-disc pl-4"><li>{tracks.filter((t) => t.file_available).length} Chromaprint fingerprints</li><li>{tracks.filter((t) => t.mb_trackid).length} MusicBrainz recording IDs</li></ul></div>
                 <div><div className="font-semibold text-zinc-300">Local changes</div><ul className="mt-1 list-disc pl-4"><li>Attach MusicBrainz IDs to Beets</li><li>Write verified IDs to file tags</li><li>Save selected artwork</li></ul></div>
               </div>
-              <p className="mt-3 text-muted">Nothing above has been submitted yet — these are the actions the workflow below will take once you run them.</p>
+              <p className="mt-3 text-muted">Nothing above has been submitted yet. These are the actions the workflow below will take once you run them.</p>
             </details>
 
-            <details className="mt-3 rounded border border-graphite-800 bg-graphite-950/35 p-3 text-xs text-zinc-400">
+            <details className="mt-3 border-t border-graphite-700 pt-3 text-xs text-zinc-400">
               <summary className="cursor-pointer text-zinc-200">Advanced lookup</summary>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <TextField label="Beets Album ID" size="small" value={albumId} onChange={(event) => setAlbumId(event.target.value.replace(/\D/g, ''))} />
@@ -681,8 +693,8 @@ export default function Submissions() {
           </section>
 
           {/* B. Reference URLs */}
-          <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
-            <h2 className="text-sm font-semibold text-zinc-100">Reference URLs</h2>
+          <section className="border-t border-graphite-700 pt-5">
+            <h2 className="ops-section-title">Reference URLs</h2>
             <p className="mt-1 text-xs text-zinc-400">Paste a YouTube, MusicBrainz, Discogs, Bandcamp, or SoundCloud link to help identify this release. Metadata is retrieved without downloading any audio or video.</p>
             <div className="mt-2 flex flex-wrap gap-2 sm:flex-nowrap">
               <TextField fullWidth size="small" placeholder="https://www.youtube.com/watch?v=..." value={refUrlInput} onChange={(event) => setRefUrlInput(event.target.value)} disabled={!target} />
@@ -691,7 +703,7 @@ export default function Submissions() {
             {refUrlError ? <Alert severity="error" sx={{ mt: 2 }}>{refUrlError}</Alert> : null}
             <div className="mt-3 space-y-3">
               {references.map((ref) => (
-                <div key={ref.id} className="rounded border border-graphite-800 bg-graphite-950/35 p-3">
+                <div key={ref.id} className="border-t border-graphite-700 pt-3">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -746,7 +758,7 @@ export default function Submissions() {
           </section>
 
           {targetLoading ? (
-            <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4 text-sm text-zinc-400">Checking readiness…</div>
+            <div className="border-t border-graphite-700 pt-5 text-sm text-zinc-400">Checking readiness…</div>
           ) : artistStageActive ? (
             <ArtistResolutionCard
               artistName={target?.summary.albumartist || itemArtist(selectedItem)}
@@ -765,21 +777,21 @@ export default function Submissions() {
           />
 
           {/* E. Track list, moved above the metadata editor */}
-          <section id="submission-tracks" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
-            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between"><h2 className="text-sm font-semibold text-zinc-100">Track Submission Preview</h2><div className="flex flex-wrap gap-2"><Button size="small" variant="outlined" disabled={!tracks.length} onClick={() => void copyText(parserText, 'Track-parser text')}>Copy track-parser text</Button><Button size="small" variant="outlined" disabled={!tracks.length} onClick={() => void copyText(`${target?.summary.albumartist || ''} - ${target?.summary.title || ''}\n\n${parserText}`, 'Submission summary')}>Copy complete summary</Button></div></div>
+          <section id="submission-tracks" className="border-t border-graphite-700 pt-5">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between"><h2 className="ops-section-title">Track Submission Preview</h2><div className="flex flex-wrap gap-2"><Button size="small" variant="outlined" disabled={!tracks.length} onClick={() => void copyText(parserText, 'Track-parser text')}>Copy track-parser text</Button><Button size="small" variant="outlined" disabled={!tracks.length} onClick={() => void copyText(`${target?.summary.albumartist || ''} - ${target?.summary.title || ''}\n\n${parserText}`, 'Submission summary')}>Copy complete summary</Button></div></div>
             {!tracks.length ? <p className="mt-3 text-sm text-muted">{target ? 'No tracks were found for this review item.' : 'Select a review item to see its tracks.'}</p> : (
               <div className="mt-3 overflow-auto rounded border border-graphite-800">
                 <table className="min-w-full text-left text-xs"><thead className="bg-graphite-950 text-zinc-400"><tr><th className="px-2 py-2">Disc</th><th className="px-2 py-2">Track</th><th className="px-2 py-2">Title</th><th className="px-2 py-2">Artist credit</th><th className="px-2 py-2">Duration</th><th className="px-2 py-2">File</th><th className="px-2 py-2">AcoustID</th><th className="px-2 py-2">Recording MBID</th><th className="px-2 py-2">Validation</th></tr></thead>
                   <tbody>{tracks.map((track) => { const edit = draft.trackEdits[String(track.item_id)] || {}; return <tr key={track.item_id || track.file_path || track.index} className="border-t border-graphite-800"><td className="px-2 py-2"><TextField size="small" value={edit.disc ?? track.disc} onChange={(event) => updateTrack(track.item_id, 'disc', Number(event.target.value) || 1)} sx={{ width: 72 }} /></td><td className="px-2 py-2"><TextField size="small" value={edit.track ?? track.track} onChange={(event) => updateTrack(track.item_id, 'track', Number(event.target.value) || track.track)} sx={{ width: 72 }} /></td><td className="px-2 py-2 min-w-56"><TextField fullWidth size="small" value={edit.title ?? track.title} onChange={(event) => updateTrack(track.item_id, 'title', event.target.value)} /></td><td className="px-2 py-2 min-w-48"><TextField fullWidth size="small" value={edit.artist ?? track.artist} onChange={(event) => updateTrack(track.item_id, 'artist', event.target.value)} /></td><td className="px-2 py-2 text-zinc-300">{track.duration_display || 'Missing'}</td><td className="max-w-56 truncate px-2 py-2 text-zinc-400">{track.file_name}<div className={track.file_available ? 'text-emerald-400' : 'text-red-300'}>{track.file_available ? 'available' : 'missing'}</div></td><td className="px-2 py-2 text-zinc-300">{track.fingerprint_status}</td><td className="max-w-44 truncate px-2 py-2 font-mono text-zinc-400">{track.mb_trackid || 'Missing'}</td><td className="px-2 py-2 text-zinc-300">{track.validation_status}</td></tr>; })}</tbody></table>
               </div>
             )}
-            <details className="mt-3 rounded border border-graphite-800 bg-graphite-950/35 p-3"><summary className="cursor-pointer text-sm text-zinc-200">Exact MusicBrainz track-parser text</summary><pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-zinc-300">{draft.mbsubmit_output || mbRun.output || parserText || 'No track text available yet.'}</pre></details>
+            <details className="mt-3 border-t border-graphite-700 pt-3"><summary className="cursor-pointer text-sm text-zinc-200">Exact MusicBrainz track-parser text</summary><pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-zinc-300">{draft.mbsubmit_output || mbRun.output || parserText || 'No track text available yet.'}</pre></details>
           </section>
 
           {/* F. Metadata editor: primary fields first, everything else collapsed */}
-          <section id="submission-metadata" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
+          <section id="submission-metadata" className="border-t border-graphite-700 pt-5">
             <div className="flex items-center justify-between gap-3">
-              <h2 className="text-sm font-semibold text-zinc-100">Editable Release Metadata</h2>
+              <h2 className="ops-section-title">Editable Release Metadata</h2>
               {saveState === 'saving' ? <Chip size="small" label="Saving…" color="warning" variant="outlined" />
                 : saveState === 'saved' ? <Chip size="small" label="Saved" color="success" variant="outlined" />
                 : saveState === 'error' ? <Chip size="small" label="Save failed" color="error" variant="outlined" />
@@ -792,7 +804,7 @@ export default function Submissions() {
                 return <TextField key={key} label={label} size="small" value={draftValue ?? backendValue} onChange={(event) => updateMeta(key, event.target.value)} helperText={draftValue ? 'User-edited draft' : (backendValue ? 'Read from Beets/file tags' : undefined)} />;
               })}
             </div>
-            <details className="mt-3 rounded border border-graphite-800 bg-graphite-950/35 p-3">
+            <details className="mt-3 border-t border-graphite-700 pt-3">
               <summary className="cursor-pointer text-sm text-zinc-200">Additional release details</summary>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 {ADDITIONAL_METADATA_FIELDS.map(([key, label]) => {
@@ -805,16 +817,16 @@ export default function Submissions() {
           </section>
 
           <section className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-2">
-            <div id="submission-duplicates" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
+            <div id="submission-duplicates" className="border-t border-graphite-700 pt-5">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold text-zinc-100">Duplicate Detection</h2>
+                <h2 className="ops-section-title">Duplicate Detection</h2>
                 {draft.duplicates_reviewed
                   ? <Chip size="small" color="success" label="Reviewed" />
                   : <Button size="small" variant="text" onClick={markDuplicatesReviewed}>Mark as reviewed</Button>}
               </div>
               <p className="mt-1 text-sm text-zinc-400">Likely existing releases from the current review evidence.</p>
               <div className="mt-3 space-y-2">
-                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-brass-400" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-xs text-muted">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
+                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="ops-ledger-row w-full border-b border-graphite-800 px-1 py-3 text-left" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-xs text-muted">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
                 {!selectedCandidateCount ? (discogsCandidate ? (
                   <Alert severity="info" action={<Button color="inherit" size="small" onClick={() => { markDuplicatesReviewed(); if (discogsCandidate.discogs_url) reprocessReferenceUrl(discogsCandidate.discogs_url); }}>Use as reference</Button>}>
                     No MusicBrainz match, but Discogs has a possible one: {discogsCandidate.artist || 'Unknown artist'} - {discogsCandidate.album || 'Unknown album'}{discogsCandidate.year ? ` (${discogsCandidate.year})` : ''}.
@@ -822,14 +834,14 @@ export default function Submissions() {
                 ) : <Alert severity="info">No duplicate candidates are attached to this review item yet. Prepare the release only after checking MusicBrainz.</Alert>) : null}
               </div>
             </div>
-            <div id="submission-mb-handoff" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4"><h2 className="text-sm font-semibold text-zinc-100">MusicBrainz Handoff</h2><p className="mt-1 text-sm text-zinc-400">The app prepares track-parser text. MusicBrainz publication stays on the MusicBrainz website in a separate tab.</p>{!isBeetsTarget && target ? <Alert severity="warning" sx={{ mt: 2 }}>This folder is not imported into Beets yet, so track-parser preparation and ID attachment are unavailable until it is imported. You can still add reference URLs and edit metadata below.</Alert> : null}<div className="mt-3 flex flex-wrap gap-2"><Button size="small" variant="contained" disabled={!target?.preflight.musicbrainz_ready || mbRun.status === 'running'} onClick={() => void runMusicBrainzPrepare()}>Prepare Submission</Button><Button size="small" variant="outlined" onClick={() => window.open(mbUrl, '_blank', 'noopener,noreferrer')}>Open MusicBrainz separately</Button></div>{mbRun.message ? <Alert severity={statusTone(mbRun.status)} sx={{ mt: 2 }}>{mbRun.message}</Alert> : null}<JobLink jobId={mbRun.jobId} /><TextField sx={{ mt: 3 }} fullWidth size="small" label="Published MusicBrainz release URL or MBID" value={mbInput} onChange={(event) => { setMbInput(event.target.value); setValidation(null); updateDraft({ ...draft, published: { ...(draft.published || {}), input: event.target.value } }); }} helperText="Paste the resulting MusicBrainz release URL here after the website confirms it exists." /><div className="mt-2 flex gap-2"><Button size="small" variant="outlined" disabled={!mbInput.trim()} onClick={() => void validatePublishedIds()}>Validate published IDs</Button>{release ? <Button size="small" variant="contained" disabled={!canApply || applyRun.status === 'running'} onClick={() => void applyPublishedIds()}>{APPLY_MBIDS_LABEL}</Button> : null}</div>{validation?.error ? <Alert severity="error" sx={{ mt: 2 }}>{validation.error}</Alert> : null}{validation?.message ? <Alert severity="info" sx={{ mt: 2 }}>{validation.message}</Alert> : null}{release ? <Alert severity={validation?.needs_confirmation ? 'warning' : 'success'} sx={{ mt: 2 }}>{release.title} / {release.albumartist} / {release.track_count} tracks. {validation?.mismatches?.length ? `${validation.mismatches.length} mismatch warning(s).` : 'Track mapping matched by position.'}</Alert> : null}{applyRun.message ? <Alert severity={statusTone(applyRun.status)} sx={{ mt: 2 }}>{applyRun.message}</Alert> : null}<JobLink jobId={applyRun.jobId} /></div>
+            <div id="submission-mb-handoff" className="border-t border-graphite-700 pt-5"><h2 className="ops-section-title">MusicBrainz Handoff</h2><p className="mt-1 text-sm text-zinc-400">The app prepares track-parser text. MusicBrainz publication stays on the MusicBrainz website in a separate tab.</p>{!isBeetsTarget && target ? <Alert severity="warning" sx={{ mt: 2 }}>This folder is not imported into Beets yet, so track-parser preparation and ID attachment are unavailable until it is imported. You can still add reference URLs and edit metadata below.</Alert> : null}<div className="mt-3 flex flex-wrap gap-2"><Button size="small" variant="contained" disabled={!target?.preflight.musicbrainz_ready || mbRun.status === 'running'} onClick={() => void runMusicBrainzPrepare()}>Prepare Submission</Button><Button size="small" variant="outlined" onClick={() => window.open(mbUrl, '_blank', 'noopener,noreferrer')}>Open MusicBrainz separately</Button></div>{mbRun.message ? <Alert severity={statusTone(mbRun.status)} sx={{ mt: 2 }}>{mbRun.message}</Alert> : null}<JobLink jobId={mbRun.jobId} /><TextField sx={{ mt: 3 }} fullWidth size="small" label="Published MusicBrainz release URL or MBID" value={mbInput} onChange={(event) => { setMbInput(event.target.value); setValidation(null); updateDraft({ ...draft, published: { ...(draft.published || {}), input: event.target.value } }); }} helperText="Paste the resulting MusicBrainz release URL here after the website confirms it exists." /><div className="mt-2 flex gap-2"><Button size="small" variant="outlined" disabled={!mbInput.trim()} onClick={() => void validatePublishedIds()}>Validate published IDs</Button>{release ? <Button size="small" variant="contained" disabled={!canApply || applyRun.status === 'running'} onClick={() => void applyPublishedIds()}>{APPLY_MBIDS_LABEL}</Button> : null}</div>{validation?.error ? <Alert severity="error" sx={{ mt: 2 }}>{validation.error}</Alert> : null}{validation?.message ? <Alert severity="info" sx={{ mt: 2 }}>{validation.message}</Alert> : null}{release ? <Alert severity={validation?.needs_confirmation ? 'warning' : 'success'} sx={{ mt: 2 }}>{release.title} / {release.albumartist} / {release.track_count} tracks. {validation?.mismatches?.length ? `${validation.mismatches.length} mismatch warning(s).` : 'Track mapping matched by position.'}</Alert> : null}{applyRun.message ? <Alert severity={statusTone(applyRun.status)} sx={{ mt: 2 }}>{applyRun.message}</Alert> : null}<JobLink jobId={applyRun.jobId} /></div>
           </section>
 
           {(target?.preflight.current_stage === 'acoustid' || target?.preflight.current_stage === 'complete') ? (
-          <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4"><h2 className="text-sm font-semibold text-zinc-100">AcoustID Submission</h2><p className="mt-1 text-sm text-zinc-400">Submit {readyFingerprints} fingerprints for {tracks.length} tracks linked to {tracks.filter((track) => track.mb_trackid).length} MusicBrainz recordings.</p><div className="mt-3 grid gap-2 md:grid-cols-2">{tracks.map((track) => <div key={`fp-${track.item_id || track.file_path}`} className="rounded border border-graphite-800 bg-graphite-950/35 p-2 text-xs"><div className="truncate text-zinc-200">{track.track}. {track.title}</div><div className={track.mb_trackid && track.file_available ? 'text-emerald-300' : 'text-red-300'}>{track.fingerprint_status}</div></div>)}</div><div className="mt-3 flex flex-wrap gap-2"><Button size="small" variant="contained" disabled={!target?.preflight.acoustid_ready || acoustidRun.status === 'running' || readyFingerprints === 0} onClick={() => void runAcoustidSubmit()}>{SUBMIT_FINGERPRINTS_LABEL}</Button><Button size="small" variant="outlined" disabled={!acoustidRun.output} onClick={() => void copyText(acoustidRun.output, 'AcoustID output')}>Copy output</Button></div>{acoustidRun.message ? <Alert severity={statusTone(acoustidRun.status)} sx={{ mt: 2 }}>{acoustidRun.message}</Alert> : null}<JobLink jobId={acoustidRun.jobId} />{acoustidRun.output ? <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded border border-graphite-800 bg-graphite-950/60 p-3 text-xs text-zinc-300">{acoustidRun.output}</pre> : null}</section>
+          <section className="border-t border-graphite-700 pt-5"><h2 className="ops-section-title">AcoustID Submission</h2><p className="mt-1 text-sm text-zinc-400">Submit {readyFingerprints} fingerprints for {tracks.length} tracks linked to {tracks.filter((track) => track.mb_trackid).length} MusicBrainz recordings.</p><div className="mt-3 grid gap-2 md:grid-cols-2">{tracks.map((track) => <div key={`fp-${track.item_id || track.file_path}`} className="border-b border-graphite-800 py-2 text-sm"><div className="truncate text-zinc-200">{track.track}. {track.title}</div><div className={track.mb_trackid && track.file_available ? 'text-emerald-300' : 'text-red-300'}>{track.fingerprint_status}</div></div>)}</div><div className="mt-3 flex flex-wrap gap-2"><Button size="small" variant="contained" disabled={!target?.preflight.acoustid_ready || acoustidRun.status === 'running' || readyFingerprints === 0} onClick={() => void runAcoustidSubmit()}>{SUBMIT_FINGERPRINTS_LABEL}</Button><Button size="small" variant="outlined" disabled={!acoustidRun.output} onClick={() => void copyText(acoustidRun.output, 'AcoustID output')}>Copy output</Button></div>{acoustidRun.message ? <Alert severity={statusTone(acoustidRun.status)} sx={{ mt: 2 }}>{acoustidRun.message}</Alert> : null}<JobLink jobId={acoustidRun.jobId} />{acoustidRun.output ? <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded border border-graphite-800 bg-graphite-950/60 p-3 text-xs text-zinc-300">{acoustidRun.output}</pre> : null}</section>
           ) : (
-            <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
-              <h2 className="text-sm font-semibold text-zinc-100">AcoustID Submission</h2>
+            <div className="border-t border-graphite-700 pt-5">
+              <h2 className="ops-section-title">AcoustID Submission</h2>
               <p className="mt-1 text-sm text-muted">Available after MusicBrainz recording IDs are attached.</p>
             </div>
           )}
