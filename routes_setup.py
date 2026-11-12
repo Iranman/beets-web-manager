@@ -39,7 +39,7 @@ from flask import jsonify, request, session
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
 from backend import config_layers  # noqa: E402
-from backend.app_runtime import SECRET_NAME_PATTERN, SECRET_VALUE_PATTERN  # noqa: E402
+from backend.app_runtime import SECRET_NAME_PATTERN, SECRET_SCHEME_PATTERN, SECRET_VALUE_PATTERN  # noqa: E402
 from backend.build_info import build_info  # noqa: E402
 from backend.web_manager_config_store import (  # noqa: E402
     WebManagerConfigStore,
@@ -1963,8 +1963,9 @@ _SECRET_KV_RE = re.compile(
     (["']?\s*[:=]\s*)
     # Already redacted only when the placeholder ends the value: in
     # "[REDACTED],y" the ",y" is still part of the secret (#524).
-    (?!['"]?(?:(?:bearer|basic)\s+)?\[redacted\]['"]?(?:\s|$))
-    ((?:(?:bearer|basic)\s+)?)
+    # The scheme words are shared with app_runtime (#660: "token=Negotiate x").
+    (?!['"]?(?:""" + SECRET_SCHEME_PATTERN + r"""\s+)?\[redacted\]['"]?(?:\s|$))
+    ((?:""" + SECRET_SCHEME_PATTERN + r"""\s+)?)
     # The value extent is shared with app_runtime (#524, #647).
     """ + SECRET_VALUE_PATTERN,
     re.VERBOSE | re.DOTALL,

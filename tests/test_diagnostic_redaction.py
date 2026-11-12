@@ -64,7 +64,10 @@ class DiagnosticRedactionTests(unittest.TestCase):
         for text in ("https://u:FAKEX@FAKEY@host/p", "access_token=FAKEX db_password=FAKEY",
                      "Cookie: a=FAKEX; b=FAKEY", "Authorization: Digest username=u, response=FAKEX",
                      # PR #659 QA: a closed quote spans newlines.
-                     'password="FAKEX\nFAKEY" tail', 'client_secret: "-----BEGIN\nFAKEX\n-----END"'):
+                     'password="FAKEX\nFAKEY" tail', 'client_secret: "-----BEGIN\nFAKEX\n-----END"',
+                     # #660
+                     "password='FAKEX\nFAKEY'\nnext", "token=Negotiate FAKEX tail", "api_key: Digest FAKEX",
+                     'x?token="FAKEX\nFAKEY"&keep=1', "x?token=FAKEX&FAKEY&keep=1"):
             for real, redact in self.redactors.items():
                 out = redact(text)
                 self.assertNotIn("FAKE", out, (real, text))
@@ -77,6 +80,7 @@ class DiagnosticRedactionTests(unittest.TestCase):
                 "token" * (n // 5), "password " * (n // 9), "password=" + " " * n,
                 "x://" + "b:" * (n // 2), "https://" + "a-" * (n // 2), "password='" + "\\" * n,
                 "Authorization:" + " " * n, "a_" * (n // 2), "pass-" * (n // 5),
+                "token='\n" * (n // 8), "token='" + "\\'" * (n // 2), "?token=x" + "&a" * (n // 2),
             ):
                 for real, redact in self.redactors.items():
                     start = time.perf_counter()
