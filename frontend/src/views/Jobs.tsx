@@ -754,7 +754,8 @@ function countSummary(summary: AlbumFolderScanSummary | null, key: keyof AlbumFo
 
 function issueKind(issue: AlbumFolderIssue) {
   const labels = (issue.issue_types ?? []).map((value) => value.replace(/_/g, ' '));
-  return labels.length ? labels.join(', ') : 'Album folder cleanup';
+  const text = labels.join(', ');
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Album folder cleanup';
 }
 
 function issueRisk(issue: AlbumFolderIssue) {

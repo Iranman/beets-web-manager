@@ -490,7 +490,7 @@ export function RecoveryReviewCard({
                 <div className="font-mono">Identity key: {carrier.recovery_identity_key}</div>
               ) : null}
               {carrier.provenance && Object.keys(carrier.provenance).length ? (
-                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-graphite-900 p-2 font-mono text-[11px] text-graphite-200">
+                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-graphite-900 p-2 font-mono text-xs text-graphite-200">
                   {JSON.stringify(carrier.provenance, null, 2)}
                 </pre>
               ) : null}

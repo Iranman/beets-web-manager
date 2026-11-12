@@ -20,7 +20,7 @@ describe('template tells (#612)', () => {
   });
 
   it('uses no labels below 12px', () => {
-    expect(offenders(/text-\[(0\.6\d*rem|10px)\]/)).toEqual([]);
+    expect(offenders(/text-\[(0\.6\d*rem|1[01]px)\]/)).toEqual([]);
   });
 
   it('uses no emoji warning glyphs', () => {
@@ -40,6 +40,20 @@ describe('template tells (#612)', () => {
 
   it('has no radial glow behind pages', () => {
     expect(readFileSync(join(root, 'styles.css'), 'utf8')).not.toMatch(/radial-gradient/);
+  });
+
+  it('uses sentence case for plugin readiness labels', () => {
+    expect(offenders(/Required Plugins (Healthy|Ready)/)).toEqual([]);
+    expect(offenders(/`✓ All \$\{/)).toEqual([]);
+  });
+
+  it('capitalises only the first letter of the album folder issue kind', () => {
+    const jobs = readFileSync(join(root, 'views/Jobs.tsx'), 'utf8');
+    expect(jobs).toContain('text.charAt(0).toUpperCase() + text.slice(1)');
+  });
+
+  it('uses no decorative dot joins in fixed copy', () => {
+    expect(offenders(/'Recovery · |'Target exists · |AcoustID · available/)).toEqual([]);
   });
 
   it('renders the warning icon as decoration', () => {

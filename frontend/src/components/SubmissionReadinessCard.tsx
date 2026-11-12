@@ -109,7 +109,7 @@ export default function SubmissionReadinessCard({ preflight, loading, primaryAct
       ) : null}
 
       {showAcoustidNotice ? (
-        <p className="mt-3 text-[0.7rem] text-muted">AcoustID · available after MusicBrainz recording IDs are attached.</p>
+        <p className="mt-3 text-[0.7rem] text-muted">AcoustID is available after MusicBrainz recording IDs are attached.</p>
       ) : null}
 
       <div className="mt-3 flex flex-wrap gap-2">
