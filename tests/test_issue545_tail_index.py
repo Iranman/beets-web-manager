@@ -316,6 +316,43 @@ class TailIndexTests(_Sync):
         self.assertTrue(jobs.tail_scan_complete.is_set())
         self.assertFalse(jobs.tail_scan_aborted.is_set())
 
+    # -- #664 -----------------------------------------------------------------
+    def test_aborted_sweep_releases_its_tail_snapshots(self):
+        tx = self.wrapper()
+        self.record("unrelated")
+
+        def partial_tail(self_, paths, now_):
+            self_.tail_transaction_jobs["other"] = [object()]  # indexed, then the sweep dies
+            raise RuntimeError("tail sweep crashed")
+
+        with mock.patch.object(threading, "excepthook", lambda _args: None):
+            jobs = self.start(tail=partial_tail)
+            jobs._recover_thread.join(5)
+            self.assertTrue(jobs.tail_scan_aborted.is_set())
+            time.sleep(0.3)  # the pass after the abort
+        self.assertEqual(jobs.tail_transaction_jobs, {})
+        self.assertEqual(self.store.get(tx["id"])["status"], "Running")
+
+    def test_type_error_from_get_rearms_a_bounded_retry(self):
+        jobs = self.jobstore()
+        tx = self.store.create(operation_type="Delete", status="Running")
+        job = jobs.start_python(lambda log, cancel_event=None: {"ok": True}, label="x",
+                                metadata={"transaction": False, "transaction_id": tx["id"], "type": "t"})
+        self.wait(job)
+        self.store.update(tx["id"], metadata={"job_id": job.job_id})
+        unreadable = {}
+        with mock.patch.object(jobs, "get", side_effect=TypeError("lazy load")):
+            for _ in range(ts._UNREADABLE_RETRIES):  # each failure re-arms the retry
+                self.assertFalse(ts._reconcile_running_transactions(jobs, self.store, unreadable=unreadable))
+            # a record that stays unreadable stops counting as a failed pass
+            self.assertTrue(ts._reconcile_running_transactions(jobs, self.store, unreadable=unreadable))
+        self.assertEqual(self.store.get(tx["id"])["status"], "Running")
+        # a transient failure: the next pass reads it and settles the row
+        unreadable.clear()
+        with mock.patch.object(jobs, "get", side_effect=[TypeError("lazy load"), job]):
+            self.assertFalse(ts._reconcile_running_transactions(jobs, self.store, unreadable=unreadable))
+            self.assertTrue(ts._reconcile_running_transactions(jobs, self.store, unreadable=unreadable))
+        self.assertEqual(self.store.get(tx["id"])["status"], "Completed")
 
 
 if __name__ == "__main__":
