@@ -478,14 +478,20 @@ def _restore_rows(ad: BeetsAdapter, before: Dict[str, Any], write: bool, *,
             live_path = _s(live.get("path"))
             path_moved = bool(move and kind == "item" and want_path
                               and want_path != live_path)
+            # A DB already restored with stale file tags (an earlier restore
+            # whose tag write failed) is rewritten too, so a retry can succeed
+            # (#555 item 4).
+            tags_stale = bool(write and kind == "item" and _is_real_adapter(ad)
+                              and _tag_values(live_path, fields) is False)
             res = None
-            if diff or path_moved:
+            if diff or path_moved or tags_stale:
                 to_write = dict(diff)
-                if path_moved and not to_write:
+                if not to_write:
                     # /modify refuses an empty field set; re-assert one
-                    # captured identity field so the file can be moved back.
+                    # captured identity field so the file can be moved back
+                    # or its tags rewritten (Beets writes every tag).
                     to_write = {k: fields[k] for k in ("albumartist", "artist", "album", "title")
-                                if fields.get(k)}
+                                if fields.get(k)} or (dict(fields) if tags_stale else {})
                     if not to_write:
                         failed += 1
                         continue
@@ -3534,6 +3540,19 @@ def apply_album_mb_track_repair(
                 "error": "This transaction has no validated repair plan; re-plan it."}
     if tx.get("status") not in ("Preview", "Approved"):
         return _apply_refused(st, operation_id)
+    from backend.resource_locks import ResourceLockConflictError
+    try:
+        # The live re-check and the write run under the rollback's locks
+        # (#555 item 2): a writer between them would otherwise be overwritten.
+        with _apply_locks(ALBUM_MB_TRACK_REPAIR_FAMILY, tx.get("metadata") or {}, operation_id):
+            return _apply_album_mb_track_repair_locked(st, ad, operation_id, tx, plan, write_tags)
+    except ResourceLockConflictError as exc:
+        return _lock_busy(operation_id, exc)
+
+
+def _apply_album_mb_track_repair_locked(st: TransactionStore, ad: BeetsAdapter, operation_id: str,
+                                        tx: Dict[str, Any], plan: Dict[str, Any],
+                                        write_tags: bool) -> Dict[str, Any]:
     aid = int(plan["album_id"])
     album = ad.get_album(aid)
     stale = ""

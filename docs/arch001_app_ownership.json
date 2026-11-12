@@ -34185,10 +34185,10 @@
    "module": "backend/transaction_service.py",
    "lines": [
     566,
-    620
+    624
    ],
-   "size": 55,
-   "body_lines": 54,
+   "size": 59,
+   "body_lines": 58,
    "route": null,
    "mutation_capable": true,
    "domain": "TRANSACTIONS",

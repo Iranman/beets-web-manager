@@ -815,11 +815,11 @@ class RestoreTruthTests(RealRestoreBase):
         live = self.lib.get_item(self.lib.get_album(album.id).items().__iter__().__next__().id)
         self.assertIn("Old Genre", list(live.genres))
 
-    def test_empty_db_diff_is_not_reported_as_rolled_back_when_tags_differ(self):
-        album, paths = self._add_wav_album(count=1, folder="Artist/EmptyDiff", title_prefix="Stable")
+    def _empty_diff_stale_tag_tx(self, folder):
+        album, paths = self._add_wav_album(count=1, folder=folder, title_prefix="Stable")
         item = album.items().__iter__().__next__()
-        # The DB row already says "Stable"; the file tag was changed behind its
-        # back. An empty diff must not be accepted as proof of restoration.
+        # The DB row already says "Stable"; the file tag does not (an earlier
+        # restore whose tag write failed, or a change behind Beets' back).
         audio = mutagen.wave.WAVE(paths[0])
         audio.tags.setall("TIT2", [mutagen.id3.TIT2(encoding=3, text=["Different"])])
         audio.save()
@@ -831,11 +831,26 @@ class RestoreTruthTests(RealRestoreBase):
                           {"id": item.id, "fields": {"title": item.title}, "path": paths[0]}
                       ]}}},
         )
+        return tx, paths[0]
+
+    def test_empty_db_diff_with_stale_tags_rewrites_the_tags_so_undo_can_be_retried(self):
+        # #555 item 4: before, an empty DB diff skipped the rewrite, so a
+        # failed Undo failed tag verification again on every retry.
+        tx, path = self._empty_diff_stale_tag_tx("Artist/EmptyDiff")
         result = cw.rollback_item_metadata(tx["id"], adapter=self.adapter, store=self.store)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "Rolled Back")
+        self.assertEqual(MediaFile(path).title, "Stable 1")
+
+    def test_empty_db_diff_is_not_reported_as_rolled_back_when_tags_stay_different(self):
+        # The rewrite is still proven: tags that do not verify afterwards
+        # are never counted as a restore (H11).
+        tx, path = self._empty_diff_stale_tag_tx("Artist/EmptyDiffUnproven")
+        with mock.patch.object(cw, "_tag_values", return_value=False):
+            result = cw.rollback_item_metadata(tx["id"], adapter=self.adapter, store=self.store)
         self.assertFalse(result["ok"])
         self.assertNotEqual(result["status"], "Rolled Back")
         self.assertEqual(result["rollback_ok"], 0)
-        self.assertEqual(MediaFile(paths[0]).title, "Different")
 
     def test_legacy_item_metadata_without_before_state_is_unavailable(self):
         tx = self.store.create(
