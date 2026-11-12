@@ -361,6 +361,90 @@ class CleanupIgnoresMarkerTests(_Roots):
         self.assertTrue((folder / slskd.APP_DOWNLOAD_MARKER / "inner").is_dir())
 
 
+class CleanupRemovesStagingSidecarsTests(_Roots):
+    """#554: a successful import removes the app's kept-for-retry marker and
+    original-names sidecar from its staging folder, and nothing else."""
+
+    _clean = CleanupIgnoresMarkerTests._clean
+    SIDECARS = (".bwm_kept_for_retry", ".bwm_recovery_original_names.json")
+
+    def setUp(self):
+        super().setUp()
+        self.stage_root = self.dl / "_beets_missing_import"
+        self.stage_root.mkdir()
+        import backend.recovery_service as rs
+        p = mock.patch.object(rs, "_staging_root", return_value=str(self.stage_root))
+        p.start()
+        self.addCleanup(p.stop)
+        # The original download the stage was copied from: never touched.
+        self.source = self.audio(self.dl / "Torrents" / "Album")
+        for name in self.SIDECARS:
+            (self.source / name).write_text("{}")
+
+    def stage(self, *extra):
+        folder = self.stage_root / "abc123-Album"
+        folder.mkdir()
+        for name in self.SIDECARS + extra:
+            (folder / name).write_text("{}")
+        return folder
+
+    def assert_source_untouched(self):
+        self.assertEqual(sorted(p.name for p in self.source.iterdir()),
+                         sorted(("01.flac",) + self.SIDECARS))
+
+    def test_success_removes_marker_and_sidecar(self):
+        folder = self.stage()
+        log, delete, plan = self._clean(folder)
+        self.assertEqual(sorted(c.args[0] for c in delete.call_args_list),
+                         sorted(str(folder / n) for n in self.SIDECARS))
+        self.assertEqual(list(folder.iterdir()), [])
+        plan.assert_called_once()
+        self.assertTrue(any("Source folder removed" in line for line in log))
+        self.assert_source_untouched()
+
+    def test_leftover_content_keeps_marker_and_sidecar(self):
+        folder = self.stage("02.flac")
+        log, delete, plan = self._clean(folder)
+        delete.assert_not_called()
+        plan.assert_not_called()
+        for name in self.SIDECARS:
+            self.assertTrue((folder / name).is_file())
+        self.assert_source_untouched()
+
+    def test_partial_import_keeps_marker_and_sidecar(self):
+        folder = self.stage("02.flac")
+        log = []
+        with mock.patch.object(imp.composite_workflows, "delete_file") as delete, \
+                mock.patch.object(imp.composite_workflows, "plan_folder_cleanup") as plan:
+            imp._folder_import_clean_source(log, str(folder), [1], True, [folder / "02.flac"])
+        delete.assert_not_called()
+        plan.assert_not_called()
+        for name in self.SIDECARS:
+            self.assertTrue((folder / name).is_file())
+
+    def test_same_names_outside_the_staging_root_are_content(self):
+        log, delete, plan = self._clean(self.source)
+        delete.assert_not_called()
+        plan.assert_not_called()
+        self.assert_source_untouched()
+
+    def test_nested_sidecar_is_content(self):
+        folder = self.stage()
+        (folder / "Disc 1").mkdir()
+        (folder / "Disc 1" / self.SIDECARS[0]).write_text("{}")
+        log, delete, plan = self._clean(folder)
+        delete.assert_not_called()
+        plan.assert_not_called()
+
+    def test_unresolvable_staging_root_keeps_everything(self):
+        folder = self.stage()
+        import backend.recovery_service as rs
+        with mock.patch.object(rs, "_staging_root", return_value=""):
+            log, delete, plan = self._clean(folder)
+        delete.assert_not_called()
+        plan.assert_not_called()
+
+
 class MarkerForgeryTests(_Roots):
     """#325 F1: a marker shipped by downloaded content proves nothing."""
 

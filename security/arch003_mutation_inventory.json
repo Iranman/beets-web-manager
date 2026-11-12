@@ -1398,7 +1398,7 @@
       "key": "backend/import_service.py:_folder_import_clean_source:98aa95154071",
       "file": "backend/import_service.py",
       "function": "_folder_import_clean_source",
-      "line": 3637,
+      "line": 3681,
       "kind": "subprocess",
       "call_text": "composite_workflows.delete_file(str(marker))",
       "classification": "STAGING_ONLY",
@@ -1407,7 +1407,7 @@
       "rule": "reviewed-app-download-ownership-marker",
       "machine_classified": true,
       "human_reviewed": true,
-      "review_reason": "#325 F1/F5/F6/F7: slskd.make_app_download_dir creates a new download folder under the downloads root and mark_app_download_dir writes the .bwm_app_download ownership marker into it only when that call created the folder (no-follow fd-relative temp + rename; never written without the no-follow primitives). The per-install HMAC key is created once 0600 with O_CREAT|O_EXCL|O_NOFOLLOW under WEB_MANAGER_DATA_DIR. import_service._folder_import_clean_source deletes only a valid marker, lstat-checked as a regular file right before composite_workflows.delete_file (LT-13 staging containment). Never touches MUSIC_ROOT or library media.",
+      "review_reason": "#325 F1/F5/F6/F7: slskd.make_app_download_dir creates a new download folder under the downloads root and mark_app_download_dir writes the .bwm_app_download ownership marker into it only when that call created the folder (no-follow fd-relative temp + rename; never written without the no-follow primitives). The per-install HMAC key is created once 0600 with O_CREAT|O_EXCL|O_NOFOLLOW under WEB_MANAGER_DATA_DIR. import_service._folder_import_clean_source deletes only a valid marker, lstat-checked as a regular file right before composite_workflows.delete_file (LT-13 staging containment). Never touches MUSIC_ROOT or library media. #554: the same call deletes the app's .bwm_kept_for_retry marker and .bwm_recovery_original_names.json sidecar, only as top-level regular files of a non-symlink folder directly inside the validated recovery staging root (recovery_service._staging_root), and only once the folder holds nothing but art; never the original download.",
       "reviewed_in_pr": null
     },
     {

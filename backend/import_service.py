@@ -16,11 +16,13 @@ from backend.library_service import _app_managed_download_path, _build_folder_ev
 from backend.ai_evidence_service import _track_ai_similarity
 from backend.pending_review_store import _pending_review_has_path_or_overlap, _library_album_ids_for_folder, _load_recorded_import_skips, _queue_folder_for_manual_review, _record_import_skips, _remove_pending_review_for_path
 import backend.recovery_carrier as recovery_carrier
+import backend.recovery_service as recovery_service
+from backend.recovery_service import KEPT_STAGING_MARKER
 from backend.playlist_service import _music_format_preferences
 from backend.ai_batch_state_service import _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _remaining_audio_files, _resolve_import_review_cleanup_file, _resolve_import_review_selected_audio_file
 from backend.app_runtime import _path_is_under, _safe_path_component, validated_downloads_root
-from backend.slskd import APP_DOWNLOAD_MARKER, app_download_marker_valid, stage_selected_audio_files as _stage_selected_audio_files_impl
+from backend.slskd import APP_DOWNLOAD_MARKER, RECOVERY_ORIGINAL_NAMES_SIDECAR, app_download_marker_valid, stage_selected_audio_files as _stage_selected_audio_files_impl
 from backend.import_guard import filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing
 from backend.audio_preferences import AudioInspectionIncomplete, mark_needs_replacement as _mark_music_format_needs_replacement, validate_audio_file as _validate_audio_file_preferences, validate_audio_properties as _validate_audio_properties, handle_rejected_download as _handle_rejected_audio_download
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
@@ -3619,6 +3621,16 @@ def _folder_import_refuse_failed_apply(ctx: _FolderImportContext, apply_res: Dic
     raise RuntimeError(reason)
 
 
+_APP_STAGING_SIDECARS = frozenset({KEPT_STAGING_MARKER, RECOVERY_ORIGINAL_NAMES_SIDECAR})
+
+
+def _is_app_staging_folder(folder: Path) -> bool:
+    """#554: ``folder`` is a real (non-symlink) top-level folder of the app's
+    recovery staging root, where only the app writes those sidecars."""
+    root = recovery_service._staging_root()
+    return bool(root) and not os.path.islink(folder) and os.path.realpath(os.path.dirname(os.path.normpath(str(folder)))) == root
+
+
 def _folder_import_clean_source(log: list, source_folder_path: str, album_ids: List[int], selected_subset_import: bool,
                                 partial_remaining_audio: List[Path]) -> None:
     # ── Move orphaned artwork to canonical album folder, then remove source ──
@@ -3639,6 +3651,8 @@ def _folder_import_clean_source(log: list, source_folder_path: str, album_ids: L
                 # Walk remaining files; skip directories (already handled above)
                 remaining_files = [f for f in src_dir.rglob("*") if f.is_file()]
                 markers = [f for f in remaining_files if f.name == APP_DOWNLOAD_MARKER and app_download_marker_valid(f.parent)]
+                if _is_app_staging_folder(src_dir):  # #554: the app's own retry marker and names sidecar
+                    markers += [f for f in remaining_files if f.parent == src_dir and f.name in _APP_STAGING_SIDECARS]
                 unknown = [f for f in remaining_files if f.suffix.lower() not in _ART_EXTS and f not in markers]
                 if unknown:
                     log.append(

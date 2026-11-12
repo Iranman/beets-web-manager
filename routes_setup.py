@@ -39,6 +39,7 @@ from flask import jsonify, request, session
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
 from backend import config_layers  # noqa: E402
+from backend.app_runtime import SECRET_NAME_PATTERN, SECRET_VALUE_PATTERN  # noqa: E402
 from backend.build_info import build_info  # noqa: E402
 from backend.web_manager_config_store import (  # noqa: E402
     WebManagerConfigStore,
@@ -311,6 +312,9 @@ _SETTING_USER_TOKEN_RE = re.compile(r"[^\s@]@[^\s@]*/")
 # Not userinfo: a digest-pinned image ("img@sha256:...") and "mailto:" (#595).
 _SETTING_DIGEST_RE = re.compile(r"@?sha(?:256|384|512):[0-9a-fA-F]+")
 _SETTING_MAILTO_RE = re.compile(r"(?i)\bmailto:")
+# A registry with a port in a digest-pinned image name: "localhost:5000/img"
+# or a dotted host. The host part holds one "." boundary only, so it is linear.
+_SETTING_REGISTRY_RE = re.compile(r"(?:localhost|[^:/.@]+\.[^:/@]+):\d+/[^:@]+")
 
 # Parameter names are matched by whole words (#601 F3, #595): "api_key",
 # "X-API-Token", "pwd", and run-together words ending in a secret word
@@ -323,23 +327,44 @@ _NOT_SECRET_PARAM_WORDS = frozenset((
     "monkey", "donkey", "turkey", "hockey", "jockey", "whiskey", "sortkey",
     "compass", "surpass", "overpass", "underpass", "trespass"))
 # A name that ends in one of these words names a count or a flag, not a
-# secret ("session_count", "auth_bypass"); so does "sort_key". Anywhere else
-# a qualifier exempts nothing (a "bypass" or "sort" prefix, a "*_bypass_key"),
-# and a bare "bypass" is still a secret (as on main).
-_NOT_SECRET_PARAM_LAST_WORDS = frozenset(("bypass", "count"))
+# secret ("session_count", "auth_bypass"); so does "sort_key" (#601 F3, #595).
+# The exemption holds only when no word before the qualifier is a secret
+# other than the weak "session"/"auth" (#642): "token_count",
+# "password_bypass", "secret_sort_key", run-together "tokencount" stay
+# masked. Anywhere else a qualifier exempts nothing (a "bypass" or "sort"
+# prefix, a "*_bypass_key"), and a bare "bypass" is still a secret.
+_NOT_SECRET_PARAM_LAST_WORDS = ("bypass", "count")
+_WEAK_SECRET_PARAM_WORDS = frozenset(("session", "auth"))
 
 
-def _is_secret_param_key(name: str) -> bool:
-    words = [w for w in re.split(r"[^a-z0-9]+", urllib.parse.unquote_plus(name).lower()) if w]
-    if len(words) > 1 and (words[-1] in _NOT_SECRET_PARAM_LAST_WORDS or words[-2:] == ["sort", "key"]):
-        return False
+def _secret_param_forms(words: Iterable[str]) -> set:
     forms = set()
     for w in words:
         w = w.rstrip("0123456789")
         forms.update((w, w[:-1]) if w.endswith("s") else (w,))
-    return any(w in _SECRET_PARAM_WORDS
-               or (w.endswith(_SECRET_PARAM_SUFFIXES) and w not in _NOT_SECRET_PARAM_WORDS)
-               for w in forms)
+    return forms
+
+
+def _is_secret_param_form(w: str) -> bool:
+    return w in _SECRET_PARAM_WORDS or (w.endswith(_SECRET_PARAM_SUFFIXES) and w not in _NOT_SECRET_PARAM_WORDS)
+
+
+def _is_secret_param_key(name: str) -> bool:
+    words = [w for w in re.split(r"[^a-z0-9]+", urllib.parse.unquote_plus(name).lower()) if w]
+    if len(words) > 1 and words[-1] in _NOT_SECRET_PARAM_LAST_WORDS:
+        qualified = words[:-1]
+    elif len(words) > 1 and words[-2:] == ["sort", "key"]:
+        qualified = words[:-2]
+    else:
+        qualified = None
+    if qualified is not None:
+        return any(_is_secret_param_form(w) and w not in _WEAK_SECRET_PARAM_WORDS
+                   for w in _secret_param_forms(qualified))
+    forms = _secret_param_forms(words)
+    # A run-together qualifier ("tokencount") is judged by its stem.
+    stems = {w[:-len(q)] for w in forms for q in _NOT_SECRET_PARAM_LAST_WORDS if w.endswith(q) and len(w) > len(q)}
+    return (any(_is_secret_param_form(w) for w in forms)
+            or any(_is_secret_param_form(w) and w not in _WEAK_SECRET_PARAM_WORDS for w in stems))
 
 
 def _secret_value_end(text: str, pos: int) -> int:
@@ -381,6 +406,18 @@ def _redact_secret_params(text: str) -> str:
 _URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
 
 
+def _decode_setting_text(text: str) -> str:
+    """``text`` %-decoded (double encoding too) and NFKC-normalized (#657)."""
+    # Three decode rounds; a value still encoded after them is masked whole
+    # by _cut_setting_text (#657).
+    for _ in range(3):
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return unicodedata.normalize("NFKC", text)
+
+
 def _redact_schemeless_userinfo(token: str) -> str:
     # "user:pass@host" with no "://" (#585). Only the part before any "://"
     # can be this token's userinfo; a token that starts with "scheme://" is
@@ -390,14 +427,22 @@ def _redact_schemeless_userinfo(token: str) -> str:
     if head != token and _URL_SCHEME_RE.fullmatch(head):
         return token
     userinfo, at, host = head.rpartition("@")
-    # A digest-pinned image is not userinfo, but a ":" other than a
-    # registry port ("reg:5000/img") still is: "u:pw@sha256:..." is cut.
-    if _SETTING_DIGEST_RE.fullmatch(host) and not re.search(r":(?!\d+/)", userinfo):
+    # A ":" written as "%3A", "%253A" or a full-width colon is still a ":"
+    # (#642, #657).
+    decoded = _decode_setting_text(userinfo)
+    colon = ":" in decoded
+    # A digest-pinned image is not userinfo, but a ":" other than a dotted
+    # or localhost registry's port ("reg.x:5000/img") still is (#642):
+    # "u:pw@sha256:..." and "u:5000/pw@sha256:..." are cut, and so is
+    # "reg.x:5000/u%3Apw@sha256:..." (#657). A plain "reg.x:5000/pw@sha256:..."
+    # is a registry image by its form and is shown.
+    if _SETTING_DIGEST_RE.fullmatch(host) and (not colon or _SETTING_REGISTRY_RE.fullmatch(decoded)):
         return token
     lead = userinfo[:7] if userinfo[:7].lower() == "mailto:" else ""
     user = userinfo[len(lead):]
-    if user and (":" in user or "/" in host):
-        return lead + (_CUT if ":" in user else _CUT_USER) + at + host + token[len(head):]
+    colon = colon and ":" in _decode_setting_text(user)
+    if user and (colon or "/" in host):
+        return lead + (_CUT if colon else _CUT_USER) + at + host + token[len(head):]
     return token
 
 
@@ -427,9 +472,12 @@ def _cut_setting_text(value: str) -> Optional[str]:
     # userinfo the cuts missed; mask the whole value. A plain email stays.
     # Only the real cuts are dropped first (#599 N2). An encoded user-only
     # token with a path also masks the whole value.
-    check = unicodedata.normalize("NFKC", urllib.parse.unquote(
-        redacted.replace(_CUT + "@", "").replace(_CUT, "").replace(_CUT_USER, "")))
-    check = _SETTING_MAILTO_RE.sub("", _SETTING_DIGEST_RE.sub("", check))
+    # Only a literal "@" pins a digest: digests are dropped before decoding,
+    # so "u:S%40sha256:..." and "u:S＠sha256:..." leave an "@" (#657).
+    check = _SETTING_DIGEST_RE.sub("", redacted.replace(_CUT + "@", "").replace(_CUT, "").replace(_CUT_USER, ""))
+    check = _SETTING_MAILTO_RE.sub("", _decode_setting_text(check))
+    if urllib.parse.unquote(check) != check:
+        return None  # encoded deeper than _decode_setting_text decodes: fail closed
     at = check.rfind("@")
     if (at > 0 and ":" in check[:at]) or _SETTING_USER_TOKEN_RE.search(check):
         return None
@@ -478,21 +526,101 @@ def _mask_secret_settings(settings: dict) -> dict:
 _MISSING = object()
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21}
+_SCHEMELESS_HOST_PORT_RE = re.compile(r"[A-Za-z0-9.-]+:\d+(?:[/?#]\S*)?")
+_URL_AUTHORITY_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.-]*:)?//([^/?#]*)")
+# Parsers disagree on these in an authority ("a\\@b": urlsplit reads host b,
+# urllib3 reads a), so such a URL is compared by its raw text (#645).
+_URL_AUTHORITY_UNSAFE_RE = re.compile(r"[\\\x00-\x20\x7f-\x9f]")
+
+
 def _url_origin(value: Any) -> Any:
-    """(scheme, host, port) of a URL string, else None (#641)."""
-    if not isinstance(value, str) or "://" not in value:
+    """(scheme, host, port) of a URL-like string, else None (#641, #645).
+    Forms the parsers may read differently, and web-scheme URLs with no
+    "//" ("https:host"), are compared by their raw text."""
+    if not isinstance(value, str):
         return None
+    text = value.strip()
+    if _SCHEMELESS_HOST_PORT_RE.fullmatch(text):
+        text = "//" + text  # "host:8080/x"
+    authority = _URL_AUTHORITY_RE.match(text)
+    if authority and _URL_AUTHORITY_UNSAFE_RE.search(authority.group(1)):
+        return ("raw", text)
     try:
-        parts = urllib.parse.urlsplit(value.strip())
-        return (parts.scheme.lower(), parts.hostname, parts.port) if parts.netloc else None
+        parts = urllib.parse.urlsplit(text)
+        scheme = parts.scheme.lower()
+        if parts.netloc:
+            return (scheme, parts.hostname, parts.port or _DEFAULT_PORTS.get(scheme))
     except ValueError:
-        return value.strip()  # an unparsable port: compare the raw text
+        return ("raw", text)  # an unparsable port
+    return ("raw", text) if scheme in _DEFAULT_PORTS else None
 
 
-def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> Any:
+def _url_origins(value: Any) -> List[Any]:
+    """Origins of every URL in ``value`` at any depth (#645)."""
+    if isinstance(value, dict):
+        return [o for v in value.values() for o in _url_origins(v)]
+    if isinstance(value, list):
+        return [o for v in value for o in _url_origins(v)]
+    origin = _url_origin(value)
+    return [] if origin is None else [origin]
+
+
+def _lost_origin(before: Any, after: Any) -> bool:
+    """A string where ``before`` held a URL now holds text with no origin,
+    such as a schemeless "evil.invalid/v1" (#657): that is a moved URL too.
+    An emptied value or an unchanged list entry is not."""
+    if isinstance(after, dict):
+        base = before if isinstance(before, dict) else {}
+        return any(_lost_origin(base.get(k, _MISSING), v) for k, v in after.items())
+    if isinstance(after, list):
+        return any(_lost_origin(before, v) for v in after
+                   if not (isinstance(before, list) and v in before))
+    return (isinstance(after, str) and bool(after.strip()) and _url_origin(after) is None
+            and bool(_url_origins(before)))
+
+
+def _carries_secret(key: Any, value: Any) -> bool:
+    return value is not _MISSING and _mask_setting_value(value, _is_secret_setting_key(str(key))) != value
+
+
+def _name_group(key: Any) -> str:
+    return next((w for w in re.split(r"[^a-z0-9]+", str(key).lower()) if w), "")
+
+
+def _check_url_origins(posted: dict, out: dict, base: dict, top: bool) -> None:
+    """#641/#645: a stored credential kept (by a mask, or at the top level
+    by leaving it out of the POST) must not stay beside a URL that moved to
+    another scheme, host or port. In a nested object every sibling is
+    related; at the top level a moved URL relates to keys sharing its first
+    name word ("ai_base_url", "ai_api_key"), or to every key when no key of
+    its group holds a secret and it brings none of its own."""
+    merged = {**base, **out} if top else out
+    kept = [k for k in merged if _carries_secret(k, base.get(k, _MISSING))
+            and (_SECRET_MASK in json.dumps(posted[k]) if k in posted else top)]
+    if not kept:
+        return
+    for m, v in out.items():
+        before = _url_origins(base.get(m, _MISSING))
+        if all(o in before for o in _url_origins(v)) and not _lost_origin(base.get(m, _MISSING), v):
+            continue
+        group = _name_group(m)
+        if top:
+            own = _carries_secret(m, v) or _carries_secret(m, base.get(m, _MISSING)) or any(
+                k != m and _name_group(k) == group and _carries_secret(k, merged[k]) for k in merged)
+            related = [k for k in kept if k != m and (_name_group(k) == group or not own)]
+        else:
+            related = [k for k in kept if k != m]
+        if related:
+            raise ValueError("a URL's host, scheme or port changed; re-enter its credential in full")
+
+
+def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False, top: bool = False) -> Any:
     """POST inverse of _mask_setting_value: wherever ``posted`` is exactly
     what GET returned for ``stored``, keep ``stored`` (#522, #570). A mask
-    with nothing stored behind it resolves to _MISSING (the key is dropped)."""
+    with nothing stored behind it resolves to _MISSING (the key is dropped).
+    ``top`` marks the settings object itself, which POST merges into the
+    stored one, so a key left out keeps its stored value."""
     if secret and posted == _SECRET_MASK:
         if stored is _MISSING:
             # A mask under a renamed or new key has no secret behind it (#601 F5).
@@ -509,12 +637,7 @@ def _restore_masked_setting(posted: Any, stored: Any, secret: bool = False) -> A
             restored = _restore_masked_setting(v, base.get(k, _MISSING), _is_secret_setting_key(str(k)))
             if restored is not _MISSING:
                 out[k] = restored
-        # #641: a URL moved to another scheme, host or port must not carry the
-        # stored credential beside it; the mask is refused, a new one is taken.
-        moved = any(_url_origin(v) not in (None, _url_origin(base.get(k))) for k, v in out.items())
-        if moved and any(_is_secret_setting_key(str(k)) and _SECRET_MASK in json.dumps(v)
-                         for k, v in posted.items()):
-            raise ValueError("a URL's host, scheme or port changed; re-enter its credential in full")
+        _check_url_origins(posted, out, base, top)
         return out
     if isinstance(posted, list):
         # Entries are matched by identity, not position (#585): a posted entry
@@ -1835,19 +1958,15 @@ _SECRET_KV_RE = re.compile(
     # Start only where a name run starts, never inside one: "\b" let each
     # "a" of "a-a-a-..." start a scan to the end of the run, O(n^2) (#524).
     (?<![a-z0-9_-])
-    ([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|passwd|passphrase|secret|authorization|auth|cookie
-        |(?<![a-z0-9])(?:pass|pwd)))  # whole word or suffix only: not bypass, compass
+    # The name is shared with app_runtime (#654).
+    (""" + SECRET_NAME_PATTERN + r""")
     (["']?\s*[:=]\s*)
     # Already redacted only when the placeholder ends the value: in
     # "[REDACTED],y" the ",y" is still part of the secret (#524).
     (?!['"]?(?:(?:bearer|basic)\s+)?\[redacted\]['"]?(?:\s|$))
     ((?:(?:bearer|basic)\s+)?)
-    # The value runs to ASCII whitespace (an NBSP may be part of it); a quoted
-    # part may hold spaces and runs to its closing quote, or to the end when
-    # unclosed (#524). The alternatives start on different characters, so
-    # matching stays linear.
-    (?:"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\ \t\r\n\f\v"'])+
-    """,
+    # The value extent is shared with app_runtime (#524, #647).
+    """ + SECRET_VALUE_PATTERN,
     re.VERBOSE | re.DOTALL,
 )
 
@@ -1882,8 +2001,9 @@ _COOKIE_HEADER_RE = re.compile(r"(?im)\b(Set-Cookie|Cookie)(\s*:\s*)[^\r\n]*")
 
 # Credentials embedded in a URL's userinfo, e.g. https://user:password@host/
 # Anchored on "://" for any scheme: a "\b[a-z][a-z0-9+.-]*" scheme scan was
-# O(n^2) on "a-a-a-..." (#524).
-_URL_CREDENTIAL_RE = re.compile(r"(://)[^\s/@]+@")
+# O(n^2) on "a-a-a-..." (#524). The userinfo runs to the last "@" before a
+# "/" or whitespace: a password may hold "@" (#654).
+_URL_CREDENTIAL_RE = re.compile(r"(://)[^\s/]+@")
 
 # Defense-in-depth cleanup: collapses a `[redacted]`/`[REDACTED]` marker
 # followed by one or more stray `]` characters back down to a single clean
@@ -3682,7 +3802,7 @@ def setup_save_settings():
     settings = dict(json.loads(record.get("content") or "{}"))
     # GET masks secret fields; a round-tripped mask keeps the stored value (#522).
     try:
-        settings.update(_restore_masked_setting(payload, settings))
+        settings.update(_restore_masked_setting(payload, settings, top=True))
     except ValueError as ex:
         return jsonify({"ok": False, "error": str(ex), "code": "settings_unmatched_mask"}), 400
     try:
