@@ -238,6 +238,7 @@ Most installs never need these. They are read only from the container environmen
 | `BEETS_SUBMISSION_DRAFTS` | `/config/submission_drafts.json` | Submission drafts file. |
 | `IMPORT_REVIEW_AUTO_IMPORTS_FILE`, `IMPORT_TARGET_PREVIEW_CACHE_TTL` | `/config/import_review_auto_imports.json`, `20` | Import review record file, and import target preview cache seconds. |
 | `UNMATCHED_DRAFT_DIR`, `METADATA_CACHE_DIR` | `WD/unmatched_drafts`, `/config/.cache/metadata` | Unmatched draft folder and metadata cache folder. |
+| `RELEASE_ART_CACHE_MAX_MB` | `500` | Size cap of the cover-art cache in `METADATA_CACHE_DIR/release-art` (minimum 1). Art from Cover Art Archive or Discogs is downloaded there once per release group and served from disk; the oldest images are removed when the cap is passed. The cache is never written into album folders. |
 | `MB_RELEASE_TRACKLIST_DISK_CACHE_TTL` | `604800` | MusicBrainz tracklist cache seconds. |
 | `AUDIO_FFPROBE_TIMEOUT`, `AUDIO_FFPROBE_FAST_TIMEOUT`, `AUDIO_FFMPEG_TIMEOUT`, `AUDIO_DECODE_MD5_TIMEOUT` | `20`, `20`, `180`, `120` | Audio tool timeouts in seconds. |
 | `MUSIC_FORMAT_PREFS_FILE`, `MUSIC_FORMAT_REPLACEMENT_STATUS_FILE` | `/config/music_format_preferences.json`, `/config/music_format_replacements.json` | Music format state files. |
