@@ -437,7 +437,7 @@ function PreviewRows({ rows, label }: { rows: MissingMbPreviewRow[]; label: (id:
           </div>
           <div className="text-xs text-muted">{row.message}</div>
           {row.proven ? (
-            <div className="font-mono text-[0.7rem] text-graphite-300">Will write: {writeText(row.write)}</div>
+            <div className="font-mono text-xs text-graphite-300">Will write: {writeText(row.write)}</div>
           ) : row.reasons.length ? (
             <div className="text-xs text-muted">Why: {row.reasons.map(reasonLabel).join('; ')}</div>
           ) : null}

@@ -995,7 +995,7 @@ function TrackList({
 }) {
   return (
     <div className="min-h-0">
-      <div className={`mb-2 text-[0.72rem] font-semibold ${tone}`}>
+      <div className={`mb-2 text-xs font-semibold ${tone}`}>
         {title}
       </div>
       <div className="max-h-80 overflow-auto rounded border border-graphite-800 bg-graphite-950/40">
@@ -1116,7 +1116,7 @@ function PlaylistJobProgress({
       ) : null}
       {trackStatuses.length ? (
         <div className="mb-3 max-h-52 overflow-auto rounded border border-graphite-800 bg-graphite-950/50">
-          <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] border-b border-graphite-800 px-3 py-2 text-[0.7rem] font-semibold text-muted">
+          <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] border-b border-graphite-800 px-3 py-2 text-xs font-semibold text-muted">
             <span>Track</span>
             <span>Source</span>
             <span>Status</span>
@@ -2360,7 +2360,7 @@ export default function Playlists() {
   return (
     <div className="min-w-0 space-y-6 overflow-x-clip">
       <div>
-        <h1 className="text-xl font-semibold text-zinc-100">Playlists</h1>
+        <h1 className="font-display text-2xl font-semibold text-zinc-100">Playlists</h1>
         <p className="mt-0.5 text-sm text-muted">
           Source playlist → saved playlist → missing-track download → Beets import → MusicBrainz release-group placement → Plex.
         </p>
@@ -2468,7 +2468,7 @@ export default function Playlists() {
           onClick={() => setImportExpanded((value) => !value)}
         >
           <span className="flex min-w-0 items-center gap-2">
-            <span className="text-[0.78rem] font-semibold text-zinc-400">
+            <span className="text-sm font-semibold text-zinc-400">
               Add or import playlist
             </span>
             <span className="rounded border border-graphite-800 px-1.5 py-0.5 text-xs text-muted">
@@ -2728,7 +2728,7 @@ export default function Playlists() {
             <div className="rounded border border-amber-900/50 bg-amber-950/20 p-3">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[0.72rem] font-semibold text-amber-300">
+                  <div className="text-xs font-semibold text-amber-300">
                     Needs cleanup
                   </div>
                   <div className="mt-1 text-xs text-amber-100/70">
@@ -3105,7 +3105,7 @@ export default function Playlists() {
       <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-[0.78rem] font-semibold text-muted">
+            <h2 className="text-sm font-semibold text-muted">
               Saved playlists
             </h2>
             <div className="mt-1 text-xs text-muted">

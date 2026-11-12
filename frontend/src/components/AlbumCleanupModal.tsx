@@ -212,7 +212,7 @@ export function AlbumCleanupModal({
                       <div>• Audio files kept on disk, unchanged</div>
                     </div>
                   </div>
-                  <p className="mt-2 text-[0.7rem] text-muted">
+                  <p className="mt-2 text-xs text-muted">
                     No files are deleted or moved. The album directory, its audio files, artwork,
                     and any other files in it stay where they are.
                   </p>
@@ -301,7 +301,7 @@ export function AlbumCleanupModal({
                     <div className="text-zinc-400">• Audio files kept on disk</div>
                   )}
                   {applyResult.log?.length ? (
-                    <details className="mt-2 rounded bg-graphite-950 p-2 text-[0.7rem] font-mono text-zinc-400">
+                    <details className="mt-2 rounded bg-graphite-950 p-2 text-xs font-mono text-zinc-400">
                       <summary className="cursor-pointer text-zinc-300">Engine Execution Log</summary>
                       <pre className="mt-1 whitespace-pre-wrap">{applyResult.log.join('\n')}</pre>
                     </details>

@@ -154,10 +154,10 @@ function PathRow({ label, path, ok }: { label: string; path: string; ok: boolean
   return (
     <div className="flex min-w-0 items-center justify-between gap-3 border-t border-graphite-800 py-2 first:border-t-0">
       <div className="min-w-0">
-        <div className="text-[0.78rem] font-medium text-zinc-300">{label}</div>
-        <div className="truncate text-[0.72rem] text-muted">{path || 'not configured'}</div>
+        <div className="text-sm font-medium text-zinc-300">{label}</div>
+        <div className="truncate text-xs text-muted">{path || 'not configured'}</div>
       </div>
-      <span className={`shrink-0 text-[0.72rem] font-semibold ${ok ? 'text-emerald-300' : 'text-red-300'}`}>
+      <span className={`shrink-0 text-xs font-semibold ${ok ? 'text-emerald-300' : 'text-red-300'}`}>
         {ok ? 'ok' : 'check'}
       </span>
     </div>
@@ -287,10 +287,10 @@ function AuthTokenDialog({
         <DialogPanel className="w-full max-w-lg rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
           <DialogTitle className="text-base font-semibold text-zinc-100">New API token generated</DialogTitle>
           <p className="mt-2 text-sm font-semibold text-amber-300">{warning || 'Save this token now — it will not be shown again.'}</p>
-          <div className="mt-3 break-all rounded border border-graphite-700 bg-graphite-950 p-3 font-mono text-[0.78rem] text-emerald-300">
+          <div className="mt-3 break-all rounded border border-graphite-700 bg-graphite-950 p-3 font-mono text-sm text-emerald-300">
             {token}
           </div>
-          <p className="mt-2 text-[0.72rem] text-muted">
+          <p className="mt-2 text-xs text-muted">
             Use this as a Bearer token (Authorization: Bearer &lt;token&gt;) for API/script clients. It replaces the
             previous token immediately.
           </p>
@@ -389,7 +389,7 @@ function EnvVariableRow({
   return (
     <div className="grid gap-3 rounded border border-graphite-800 bg-graphite-950/35 p-3.5 lg:grid-cols-[minmax(14rem,22rem)_minmax(0,1fr)_auto]">
       <div className="min-w-0">
-        <div className="break-all text-[0.80rem] font-semibold text-zinc-100">{variable.name}</div>
+        <div className="break-all text-sm font-semibold text-zinc-100">{variable.name}</div>
         <div className="mt-1.5 flex flex-wrap gap-1.5 text-xs font-semibold">
           <span className={`rounded px-1.5 py-0.5 ${badge.className}`}>{badge.label}</span>
           {variable.secret && (
@@ -420,7 +420,7 @@ function EnvVariableRow({
             <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400 border border-zinc-800">not editable here</span>
           )}
         </div>
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.72rem] text-zinc-400">
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-400">
           {variable.container_path && (
             <span>
               <span className="text-muted">Container:</span> <code className="text-zinc-300">{variable.container_path}</code>
@@ -442,7 +442,7 @@ function EnvVariableRow({
         </div>
 
         {variable.is_overridden && (
-          <div className="mt-2 rounded border border-amber-800/50 bg-amber-950/30 p-2 text-[0.70rem] text-amber-200">
+          <div className="mt-2 rounded border border-amber-800/50 bg-amber-950/30 p-2 text-xs text-amber-200">
             <div className="font-semibold text-amber-300"><WarningIcon /> Environment overrides saved configuration</div>
             <div className="mt-0.5 font-mono text-zinc-300">
               <span>Running: </span>
@@ -463,7 +463,7 @@ function EnvVariableRow({
         {/* Reveal display area */}
         {isRevealed && (
           <div className="mb-2 flex items-center gap-2 rounded border border-emerald-700/70 bg-emerald-950/40 p-2 text-xs">
-            <span className="font-mono text-[0.70rem] font-bold text-emerald-400">VALUE:</span>
+            <span className="font-mono text-xs font-bold text-emerald-400">VALUE:</span>
             <code className="min-w-0 flex-1 break-all font-mono text-xs text-emerald-200 select-all font-semibold">
               {revealedValue}
             </code>
@@ -483,7 +483,7 @@ function EnvVariableRow({
         )}
 
         {revealError && !isRevealed && (
-          <div className="mb-1.5 text-[0.72rem] text-red-300">{revealError}</div>
+          <div className="mb-1.5 text-xs text-red-300">{revealError}</div>
         )}
 
         {/* 1. BEETS_WEB_PASSWORD Special Row */}
@@ -568,7 +568,7 @@ function EnvVariableRow({
         )}
       </div>
 
-      <label className="flex items-center justify-end gap-1.5 text-[0.72rem] font-semibold text-zinc-400">
+      <label className="flex items-center justify-end gap-1.5 text-xs font-semibold text-zinc-400">
         <Checkbox
           size="small"
           disabled={notEditable || (!variable.secret && !variable.configured && !variable.value) || (!variable.configured && value === '')}
@@ -944,7 +944,7 @@ export default function System() {
     <div className="space-y-5">
       <section className="flex flex-wrap items-start justify-between gap-3 border-b border-graphite-800 pb-4">
         <div>
-          <h1 className="text-xl font-semibold text-zinc-100">System</h1>
+          <h1 className="font-display text-2xl font-semibold text-zinc-100">System</h1>
           <div className="mt-1 text-sm text-muted">
             {status?.version ? versionLabel(status.version, status.revision) : 'Environment, readiness, and Beets configuration'}
           </div>
@@ -1034,11 +1034,11 @@ export default function System() {
               return (
                 <div key={name} className="border-t border-graphite-800 py-2 first:border-t-0">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-[0.78rem] font-medium capitalize text-zinc-300">
+                    <span className="text-sm font-medium capitalize text-zinc-300">
                       {name}
                       {integration.required && <span className="ml-1.5 text-xs font-semibold text-muted">(required)</span>}
                     </span>
-                    <span className={`flex items-center gap-1 text-[0.72rem] font-semibold ${toneClass}`}>
+                    <span className={`flex items-center gap-1 text-xs font-semibold ${toneClass}`}>
                       <span aria-hidden="true">{badge.icon}</span>
                       {badge.label}
                     </span>
@@ -1083,11 +1083,13 @@ export default function System() {
           {pluginsMsg && <Alert severity="success">{pluginsMsg}</Alert>}
           {panelError(pluginsError, engineOffline) && <Alert severity="error">{pluginsError}</Alert>}
 
-          <div className="grid gap-2 text-[0.72rem] text-zinc-200 sm:grid-cols-2 lg:grid-cols-4 rounded bg-graphite-950 p-3 border border-graphite-800">
+          <div className="grid gap-2 text-xs text-zinc-200 sm:grid-cols-2 lg:grid-cols-4 rounded bg-graphite-950 p-3 border border-graphite-800">
             <div><span className="font-semibold text-zinc-100">Plugin path:</span> {status.beets.pluginpath?.join(' then ') || 'not configured'}</div>
             <div><span className="font-semibold text-zinc-100">ReplayGain:</span> {status.beets.replaygain_backend || status.beets.replaygain_command || 'not configured'}</div>
             <div><span className="font-semibold text-zinc-100">Enabled plugins:</span> {status.beets.configured_plugins?.length ?? 0}</div>
-            <div><span className="font-semibold text-zinc-100">Plugin loader:</span> {pluginLoaderLabel(status.beets)}</div>
+            <div><span className="font-semibold text-zinc-100">Plugin loader:</span>{' '}
+              <span className={pluginLoaderLabel(status.beets) === 'loaded' ? 'text-emerald-300' : 'font-semibold text-red-300'}>{pluginLoaderLabel(status.beets)}</span>
+            </div>
           </div>
 
           {pluginsReport && (
@@ -1178,8 +1180,8 @@ export default function System() {
           {regenerateTokenError && <Alert severity="error" onClose={() => setRegenerateTokenError('')}>{regenerateTokenError}</Alert>}
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:border-r sm:pr-3">
-              <div className="text-[0.78rem] font-medium text-zinc-300">API token (Bearer)</div>
-              <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.token_configured ? 'text-emerald-300' : 'text-muted'}`}>
+              <div className="text-sm font-medium text-zinc-300">API token (Bearer)</div>
+              <div className={`mt-1 text-xs font-semibold ${status.auth.token_configured ? 'text-emerald-300' : 'text-muted'}`}>
                 {status.auth.token_configured
                   ? status.auth.token_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
                   : '✗ Not configured'}
@@ -1192,8 +1194,8 @@ export default function System() {
               )}
             </div>
             <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:pl-3">
-              <div className="text-[0.78rem] font-medium text-zinc-300">Browser Login (Basic Auth)</div>
-              <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.password_configured ? 'text-emerald-300' : 'text-muted'}`}>
+              <div className="text-sm font-medium text-zinc-300">Browser Login (Basic Auth)</div>
+              <div className={`mt-1 text-xs font-semibold ${status.auth.password_configured ? 'text-emerald-300' : 'text-muted'}`}>
                 {status.auth.password_configured
                   ? status.auth.password_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
                   : '✗ Not configured'}
@@ -1259,7 +1261,7 @@ export default function System() {
                 if (event.key === 'Enter' && reauthDialog.password && !reauthDialog.submitting) void submitReauth();
               }}
             />
-            {reauthDialog.error && <div className="mt-2 text-[0.75rem] text-red-300">{reauthDialog.error}</div>}
+            {reauthDialog.error && <div className="mt-2 text-xs text-red-300">{reauthDialog.error}</div>}
             <div className="mt-5 flex justify-end gap-2">
               <Button
                 variant="outlined"
@@ -1285,7 +1287,7 @@ export default function System() {
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-zinc-100">Environment variables</h2>
-            <div className="mt-1 break-all text-[0.72rem] text-muted">
+            <div className="mt-1 break-all text-xs text-muted">
               {env?.env_file ?? 'No env file'} {env?.exists ? '' : '(will be created)'}
             </div>
           </div>
@@ -1301,7 +1303,7 @@ export default function System() {
 
         {grouped.map(([section, variables]) => (
           <div key={section} className="space-y-2">
-            <div className="text-[0.72rem] font-semibold text-muted">{section}</div>
+            <div className="text-xs font-semibold text-muted">{section}</div>
             {variables.map((variable) => (
               <EnvVariableRow
                 key={variable.name}

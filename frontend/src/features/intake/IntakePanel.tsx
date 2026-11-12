@@ -62,7 +62,7 @@ function StatCard({
   return (
     <div className="rounded border border-graphite-800 bg-graphite-950/70 px-3 py-3">
       <div className={cx('text-xl font-semibold tabular-nums', toneClass)}>{value.toLocaleString()}</div>
-      <div className="mt-1 text-[0.7rem] text-muted">{label}</div>
+      <div className="mt-1 text-xs text-muted">{label}</div>
     </div>
   );
 }
@@ -934,7 +934,7 @@ function JobLog({
                     <div key={folder.folder_id} className="flex min-w-0 items-center justify-between gap-2 rounded border border-graphite-800 px-2 py-2">
                       <div className="min-w-0">
                         <div className="truncate text-sm text-zinc-200">{folderName(folder.source_folder)}</div>
-                        <div className="truncate font-mono text-[0.7rem] text-muted">
+                        <div className="truncate font-mono text-xs text-muted">
                           {staleWorker
                             ? 'worker stopped before this folder finished'
                             : [folderStatusLabel(folder.status), folderStageLabel(folder.stage), folder.current_step].filter(Boolean).join(' · ') || folder.ai_suggest_status}
@@ -1357,11 +1357,11 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
           {preflight.folders.length > 0 ? (
             <div className="rounded border border-graphite-800 bg-graphite-950/30">
               <div className="flex items-center justify-between border-b border-graphite-800 px-3 py-2">
-                <span className="text-[0.75rem] font-semibold text-muted">
+                <span className="text-xs font-semibold text-muted">
                   Folders ({preflight.folders.length})
                 </span>
                 {preflight.folders.length === 100 ? (
-                  <span className="text-[0.7rem] text-muted">showing first 100</span>
+                  <span className="text-xs text-muted">showing first 100</span>
                 ) : null}
               </div>
               {preflight.folders.map((folder) => (

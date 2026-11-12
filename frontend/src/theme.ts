@@ -125,6 +125,18 @@ export const theme = createTheme({
           borderRadius: 6,
           border: `1px solid ${graphite.borderSoft}`,
           backgroundImage: 'none',
+          // Info sits on the warm shelf surface; blue stays on the icon only, so notices
+          // read as neutral messages rather than a navy panel.
+          variants: [
+            {
+              props: { variant: 'standard', severity: 'info' },
+              style: {
+                backgroundColor: graphite.surface2,
+                color: graphite.text,
+                '& .MuiAlert-icon': { color: '#93c5fd' },
+              },
+            },
+          ],
         },
       },
     },

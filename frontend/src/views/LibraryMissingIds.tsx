@@ -11,7 +11,7 @@ export default function LibraryMissingIds() {
         <Link className="text-xs text-zinc-400 hover:text-zinc-200" to="/library">
           ← Back to Library
         </Link>
-        <h1 className="mt-2 text-2xl font-semibold text-zinc-100">Missing MusicBrainz IDs</h1>
+        <h1 className="mt-2 font-display text-2xl font-semibold text-zinc-100">Missing MusicBrainz IDs</h1>
         <p className="mt-2 max-w-3xl text-sm text-zinc-400">
           These albums and tracks are already in your Beets library but have no MusicBrainz release or recording ID,
           so duplicate checks, Find Music, and artwork lookups cannot identify them. Pick a match for each one;

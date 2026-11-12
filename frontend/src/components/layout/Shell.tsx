@@ -108,7 +108,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                   to={to}
                   className={({ isActive }) =>
                     [
-                      'flex shrink-0 items-center whitespace-nowrap border-b-2 px-2.5 text-[0.82rem] font-medium transition-colors focus-visible:-outline-offset-2! sm:px-3',
+                      'flex shrink-0 items-center whitespace-nowrap border-b-2 px-2.5 text-sm font-medium transition-colors focus-visible:-outline-offset-2! sm:px-3',
                       isActive
                         ? 'border-brass-400 bg-brass-950/60 text-zinc-50'
                         : 'border-transparent text-zinc-300 hover:border-brass-700 hover:bg-brass-950/40 hover:text-zinc-50',
@@ -124,10 +124,10 @@ export default function Shell({ username, onLogout }: ShellProps) {
 
             <div className="ml-auto flex shrink-0 items-center gap-3">
               {restartMsg && (
-                <span className="text-[0.72rem] text-emerald-400">{restartMsg}</span>
+                <span className="text-xs text-emerald-400">{restartMsg}</span>
               )}
               {!restartMsg && running > 0 && (
-                <span className="hidden items-center sm:flex gap-1.5 text-[0.72rem] text-amber-300">
+                <span className="hidden items-center sm:flex gap-1.5 text-xs text-amber-300">
                   <span className="inline-block h-1.5 w-1.5 motion-safe:animate-pulse rounded-full bg-amber-300" />
                   {running} running
                 </span>
@@ -135,7 +135,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
               <Menu>
                 <MenuButton
                   disabled={restarting}
-                  className="flex items-center rounded-md px-1.5 py-1 text-brass-300 transition-colors hover:bg-brass-950/60 hover:text-brass-200 disabled:opacity-40"
+                  className="flex items-center rounded-md p-2 text-brass-300 transition-colors hover:bg-brass-950/60 hover:text-brass-200 disabled:opacity-40"
                   title="System"
                 >
                   <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

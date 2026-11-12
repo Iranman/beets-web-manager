@@ -53,7 +53,7 @@ function GroupRow({
             <Chip color="secondary" label="rename to MB" size="small" />
           )}
         </div>
-        <div className="text-[0.72rem] text-muted">
+        <div className="text-xs text-muted">
           {group.variants.map((v) => v.name).join(' · ')}
         </div>
         {mbid && (
@@ -343,8 +343,8 @@ export function ArtistFoldersPanel() {
 
           {dryRunLog.length > 0 && (
             <div className="rounded border border-graphite-700 bg-graphite-950 p-3">
-              <div className="mb-1 text-[0.72rem] font-semibold text-muted">Dry run output</div>
-              <LogViewer className="max-h-52 text-[0.71rem] leading-5" lines={dryRunLog} />
+              <div className="mb-1 text-xs font-semibold text-muted">Dry run output</div>
+              <LogViewer className="max-h-52 text-xs leading-5" lines={dryRunLog} />
             </div>
           )}
 
@@ -391,7 +391,7 @@ export function ArtistFoldersPanel() {
         {stampMsg && <p className="text-xs text-zinc-400">{stampMsg}</p>}
         {stampLog.length > 0 && (
           <div className="rounded border border-graphite-700 bg-graphite-950 p-3">
-            <LogViewer className="max-h-52 text-[0.71rem] leading-5" lines={stampLog} />
+            <LogViewer className="max-h-52 text-xs leading-5" lines={stampLog} />
           </div>
         )}
         <JobStatusCard job={stampJob} runningLabel="Stamping MB IDs on folders…" logLines={3} />
