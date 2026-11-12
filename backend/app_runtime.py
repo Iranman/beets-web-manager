@@ -708,15 +708,14 @@ SECRET_NAME_PATTERN = (
 # - a query parameter ("?access_token=x&keep=1"): the value stops at "&",
 #   "#" or whitespace outside quotes, so the following parameters survive;
 # - an Authorization or Cookie header with an unquoted value: masked to the
-#   end of the line (Digest/Token parameters, several cookie pairs), keeping
-#   a known scheme word for context;
+#   end of the line (Digest/Token parameters, several cookie pairs), the
+#   scheme word included, as before;
 # - any other "name: value" / "name=value", the key possibly closing its own
 #   quote first ({"password": ...}).
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![a-z0-9_-])(?:"
     r"(?<=[?&])(?P<qk>" + SECRET_NAME_PATTERN + r")(?P<qs>=)(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&#\s\"'])*"
-    r"|(?P<hk>[a-z0-9_-]*?(?:authorization|cookie))(?P<hs>[ \t]*[:=][ \t]*(?![ \t]*[\"'])"
-    r"(?:(?:Bearer|Basic|Digest|Token|Negotiate)[ \t]+)?)[^\r\n]*"
+    r"|(?P<hk>[a-z0-9_-]*?(?:authorization|cookie))(?P<hs>[ \t]*[:=][ \t]*)(?![ \t]*[\"'])[^\r\n]*"
     r"|(?P<k>" + SECRET_NAME_PATTERN + r")(?P<s>[\"']?\s*[:=]\s*)"
     r"(?:(?:Bearer|Basic|Digest|Token|Negotiate)\s+)?" + SECRET_VALUE_PATTERN + r")",
     re.DOTALL,

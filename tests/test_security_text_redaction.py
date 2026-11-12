@@ -29,15 +29,15 @@ class SecurityTextRedactionTests(unittest.TestCase):
         self.assert_masked("password=[REDACTED],S tail", "password=[REDACTED] tail")
 
     def test_bearer_header(self):
-        # #654: a header value runs to the end of the line; the scheme is kept.
-        self.assert_masked("Authorization: Bearer abc tail\nnext", "Authorization: Bearer [REDACTED]\nnext")
+        # #654: a header value runs to the end of the line; the scheme word is masked too.
+        self.assert_masked("Authorization: Bearer abc tail\nnext", "Authorization: [REDACTED]\nnext")
 
     def test_digest_and_token_authorization(self):
         # #654: only the scheme word was masked.
         self.assert_masked('Authorization: Digest username="u", response="fake-s1"\nnext',
-                           "Authorization: Digest [REDACTED]\nnext")
-        self.assert_masked("Proxy-Authorization: Token fake-s2 more", "Proxy-Authorization: Token [REDACTED]")
-        self.assert_masked("authorization=Token fake-s3 more", "authorization=Token [REDACTED]")
+                           "Authorization: [REDACTED]\nnext")
+        self.assert_masked("Proxy-Authorization: Token fake-s2 more", "Proxy-Authorization: [REDACTED]")
+        self.assert_masked("authorization=Token fake-s3 more", "authorization=[REDACTED]")
 
     def test_multi_pair_cookie_header(self):
         # #654: pairs after the first one were shown.

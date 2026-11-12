@@ -56,8 +56,8 @@ class DiagnosticRedactionTests(unittest.TestCase):
     def test_surrounding_text_is_kept(self):
         redact = self.redactors[True]
         self.assertEqual(redact("connect failed: password=x,y next"), "connect failed: password=[REDACTED] next")
-        # #654: the scheme survives both passes.
-        self.assertEqual(redact("ok\nAuthorization: Bearer x y\nnext"), "ok\nAuthorization: Bearer [REDACTED]\nnext")
+        # The scheme word is masked too (the import-review tests forbid it in logs).
+        self.assertEqual(redact("ok\nAuthorization: Bearer x y\nnext"), "ok\nAuthorization: [REDACTED]\nnext")
         self.assertEqual(redact("https://u:x@host/p"), "https://[redacted]@host/p")
 
     def test_issue_654_residuals(self):
