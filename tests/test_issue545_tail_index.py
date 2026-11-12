@@ -1,4 +1,4 @@
-"""#545: tail index robustness and scope (follow-ups from #541)."""
+"""#545: tail index robustness and scope (follow-ups from #541); #557 follow-ups from #551."""
 import json
 import os
 import threading
@@ -205,6 +205,117 @@ class TailIndexTests(_Sync):
             tick()
         self.assertTrue(any("left unchanged" in c[0][0] for c in warn.call_args_list))
         self.assertFalse([c for c in debug.call_args_list if "pending" in c[0][0]])
+
+    # -- #557 -----------------------------------------------------------------
+    def _newer(self, older, newer):
+        """List order is newest first: ``newer`` is reconciled before ``older``."""
+        os.utime(self.store._path(older), (1000, 1000))
+        os.utime(self.store._path(newer), (2000, 2000))
+
+    # -- item 1 -------------------------------------------------------------
+    def _corrupt_snapshot_is_confined_to_its_row(self, *corrupt_records):
+        good, bad = self.wrapper(), self.wrapper()
+        self._newer(good["id"], bad["id"])  # the corrupt row comes first
+        self.record("goodjob", metadata={"type": "playlist-sync", "transaction_id": good["id"]})
+        for name, extra in corrupt_records:
+            self.record(name, metadata={"type": "playlist-sync", "transaction_id": bad["id"]})
+            path = self.jobs_dir / f"{name}.json"
+            stat = path.stat()
+            path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), **extra}), encoding="utf-8")
+            os.utime(path, (stat.st_mtime, stat.st_mtime))
+        jobs = self.start()
+        jobs._recover_thread.join(5)
+        self.assertEqual(self.settle(good["id"]), "Completed")
+        time.sleep(0.3)  # several more ticks, including the judging pass
+        self.assertEqual(self.store.get(bad["id"])["status"], "Running")  # never settled on a corrupt record
+
+    def test_unhashable_job_id_in_a_tail_snapshot(self):
+        self._corrupt_snapshot_is_confined_to_its_row(("badid", {"job_id": ["not", "hashable"]}))
+
+    def test_mixed_created_at_types_in_tail_snapshots(self):
+        self._corrupt_snapshot_is_confined_to_its_row(("textjob", {"created_at": "yesterday"}),
+                                                      ("numjob", {}))
+
+    # -- item 2 -------------------------------------------------------------
+    def test_orphan_recheck_and_transition_are_atomic_under_the_lock(self):
+        # A competing write started right after the re-read must not land
+        # before the transition: the store lock is held across both.
+        tx = self.wrapper()
+        row = self.store.get(tx["id"])
+        wrote, seen = threading.Event(), {}
+        real_get, real_transition = self.store.get, self.store.transition
+
+        def writer():
+            self.store.append_log(tx["id"], "competing write")
+            wrote.set()
+
+        def get(tx_id, **kwargs):
+            result = real_get(tx_id, **kwargs)
+            if "started" not in seen:
+                seen["started"] = True
+                threading.Thread(target=writer, daemon=True).start()
+                wrote.wait(0.3)  # lands now unless this thread holds the lock
+            return result
+
+        def transition(*args, **kwargs):
+            seen.setdefault("write_landed_first", wrote.is_set())
+            return real_transition(*args, **kwargs)
+
+        with mock.patch.object(self.store, "get", get), mock.patch.object(self.store, "transition", transition):
+            ts._orphaned_job_wrapper(self.store, row, time.time() + 1)
+        self.assertTrue(wrote.wait(5))
+        self.assertIs(seen.get("write_landed_first"), False)
+
+    # -- item 3 -------------------------------------------------------------
+    def _assert_aborted_sweep_is_terminal(self, jobs):
+        self.assertFalse(jobs.tail_scan_complete.is_set())
+        self.assertTrue(jobs.tail_scan_aborted.is_set())
+
+    def test_dead_sweep_is_aborted_and_the_reconcile_stops_waiting(self):
+        tx = self.wrapper()  # no job anywhere: an orphan only a complete sweep could prove
+        self.record("unrelated")  # a tail to sweep
+
+        def crashing_tail(self_, paths, now_):
+            raise RuntimeError("tail sweep crashed")
+
+        with mock.patch.object(threading, "excepthook", lambda _args: None), \
+                mock.patch.object(ts._app_logger, "warning") as warn:
+            jobs = self.start(tail=crashing_tail)
+            jobs._recover_thread.join(5)
+            self._assert_aborted_sweep_is_terminal(jobs)
+            calls = []
+            real_rows = ts._running_rows
+            with mock.patch.object(ts, "_running_rows", lambda s: calls.append(1) or real_rows(s)):
+                time.sleep(0.5)  # ~10 ticks
+        self.assertEqual(self.store.get(tx["id"])["status"], "Running")  # never judged orphaned
+        self.assertLessEqual(len(calls), 1)  # one pass after the abort, then the reconcile settles
+        self.assertTrue(any("left unchanged" in c[0][0] for c in warn.call_args_list))
+
+    def test_sweep_stopped_by_close_is_aborted(self):
+        tx = self.wrapper()
+        self.record("oldjob", metadata={"type": "playlist-sync", "transaction_id": tx["id"]})
+        gate = threading.Event()
+        real_tail = JobStore._recover_tail
+
+        def gated_tail(self_, paths, now_):
+            gate.wait(5)
+            real_tail(self_, paths, now_)
+
+        jobs = self.start(tail=gated_tail)
+        jobs._closed.set()  # what close() does first
+        gate.set()
+        jobs._recover_thread.join(5)
+        self._assert_aborted_sweep_is_terminal(jobs)
+        time.sleep(0.3)
+        self.assertEqual(self.store.get(tx["id"])["status"], "Running")
+
+    def test_finished_sweep_is_not_aborted(self):
+        self.record("unrelated")
+        jobs = self.start()
+        jobs._recover_thread.join(5)
+        self.assertTrue(jobs.tail_scan_complete.is_set())
+        self.assertFalse(jobs.tail_scan_aborted.is_set())
+
 
 
 if __name__ == "__main__":
