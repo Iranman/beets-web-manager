@@ -17,7 +17,7 @@ RUN npm run build
 FROM denoland/deno:bin-2.9.7@sha256:bc5aa4466e21b6d3021226a85ba2e1911f7c386254d97b9d797903ab74edace2 AS deno
 
 # ---- Runtime stage ----------------------------------------------------------
-FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3 AS runtime
+FROM python:3.15-slim-bookworm@sha256:96599df822d0e1c6bb700014a05c7f3c8cabc6e0f7ff3c4f9f69cee033b4b5d9 AS runtime
 
 # Immutable image provenance. Required, not optional: a blank/missing
 # VCS_REF fails the build rather than silently producing an unlabeled image.
