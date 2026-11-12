@@ -55,19 +55,12 @@ class StagingFolderBusy(RuntimeError):
 
 def staging_prefix_for(folder_or_prefix: str) -> str:
     """The ``rec-<hex>`` recovery staging prefix a folder (or prefix) belongs
-    to: from its name when it carries one, else from the carrier bound to it.
-    "" when neither applies (not a recovery folder)."""
+    to, read from its name; "" for any other folder. Every folder a recovery
+    stages and binds carries the prefix in its name (``rec-<hex>-<album>``,
+    ``<album> - <src> missing rec-<hex>``, their ``__slot_deferred`` split), so
+    no carrier lookup is needed -- and none is made on an ordinary import."""
     m = _REC_STAGE_RE.search(os.path.basename(_s(folder_or_prefix).rstrip("/\\")))
-    if m:
-        return m.group(0)
-    if not _s(folder_or_prefix).strip():
-        return ""
-    try:
-        carrier = recovery_carrier.load_for_folder(folder_or_prefix)
-    except Exception:
-        return ""
-    key = _s((carrier or {}).get("recovery_identity_key")).strip().lower()
-    return ("rec-" + key[:16]) if key else ""
+    return m.group(0) if m else ""
 
 
 @contextmanager

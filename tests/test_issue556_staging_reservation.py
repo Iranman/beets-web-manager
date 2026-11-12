@@ -130,11 +130,31 @@ class RestageVersusImport(_Env):
             with mock.patch.object(rc, "load_for_folder", return_value=None):
                 self.assertEqual(self._folder_import(plain, lambda log, c: "ok"), "ok")
 
-    def test_carrier_bound_source_folder_maps_to_its_prefix(self):
-        source = os.path.join(self.tmp, "downloads", "Artist - Album")
-        carrier = {"recovery_identity_key": "0123456789ABCDEF" + "0" * 48}
-        with mock.patch.object(rc, "load_for_folder", return_value=carrier):
-            self.assertEqual(recovery_service.staging_prefix_for(source), PREFIX)
+    def test_prefix_comes_from_the_name_without_a_carrier_lookup(self):
+        with mock.patch.object(rc, "load_for_folder") as lookup:
+            self.assertEqual(recovery_service.staging_prefix_for(self.folder), PREFIX)
+            self.assertEqual(recovery_service.staging_prefix_for(
+                os.path.join(self.tmp, f"C - yt missing {PREFIX}__slot_deferred")), PREFIX)
+            self.assertEqual(recovery_service.staging_prefix_for(os.path.join(self.tmp, "Artist - Album")), "")
+        lookup.assert_not_called()
+
+
+class ParentsChildImportIsNotRefused(_Env):
+    """QA finding 3: the acquisition's own child import (reimport-disk) runs
+    while the parent holds the reservation; it must not try to take it."""
+
+    def test_reimport_child_runs_the_same_with_the_reservation_held(self):
+        import tests.test_import_jobs_characterization as golden
+        # The acquisition's child payload: an existing-album fill, own import slot.
+        spec = dict(payload={k: v for k, v in golden._fill().items() if k != "skip_import_lock"})
+        baseline = golden._run("reimport", spec)
+        busy = mock.Mock(side_effect=recovery_service.StagingFolderBusy("held by the parent"))
+        with mock.patch.object(recovery_service, "staging_reservation", busy):
+            under_parent = golden._run("reimport", spec)
+        busy.assert_not_called()
+        self.assertEqual(under_parent, baseline)
+        self.assertNotIn("StagingFolderBusy", str(under_parent))
+        self.assertIn(["held-enter", "import-slot"], under_parent["trace"])  # it really ran
 
 
 class AdvancerDefersBusyFolder(_Env):
