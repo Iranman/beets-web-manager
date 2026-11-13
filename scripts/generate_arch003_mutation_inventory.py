@@ -257,6 +257,11 @@ _REVIEWED_RULE_DETAILS = {
         "review_reason": "Wave 26 independent review: beets_client.move_file/delete_file called against a path explicitly verified (locally, before the call) to be outside MUSIC_ROOT and under an app-managed staging/download root -- cleanup of a rejected download, an already-imported staged source copy, or a disposable staged-subset working directory, never authoritative library media.",
         "reviewed_in_pr": WAVE26_AI_IMPORT_PR,
     },
+    "recover-orphan-staging-dir-cleanup": {
+        "domain": "import_reconciliation",
+        "review_reason": "#467 (integrations-automation owner classification): recover_service._prune_orphan_recover_dirs removes stale per-run staging dirs under the validated <downloads>/recovered tree with shutil.rmtree. Each candidate is resolve()'d and must sit strictly inside recovered/ (base in resolved.parents) before deletion; a dir referenced by the current URL->segment resume map, or holding ANY finished audio file (_RECOVER_AUDIO_EXT), is always kept. It only ever removes empty or .part/.ytdl-only UNREFERENCED dirs under the staging root -- never MUSIC_ROOT, authoritative library media, or anything outside recovered/. Same staging-only disposition as the other recover_service download-staging sinks; the live music library is never touched. Staging-containment surface flagged for independent security review.",
+        "reviewed_in_pr": 715,
+    },
     "reviewed-arch030-recovery-orphan-staging-cleanup": {
         "domain": "import_reconciliation",
         "review_reason": "ARCH-030 Step 4 (library-transaction) owner classification: recovery_service.reconcile_orphan_staging_folders cleans up ORPHANED staging folders under the validated <downloads>/_beets_missing_import staging root. The target is pre-verified fail-closed (realpath + commonpath containment inside that root, symlinked children skipped) and then handed to composite_workflows.delete_file (LT-13), which independently re-enforces SEC-007/#325 containment: inside a staging root, never a staging root itself, never MUSIC_ROOT or protected data, no symlink component, fd-relative, lstat-rechecked. A folder still bound to (or whose deterministic rec-<16hex> prefix matches) a live carrier is ADOPTED, never deleted; the live music library is never touched. Staging-containment surface flagged for the Step 6 independent security review.",
@@ -404,6 +409,7 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_write_provenance": ("STAGING_ONLY", "staging_v1", "recover-provenance-sidecar-in-downloads"),
     "_recover_fetch_one": ("STAGING_ONLY", "staging_v1", "recover-download-staging-dir-and-corrupt-cleanup"),
     "_stamp_staged_identity_tags": ("STAGING_ONLY", "staging_v1", "recover-staging-identity-tag-stamp"),
+    "_prune_orphan_recover_dirs": ("STAGING_ONLY", "staging_v1", "recover-orphan-staging-dir-cleanup"),
     "_recover_import_one": ("ENGINE_NATIVE_BEETS", "", "recover-verified-singleton-import"),
     "render_index": ("READ_ONLY_FALSE_POSITIVE", "none", "in-memory-template-string-replace"),
     "_delete_no_audio_folders": ("NON_MEDIA_FILESYSTEM", "infra_v1", "delete-no-audio-staging-folders"),
