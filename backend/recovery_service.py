@@ -264,8 +264,11 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
         summary["kept_review"] += 1
         summary["carriers"].append({"carrier_id": cid, "outcome": "kept_review",
                                     "reason": evaluation["reason"]})
-        if evaluation["reason"]:
-            log.append(f"[recovery-advance] carrier {cid}: kept in review -- {evaluation['reason']}")
+        # Steady-state "kept in review" carriers are NOT re-logged per carrier on
+        # every tick (that flooded the job log each sweep for a Review backlog).
+        # The per-carrier reason stays on summary["carriers"] and is attached to
+        # the carrier by _attach_decision above; the per-run "done" line below
+        # reports the aggregate kept_review count.
     log.append(f"[recovery-advance] done: scanned {summary['scanned']}, "
                f"handed_off {summary['handed_off']}, kept_review {summary['kept_review']}, "
                f"skipped {summary['skipped']}.")
@@ -491,7 +494,11 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
                                      TORRENT_SOURCE_ROOTS)
     log = log if log is not None else []
     summary: Dict[str, Any] = {"scanned": 0, "adopted": 0, "removed": 0,
-                               "kept": 0, "skipped": 0}
+                               "kept": 0, "skipped": 0,
+                               # Breakdown of the steady-state "kept" cases, so the
+                               # per-run "done" line carries the reasons that used
+                               # to be one INFO line per folder (log flood).
+                               "kept_in_review": 0, "kept_retry": 0, "kept_unmarked": 0}
     root = _staging_root()
     if not root or not os.path.isdir(root):
         return summary
@@ -582,11 +589,11 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
         from backend.pending_review_store import _pending_review_has_path_or_overlap
         if _pending_review_has_path_or_overlap(child, unknown=True):
             summary["kept"] += 1
-            log.append(f"[recovery-reconcile] kept {entry.name} (queued for Review).")
+            summary["kept_in_review"] += 1
             continue
         if _kept_for_retry(child, now):
             summary["kept"] += 1
-            log.append(f"[recovery-reconcile] kept {entry.name} (kept for a retry).")
+            summary["kept_retry"] += 1
             continue
         # CLEANUP: no carrier owns it. Age guard against an in-flight download.
         try:
@@ -604,7 +611,7 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
                 slskd.app_download_key_path(),
                 (*DOWNLOADS_ALLOWED_ROOTS, *TORRENT_SOURCE_ROOTS, *PLAYLIST_DOWNLOAD_ALLOWED_ROOTS))):
             summary["kept"] += 1
-            log.append(f"[recovery-reconcile] kept {entry.name} (no app ownership marker).")
+            summary["kept_unmarked"] += 1
             continue
         # C11: only actual deletes count against the bounded cap; defer the rest
         # to the next run rather than dragging the whole backlog into one sweep.
@@ -623,10 +630,14 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
             # without fd-relative ops; nothing is removed.
             summary["skipped"] += 1
             log.append(f"[recovery-reconcile] skipped {entry.name} ({type(ex).__name__}).")
-    if summary["adopted"] or summary["removed"]:
-        log.append(f"[recovery-reconcile] done: adopted {summary['adopted']}, "
-                   f"removed {summary['removed']}, kept {summary['kept']}, "
-                   f"skipped {summary['skipped']}.")
+    # Per-run aggregate, emitted every run (like the advance "done" line). The
+    # steady-state "kept" cases are no longer one INFO line per folder; their
+    # reasons survive here as the kept breakdown, so a Review backlog produces a
+    # single line per sweep instead of one per folder every ~2 minutes.
+    log.append(f"[recovery-reconcile] done: adopted {summary['adopted']}, "
+               f"removed {summary['removed']}, kept {summary['kept']} "
+               f"(in_review {summary['kept_in_review']}, retry {summary['kept_retry']}, "
+               f"unmarked {summary['kept_unmarked']}), skipped {summary['skipped']}.")
     return summary
 
 
