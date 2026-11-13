@@ -12,10 +12,11 @@ import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { getAlbumTracks, getArtistImageUrl } from '../api/client';
 import { apiGet } from '../lib/api';
-import { useLocation, useNavigate, useSearchParams } from 'react-router';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router';
 import { useInterval } from '../lib/hooks';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
+import { RecordRing } from '../components/RecordRing';
 import CoverFlow, { type CoverFlowItem } from '../components/CoverFlow';
 
 type SearchScope = 'all' | 'artists' | 'albums' | 'tracks';
@@ -200,8 +201,9 @@ function initials(name: string) {
     .join('');
 }
 
-// Placeholder sleeve for albums without art: a record half out of a plain card sleeve.
-function SleevePlaceholder() {
+// Placeholder sleeve for albums without art: a record half out of a plain card sleeve, with the
+// album's initial printed on the blank sleeve in the display serif. Designed, never a grey box.
+function SleevePlaceholder({ initial }: { initial?: string }) {
   return (
     <span className="relative flex h-full w-full items-center justify-center bg-graphite-850" data-testid="sleeve-placeholder">
       <svg aria-hidden="true" className="h-3/4 w-3/4" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -213,6 +215,7 @@ function SleevePlaceholder() {
         <rect x="8" y="12" width="56" height="76" rx="2" className="fill-graphite-800 stroke-graphite-700" />
         <circle cx="36" cy="50" r="10" className="stroke-graphite-700" strokeWidth="1.5" />
       </svg>
+      {initial ? <span aria-hidden="true" className="lib-sleeve-initial">{initial}</span> : null}
       <span className="sr-only">No cover art</span>
     </span>
   );
@@ -258,34 +261,6 @@ function Artwork({
           </span>
         ) : fallback
       )}
-    </div>
-  );
-}
-
-// The header's shelf: a few sleeves leaning on the ledge, the library's own cover art. Decorative
-// (the albums are listed below), so hidden from assistive tech; a cover that fails to load just drops out.
-function ShelfCover({ src }: { src: string }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) return null;
-  return (
-    <img
-      alt=""
-      className="lib-shelf-cover"
-      decoding="async"
-      height={112}
-      loading="lazy"
-      src={src}
-      width={112}
-      onError={() => setFailed(true)}
-    />
-  );
-}
-
-function CoverShelf({ urls }: { urls: string[] }) {
-  if (!urls.length) return null;
-  return (
-    <div aria-hidden="true" className="lib-shelf">
-      {urls.map((url) => <ShelfCover key={url} src={url} />)}
     </div>
   );
 }
@@ -466,7 +441,7 @@ function ArtistCard({
       type="button"
       onClick={() => onSelect(artist)}
     >
-      <span className="sleeve block aspect-square w-full">
+      <span className="sleeve lib-sleeve relative block aspect-square w-full">
         <Artwork
           className="sleeve-face h-full w-full"
           fallback={initials(name) || 'A'}
@@ -577,13 +552,13 @@ function AlbumCard({
       <button
         aria-haspopup="dialog"
         aria-label={`Open ${title}`}
-        className="sleeve block aspect-square w-full cursor-pointer rounded-sm motion-safe:transition-transform motion-safe:hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brass-300"
+        className="sleeve lib-sleeve block aspect-square w-full cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brass-300"
         type="button"
         onClick={() => onDetails(row)}
       >
         <Artwork
           className="sleeve-face h-full w-full"
-          fallback={<SleevePlaceholder />}
+          fallback={<SleevePlaceholder initial={title.trim()[0]?.toUpperCase()} />}
           label={`${title} cover`}
           fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
           src={albumArtUrl(album, libraryVersion)}
@@ -624,7 +599,7 @@ function AlbumGrid({
       </div>
       <div className="crate max-h-[calc(100vh-22rem)] min-h-72 overflow-y-auto rounded-sm px-3 py-4">
         {rows.length ? (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,8rem),1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(min(100%,12rem),1fr))]">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,8rem),1fr))] gap-x-3 gap-y-6 sm:grid-cols-[repeat(auto-fill,minmax(min(100%,13rem),1fr))]">
             {rows.map((row) => (
               <AlbumCard
                 key={`${row.artist.name}::${row.album.album_id || row.album.aldir || row.album.album}`}
@@ -776,7 +751,7 @@ function AlbumFlow({
       art: (
         <Artwork
           className="h-full w-full"
-          fallback={<SleevePlaceholder />}
+          fallback={<SleevePlaceholder initial={title.trim()[0]?.toUpperCase()} />}
           fallbackSrc={albumDiskArtFallbackUrl(album, libraryVersion)}
           label=""
           src={albumArtUrl(album, libraryVersion)}
@@ -1102,6 +1077,55 @@ function formatLength(seconds?: number) {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
+// Scroll collapse for the liner-note stat header: once the reader scrolls a little, the band tightens
+// to one line so the list leads. Not sticky and never scroll-jacking; it only toggles a class.
+function useCollapseOnScroll(threshold = 96) {
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setCollapsed(window.scrollY > threshold);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, [threshold]);
+  return collapsed;
+}
+
+// Designed loading skeleton: cover squares and text lines under a warm shimmer, while the first
+// library payload is on its way. Decorative; a polite status is announced for assistive tech.
+function LibrarySkeleton() {
+  return (
+    <div className="space-y-3">
+      <p className="sr-only" aria-live="polite">Loading library…</p>
+      <div aria-hidden="true" className="crate rounded-sm px-3 py-4">
+        <div className="lib-skeleton-grid">
+          {Array.from({ length: 12 }, (_, i) => (
+            <div key={i} className="lib-skeleton-tile">
+              <div className="lib-skeleton-box is-cover" />
+              <div className="lib-skeleton-line" />
+              <div className="lib-skeleton-line is-short" />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Character empty state: an empty shelf, the record-ring mark, and the one way in (the existing
+// Import tab). Shown only when the library is genuinely empty, so it is onboarding, not an action.
+function LibraryEmpty() {
+  return (
+    <div className="lib-empty" data-testid="library-empty">
+      <RecordRing className="size-16" />
+      <h2 className="lib-empty-title">Nothing on this shelf yet…</h2>
+      <p className="lib-empty-body">
+        Your library is empty. Bring in music and it will line up here as sleeves you can browse.
+      </p>
+      <Link className="lib-empty-cta" to="/import">Go to Import</Link>
+    </div>
+  );
+}
+
 export default function Library() {
   const [data, setData] = useState<LibraryResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1334,13 +1358,17 @@ export default function Library() {
   }
 
   const loadFailed = !data && Boolean(error);
-  // Up to eight sleeves for the header shelf, taken from the albums already loaded (no extra request).
+  // A genuinely empty library (loaded, zero artists): the character empty state, not "No matching…".
+  const libraryEmpty = Boolean(data) && (data?.stats.artists ?? 0) === 0;
+  // The liner-note stat header collapses to one line once the reader scrolls past the fold.
+  const headerCollapsed = useCollapseOnScroll();
+  // The first loaded cover (no extra request) blurs behind the liner-note glass band.
   const shelfCovers = useMemo(() => {
     const urls: string[] = [];
     for (const row of allAlbumRows) {
       const url = albumArtUrl(row.album, libraryVersion);
       if (url && !urls.includes(url)) urls.push(url);
-      if (urls.length >= 8) break;
+      if (urls.length >= 1) break;
     }
     return urls;
   }, [allAlbumRows, libraryVersion]);
@@ -1348,29 +1376,30 @@ export default function Library() {
 
   return (
     <div className="space-y-4">
-      {/* Page header straight on the shelf: no panel around the page's own title. */}
-      <div className="border-b border-graphite-800 pb-4">
-        <div className="flex flex-col-reverse gap-4 md:flex-row md:items-end md:justify-between">
-          <div className="min-w-0">
-            <h1 className="lib-title">Browse music library</h1>
-            <p className="lib-catalog">
-              {/* No library loaded yet, or the load failed: counts are unknown, not zero. */}
-              <span>{data ? countLabel(data.stats.artists, 'artist') : '— artists'}</span>
-              <span>{data ? countLabel(data.stats.albums, 'album') : '— albums'}</span>
-              <span>{data ? countLabel(data.stats.tracks, 'track') : '— tracks'}</span>
-            </p>
-            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-muted">
-              <span>{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
-            </div>
+      {/* Liner-note stat header: oversized display counts on a frosted-glass band, with the library's
+          own album art blurred behind it (the one measured "warm glass" moment; the lists below stay on
+          solid surfaces). Each count is one text node. The band collapses to one line once scrolled. */}
+      <header className="relative isolate overflow-hidden rounded-2xl">
+        {/* The art the glass sits over: a cover blurred and tinted, or the walnut ground when there is none. */}
+        {selectedArtist ? null : <CoverBackdrop src={shelfCovers[0] ?? ''} />}
+        <div className={cx('lib-liner', headerCollapsed && 'is-collapsed')}>
+          <h1 className="lib-title">Browse music library</h1>
+          <div className="lib-liner-figures">
+            {/* No library loaded yet, or the load failed: counts are unknown, not zero. */}
+            <span className={cx('lib-liner-figure', !data && 'is-unknown')}>{data ? countLabel(data.stats.artists, 'artist') : '— artists'}</span>
+            <span className={cx('lib-liner-figure', !data && 'is-unknown')}>{data ? countLabel(data.stats.albums, 'album') : '— albums'}</span>
+            <span className={cx('lib-liner-figure', !data && 'is-unknown')}>{data ? countLabel(data.stats.tracks, 'track') : '— tracks'}</span>
           </div>
-          {/* Inside an artist the shelf steps aside so the artist's own header leads. */}
-          {selectedArtist ? null : <CoverShelf urls={shelfCovers} />}
+          <div className="lib-liner-meta">
+            <span className="liner-label">{data?.tracks_included ? 'Track search loaded' : 'Fast library summary'}</span>
+            {libraryVersion ? <span className="liner-label">Catalog v{libraryVersion}</span> : null}
+          </div>
         </div>
-        {loading ? <LinearProgress sx={{ mt: 2, borderRadius: 1 }} /> : null}
-      </div>
+      </header>
+      {loading ? <LinearProgress sx={{ borderRadius: 1 }} /> : null}
 
       {/* What the list below is showing, as one plain line over the search fields. */}
-      {loadFailed ? null : <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+      {loadFailed || libraryEmpty || (loading && !data) ? null : <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 text-sm">
         <span className="font-semibold text-zinc-100">Browsing artists</span>
         {selectedArtist ? <span className="text-zinc-200">{`Artist: ${displayArtistName(selectedArtist)}`}</span> : null}
         <span className="text-muted">
@@ -1379,7 +1408,7 @@ export default function Library() {
         <ViewToggle view={view} onChange={changeView} />
       </div>}
 
-      <SearchRow
+      {libraryEmpty ? null : <SearchRow
         query={query}
         scope={scope}
         artistSort={artistSort}
@@ -1390,13 +1419,18 @@ export default function Library() {
         onScopeChange={(value) => { setScope(value); resetFlows(); }}
         onArtistSortChange={(value) => { setArtistSort(value); resetFlows(); }}
         onAlbumSortChange={(value) => { setAlbumSort(value); setAlbumKey(''); }}
-      />
+      />}
 
       {shownError ? <Alert severity="error">{shownError}</Alert> : null}
       {trackSearchError ? <Alert severity="warning">Track search rows could not be loaded: {trackSearchError}</Alert> : null}
 
-      {/* Under a load error there is no list: "No matching artists" would claim an empty library. */}
-      {loadFailed ? null : selectedArtist ? (
+      {/* Under a load error there is no list: "No matching artists" would claim an empty library.
+          A fresh load shows the skeleton; a loaded-but-empty library shows the character empty state. */}
+      {loadFailed ? null : (loading && !data) ? (
+        <LibrarySkeleton />
+      ) : libraryEmpty ? (
+        <LibraryEmpty />
+      ) : selectedArtist ? (
         <ArtistDetail
           artist={selectedArtist}
           rows={selectedArtistRows}

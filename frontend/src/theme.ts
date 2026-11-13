@@ -202,6 +202,9 @@ export const theme = createTheme({
           'button&.Mui-disabled': { pointerEvents: 'auto', cursor: 'not-allowed' },
           '&.MuiButton-contained': {
             backgroundColor: button.primaryBg,
+            // Polished brass: a top-to-bottom sheen over the solid fill, so the one primary action
+            // catches the light. The sheen is on the image layer; hover/active only change the fill.
+            backgroundImage: 'linear-gradient(180deg, rgba(255,244,222,0.30), rgba(255,244,222,0) 48%)',
             border: `1px solid ${button.primaryBg}`,
             color: button.primaryText,
             '&:hover': { backgroundColor: button.primaryHover, borderColor: button.primaryHover },
@@ -292,7 +295,9 @@ export const theme = createTheme({
           backgroundColor: graphite.surface3,
         },
         bar: {
-          backgroundColor: brass.hover,
+          // Brass progress fill with a polished top sheen (one of brass's three jobs: live progress).
+          backgroundColor: brass.main,
+          backgroundImage: 'linear-gradient(180deg, #e9bd68, #d39e3f)',
         },
       },
     },
