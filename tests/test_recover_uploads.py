@@ -425,6 +425,138 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertIn("action", info)
         self.assertIsInstance(info["message"], str)
 
+    # ── F-467-3: auth precedence on mixed auth+DRM messages ──
+    def test_bare_401_with_drm_text_is_auth(self):
+        cat = self._cat("Server returned 401; encrypted media required")
+        self.assertEqual(cat, "auth-needed")
+        self.assertNotEqual(cat, "genuinely-DRM")
+
+    def test_authentication_required_with_drm_text_is_auth(self):
+        cat = self._cat("authentication required to access this encrypted media stream")
+        self.assertEqual(cat, "auth-needed")
+
+    def test_bare_401_status_is_auth(self):
+        self.assertEqual(self._cat("HTTP response status 401"), "auth-needed")
+
+    def test_pure_encrypted_media_still_drm(self):
+        # Auth precedence must not swallow a genuine DRM message with no auth
+        # evidence.
+        self.assertEqual(self._cat("This stream uses encrypted media"), "genuinely-DRM")
+
+    # ── F-467-4: DRM precedence over the generic "manifest" keyword ──
+    def test_manifest_with_widevine_is_drm_not_hls(self):
+        cat = self._cat("Manifest contains Widevine-protected content")
+        self.assertEqual(cat, "genuinely-DRM")
+        self.assertNotEqual(cat, "hls-assembly")
+
+    def test_plain_widevine_still_drm(self):
+        self.assertEqual(self._cat("Widevine"), "genuinely-DRM")
+
+    def test_plain_manifest_parse_still_hls(self):
+        # No DRM evidence -> the generic "manifest" keyword still routes to HLS.
+        self.assertEqual(self._cat("manifest parse error: unexpected token"), "hls-assembly")
+
+
+class CodecLosslessPrecedence(unittest.TestCase):
+    """F-467-2: the detected codec takes precedence over the extension — a known
+    codec decides losslessness; the extension is only a fallback for an unknown
+    or absent codec."""
+
+    def test_truth_table(self):
+        il = recover_service._codec_is_lossless
+        cases = [
+            # known-lossy codec is lossy even inside a lossless-looking container
+            ("mp3", ".wav", False),
+            ("mp3", "wav", False),         # extension normalized (no leading dot)
+            ("aac", ".m4a", False),
+            ("mp4a.40.2", ".m4a", False),  # dotted codec string normalized
+            ("opus", ".opus", False),
+            ("vorbis", ".ogg", False),
+            # known-lossless codec is lossless even with a lossy-looking ext
+            ("flac", ".mp3", True),
+            ("alac", ".m4a", True),
+            ("pcm_s16le", ".wav", True),
+            # unknown/absent codec -> fall back to the extension
+            ("", ".flac", True),
+            ("", ".mp3", False),
+            ("", ".wav", True),
+            ("", "", False),
+            ("someweirdcodec", ".flac", True),
+            ("someweirdcodec", ".mp3", False),
+        ]
+        for codec, ext, expected in cases:
+            self.assertEqual(il(codec, ext), expected, f"codec={codec!r} ext={ext!r}")
+
+
+class ResumeAndOrphanCleanup(unittest.TestCase):
+    """F-467-1: a re-requested URL resumes its ORIGINAL staging segment, and
+    stale/empty orphan dirs are pruned while referenced or audio-holding dirs are
+    kept."""
+
+    def _store(self, tmp):
+        from backend.web_manager_config_store import WebManagerConfigStore
+        return WebManagerConfigStore(data_root=Path(tmp) / "cfg")
+
+    def test_same_url_resumes_same_segment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            with mock.patch("backend.web_manager_config_store.get_config_store", return_value=store):
+                url = "https://www.youtube.com/watch?v=abc"
+                seg1 = recover_service._recover_segment_for_url(url)
+                seg2 = recover_service._recover_segment_for_url(url)
+                other = recover_service._recover_segment_for_url(
+                    "https://www.youtube.com/watch?v=def")
+            self.assertTrue(seg1)
+            self.assertEqual(seg1, seg2)      # resume: same dir on re-request
+            self.assertNotEqual(seg1, other)  # distinct URL -> distinct dir
+
+    def test_segment_key_ignores_url_secrets(self):
+        # The map key is the sanitized URL, so a changing auth token never
+        # defeats resume and no secret is persisted.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            with mock.patch("backend.web_manager_config_store.get_config_store", return_value=store):
+                a = recover_service._recover_segment_for_url(
+                    "https://www.youtube.com/watch?v=abc&token=SECRET1")
+                b = recover_service._recover_segment_for_url(
+                    "https://www.youtube.com/watch?v=abc&token=SECRET2")
+            self.assertEqual(a, b)
+
+    def test_prune_removes_orphans_keeps_referenced_and_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dl_root = Path(tmp) / "downloads"
+            recovered = dl_root / "recovered" / "youtube"
+            recovered.mkdir(parents=True)
+            store = self._store(tmp)
+            with mock.patch("backend.web_manager_config_store.get_config_store", return_value=store):
+                live_seg = recover_service._recover_segment_for_url(
+                    "https://www.youtube.com/watch?v=live")
+            # Referenced (live) dir with only a partial — must be KEPT.
+            live_dir = recovered / live_seg
+            live_dir.mkdir()
+            (live_dir / "x.part").write_bytes(b"\x00")
+            # Orphan dir with only a partial — must be REMOVED.
+            orphan_partial = recovered / "oldrun-1"
+            orphan_partial.mkdir()
+            (orphan_partial / "y.part").write_bytes(b"\x00")
+            # Orphan empty dir — must be REMOVED.
+            orphan_empty = recovered / "oldrun-2"
+            orphan_empty.mkdir()
+            # Orphan dir holding finished audio — must be KEPT (never delete audio).
+            orphan_audio = recovered / "oldrun-3"
+            orphan_audio.mkdir()
+            (orphan_audio / "song.opus").write_bytes(b"\x00" * 16)
+
+            with mock.patch("backend.web_manager_config_store.get_config_store", return_value=store), \
+                 mock.patch.object(recover_service, "validated_downloads_root", return_value=str(dl_root)):
+                removed = recover_service._prune_orphan_recover_dirs()
+
+            self.assertEqual(removed, 2)
+            self.assertTrue(live_dir.exists())
+            self.assertFalse(orphan_partial.exists())
+            self.assertFalse(orphan_empty.exists())
+            self.assertTrue(orphan_audio.exists())
+
 
 class SingleItemFetchRejectsCollections(unittest.TestCase):
     """F3: a channel/playlist/set URL is refused in the single-item fetch path

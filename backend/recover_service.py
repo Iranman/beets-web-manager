@@ -92,6 +92,14 @@ _LOSSLESS_EXTS = frozenset({
     ".flac", ".alac", ".wav", ".aiff", ".aif", ".ape", ".wv", ".tak", ".tta",
     ".dsf", ".dff",
 })
+# Known lossy codecs. A known-lossy codec stays lossy even inside a
+# lossless-looking container, so the DETECTED codec takes precedence over the
+# extension in ``_codec_is_lossless`` (F-467-2).
+_LOSSY_CODECS = frozenset({
+    "mp3", "aac", "mp4a", "opus", "vorbis", "ac3", "eac3", "ac-3",
+    "wma", "wmav1", "wmav2", "amr", "amr_nb", "amr_wb", "speex", "mp2",
+    "gsm", "cook", "ra", "sipr", "atrac3", "qdm2",
+})
 
 # Containers Beets/MediaFile adds NO item from, even when the audio codec is
 # itself importable. yt-dlp bestaudio commonly stages opus/vorbis inside a
@@ -191,10 +199,20 @@ def _as_list(value):
 
 def _codec_is_lossless(codec: Any, ext: Any) -> bool:
     c = _s(codec).strip().lower()
+    base = c.split(".", 1)[0]  # normalize "mp4a.40.2" -> "mp4a"
     e = _s(ext).strip().lower()
     if e and not e.startswith("."):
         e = "." + e
-    return c in _LOSSLESS_CODECS or e in _LOSSLESS_EXTS
+    # The detected codec wins whenever it is a KNOWN codec: a known-lossy codec
+    # is lossy even inside a lossless-looking container (codec=mp3 / ext=.wav is
+    # lossy, not lossless), and a known-lossless codec is lossless regardless of
+    # ext. Only when the codec is unknown/absent do we fall back to the container
+    # extension (F-467-2).
+    if c in _LOSSLESS_CODECS or base in _LOSSLESS_CODECS:
+        return True
+    if c in _LOSSY_CODECS or base in _LOSSY_CODECS:
+        return False
+    return e in _LOSSLESS_EXTS
 
 
 # ── yt-dlp module seam (so tests can inject a fake without a network) ──
@@ -914,11 +932,15 @@ def classify_recover_error(error: Any) -> Dict[str, str]:
         or "login required" in text
         or "sign in" in text
         or "unauthorized" in text
-        or "http error 401" in text
-        or "error 401" in text
+        or "authentication required" in text
+        or bool(re.search(r"\b401\b", text))
         or "entitlement required" in text
         or ("members-only" in text or "members only" in text)
     ):
+        # Auth wins on mixed messages: a 401 / "authentication required" that
+        # also mentions "encrypted media" is an authorization failure, not DRM
+        # (F-467-3). Classified ahead of the DRM branch, so it cannot fall
+        # through and be mislabeled.
         return result("auth-needed",
                       "Configure/refresh YTDLP_COOKIE_FILE with cookies for the owning account.")
 
@@ -942,19 +964,12 @@ def classify_recover_error(error: Any) -> Dict[str, str]:
     ):
         return result("expired-url", "Re-fetch a fresh URL for this item, or it no longer exists.")
 
-    if (
-        "m3u8" in text or "hls" in text or "fragment" in text
-        or "ffmpeg exited" in text or "manifest" in text
-    ):
-        return result("hls-assembly", "Transient HLS/stream assembly failure; retry the fetch.")
-
-    if "requested format is not available" in text or "no video formats" in text or "no suitable format" in text or "requested format" in text:
-        return result("format", "Adjust the requested format or try again; the stream format changed.")
-
-    # DRM only on real EME/CDM evidence. "eme" is matched as a standalone token
-    # only, so "sch-EME"/"placement"/"requirement"/"agreement"/"Element" never
-    # trip it. Auth/format/HLS are already classified above and cannot reach
-    # here (F1).
+    # DRM evidence takes precedence over the generic HLS / "manifest" and format
+    # keywords below: "Manifest contains Widevine-protected content" is DRM, not
+    # a transient manifest-assembly failure (F-467-4). "eme" is matched as a
+    # standalone token only, so "sch-EME"/"placement"/"requirement"/"agreement"/
+    # "Element" never trip it. Auth is already classified above and wins over DRM
+    # on mixed auth+DRM messages (F-467-3).
     if (
         "widevine" in text
         or "fairplay" in text
@@ -967,6 +982,15 @@ def classify_recover_error(error: Any) -> Dict[str, str]:
     ):
         return result("genuinely-DRM",
                       "This item is DRM/EME protected; recover it from the account owner's own source, not here.")
+
+    if (
+        "m3u8" in text or "hls" in text or "fragment" in text
+        or "ffmpeg exited" in text or "manifest" in text
+    ):
+        return result("hls-assembly", "Transient HLS/stream assembly failure; retry the fetch.")
+
+    if "requested format is not available" in text or "no video formats" in text or "no suitable format" in text or "requested format" in text:
+        return result("format", "Adjust the requested format or try again; the stream format changed.")
 
     if (
         "not installed" in text
@@ -1738,6 +1762,133 @@ def recover_get_run(run_id: str) -> Optional[Dict[str, Any]]:
         if _s(run.get("run_id")) == target:
             return run
     return None
+
+
+# ── URL -> staging-segment map: resume a prior run's partial/finished file ──
+# A fresh job run_id is minted per POST /api/recover/fetch (correct: each POST is
+# its own run RECORD). The per-URL STAGING segment, however, is kept stable
+# across requests so a re-fetch of the same URL resumes the SAME staging dir —
+# letting continuedl pick up a leftover .part and the crash re-scan find an
+# already-finished file — instead of starting a new dir and re-downloading, and
+# so stale per-run dirs stop accumulating under DOWNLOADS_ROOT/recovered
+# (F-467-1).
+_RECOVER_URL_MAP_FILENAME = "recover_url_runs.json"
+_RECOVER_URL_MAP_LOCK = threading.Lock()
+_MAX_RECOVER_URL_MAP = 1000
+
+
+def _load_recover_url_map() -> Dict[str, str]:
+    """Current sanitized-URL -> staging-segment map (empty on any read error)."""
+    from backend.web_manager_config_store import get_config_store
+    try:
+        data = get_config_store().load_json(_RECOVER_URL_MAP_FILENAME, default={"map": {}})
+    except Exception:
+        return {}
+    raw = (data or {}).get("map")
+    if not isinstance(raw, dict):
+        return {}
+    return {_s(k): _s(v) for k, v in raw.items() if _s(k) and _s(v)}
+
+
+def _recover_segment_for_url(url: str) -> str:
+    """Return the persisted staging segment for ``url`` (keyed by its sanitized
+    form), minting and persisting a fresh one on first sight. A later re-request
+    of the same URL gets the SAME segment -> the same staging dir -> resume, not
+    re-download (F-467-1). Falls back to a one-off id on any store error."""
+    key = _sanitize_persisted_url(url)
+    if not key:
+        return uuid.uuid4().hex
+    from backend.web_manager_config_store import WebManagerConfigStoreError, get_config_store
+    with _RECOVER_URL_MAP_LOCK:
+        try:
+            store = get_config_store()
+            for _attempt in range(3):
+                rec = store.read_text_record(_RECOVER_URL_MAP_FILENAME)
+                rev = rec.get("revision") if rec.get("exists") else None
+                raw_text = rec.get("content")
+                mapping: Dict[str, str] = {}
+                if raw_text:
+                    try:
+                        parsed = json.loads(raw_text)
+                        if isinstance(parsed, dict) and isinstance(parsed.get("map"), dict):
+                            mapping = {
+                                _s(k): _s(v)
+                                for k, v in parsed["map"].items()
+                                if _s(k) and _s(v)
+                            }
+                    except Exception:
+                        mapping = {}
+                existing = mapping.get(key)
+                if existing:
+                    return existing
+                segment = uuid.uuid4().hex
+                mapping[key] = segment
+                if len(mapping) > _MAX_RECOVER_URL_MAP:
+                    # Drop oldest insertions (dicts preserve order); a dropped URL
+                    # only loses resume, never correctness.
+                    for stale in list(mapping)[: len(mapping) - _MAX_RECOVER_URL_MAP]:
+                        mapping.pop(stale, None)
+                try:
+                    store.save_json(
+                        _RECOVER_URL_MAP_FILENAME,
+                        {"version": 1, "map": mapping},
+                        is_secret=False,
+                        expected_revision=rev,
+                    )
+                    return segment
+                except WebManagerConfigStoreError:
+                    continue  # lost a revision race; re-read and retry
+        except Exception:
+            pass
+    return uuid.uuid4().hex
+
+
+def _prune_orphan_recover_dirs() -> int:
+    """Remove stale per-run staging dirs under ``DOWNLOADS_ROOT/recovered`` that
+    are not referenced by the URL->segment map AND hold no finished audio (only
+    empties or leftover ``.part``/``.ytdl``). Never touches a referenced dir or
+    one holding a real staged file, and never leaves the recovered/ tree, so the
+    user's library is never at risk (F-467-1). Returns the count removed."""
+    import shutil
+    try:
+        base = (Path(validated_downloads_root()) / "recovered").resolve()
+    except Exception:
+        return 0
+    if not base.is_dir():
+        return 0
+    live = set(_load_recover_url_map().values())
+    removed = 0
+    try:
+        platform_dirs = [p for p in base.iterdir() if p.is_dir()]
+    except OSError:
+        return 0
+    for platform_dir in platform_dirs:
+        try:
+            children = [c for c in platform_dir.iterdir() if c.is_dir()]
+        except OSError:
+            continue
+        for child in children:
+            if child.name in live:
+                continue  # referenced by an active/resumable URL — keep
+            try:
+                resolved = child.resolve()
+            except OSError:
+                continue
+            # Confinement: only ever delete strictly inside recovered/.
+            if base not in resolved.parents:
+                continue
+            try:
+                entries = list(child.iterdir())
+            except OSError:
+                continue
+            if any(e.is_file() and e.suffix.lower() in _RECOVER_AUDIO_EXT for e in entries):
+                continue  # holds recovered audio — never delete it
+            try:
+                shutil.rmtree(child)
+                removed += 1
+            except OSError:
+                continue
+    return removed
 
 
 # ── fetch + stage job ──
@@ -3187,8 +3338,16 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("cancelled")
         log.append(f"[recover] [{idx}/{len(urls)}] {_sanitize_persisted_url(url) or url}")
-        # Per-item sub-run id keeps multiple items in one job isolated too.
-        result = _recover_fetch_one(url, log, run_id=f"{run_id}-{idx}", ydl_module=ydl_module,
+        # Resume: a STABLE per-URL staging segment (not the ephemeral job run_id)
+        # reuses the same dir on a re-fetch, so continuedl / the crash re-scan
+        # pick up a prior partial or finished file instead of re-downloading
+        # (F-467-1). This also isolates distinct items in one job (distinct URLs
+        # -> distinct segments).
+        # ponytail: two CONCURRENT jobs on the IDENTICAL url would share one dir;
+        # continuedl + file_access_retries cover it. Add per-URL locks only if
+        # same-URL concurrency becomes real.
+        item_run_id = _recover_segment_for_url(url)
+        result = _recover_fetch_one(url, log, run_id=item_run_id, ydl_module=ydl_module,
                                     auth_basis=auth_basis, auth_note=auth_note)
         if result.get("recovered"):
             recovered.append(result)
@@ -3197,6 +3356,10 @@ def recover_fetch_job(urls: List[str], log: list, cancel_event: Any = None,
             log.append(
                 f"  [recover] Failed ({result.get('category')}): {result.get('action')}"
             )
+    # Drop stale/empty staging dirs left by earlier crashed or superseded runs
+    # (old-scheme per-run dirs that no current URL resumes) (F-467-1).
+    _prune_orphan_recover_dirs()
+
     # BA-3: a job where every item failed must report ok=False so the job engine
     # records it as failed, not success (F12). A partial success stays ok=True
     # but carries partial=True and the per-item counts.
