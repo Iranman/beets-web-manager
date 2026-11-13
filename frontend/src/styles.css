@@ -1844,3 +1844,121 @@ body {
   }
 }
 /* ── end touch targets ───────────────────────────────────────────────────────────────────────── */
+
+/* ── Bolder Jobs & Cleanup (views/Jobs.tsx) ──────────────────────────────────────────────────────
+   The listening station raised into the Bolder Shelf world, scoped to .jobs-bolder so the shared
+   ops-* surfaces Workbench and Submissions also use stay untouched. Nothing new is invented: this
+   reuses the foundation tokens that shipped with the Bolder Shelf — brass with its defined role
+   (--bw-accent / --bw-accent-hover for the active+progress state), the aged --bw-patina for the
+   ring body, the walnut room light, the motion tokens, the .liner-label small-caps and the record
+   ring. Operate filter: scanability first, motion <= --dur-lift and reduced-motion-aware, and glass
+   is one measured overlay (the job-details backdrop), never behind the feed or the ledgers. */
+@layer components {
+  /* Masthead title at full display strength: the page's serif anchor, bolder on a brass-lit rule. */
+  .jobs-bolder .ops-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    letter-spacing: -0.02em;
+  }
+  .jobs-bolder .ops-masthead {
+    border-bottom-color: color-mix(in srgb, var(--bw-accent) 24%, var(--bw-border));
+  }
+  /* The three counters (Current activity, Library Cleanup, Job History) read as true headings. */
+  .jobs-bolder .ops-section-title {
+    font-size: clamp(1.375rem, 1.2rem + 0.55vw, 1.6rem);
+    letter-spacing: -0.012em;
+  }
+
+  /* Walnut, lit. The station carries the room's warm light from the top and a hairline brass edge,
+     over the deep walnut base — the same material language as the Library crate. No glass here: the
+     station can hold the running feed, and glass never sits behind a list (DESIGN). */
+  .jobs-bolder .ops-station {
+    border-color: color-mix(in srgb, var(--bw-accent) 18%, var(--ops-wood-rule));
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.1), transparent 32%),
+      var(--ops-grain),
+      linear-gradient(180deg, var(--ops-sheen), transparent 45%);
+    background-size: 100% 100%, 520px 180px, auto;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+
+  /* Metadata as liner notes: figure labels become the letterspaced small-caps liner label. Values
+     stay sans + tabular (they are table data, which the shelf keeps out of the serif). */
+  .jobs-bolder .ops-figures dt {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--bw-muted);
+  }
+
+  /* One oversized liner-note count: the Clean All completion read in the display serif. Serif on a
+     big counter is the Bolder Shelf's own allowance; it keeps tabular numerals so it never jitters. */
+  .jobs-bolder .jobs-clean-pct {
+    min-width: 3.5rem;
+    font-family: var(--font-display);
+    font-size: clamp(1.6rem, 1.3rem + 1vw, 2.1rem);
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -0.01em;
+    color: var(--bw-text);
+  }
+
+  /* The platter ring in bolder brass. The track is an aged-patina hairline (the ring body); the
+     played arc is the polished brass glint — thicker, with a soft brass halo so progress reads live.
+     This is the record-ring signature expressed on the drawn progress ring. */
+  .jobs-bolder .ops-ring-track {
+    stroke: color-mix(in srgb, var(--bw-patina) 55%, transparent);
+    stroke-width: 1.3;
+  }
+  .jobs-bolder .ops-ring-progress {
+    stroke: var(--bw-accent-hover);
+    stroke-width: 3;
+    filter: drop-shadow(0 0 2px color-mix(in srgb, var(--bw-accent) 55%, transparent));
+  }
+  /* A patina edge around the centre label, so the disc reads as pressed brass even with no cover. */
+  .jobs-bolder .ops-record > .ops-record-label {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--bw-patina) 60%, transparent);
+  }
+
+  /* The playing phase on the Clean All rule: a filled brass track number (dark brass-ink on brass),
+     the phase name in brass. aria-current="step" already marks it for assistive tech. */
+  .jobs-bolder .ops-pipeline > li.is-current {
+    color: var(--bw-accent-hover);
+  }
+  .jobs-bolder .ops-pipeline > li.is-current .ops-pipeline-no {
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    background: var(--bw-accent);
+    color: var(--bw-bg);
+    font-weight: 600;
+  }
+
+  /* The selected history row wears the shared brass rail (the Bolder Shelf's active-row signature)
+     instead of a single hairline — patina edge plus a polished inner glint. */
+  .jobs-bolder .ops-ledger-row.is-selected {
+    background: color-mix(in oklab, var(--bw-accent) 11%, transparent);
+    box-shadow: inset 3px 0 0 var(--bw-accent), inset 4px 0 0 rgba(246, 223, 174, 0.25);
+  }
+}
+
+/* The one measured frosted-glass moment: the job-details backdrop. It is an overlay over the page,
+   never behind a data table — the dialog's content sits on its own solid panel above this glass.
+   A near-opaque walnut is the fallback where backdrop-filter is unsupported. Portaled by Headless
+   UI outside .ops-page, so this hook is unscoped by necessity (it styles only the backdrop). */
+.jobs-modal-glass {
+  background: color-mix(in srgb, var(--bw-bg) 80%, #000);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .jobs-modal-glass {
+    background: color-mix(in srgb, var(--bw-bg) 52%, transparent);
+    -webkit-backdrop-filter: blur(6px) saturate(1.1);
+    backdrop-filter: blur(6px) saturate(1.1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .jobs-modal-glass {
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+  }
+}
+/* ── end Bolder Jobs & Cleanup ───────────────────────────────────────────────────────────────── */
