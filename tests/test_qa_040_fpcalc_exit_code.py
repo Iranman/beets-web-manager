@@ -10,6 +10,7 @@ permanently. Pinned here: the JSON, not the exit code, decides; a real
 fingerprint failure is "not checked" (never NO_RESULT, never cached); and
 v2 cache entries (possibly poisoned) are no longer served.
 """
+import gzip
 import hashlib
 import json
 import subprocess
@@ -51,9 +52,11 @@ class FpcalcExitCodeTests(unittest.TestCase):
     def test_exit_3_fingerprint_is_sent_to_acoustid(self):
         fpcalc = subprocess.CompletedProcess(["fpcalc"], 3, stdout=FPCALC_STDOUT, stderr=EOF_STDERR)
         _result, opened = _run_lookup(fpcalc)
-        url = opened.call_args.args[1].full_url
-        self.assertIn("duration=40", url)
-        self.assertIn("fingerprint=AQADtEmUaEkSRZEK", url)
+        req = opened.call_args.args[1]
+        self.assertEqual(req.get_method(), "POST")
+        body = gzip.decompress(req.data).decode()
+        self.assertIn("duration=40", body)
+        self.assertIn("fingerprint=AQADtEmUaEkSRZEK", body)
 
     def test_failed_fpcalc_is_unavailable_not_no_result(self):
         for stdout in ("", "not json", json.dumps({"duration": 40, "fingerprint": ""}),

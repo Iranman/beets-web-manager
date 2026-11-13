@@ -49,7 +49,7 @@ describe('#606 focus and contrast tokens', () => {
   });
 
   it('no zinc-500/600/700 text utilities remain outside the light-surface review panels', () => {
-    for (const p of ['views/Jobs.tsx', 'views/System.tsx', 'views/Login.tsx', 'components/layout/Shell.tsx']) {
+    for (const p of ['views/Jobs.tsx', 'views/System.tsx', 'views/Login.tsx', 'components/layout/Shell.tsx', 'features/system/EnvEditor.tsx', 'features/system/SecuritySection.tsx', 'features/system/ConfigYamlEditor.tsx']) {
       expect(src(p)).not.toMatch(/text-zinc-[567]00/);
     }
   });

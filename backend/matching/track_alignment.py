@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .models import AcoustIDStatus, TrackAlignmentResult, TrackAssignment, UnmatchedLocalTrack
 from .normalize import (
@@ -156,12 +156,43 @@ def _hit_score(hit: Dict[str, Any]) -> float:
     return acoustid_score_percent(hit.get("score") or hit.get("confidence") or 0)
 
 
+def _hit_weak(hit: Any) -> bool:
+    return isinstance(hit, Mapping) and bool(hit.get("weak_sources"))
+
+
+def strong_only_agrees(fn: Callable[[List[Any]], Any], hits: List[Any], default: Any,
+                       key: Callable[[Any], Any] = lambda verdict: verdict,
+                       blocks: Callable[[Any], bool] = lambda verdict: False) -> Any:
+    """``fn``'s verdict on the hits, kept only when the hits without
+    ``weak_sources`` reach the same verdict (compared by ``key``; the
+    strong-only verdict is returned). When they differ, a strong-only
+    verdict that ``blocks`` (a conflict) is kept; otherwise ``default``.
+
+    A weakly sourced recording (helpers_mb._acoustid_parse_candidates) can
+    only make the result stricter: on its own it never confirms a recording,
+    never contradicts one (a verdict that exists only because of it falls
+    back to ``default``, review), and never removes a conflict the strong
+    hits prove. With no weak hit this is exactly ``fn(hits)``."""
+    full = fn(hits)
+    strong = [hit for hit in hits if not _hit_weak(hit)]
+    if len(strong) == len(hits):
+        return full
+    lean = fn(strong)
+    return lean if key(lean) == key(full) or blocks(lean) else default
+
+
 def _acoustid_status_for_target(local: Dict[str, Any], target_recording_id: str) -> Tuple[AcoustIDStatus, List[str], List[str]]:
-    positives: List[str] = []
-    conflicts: List[str] = []
     hits = _acoustid_hits(local)
     if hits is None:
-        return AcoustIDStatus.UNAVAILABLE, positives, conflicts
+        return AcoustIDStatus.UNAVAILABLE, [], []
+    return strong_only_agrees(lambda rows: _acoustid_status_for_hits(rows, target_recording_id), hits,
+                              (AcoustIDStatus.AMBIGUOUS, [], []), key=lambda verdict: verdict[0],
+                              blocks=lambda verdict: bool(verdict[2]))
+
+
+def _acoustid_status_for_hits(hits: List[Dict[str, Any]], target_recording_id: str) -> Tuple[AcoustIDStatus, List[str], List[str]]:
+    positives: List[str] = []
+    conflicts: List[str] = []
     if not hits:
         return AcoustIDStatus.NO_RESULT, positives, conflicts
     high_hits = [
@@ -281,6 +312,10 @@ def _acoustid_confirmed_target(local: Dict[str, Any], recording_to_target: Dict[
     hits = _acoustid_hits(local)
     if hits is None or not hits:
         return None
+    return strong_only_agrees(lambda rows: _confirmed_target_for_hits(rows, recording_to_target), hits, None)
+
+
+def _confirmed_target_for_hits(hits: List[Dict[str, Any]], recording_to_target: Dict[str, int]) -> Optional[int]:
     high = [
         (_hit_recording_id(hit), _hit_score(hit))
         for hit in hits

@@ -19,6 +19,8 @@ vi.mock('../src/api/client', async (importOriginal) => {
   };
 });
 vi.mock('../src/features/plugins/PluginsPanel', () => ({ PluginsPanel: () => null }));
+vi.mock('../src/features/system/ConfigYamlEditor', () => ({ ConfigYamlEditor: () => null }));
+vi.mock('../src/features/system/SecuritySection', () => ({ SecuritySection: () => null }));
 
 const fakePrefs = {
   allowed_layouts: { stereo: true },

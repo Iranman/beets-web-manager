@@ -1,6 +1,6 @@
 """MusicBrainz / AcoustID API helpers — no app.py dependencies."""
 import backend.provider_boundary as provider_boundary
-import json, logging, os, re, shutil, subprocess, threading, time
+import gzip, json, logging, math, os, re, shutil, subprocess, threading, time
 import urllib.error, urllib.parse, urllib.request
 from backend.security import install_secure_urllib
 install_secure_urllib()
@@ -671,11 +671,17 @@ def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     set only when the recording maps to exactly one release group; otherwise
     it is empty and the full set is in ``mb_releasegroupids`` with
     ``release_group_ambiguous`` -- a recording on an album and a single is
-    not evidence for either release group."""
+    not evidence for either release group.
+
+    ``sources`` is the number of AcoustID submissions linking the fingerprint
+    to the recording (None when the response omits it). A recording with
+    fewer than ACOUSTID_WEAK_SOURCES_RATIO of the best-sourced recording's
+    sources is marked ``weak_sources``: on its own it neither confirms nor
+    contradicts a recording (see track_alignment.strong_only_agrees)."""
     out = []
     seen_mbids: set = set()
     for result in (data.get("results") or [])[:5]:
-        confidence = int(round((result.get("score") or 0) * 100))
+        confidence = _acoustid_score_percent(result.get("score"))
         acoustid_id = str(result.get("id") or "")
         for rec in (result.get("recordings") or []):
             mb_id = rec.get("id", "")
@@ -722,8 +728,38 @@ def _acoustid_parse_candidates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "mb_releasegroupids": rg_ids,
                 "release_group_ambiguous": len(rg_ids) > 1,
                 "release_group": rg_title,
+                "sources": _acoustid_sources(rec.get("sources")),
             })
+    top_sources = max((row["sources"] for row in out if row["sources"] is not None), default=0)
+    for row in out:
+        row["weak_sources"] = bool(
+            top_sources and row["sources"] is not None
+            and row["sources"] < top_sources * ACOUSTID_WEAK_SOURCES_RATIO)
     return out
+
+
+#: A recording linked by fewer than this share of the best-sourced
+#: recording's AcoustID submissions is weak (often a mislinked submission).
+ACOUSTID_WEAK_SOURCES_RATIO = 0.25
+
+
+def _acoustid_sources(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):  # json.loads accepts Infinity / 1e400
+        return None
+
+
+def _acoustid_score_percent(value: Any) -> int:
+    """AcoustID result score (0..1) as an integer percent; a missing,
+    non-numeric or non-finite score is 0 (below every floor), never an error."""
+    try:
+        score = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return int(round(score * 100)) if math.isfinite(score) else 0
 
 
 ACOUSTID_NOT_CONFIGURED_MESSAGE = (
@@ -795,16 +831,23 @@ def acoustid_lookup_outcome(file_path: str):
         # checked", never NO_RESULT, so callers do not cache it (D11/#252).
         return ProviderResult("acoustid", ProviderOutcome.UNAVAILABLE, data=[],
                               message="audio could not be fingerprinted", evidence={"fingerprintable": False})
-    params = _up.urlencode({
+    # POST with a gzip-compressed form body (AcoustID accepts
+    # Content-Encoding: gzip): fingerprints are several KB and a GET puts
+    # them, with the key, in the URL. Through provider_boundary like any call.
+    body = gzip.compress(_up.urlencode({
         "client":      aid_key,
-        "meta":        "recordings releases releasegroups",
+        "meta":        "recordings releases releasegroups sources",
         "duration":    duration,
         "fingerprint": fingerprint,
         "format":      "json",
-    })
+    }).encode("ascii"))
     req = _ur.Request(
-        f"https://api.acoustid.org/v2/lookup?{params}",
-        headers={"User-Agent": "BeetsWebControl/1.0"}
+        "https://api.acoustid.org/v2/lookup",
+        data=body,
+        headers={"User-Agent": "BeetsWebControl/1.0",
+                 "Content-Type": "application/x-www-form-urlencoded",
+                 "Content-Encoding": "gzip"},
+        method="POST",
     )
 
     def _once():
