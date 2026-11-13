@@ -5,7 +5,7 @@ import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import {
   apiErrorBody,
   getMbidStatus,
@@ -28,20 +28,9 @@ import type {
   StatsResponse,
 } from '../api/types';
 
-// ── Stat card ─────────────────────────────────────────────────────────────────
-
-function StatCard({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="flex flex-col gap-1 rounded border border-graphite-800 bg-graphite-900 px-5 py-4">
-      <div className="text-xs font-semibold text-muted">
-        {label}
-      </div>
-      <div className="text-2xl font-semibold text-zinc-100">
-        {typeof value === 'number' ? value.toLocaleString() : value}
-      </div>
-    </div>
-  );
-}
+// Settings is the one editing page: an index of sections beside the work (sticky from 64rem), each
+// section on a rule with a serif title. Library counts sit on the masthead's catalogue line; the
+// preferred-format order is the page's one wooden surface.
 
 // ── MB coverage bar ───────────────────────────────────────────────────────────
 
@@ -50,9 +39,9 @@ function CoverageBar({ label, present, total }: { label: string; present: number
   const color = pct >= 90 ? 'success' : pct >= 60 ? 'warning' : 'error';
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-zinc-300">{label}</span>
-        <span className="tabular-nums text-zinc-400">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 text-sm">
+        <span className="text-zinc-100">{label}</span>
+        <span className="tabular-nums text-zinc-300">
           {present.toLocaleString()} / {total.toLocaleString()} ({pct}%)
         </span>
       </div>
@@ -60,34 +49,90 @@ function CoverageBar({ label, present, total }: { label: string; present: number
         variant="determinate"
         value={pct}
         color={color}
+        aria-label={label}
         sx={{ height: 6, borderRadius: 3, backgroundColor: 'var(--bw-surface-3)' }}
       />
     </div>
   );
 }
 
-// ── ID health metric ──────────────────────────────────────────────────────────
+// ── Section frame ─────────────────────────────────────────────────────────────
 
-function HealthMetric({
-  label,
-  value,
-  tone = 'neutral',
+/** The in-page index; every entry is a section below and a /config#id deep link. */
+const SECTIONS = [
+  { id: 'musicbrainz', label: 'MusicBrainz' },
+  { id: 'music-format', label: 'Music format' },
+  { id: 'plugins', label: 'Plugins' },
+  { id: 'config-yaml', label: 'config.yaml' },
+  { id: 'security', label: 'Security' },
+] as const;
+
+type SectionId = (typeof SECTIONS)[number]['id'];
+
+/** One settings section on a rule: serif title, an optional hint, actions, then the controls. */
+function SettingsSection({
+  id,
+  title,
+  hint,
+  actions,
+  children,
 }: {
-  label: string;
-  value: number;
-  tone?: 'neutral' | 'warn' | 'ok';
+  id: SectionId;
+  title: string;
+  hint?: ReactNode;
+  actions?: ReactNode;
+  children: ReactNode;
 }) {
-  const color = tone === 'ok' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-300' : 'text-zinc-100';
   return (
-    <div className="rounded border border-graphite-800 bg-graphite-950/35 px-3 py-2">
-      <div className="text-xs font-semibold text-muted">
-        {label}
+    <section
+      id={id}
+      aria-labelledby={`settings-${id}`}
+      className="min-w-0 scroll-mt-20 space-y-4 border-t border-graphite-800 pt-6 first:border-t-0 first:pt-0"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 max-w-[65ch]">
+          <h2 id={`settings-${id}`} className="ops-section-title">{title}</h2>
+          {hint ? <p className="m-0 mt-1 text-sm text-muted">{hint}</p> : null}
+        </div>
+        {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
       </div>
-      <div className={`mt-1 text-lg font-semibold tabular-nums ${color}`}>
-        {value.toLocaleString()}
-      </div>
-    </div>
+      {children}
+    </section>
   );
+}
+
+const SUBHEAD = 'm-0 text-sm font-semibold text-zinc-100';
+const CHECK_ROW = 'flex min-h-10 cursor-pointer items-center gap-2 text-sm text-zinc-200 pointer-coarse:min-h-11';
+const CHECK = 'size-4 shrink-0 accent-brass-500';
+
+/** Deep links (/config#security): the sections above the target load at their own pace and push it
+ * down, so the target is kept at the top while the page settles, until the reader scrolls, clicks
+ * or types. Targets carry `scroll-mt-20` to clear the sticky header. */
+function useHashTargetScroll(container: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const raw = window.location.hash.slice(1);
+    let id = raw;
+    try {
+      id = decodeURIComponent(raw);
+    } catch {
+      // A hand-made malformed hash (#%E0%A4%A) must not take the page down; fall back to the raw text.
+    }
+    if (!id) return undefined;
+    const scroll = () => document.getElementById(id)?.scrollIntoView?.({ block: 'start' });
+    scroll();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scroll);
+    if (container.current) observer?.observe(container.current);
+    const userEvents = ['wheel', 'touchstart', 'pointerdown', 'keydown'];
+    const release = () => {
+      observer?.disconnect();
+      window.clearTimeout(timer);
+      userEvents.forEach((name) => window.removeEventListener(name, release));
+    };
+    // ponytail: sections that finish loading after 8s are not followed; browser scroll anchoring covers most of those.
+    const timer = window.setTimeout(release, 8000);
+    userEvents.forEach((name) => window.addEventListener(name, release, { passive: true }));
+    return release;
+  }, [container]);
 }
 
 const MUSIC_FORMAT_LAYOUTS: Array<{ key: MusicFormatLayout; label: string }> = [
@@ -195,11 +240,9 @@ export default function Config() {
   }, [load, loadMusicFormat]);
 
   // System links here as /config#security, #config-yaml or #plugins; a client-side route change
-  // does not scroll to the hash on its own.
-  useEffect(() => {
-    const id = window.location.hash.slice(1);
-    if (id) document.getElementById(id)?.scrollIntoView?.();
-  }, []);
+  // does not scroll to the hash on its own, and the sections above it load after mount.
+  const pageRef = useRef<HTMLDivElement>(null);
+  useHashTargetScroll(pageRef);
 
   const handleSaveMusicFormat = async () => {
     setFormatBusy(true);
@@ -293,246 +336,278 @@ export default function Config() {
   const trackRecordingGapRows = mbStatus?.track_recording_gap_rows ?? mbStatus?.missing_track_mb ?? 0;
   const inferredAlbumRows = mbStatus?.inferred_album_mbid_rows ?? 0;
   const templateTokenRows = mbStatus?.template_token_rows ?? 0;
+  const healthFigures = [
+    { label: 'Item release gaps', value: itemReleaseGapRows },
+    { label: 'Recording ID gaps', value: trackRecordingGapRows },
+    { label: 'Inferable albums', value: inferredAlbumRows },
+    { label: 'Path token rows', value: templateTokenRows },
+  ];
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-4">
-        <h1 className="font-display text-2xl font-semibold text-zinc-100">Settings</h1>
+    <div ref={pageRef} className="ops-page min-w-0 space-y-8 overflow-x-clip pb-10">
+      <header className="ops-masthead">
+        <div className="min-w-0">
+          <h1 className="ops-title">Settings</h1>
+          {stats ? (
+            <p className="ops-catalog mt-2">
+              <span>{stats.artists.toLocaleString()} artists</span>
+              <span>{stats.albums.toLocaleString()} albums</span>
+              <span>{stats.tracks.toLocaleString()} tracks</span>
+            </p>
+          ) : null}
+        </div>
         <Button variant="outlined" size="small" onClick={refreshAll} disabled={loading || formatLoading}>
           Refresh
         </Button>
-      </div>
+      </header>
 
       {panelError(error, engineOffline) && <Alert severity="error">{error}</Alert>}
-      {loading && <LinearProgress sx={{ borderRadius: 1 }} />}
+      {loading && <LinearProgress aria-label="Loading library figures" sx={{ borderRadius: 1 }} />}
 
-      {/* Library stats */}
-      <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-zinc-200">Library</h2>
-        {stats && (
-          <div className="grid grid-cols-3 gap-3">
-            <StatCard label="Artists" value={stats.artists} />
-            <StatCard label="Albums"  value={stats.albums} />
-            <StatCard label="Tracks"  value={stats.tracks} />
-          </div>
-        )}
-      </section>
-
-      {/* MusicBrainz coverage */}
-      {mbStatus?.ok && (
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-zinc-200">MusicBrainz</h2>
-          <div className="rounded border border-graphite-800 bg-graphite-900 px-5 py-4 space-y-4">
-            <CoverageBar
-              label="Albums with MB release ID"
-              present={mbStatus.total_albums - mbStatus.missing_album_mb}
-              total={mbStatus.total_albums}
-            />
-            <CoverageBar
-              label="Tracks with MB recording ID"
-              present={mbStatus.total_tracks - mbStatus.missing_track_mb}
-              total={mbStatus.total_tracks}
-            />
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              <HealthMetric label="Item release gaps"  value={itemReleaseGapRows}      tone={itemReleaseGapRows ? 'warn' : 'ok'} />
-              <HealthMetric label="Recording ID gaps"  value={trackRecordingGapRows}   tone={trackRecordingGapRows ? 'warn' : 'ok'} />
-              <HealthMetric label="Inferable albums"   value={inferredAlbumRows}        tone={inferredAlbumRows ? 'warn' : 'ok'} />
-              <HealthMetric label="Path token rows"    value={templateTokenRows}        tone={templateTokenRows ? 'warn' : 'ok'} />
-            </div>
-          </div>
-        </section>
-      )}
-
-      {/* Music format preferences */}
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-semibold text-zinc-200">Music Format Preferences</h2>
-            <p className="mt-1 text-xs text-muted">
-              Downloaded tracks are inspected before import. Files that do not match your selected format preferences are rejected or replaced.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button size="small" variant="outlined" onClick={() => void loadMusicFormat()} disabled={formatLoading || formatBusy}>Reload</Button>
-            <Button size="small" variant="outlined" onClick={() => void handleStartMusicFormatScan()} disabled={formatLoading || formatBusy}>Scan library</Button>
-            <Button size="small" variant="outlined" color="warning" onClick={() => void handleStartMusicFormatReplacement()} disabled={formatLoading || formatBusy || queuedReplacementCount === 0}>Replace queued</Button>
-            <Button size="small" variant="contained" onClick={() => void handleSaveMusicFormat()} disabled={!formatLoaded || formatLoading || formatBusy || !formatDirty || formatPrefs.preferred_formats.length === 0}>Save</Button>
-          </div>
-        </div>
-        {formatMsg && <Alert severity="success" onClose={() => setFormatMsg('')}>{formatMsg}</Alert>}
-        {panelError(formatError, engineOffline) && <Alert severity="error">{formatError}</Alert>}
-        {!formatLoaded && !formatLoading && (
-          <Alert severity="warning">
-            Your saved Music Format Preferences could not be loaded, so the form is locked to avoid overwriting them with defaults. Use Reload to try again.
-          </Alert>
-        )}
-        {formatLoading && <LinearProgress sx={{ borderRadius: 1 }} />}
-        <fieldset disabled={!formatLoaded} aria-label="Music format preference fields" className="m-0 min-w-0 space-y-3 border-0 p-0">
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
-            <div className="text-sm font-medium text-zinc-200">Audio layouts</div>
-            <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {MUSIC_FORMAT_LAYOUTS.map((layout) => (
-                <label key={layout.key} className="flex items-center gap-2 text-sm text-zinc-300">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(formatPrefs.allowed_layouts[layout.key])}
-                    onChange={(event) => toggleLayout(layout.key, event.target.checked)}
-                  />
-                  {layout.label}
-                </label>
-              ))}
-            </div>
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <label className="text-xs text-muted">
-                Custom max channel count
-                <TextField
-                  fullWidth
-                  size="small"
-                  type="number"
-                  value={formatPrefs.custom_max_channels ?? ''}
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
-                    setFormatPrefs((current) => ({ ...current, custom_max_channels: Number.isFinite(value) && value > 0 ? value : null }));
-                  }}
-                  slotProps={{ htmlInput: { min: 1, max: 32 } }}
-                />
-              </label>
-              <div className="space-y-2 text-sm text-zinc-300">
-                <label className="flex items-center gap-2">
-                  <input
-                    name="atmos-mode"
-                    type="radio"
-                    checked={formatPrefs.allow_atmos}
-                    onChange={() => setFormatPrefs((current) => ({ ...current, allow_atmos: true, allowed_layouts: { ...current.allowed_layouts, atmos: true } }))}
-                  />
-                  Allow Atmos audio
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    name="atmos-mode"
-                    type="radio"
-                    checked={!formatPrefs.allow_atmos}
-                    onChange={() => setFormatPrefs((current) => ({ ...current, allow_atmos: false, allowed_layouts: { ...current.allowed_layouts, atmos: false } }))}
-                  />
-                  Reject Atmos audio
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
-            <div className="text-sm font-medium text-zinc-200">Preferred formats</div>
-            <div className="mt-3 space-y-2">
-              {MUSIC_FORMATS.map((format) => {
-                const enabled = formatPrefs.preferred_formats.includes(format.key);
-                const rank = formatPrefs.preferred_formats.indexOf(format.key);
-                return (
-                  <div key={format.key} className="flex items-center justify-between gap-2 rounded border border-graphite-800 bg-graphite-950/35 px-3 py-2 text-sm">
-                    <label className="flex items-center gap-2 text-zinc-300">
-                      <input type="checkbox" checked={enabled} onChange={(event) => toggleFormat(format.key, event.target.checked)} />
-                      {format.label}
-                    </label>
-                    {enabled ? (
-                      <div className="flex items-center gap-1 text-xs text-muted">
-                        <span>#{rank + 1}</span>
-                        <Button size="small" variant="text" onClick={() => moveFormat(format.key, -1)} disabled={rank <= 0}>Up</Button>
-                        <Button size="small" variant="text" onClick={() => moveFormat(format.key, 1)} disabled={rank < 0 || rank >= formatPrefs.preferred_formats.length - 1}>Down</Button>
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-            <div className="mt-3 text-xs text-muted">
-              Current order: {formatPrefs.preferred_formats.map(formatLabel).join(' -> ') || 'Select at least one format'}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-          <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
-            <div className="text-sm font-medium text-zinc-200">Rejected audio handling</div>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              <label className="text-xs text-muted">
-                Rejected downloads
-                <select
-                  className="mt-1 w-full rounded border border-field-border bg-graphite-950 px-2 py-2 text-sm text-zinc-200"
-                  value={formatPrefs.rejected_download_handling}
-                  onChange={(event) => setFormatPrefs((current) => ({ ...current, rejected_download_handling: event.target.value as MusicFormatPreferences['rejected_download_handling'] }))}
+      <div className="ops-split">
+        <nav aria-label="Settings sections" className="ops-split-aside min-w-0">
+          <ul className="m-0 flex list-none gap-1 overflow-x-auto border-b border-graphite-800 p-0 lg:flex-col lg:overflow-visible lg:border-b-0 lg:border-l">
+            {SECTIONS.map((section) => (
+              <li key={section.id} className="shrink-0">
+                <a
+                  href={`#${section.id}`}
+                  className="ops-filter flex items-center whitespace-nowrap no-underline lg:-ml-px lg:border-b-0 lg:border-l-2 lg:border-transparent lg:hover:border-brass-500"
                 >
-                  <option value="quarantine">Quarantine rejected files</option>
-                  <option value="delete">Delete rejected files</option>
-                </select>
-              </label>
-              <div className="space-y-2 text-sm text-zinc-300">
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={formatPrefs.replacement_fallback.keep_current} disabled />
-                  Keep current file
-                </label>
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={formatPrefs.replacement_fallback.queue_retry} onChange={(event) => setFallback('queue_retry', event.target.checked)} />
-                  Queue automatic retry
-                </label>
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={formatPrefs.replacement_fallback.try_lower_ranked} onChange={(event) => setFallback('try_lower_ranked', event.target.checked)} />
-                  Try lower-ranked allowed formats
-                </label>
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={formatPrefs.replacement_fallback.try_alternate_source} onChange={(event) => setFallback('try_alternate_source', event.target.checked)} />
-                  Try alternate source
-                </label>
-              </div>
-            </div>
-          </div>
+                  {section.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
 
-          <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-medium text-zinc-200">Replacement status</div>
-              <span className="text-xs text-muted">{queuedReplacementCount.toLocaleString()} queued / {replacementRows.length.toLocaleString()} tracked</span>
-            </div>
-            <div className="mt-3 space-y-2">
-              {replacementRows.slice(0, 5).map((row) => (
-                <div key={`${row.item_id ?? row.path}-${row.updated_at ?? ''}`} className="rounded border border-graphite-800 bg-graphite-950/35 px-3 py-2 text-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-medium text-zinc-200">{row.artist || 'Unknown artist'} - {row.title || 'Unknown track'}</span>
-                    <span className="text-xs text-amber-300">{row.replacement_status || row.status}</span>
-                  </div>
-                  {row.reason ? <div className="mt-1 text-xs text-muted">{row.reason}</div> : null}
-                  {(row.failure_stage || row.attempt_count || row.next_retry_at) ? (
-                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
-                      {row.failure_stage ? <span>Stage: {row.failure_stage.replace(/_/g, ' ')}</span> : null}
-                      {row.attempt_count ? <span>Attempts: {row.attempt_count}</span> : null}
-                      {row.next_retry_at ? <span>Retry: {formatEpochDateTime(row.next_retry_at)}</span> : null}
-                    </div>
-                  ) : null}
+        <div className="min-w-0 space-y-10">
+          <SettingsSection
+            id="musicbrainz"
+            title="MusicBrainz"
+            hint="How much of the library carries MusicBrainz IDs."
+          >
+            {mbStatus?.ok ? (
+              <div className="space-y-5">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <CoverageBar
+                    label="Albums with MB release ID"
+                    present={mbStatus.total_albums - mbStatus.missing_album_mb}
+                    total={mbStatus.total_albums}
+                  />
+                  <CoverageBar
+                    label="Tracks with MB recording ID"
+                    present={mbStatus.total_tracks - mbStatus.missing_track_mb}
+                    total={mbStatus.total_tracks}
+                  />
                 </div>
-              ))}
-              {replacementRows.length === 0 ? <div className="text-sm text-muted">No tracks are marked Needs replacement.</div> : null}
-            </div>
-          </div>
+                <dl className="ops-figures">
+                  {healthFigures.map((figure) => (
+                    <div key={figure.label}>
+                      <dt>{figure.label}</dt>
+                      <dd className={figure.value ? 'text-amber-300' : 'text-emerald-300'}>{figure.value.toLocaleString()}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ) : (
+              <p className="m-0 text-sm text-muted">
+                {loading ? 'Reading MusicBrainz coverage...' : 'MusicBrainz coverage is not available. Use Refresh to try again.'}
+              </p>
+            )}
+          </SettingsSection>
+
+          <SettingsSection
+            id="music-format"
+            title="Music Format Preferences"
+            hint="Downloaded tracks are inspected before import. Files that do not match your selected format preferences are rejected or replaced."
+            actions={(
+              <>
+                <Button size="small" variant="outlined" onClick={() => void loadMusicFormat()} disabled={formatLoading || formatBusy}>Reload</Button>
+                <Button size="small" variant="outlined" onClick={() => void handleStartMusicFormatScan()} disabled={formatLoading || formatBusy}>Scan library</Button>
+                <Button size="small" variant="outlined" color="warning" onClick={() => void handleStartMusicFormatReplacement()} disabled={formatLoading || formatBusy || queuedReplacementCount === 0}>Replace queued</Button>
+                <Button size="small" variant="contained" onClick={() => void handleSaveMusicFormat()} disabled={!formatLoaded || formatLoading || formatBusy || !formatDirty || formatPrefs.preferred_formats.length === 0}>Save</Button>
+              </>
+            )}
+          >
+            {formatMsg && <Alert severity="success" onClose={() => setFormatMsg('')}>{formatMsg}</Alert>}
+            {panelError(formatError, engineOffline) && <Alert severity="error">{formatError}</Alert>}
+            {!formatLoaded && !formatLoading && (
+              <Alert severity="warning">
+                Your saved Music Format Preferences could not be loaded, so the form is locked to avoid overwriting them with defaults. Use Reload to try again.
+              </Alert>
+            )}
+            {formatLoading && <LinearProgress aria-label="Loading music format preferences" sx={{ borderRadius: 1 }} />}
+            {formatDirty && formatLoaded ? <p className="m-0 text-xs font-semibold text-amber-300">Unsaved changes</p> : null}
+            <fieldset disabled={!formatLoaded} aria-label="Music format preference fields" className="m-0 min-w-0 space-y-8 border-0 p-0">
+              <div className="grid gap-x-10 gap-y-8 xl:grid-cols-2">
+                <div className="min-w-0 space-y-3">
+                  <h3 className={SUBHEAD}>Preferred formats</h3>
+                  <p className="m-0 text-xs text-muted">Tick the formats to accept; the first is tried first.</p>
+                  <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
+                    {MUSIC_FORMATS.map((format) => {
+                      const enabled = formatPrefs.preferred_formats.includes(format.key);
+                      const rank = formatPrefs.preferred_formats.indexOf(format.key);
+                      return (
+                        <li key={format.key} className="flex flex-wrap items-center justify-between gap-x-2 px-3">
+                          <label className={CHECK_ROW}>
+                            <input className={CHECK} type="checkbox" checked={enabled} onChange={(event) => toggleFormat(format.key, event.target.checked)} />
+                            {format.label}
+                          </label>
+                          {enabled ? (
+                            <div className="flex items-center gap-1 text-xs text-zinc-300">
+                              <span className="w-7 text-right tabular-nums font-semibold text-brass-200">#{rank + 1}</span>
+                              <Button size="small" variant="text" aria-label={`Move ${format.label} up`} onClick={() => moveFormat(format.key, -1)} disabled={rank <= 0}>Up</Button>
+                              <Button size="small" variant="text" aria-label={`Move ${format.label} down`} onClick={() => moveFormat(format.key, 1)} disabled={rank < 0 || rank >= formatPrefs.preferred_formats.length - 1}>Down</Button>
+                            </div>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <p className="m-0 text-xs text-zinc-300">
+                    Current order: {formatPrefs.preferred_formats.map(formatLabel).join(' -> ') || 'Select at least one format'}
+                  </p>
+                </div>
+
+                <div className="min-w-0 space-y-6">
+                  <div className="space-y-2">
+                    <h3 className={SUBHEAD}>Audio layouts</h3>
+                    <div className="grid grid-cols-2 gap-x-4 sm:grid-cols-3">
+                      {MUSIC_FORMAT_LAYOUTS.map((layout) => (
+                        <label key={layout.key} className={CHECK_ROW}>
+                          <input
+                            className={CHECK}
+                            type="checkbox"
+                            checked={Boolean(formatPrefs.allowed_layouts[layout.key])}
+                            onChange={(event) => toggleLayout(layout.key, event.target.checked)}
+                          />
+                          {layout.label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <label className="block space-y-1 text-xs text-zinc-300">
+                      <span>Custom max channel count</span>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        type="number"
+                        value={formatPrefs.custom_max_channels ?? ''}
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          setFormatPrefs((current) => ({ ...current, custom_max_channels: Number.isFinite(value) && value > 0 ? value : null }));
+                        }}
+                        slotProps={{ htmlInput: { min: 1, max: 32 } }}
+                      />
+                    </label>
+                    <div role="radiogroup" aria-label="Atmos audio">
+                      <label className={CHECK_ROW}>
+                        <input
+                          className={CHECK}
+                          name="atmos-mode"
+                          type="radio"
+                          checked={formatPrefs.allow_atmos}
+                          onChange={() => setFormatPrefs((current) => ({ ...current, allow_atmos: true, allowed_layouts: { ...current.allowed_layouts, atmos: true } }))}
+                        />
+                        Allow Atmos audio
+                      </label>
+                      <label className={CHECK_ROW}>
+                        <input
+                          className={CHECK}
+                          name="atmos-mode"
+                          type="radio"
+                          checked={!formatPrefs.allow_atmos}
+                          onChange={() => setFormatPrefs((current) => ({ ...current, allow_atmos: false, allowed_layouts: { ...current.allowed_layouts, atmos: false } }))}
+                        />
+                        Reject Atmos audio
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 border-t border-graphite-800 pt-5">
+                    <h3 className={SUBHEAD}>Rejected audio handling</h3>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="block space-y-1 text-xs text-zinc-300">
+                        <span>Rejected downloads</span>
+                        <select
+                          className="ops-field w-full"
+                          value={formatPrefs.rejected_download_handling}
+                          onChange={(event) => setFormatPrefs((current) => ({ ...current, rejected_download_handling: event.target.value as MusicFormatPreferences['rejected_download_handling'] }))}
+                        >
+                          <option value="quarantine">Quarantine rejected files</option>
+                          <option value="delete">Delete rejected files</option>
+                        </select>
+                      </label>
+                      <div>
+                        <label className={CHECK_ROW}>
+                          <input className={CHECK} type="checkbox" checked={formatPrefs.replacement_fallback.keep_current} disabled />
+                          Keep current file
+                        </label>
+                        <label className={CHECK_ROW}>
+                          <input className={CHECK} type="checkbox" checked={formatPrefs.replacement_fallback.queue_retry} onChange={(event) => setFallback('queue_retry', event.target.checked)} />
+                          Queue automatic retry
+                        </label>
+                        <label className={CHECK_ROW}>
+                          <input className={CHECK} type="checkbox" checked={formatPrefs.replacement_fallback.try_lower_ranked} onChange={(event) => setFallback('try_lower_ranked', event.target.checked)} />
+                          Try lower-ranked allowed formats
+                        </label>
+                        <label className={CHECK_ROW}>
+                          <input className={CHECK} type="checkbox" checked={formatPrefs.replacement_fallback.try_alternate_source} onChange={(event) => setFallback('try_alternate_source', event.target.checked)} />
+                          Try alternate source
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="min-w-0 space-y-2">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                  <h3 className={SUBHEAD}>Replacement status</h3>
+                  <span className="text-xs tabular-nums text-zinc-300">{queuedReplacementCount.toLocaleString()} queued / {replacementRows.length.toLocaleString()} tracked</span>
+                </div>
+                {replacementRows.length === 0 ? (
+                  <p className="m-0 border-t border-graphite-800 pt-2 text-sm text-muted">No tracks are marked Needs replacement.</p>
+                ) : (
+                  <ul className="ops-track-list border-t border-graphite-800">
+                    {replacementRows.slice(0, 5).map((row) => (
+                      <li key={`${row.item_id ?? row.path}-${row.updated_at ?? ''}`} className="py-2 text-sm">
+                        <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+                          <span className="min-w-0 break-words font-medium text-zinc-100">{row.artist || 'Unknown artist'} - {row.title || 'Unknown track'}</span>
+                          <span className="text-xs font-semibold text-amber-300">{row.replacement_status || row.status}</span>
+                        </div>
+                        {row.reason ? <div className="mt-1 text-xs text-zinc-300">{row.reason}</div> : null}
+                        {(row.failure_stage || row.attempt_count || row.next_retry_at) ? (
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
+                            {row.failure_stage ? <span>Stage: {row.failure_stage.replace(/_/g, ' ')}</span> : null}
+                            {row.attempt_count ? <span>Attempts: {row.attempt_count}</span> : null}
+                            {row.next_retry_at ? <span>Retry: {formatEpochDateTime(row.next_retry_at)}</span> : null}
+                          </div>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </fieldset>
+          </SettingsSection>
+
+          <SettingsSection id="plugins" title="Plugins" hint="Plex Direct and the state of optional Beets command plugins.">
+            <PluginsPanel />
+          </SettingsSection>
+
+          {/* Beets config.yaml (moved from System) */}
+          <SettingsSection id="config-yaml" title="config.yaml" hint="Beets' own configuration. Saving and reverting ask first.">
+            <ConfigYamlEditor />
+          </SettingsSection>
+
+          {/* Sign-in, API token and outbound policy (moved from System) */}
+          <SettingsSection id="security" title="Security">
+            <SecuritySection />
+          </SettingsSection>
         </div>
-        </fieldset>
-      </section>
-      {/* Plugin controls */}
-      <section id="plugins" className="scroll-mt-20 space-y-3">
-        <h2 className="text-sm font-semibold text-zinc-200">Plugins</h2>
-        <PluginsPanel />
-      </section>
-
-      {/* Beets config.yaml (moved from System) */}
-      <section id="config-yaml" aria-labelledby="settings-config-yaml" className="scroll-mt-20 space-y-3">
-        <h2 id="settings-config-yaml" className="text-sm font-semibold text-zinc-200">config.yaml</h2>
-        <ConfigYamlEditor />
-      </section>
-
-      {/* Sign-in, API token and outbound policy (moved from System) */}
-      <section id="security" aria-labelledby="settings-security" className="scroll-mt-20 space-y-3">
-        <h2 id="settings-security" className="text-sm font-semibold text-zinc-200">Security</h2>
-        <SecuritySection />
-      </section>
-
+      </div>
     </div>
   );
 }
