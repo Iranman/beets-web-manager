@@ -1008,17 +1008,9 @@ body {
     border-left: 0;
   }
 
-  /* Controls: 40px tall, 44px where the pointer is a finger. */
-  .ops-page .MuiButton-sizeSmall {
-    min-height: 2.5rem;
-  }
-  @media (pointer: coarse) {
-    .ops-page .MuiButton-sizeSmall,
-    .ops-filter,
-    .ops-field {
-      min-height: 2.75rem;
-    }
-  }
+  /* Controls: 40px tall, 44px where the pointer is a finger.
+     The touch-target min-heights live unlayered near the end of this file; MUI's emotion styles are
+     unlayered and would beat them from inside @layer components. */
   .ops-field {
     height: 2.5rem;
     padding: 0 0.75rem;
@@ -1564,3 +1556,24 @@ body {
   font-size: 0.9375rem;
 }
 /* ── end Hallmark Library Changes ─────────────────────────────────────────────────────────────── */
+
+/* ── Touch targets (unlayered) ───────────────────────────────────────────────────────────────────
+   MUI's emotion styles are unlayered, so a min-height rule inside @layer components loses to them.
+   These sit outside the layer, like .changes-page above, so the ops pages' 40px / 44px-under-a-finger
+   sizing actually lands. .touch-controls is the minimal hook for pages (Playlists, System) that are
+   neither an ops page nor the changes ledger; it only bumps their MUI small buttons on coarse
+   pointers, leaving the desktop appearance untouched. .crate-tab covers the A-Z / view / filter
+   tabs, whose Tailwind heights (h-8/min-h-9/h-10) sit below 44px. */
+.ops-page .MuiButton-sizeSmall {
+  min-height: 2.5rem;
+}
+@media (pointer: coarse) {
+  .ops-page .MuiButton-sizeSmall,
+  .ops-filter,
+  .ops-field,
+  .touch-controls .MuiButton-sizeSmall,
+  .crate-tab {
+    min-height: 2.75rem;
+  }
+}
+/* ── end touch targets ───────────────────────────────────────────────────────────────────────── */

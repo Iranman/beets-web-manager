@@ -122,6 +122,25 @@ describe('System diagnostics page', () => {
     expect(healthProblems(status(), null)).toEqual([]);
   });
 
+  it('does not double-count a beets-plugin integration or repeat an identical reason', () => {
+    const s = status({
+      // The backend already phrased the MusicBrainz failure as a blocking reason.
+      blocking_reasons: ['MusicBrainz: Connection test failed.'],
+      integrations: {
+        musicbrainz: { configured: true, required: true, state: 'connection_test_failed', category: 'service' },
+        // A required beets-plugin integration: covered by the aggregate plugin line, not its own row.
+        chroma: { configured: true, required: true, state: 'connection_test_failed', category: 'beets_plugin' },
+      },
+    });
+    const plugins = { all_required_healthy: false, required_count: 2, required_healthy_count: 1 } as never;
+    // MusicBrainz appears once (blocking reason == derived line, deduped); chroma is not listed on
+    // its own; only the aggregate plugin line represents the plugin failure.
+    expect(healthProblems(s, plugins)).toEqual([
+      'MusicBrainz: Connection test failed.',
+      '1 of 2 required Beets plugins report a problem. Open Beets plugins below.',
+    ]);
+  });
+
   it('keeps reference material folded away and has no editing of config.yaml or sign-in', async () => {
     renderSystem();
     await screen.findByRole('status');

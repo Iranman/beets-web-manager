@@ -651,7 +651,7 @@ function ViewToggle({ view, onChange }: { view: LibraryView; onChange: (view: Li
         <button
           key={option}
           aria-pressed={view === option}
-          className={cx('crate-tab h-8 px-3 text-xs', view === option && 'font-semibold')}
+          className={cx('crate-tab h-10 px-3 text-xs', view === option && 'font-semibold')}
           type="button"
           onClick={() => onChange(option)}
         >
