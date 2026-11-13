@@ -11,6 +11,7 @@ import { HistoryPanel } from '../features/history/HistoryPanel';
 import { ImportReviewPage } from '../features/importReview/ImportReviewPage';
 import type { QueueFilter } from '../features/importReview/ImportReviewPage';
 import { IntakePanel } from '../features/intake/IntakePanel';
+import { PlaylistPipelinePanel } from '../features/playlists/PlaylistPipelinePanel';
 import { SleeveArt, albumArtSources } from '../components/SleeveArt';
 import type { Job, JobListResponse } from '../types/api';
 import LibraryChanges from './LibraryChanges';
@@ -18,6 +19,7 @@ import LibraryChanges from './LibraryChanges';
 const TABS = [
   { id: 'intake', label: 'Import Source' },
   { id: 'acquire', label: 'Find Music' },
+  { id: 'playlists', label: 'Playlist Downloads' },
   { id: 'review', label: 'Review Queue' },
   { id: 'history', label: 'Recently Imported' },
   { id: 'missing-ids', label: 'Missing IDs' },
@@ -220,6 +222,8 @@ export default function Import() {
     setSelectedIndex(Math.max(0, TAB_NAMES.indexOf(tabId)));
     const nextParams = new URLSearchParams(searchParams);
     nextParams.delete('q');
+    // A playlist deep link belongs to Playlist Downloads only.
+    if (tabId !== 'playlists') nextParams.delete('playlist');
     // A transaction deep link belongs to Library Changes only.
     if (tabId !== 'changes') nextParams.delete('tx');
     if (tabId === 'intake') {
@@ -232,7 +236,7 @@ export default function Import() {
     } else if (tabId === 'review') {
       nextParams.set('tab', tabId);
       nextParams.delete('source');
-    } else if (tabId === 'history' || tabId === 'missing-ids' || tabId === 'changes') {
+    } else if (tabId === 'history' || tabId === 'missing-ids' || tabId === 'changes' || tabId === 'playlists') {
       nextParams.set('tab', tabId);
       nextParams.delete('filter');
       nextParams.delete('source');
@@ -299,7 +303,7 @@ export default function Import() {
       {summary.error ? <p className="text-sm text-rose-200">{summary.error}</p> : null}
 
       <TabGroup selectedIndex={selectedIndex} onChange={handleTabChange}>
-        {/* The new-arrivals bin: the latest imports lean at the back as sleeves, the six sections stand in front as divider cards. */}
+        {/* The new-arrivals bin: the latest imports lean at the back as sleeves, the seven sections stand in front as divider cards. */}
         <div className="ops-bin">
           <div className="ops-bin-head">
             <h2 className="ops-section-title">New arrivals</h2>
@@ -336,6 +340,10 @@ export default function Import() {
 
           <TabPanel>
             <AcquisitionPanel initialSourceFilter={sourceParam} onSourceFilterChange={syncAcquireSource} />
+          </TabPanel>
+
+          <TabPanel>
+            <PlaylistPipelinePanel initialPlaylist={searchParams.get('playlist') ?? ''} onJobStarted={() => void loadSummary(true)} />
           </TabPanel>
 
           <TabPanel unmount={false}>

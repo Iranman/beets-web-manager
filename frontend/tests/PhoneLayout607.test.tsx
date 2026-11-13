@@ -32,7 +32,9 @@ describe('#607 phone layout', () => {
     expect(playlists).toContain('<div className="min-w-0 space-y-6 overflow-x-clip">');
     expect(playlists).not.toContain('overflow-x-hidden');
     expect(playlists).not.toMatch(/sticky top-0/);
-    expect(playlists.match(/sticky top-\[var\(--bw-header-h\)\]/g)).toHaveLength(2);
+    // The pipeline deck (the other sticky bar) moved to the Workbench's Playlist Downloads tab.
+    expect(playlists.match(/sticky top-\[var\(--bw-header-h\)\]/g)).toHaveLength(1);
+    expect(src('features/playlists/PlaylistPipelinePanel.tsx')).not.toMatch(/sticky top-0/);
     expect(playlists).not.toMatch(/sticky[^"]*\bz-(?:[2-9]\d)\b/);
   });
 

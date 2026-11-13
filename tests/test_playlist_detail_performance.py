@@ -12,6 +12,10 @@ PAGE_SOURCE = (ROOT / "frontend" / "src" / "views" / "Playlists.tsx").read_text(
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 HOOKS_SOURCE = (ROOT / "frontend" / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
+# Downloads and pipeline runs moved to the Workbench panel; shared poll helpers live beside it.
+PLAYLIST_FEATURE_DIR = ROOT / "frontend" / "src" / "features" / "playlists"
+PANEL_SOURCE = (PLAYLIST_FEATURE_DIR / "PlaylistPipelinePanel.tsx").read_text(encoding="utf-8")
+SHARED_SOURCE = (PLAYLIST_FEATURE_DIR / "playlistShared.tsx").read_text(encoding="utf-8")
 
 
 class PlaylistDetailPerformanceTests(unittest.TestCase):
@@ -67,12 +71,15 @@ class PlaylistDetailPerformanceTests(unittest.TestCase):
 
     def test_playlist_polling_uses_bounded_intervals_and_summary_refreshes(self):
         self.assertIn('PLAYLIST_SYNC_STATUS_POLL_MS = 60_000', PAGE_SOURCE)
-        self.assertIn('PLAYLIST_DOWNLOAD_POLL_MS = 3_000', PAGE_SOURCE)
+        self.assertIn('PLAYLIST_DOWNLOAD_POLL_MS = 3_000', PANEL_SOURCE)
         self.assertIn('PLAYLIST_PIPELINE_JOB_POLL_MS = 5_000', PAGE_SOURCE)
-        self.assertIn('PLAYLIST_HIDDEN_POLL_MS = 15_000', PAGE_SOURCE)
+        self.assertIn('PLAYLIST_PIPELINE_JOB_POLL_MS = 5_000', PANEL_SOURCE)
+        self.assertIn('PLAYLIST_HIDDEN_POLL_MS = 15_000', SHARED_SOURCE)
         self.assertIn('playlistPollDelay(PLAYLIST_PIPELINE_JOB_POLL_MS)', PAGE_SOURCE)
-        self.assertNotIn('window.setTimeout(poll, 1500)', PAGE_SOURCE)
-        self.assertNotIn('window.setTimeout(poll, 2000)', PAGE_SOURCE)
+        self.assertIn('playlistPollDelay(PLAYLIST_DOWNLOAD_POLL_MS)', PANEL_SOURCE)
+        for source in (PAGE_SOURCE, PANEL_SOURCE):
+            self.assertNotIn('window.setTimeout(poll, 1500)', source)
+            self.assertNotIn('window.setTimeout(poll, 2000)', source)
         self.assertNotIn('getPlaylistDetails(playlist.name);', PAGE_SOURCE)
         self.assertIn("getPlaylistDetails(playlist.name, { mode: 'summary' })", PAGE_SOURCE)
         self.assertIn('JOB_POLL_MS = 3_000', HOOKS_SOURCE)

@@ -41,4 +41,12 @@ describe('Jobs deep link (#356 last_job_id)', () => {
     expect(await screen.findByText(/Job gone-1 is not in the job list/)).toBeTruthy();
     expect(screen.queryByRole('dialog')).toBeNull();
   });
+
+  it('?tab=playlist-repair opens Playlist Review Rows on the linked playlist', async () => {
+    stubJobs();
+    renderAt('/jobs?tab=playlist-repair&playlist=Late%20Night%20Drive');
+    const drawer = (await screen.findByText('Playlist Review Rows')).closest('details');
+    expect(drawer?.open).toBe(true);
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/api/playlists/Late%20Night%20Drive/'))).toBe(true));
+  });
 });
