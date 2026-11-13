@@ -87,7 +87,7 @@ class _World:
           if folder in self.real_folders else (self.folder_files.get(folder, []), False))
         self.folder_files = {}
         p("backend.missing_mb_batch._reconstruct_track_recording_candidates",
-          side_effect=lambda item, iid: ({}, self.candidates.get(iid, []), item.path, Path(item.path).name))
+          side_effect=lambda item, iid, **_kw: ({}, self.candidates.get(iid, []), item.path, Path(item.path).name))
         p("backend.missing_mb_batch._acoustid_lookup_cached_outcome",
           side_effect=lambda path: self.fingerprints[path])
         p("backend.missing_mb_batch.beets_adapter.get_stats", return_value={"albums": 7, "items": 70})

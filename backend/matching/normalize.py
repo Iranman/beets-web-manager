@@ -302,6 +302,14 @@ def normalize_artist(value: Any) -> str:
     return " ".join(_strip_feature_suffix(_tokens(value)))
 
 
+def lookup_title(value: Any) -> str:
+    """Aggressively cleaned title for a retried fuzzy text lookup: drops
+    source-ID suffixes, bracketed segments, ``feat.`` and trailing version
+    words ("remastered 2009", "live", "edit"). Never identity evidence."""
+    text = _without_balanced_parenthetical_segments(strip_track_filename_id_suffix(value))
+    return " ".join(_strip_known_version_suffix(_strip_feature_suffix(_tokens(text))))
+
+
 def strip_track_filename_id_suffix(value: Any) -> str:
     """Strip trailing Lidarr/Soulseek/hash ID suffixes from track filenames/titles."""
     text = _s(value).strip()
