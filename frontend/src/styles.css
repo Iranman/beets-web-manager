@@ -1099,7 +1099,8 @@ body {
     padding-left: 0;
     list-style: none;
   }
-  .ops-track-list > li + li {
+  .ops-track-list > li + li,
+  dl.ops-track-list > div + div {
     border-top: 1px solid var(--ops-rule);
   }
 
@@ -1545,3 +1546,21 @@ body {
   }
 }
 /* ── end Hallmark ops pages ─────────────────────────────────────────────────────────────────── */
+
+/* ── Hallmark Library Changes (views/LibraryChanges.tsx) ─────────────────────────────────────────
+   The audit ledger inside the Workbench. Unlayered and scoped two classes deep on purpose: MUI's
+   emotion styles are unlayered, so the layered `.ops-page .MuiButton-sizeSmall` rule loses to them;
+   this one wins on specificity and gives the ledger's controls their 40px, 44px under a finger. */
+.changes-page .MuiButton-sizeSmall {
+  min-height: 2.5rem;
+}
+@media (pointer: coarse) {
+  .changes-page .MuiButton-sizeSmall,
+  .changes-page .MuiInputBase-sizeSmall {
+    min-height: 2.75rem;
+  }
+}
+.changes-page .changes-figures dd {
+  font-size: 0.9375rem;
+}
+/* ── end Hallmark Library Changes ─────────────────────────────────────────────────────────────── */

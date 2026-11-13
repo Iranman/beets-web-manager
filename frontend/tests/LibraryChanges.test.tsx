@@ -283,7 +283,8 @@ describe('LibraryChanges rollback', () => {
     expect(id).toBeTruthy();
     const description = document.getElementById(id!);
     expect(description?.textContent).toContain(reason);
-    expect(screen.getByText(/Undo: Unavailable/)).toBeTruthy();
+    // Figures are a definition list on a rule: label over value.
+    expect(screen.getByText('Undo', { selector: 'dt' }).nextElementSibling?.textContent).toBe('Unavailable');
   });
 
   it('does not repeat "Rollback unavailable." when the server reason is exactly that', async () => {

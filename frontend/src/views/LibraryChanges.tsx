@@ -4,7 +4,6 @@ import { errorMessage, sentences } from '../lib/errors';
 import { Description, Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
-import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
@@ -148,8 +147,8 @@ function DeleteFilesApproveDialog({ open, busy, onCancel, onConfirm }: {
     <Dialog className="relative z-50" open={open} onClose={() => { if (!busy) onCancel(); }}>
       <DialogBackdrop className="fixed inset-0 bg-black/70" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-lg rounded-md border border-graphite-700 bg-graphite-950 p-5 shadow-2xl">
-          <DialogTitle className="text-lg font-semibold text-zinc-100">Approve album cleanup that deletes files</DialogTitle>
+        <DialogPanel className="w-full max-w-lg rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
+          <DialogTitle className="font-display text-xl font-semibold text-zinc-50">Approve album cleanup that deletes files</DialogTitle>
           <form
             className="mt-3 space-y-3"
             onSubmit={(event) => {
@@ -170,11 +169,11 @@ function DeleteFilesApproveDialog({ open, busy, onCancel, onConfirm }: {
               autoFocus
               autoComplete="off"
               spellCheck={false}
-              className="w-full rounded border border-field-border bg-graphite-900 px-2 py-1 font-mono text-sm text-white"
+              className="h-10 w-full rounded-md border border-field-border bg-graphite-950 px-3 font-mono text-sm text-zinc-50 focus:border-brass-400 pointer-coarse:h-11"
               value={typed}
               onChange={(event) => setTyped(event.target.value)}
             />
-            <div className="flex justify-end gap-2">
+            <div className="ops-page changes-page flex flex-wrap justify-end gap-2">
               <Button size="small" variant="outlined" disabled={busy} onClick={onCancel}>Cancel</Button>
               <Button size="small" color="error" variant="contained" type="submit" disabled={!matches || busy}>Approve deletion</Button>
             </div>
@@ -195,12 +194,17 @@ function pct(value?: number | null) {
   return `${Math.round(value * 100)}%`;
 }
 
-function statusColor(status: string): 'default' | 'primary' | 'success' | 'warning' | 'error' {
-  if (status === 'Completed' || status === 'Rolled Back') return 'success';
-  if (status === 'Running' || status === 'Approved') return 'primary';
-  if (status === 'Preview' || status === 'Pending' || status === 'Partially Rolled Back') return 'warning';
-  if (status === 'Failed' || status === 'Cancelled') return 'error';
-  return 'default';
+// Status is a word in a state colour (DESIGN.md, the Label-With-Colour Rule), never colour alone.
+function statusTone(status: string) {
+  if (status === 'Completed' || status === 'Rolled Back') return 'text-emerald-300';
+  if (status === 'Running' || status === 'Approved') return 'text-sky-300';
+  if (status === 'Preview' || status === 'Pending' || status === 'Partially Rolled Back') return 'text-amber-300';
+  if (status === 'Failed' || status === 'Cancelled' || status === 'Recovery Required') return 'text-red-300';
+  return 'text-zinc-300';
+}
+
+function StatusWord({ status, className = '' }: { status: string; className?: string }) {
+  return <span className={`font-semibold whitespace-nowrap ${statusTone(status)} ${className}`}>{status}</span>;
 }
 
 function countText(tx: TransactionSummary) {
@@ -213,65 +217,65 @@ function countText(tx: TransactionSummary) {
 
 function DiffRows({ change }: { change: TransactionChange }) {
   const rows = (change.metadata_diff || []).filter((row) => row.changed !== false);
-  if (!rows.length) return <div className="text-xs text-muted">No field-level metadata diff captured.</div>;
+  if (!rows.length) return <p className="text-xs text-muted">No field-level metadata diff captured.</p>;
   return (
-    <div className="space-y-2">
+    <dl className="ops-track-list text-xs">
       {rows.map((row) => (
-        <div key={row.field} className="rounded border border-graphite-700 bg-graphite-950 p-2 text-xs">
-          <div className="font-semibold text-zinc-200">{row.field}</div>
-          <div className="mt-1 grid gap-1 sm:grid-cols-2">
+        <div key={row.field} className="grid gap-x-3 gap-y-0.5 py-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
+          <dt className="font-semibold break-words text-zinc-200">{row.field}</dt>
+          <dd className="m-0 min-w-0 space-y-0.5 [overflow-wrap:anywhere]">
             <div><span className="text-muted">Old:</span> <span className="text-rose-200">{String(row.old ?? 'None')}</span></div>
             <div><span className="text-muted">New:</span> <span className="text-emerald-200">{String(row.new ?? 'None')}</span></div>
-          </div>
+          </dd>
         </div>
       ))}
-    </div>
+    </dl>
   );
 }
 
 function FilesystemRows({ change }: { change: TransactionChange }) {
   const rows = change.filesystem || [];
-  if (!rows.length) return <div className="text-xs text-muted">No filesystem diff captured.</div>;
+  if (!rows.length) return <p className="text-xs text-muted">No filesystem diff captured.</p>;
   return (
-    <div className="space-y-2">
+    <ul className="ops-track-list text-xs">
       {rows.map((row, index) => (
-        <div key={`${row.operation}-${index}`} className="rounded border border-graphite-700 bg-graphite-950 p-2 text-xs">
+        <li key={`${row.operation}-${index}`} className="py-2">
           <div className="font-semibold text-amber-200">{row.operation || 'File change'}</div>
-          <div className="mt-1 break-all text-zinc-400">Old: {row.old || '-'}</div>
-          <div className="break-all text-zinc-200">New: {row.new || '-'}</div>
-        </div>
+          <div className="mt-0.5 font-mono break-all text-zinc-400">Old: {row.old || '-'}</div>
+          <div className="font-mono break-all text-zinc-200">New: {row.new || '-'}</div>
+        </li>
       ))}
-    </div>
+    </ul>
   );
 }
 
 function ChangePreview({ change }: { change: TransactionChange }) {
   return (
-    <div className="rounded border border-graphite-700 bg-graphite-900 p-3">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <div className="text-sm font-semibold text-white">{change.track || change.album || change.artist || change.operation || 'Change'}</div>
-          <div className="text-xs text-zinc-400">{[change.artist, change.album].filter(Boolean).join(' - ') || change.source || 'No source label'}</div>
+    <li className="py-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold break-words text-zinc-50">{change.track || change.album || change.artist || change.operation || 'Change'}</div>
+          <div className="text-xs break-words text-zinc-400">{[change.artist, change.album].filter(Boolean).join(' - ') || change.source || 'No source label'}</div>
         </div>
-        <Chip size="small" label={pct(change.confidence?.overall)} variant="outlined" />
+        <span className="text-xs text-zinc-300 tabular-nums">Confidence {pct(change.confidence?.overall)}</span>
       </div>
-      <div className="mt-3 grid gap-3 lg:grid-cols-2">
-        <div>
+      <div className="mt-3 grid gap-4 lg:grid-cols-2">
+        <div className="min-w-0">
           <div className="mb-1 text-xs font-semibold text-muted">Metadata diff</div>
           <DiffRows change={change} />
         </div>
-        <div>
+        <div className="min-w-0">
           <div className="mb-1 text-xs font-semibold text-muted">Filesystem diff</div>
           <FilesystemRows change={change} />
         </div>
       </div>
       {(change.reason || change.source) && (
-        <div className="mt-3 rounded bg-graphite-950 p-2 text-xs text-zinc-300">
+        <div className="mt-3 space-y-0.5 text-xs break-words text-zinc-300">
           {change.reason && <div>Reason: {change.reason}</div>}
           {change.source && <div>Source: {change.source}</div>}
         </div>
       )}
-    </div>
+    </li>
   );
 }
 
@@ -414,22 +418,23 @@ export default function LibraryChanges() {
     void runAction('Rollback', rollbackTransaction, rollbackSuccessMessage);
   };
 
+  const figures: [string, string][] = detail ? [
+    ['Date', formatDate(detail.created_at)],
+    ['Job', detail.originating_job || '-'],
+    ['Dry run', detail.dry_run ? 'Yes' : 'No'],
+    ['Undo', detail.rollback?.allowed === true ? 'Available' : 'Unavailable'],
+    ['Overall', pct(detail.confidence?.overall)],
+    ['MusicBrainz', pct(detail.confidence?.musicbrainz)],
+    ['AcoustID', pct(detail.confidence?.acoustid)],
+    ['Artwork', pct(detail.confidence?.artwork)],
+    ['AI', pct(detail.confidence?.ai)],
+  ] : [];
+
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="font-display text-xl font-semibold text-zinc-100">Library Changes</h2>
-          <p className="mt-1 text-sm text-zinc-400">Transaction history, previews, confidence, exports, and rollback status for library-changing work.</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {detail && (
-            <>
-              <Button size="small" variant="outlined" href={transactionExportUrl(detail.id, 'markdown')}>Markdown</Button>
-              <Button size="small" variant="outlined" href={transactionExportUrl(detail.id, 'json')}>JSON</Button>
-              <Button size="small" variant="outlined" href={transactionExportUrl(detail.id, 'csv')}>CSV</Button>
-            </>
-          )}
-        </div>
+    <section aria-labelledby="library-changes-title" className="ops-page changes-page space-y-6">
+      <div className="max-w-3xl">
+        <h2 id="library-changes-title" className="ops-section-title">Library Changes</h2>
+        <p className="mt-1 text-sm text-zinc-400">Transaction history, previews, confidence, exports, and rollback status for library-changing work.</p>
       </div>
 
       {loading && <LinearProgress />}
@@ -442,8 +447,8 @@ export default function LibraryChanges() {
       />
       {message && <Alert severity="success" onClose={() => setMessage('')}>{message}</Alert>}
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.35fr)]">
-        <section className="space-y-3">
+      <div className="grid gap-x-8 gap-y-6 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.35fr)]">
+        <section aria-label="Transaction ledger" className="min-w-0 space-y-4">
           <div className="grid gap-2 sm:grid-cols-3">
             <TextField select size="small" label="Status" value={status} onChange={(event) => { setOffset(0); setStatus(event.target.value); }}>
               {STATUS_OPTIONS.map((option) => <MenuItem key={option} value={option}>{option === 'all' ? 'All statuses' : option}</MenuItem>)}
@@ -454,31 +459,31 @@ export default function LibraryChanges() {
             <TextField size="small" label="Search" value={query} onChange={(event) => { setOffset(0); setQuery(event.target.value); }} />
           </div>
 
-          <div className="overflow-hidden rounded border border-graphite-700">
-            <div className="grid grid-cols-[1fr_auto] border-b border-graphite-700 bg-graphite-900 px-3 py-2 text-xs font-semibold text-muted">
+          <div className="overflow-hidden">
+            <div className="flex items-baseline justify-between gap-3 border-b border-graphite-700 pb-2 text-sm text-zinc-300 tabular-nums">
               {listFailed ? (
                 <span>Transactions unknown</span>
               ) : (
                 <>
-                  <span>{total} transaction{total === 1 ? '' : 's'}</span>
-                  <span>{total ? `${offset + 1}-${Math.min(offset + pageSize, total)}` : '—'}</span>
+                  <span className="font-semibold text-zinc-50">{total} transaction{total === 1 ? '' : 's'}</span>
+                  <span className="text-xs text-muted">{total ? `${offset + 1}-${Math.min(offset + pageSize, total)}` : '—'}</span>
                 </>
               )}
             </div>
-            <div className="divide-y divide-graphite-800">
-              {rows.length === 0 && !loading && !listFailed && <div className="p-4 text-sm text-muted">No transactions found.</div>}
+            <div>
+              {rows.length === 0 && !loading && !listFailed && <p className="py-6 text-sm text-muted">No transactions found.</p>}
               {rows.map((row) => (
                 <button
                   key={row.id}
-                  className={`grid w-full gap-1 px-3 py-3 text-left hover:bg-graphite-900 ${row.id === selectedId ? 'bg-brass-500/10' : 'bg-graphite-950'}`}
+                  type="button"
+                  aria-pressed={row.id === selectedId}
+                  className={`ops-ledger-row grid w-full grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 border-b border-graphite-800 px-2 py-3 text-left ${row.id === selectedId ? 'is-selected' : ''}`}
                   onClick={() => setSelectedId(row.id)}
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-sm font-semibold text-white">{row.operation_type}</span>
-                    <Chip size="small" color={statusColor(row.status)} label={row.status} />
-                  </div>
-                  <div className="text-xs text-zinc-400">{formatDate(row.created_at)} - {countText(row)}</div>
-                  <div className="truncate text-xs text-muted">{row.summary || row.reason || row.id}</div>
+                  <span className="truncate text-sm font-semibold text-zinc-50">{row.operation_type}</span>
+                  <StatusWord status={row.status} className="text-xs" />
+                  <span className="col-span-2 text-xs text-zinc-400 tabular-nums">{formatDate(row.created_at)} · {countText(row)}</span>
+                  <span className="col-span-2 truncate text-xs text-muted">{row.summary || row.reason || row.id}</span>
                 </button>
               ))}
             </div>
@@ -490,37 +495,36 @@ export default function LibraryChanges() {
           </div>
         </section>
 
-        <section className="space-y-3">
+        <div className="min-w-0 space-y-6">
           {!detail && selected && <LinearProgress />}
           {detail ? (
             <>
-              <div className="rounded border border-graphite-700 bg-graphite-900 p-3">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <div className="text-lg font-semibold text-white">{detail.operation_type}</div>
-                    <div className="mt-1 text-xs text-zinc-400">{detail.id}</div>
-                    <div className="mt-1 text-sm text-zinc-300">{detail.summary || detail.reason || 'No summary captured.'}</div>
+              <article aria-labelledby="transaction-detail-title" className="rounded-lg border border-graphite-700 bg-graphite-900 p-4 sm:p-5">
+                <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+                  <div className="min-w-0">
+                    <h3 id="transaction-detail-title" className="font-display text-2xl leading-tight font-semibold break-words text-zinc-50">{detail.operation_type}</h3>
+                    <div className="mt-1 text-sm break-words text-zinc-300">{detail.summary || detail.reason || 'No summary captured.'}</div>
+                    <div className="mt-1 font-mono text-xs break-all text-muted">{detail.id}</div>
                   </div>
-                  <Chip color={statusColor(detail.status)} label={detail.status} />
+                  <StatusWord status={detail.status} className="text-base" />
                 </div>
-                <div className="mt-3 grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 lg:grid-cols-3">
-                  <div>Date: {formatDate(detail.created_at)}</div>
-                  <div>Job: {detail.originating_job || '-'}</div>
-                  <div>Dry run: {detail.dry_run ? 'Yes' : 'No'}</div>
-                  <div>Overall: {pct(detail.confidence?.overall)}</div>
-                  <div>AI: {pct(detail.confidence?.ai)}</div>
-                  <div>AcoustID: {pct(detail.confidence?.acoustid)}</div>
-                  <div>MusicBrainz: {pct(detail.confidence?.musicbrainz)}</div>
-                  <div>Artwork: {pct(detail.confidence?.artwork)}</div>
-                  <div>Undo: {detail.rollback?.allowed === true ? 'Available' : 'Unavailable'}</div>
-                </div>
+
+                <dl className="ops-figures changes-figures mt-4">
+                  {figures.map(([label, value]) => (
+                    <div key={label}>
+                      <dt>{label}</dt>
+                      <dd>{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+
                 {detail.rollback?.allowed !== true && (
                   // role="status": selecting a transaction should not announce an alert.
-                  <Alert id="rollback-blocked-reason" role="status" severity="warning" className="mt-3">
+                  <Alert id="rollback-blocked-reason" role="status" severity="warning" className="mt-4">
                     {rollbackBlockedReason(detail)}
                   </Alert>
                 )}
-                <div className="mt-3 flex flex-wrap gap-2">
+                <div className="mt-4 flex flex-wrap gap-2">
                   <Button size="small" variant="contained" disabled={approving || detail.status === 'Approved' || detail.status === 'Completed' || detail.status === 'Running'} onClick={() => (deletesAlbumFiles(detail) ? setConfirmOpen(true) : void doApprove())}>Approve</Button>
                   <Button size="small" color="success" variant="contained" disabled={detail.status !== 'Approved'} onClick={() => void doApply()}>Apply</Button>
                   <Button size="small" color="warning" variant="outlined" disabled={detail.cancel?.allowed !== true} aria-describedby={detail.cancel?.allowed === true ? undefined : 'cancel-blocked-reason'} onClick={() => void doCancel()}>{detail.cancel?.mode === 'engine' ? 'Cancel Sync' : 'Cancel'}</Button>
@@ -529,44 +533,53 @@ export default function LibraryChanges() {
                 {detail.cancel?.allowed !== true && (
                   <p id="cancel-blocked-reason" className="mt-2 text-xs text-zinc-400">{cancelBlockedReason(detail)}</p>
                 )}
-              </div>
 
-              {settings && (
-                <div className="rounded border border-graphite-700 bg-graphite-900 p-3">
-                  <div className="mb-2 text-sm font-semibold text-white">Transaction Settings</div>
-                  <div className="grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 lg:grid-cols-4">
-                    <label className="flex items-center gap-2"><input type="checkbox" checked={settings.enabled} onChange={(e) => void updateSettings({ enabled: e.target.checked })} /> History</label>
-                    <label className="flex items-center gap-2"><input type="checkbox" checked={settings.backups_enabled} onChange={(e) => void updateSettings({ backups_enabled: e.target.checked })} /> Backups</label>
-                    <label className="flex items-center gap-2"><input type="checkbox" checked={settings.rollback_enabled} onChange={(e) => void updateSettings({ rollback_enabled: e.target.checked })} /> Rollback</label>
-                    <label className="flex items-center gap-2"><input type="checkbox" checked={settings.dry_run_by_default} onChange={(e) => void updateSettings({ dry_run_by_default: e.target.checked })} /> Dry run by default</label>
-                  </div>
+                <div role="group" aria-label="Export this transaction" className="mt-4 flex flex-wrap items-center gap-2 border-t border-graphite-700 pt-3">
+                  <span className="mr-1 text-xs font-semibold text-muted">Export</span>
+                  <Button size="small" variant="text" href={transactionExportUrl(detail.id, 'markdown')}>Markdown</Button>
+                  <Button size="small" variant="text" href={transactionExportUrl(detail.id, 'json')}>JSON</Button>
+                  <Button size="small" variant="text" href={transactionExportUrl(detail.id, 'csv')}>CSV</Button>
                 </div>
-              )}
+              </article>
 
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold text-white">Preview changes</div>
-                  <div className="text-xs text-muted">{detail.changes_total} captured</div>
+              <section aria-labelledby="transaction-preview-title">
+                <div className="flex items-baseline justify-between gap-3 border-b border-graphite-700 pb-2">
+                  <h3 id="transaction-preview-title" className="text-base font-semibold text-zinc-50">Preview changes</h3>
+                  <span className="text-xs text-muted tabular-nums">{detail.changes_total} captured</span>
                 </div>
                 {detail.changes.length === 0 ? (
-                  <Alert severity="info">This transaction has job-level history only. Item-level diffs have not been captured for this workflow yet.</Alert>
+                  <p className="py-4 text-sm text-zinc-400">This transaction has job-level history only. Item-level diffs have not been captured for this workflow yet.</p>
                 ) : (
-                  detail.changes.map((change, index) => <ChangePreview key={change.id || index} change={change} />)
+                  <ul className="ops-track-list">
+                    {detail.changes.map((change, index) => <ChangePreview key={change.id || index} change={change} />)}
+                  </ul>
                 )}
-              </div>
+              </section>
 
               {detail.logs && detail.logs.length > 0 && (
-                <div className="rounded border border-graphite-700 bg-graphite-950 p-3">
-                  <div className="mb-2 text-sm font-semibold text-white">Log</div>
-                  <pre className="max-h-72 overflow-auto whitespace-pre-wrap text-xs text-zinc-400">{detail.logs.slice(-80).join('\n')}</pre>
-                </div>
+                <section aria-labelledby="transaction-log-title">
+                  <h3 id="transaction-log-title" className="border-b border-graphite-700 pb-2 text-base font-semibold text-zinc-50">Log</h3>
+                  <pre tabIndex={0} aria-labelledby="transaction-log-title" className="mt-3 max-h-72 overflow-auto rounded-md bg-graphite-950 p-3 text-xs whitespace-pre-wrap text-zinc-400">{detail.logs.slice(-80).join('\n')}</pre>
+                </section>
+              )}
+
+              {settings && (
+                <section aria-labelledby="transaction-settings-title">
+                  <h3 id="transaction-settings-title" className="border-b border-graphite-700 pb-2 text-base font-semibold text-zinc-50">Transaction Settings</h3>
+                  <div className="mt-2 grid gap-x-4 text-sm text-zinc-300 sm:grid-cols-2 xl:grid-cols-4">
+                    <label className="flex min-h-10 cursor-pointer items-center gap-2 pointer-coarse:min-h-11"><input type="checkbox" className="size-4 accent-brass-500" checked={settings.enabled} onChange={(e) => void updateSettings({ enabled: e.target.checked })} /> History</label>
+                    <label className="flex min-h-10 cursor-pointer items-center gap-2 pointer-coarse:min-h-11"><input type="checkbox" className="size-4 accent-brass-500" checked={settings.backups_enabled} onChange={(e) => void updateSettings({ backups_enabled: e.target.checked })} /> Backups</label>
+                    <label className="flex min-h-10 cursor-pointer items-center gap-2 pointer-coarse:min-h-11"><input type="checkbox" className="size-4 accent-brass-500" checked={settings.rollback_enabled} onChange={(e) => void updateSettings({ rollback_enabled: e.target.checked })} /> Rollback</label>
+                    <label className="flex min-h-10 cursor-pointer items-center gap-2 pointer-coarse:min-h-11"><input type="checkbox" className="size-4 accent-brass-500" checked={settings.dry_run_by_default} onChange={(e) => void updateSettings({ dry_run_by_default: e.target.checked })} /> Dry run by default</label>
+                  </div>
+                </section>
               )}
             </>
           ) : (
-            <Alert severity="info">Select a transaction to inspect its preview, confidence, files, and rollback status.</Alert>
+            <p className="border-t border-graphite-700 pt-4 text-sm text-zinc-400">Select a transaction to inspect its preview, confidence, files, and rollback status.</p>
           )}
-        </section>
+        </div>
       </div>
-    </div>
+    </section>
   );
 }

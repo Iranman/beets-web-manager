@@ -265,6 +265,19 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - Reference material (Beets plugins, Environment variables, Beets config) sits behind native `<details>` with a serif summary and a one-line hint. The first screen at 1440x900 shows the whole health picture.
 - Editing Beets' config.yaml and sign-in lives in Settings (`/config#config-yaml`, `/config#security`); System links there.
 
+### Library Changes: the audit ledger
+- Library Changes is a Workbench section (`views/LibraryChanges.tsx`, under the Workbench `h1`), so its title is an `h2` in `.ops-section-title`. It is a ledger, not a dashboard: open composition on rules, no stat tiles, no wood (the bin above it is the Workbench's one wooden surface).
+- The filters (Status, Operation, Search) sit over the ledger. The count line reads "N transactions" with the page range on the right, or "Transactions unknown" when the list failed, never zero.
+- Each row is an `.ops-ledger-row` button with `aria-pressed`: operation, then date and counts in tabular numerals, then the summary. The status is a word in a state colour (green done or rolled back, blue running or approved, amber preview, pending or partly rolled back, red failed, cancelled or Recovery Required), never a coloured chip alone.
+- The selected transaction is the one bordered panel (Oak, 1px edge, no shadow): its operation as an `h3` in the display serif, summary and id, figures as an `.ops-figures` definition list (Date, Job, Dry run, Undo, the confidences), then the actions and the Export links on a rule. Preview changes, Log and Transaction Settings follow as open `h3` sections on rules; diffs are rows on soft rules, paths in mono.
+- Actions and their confirmations are unchanged: the typed DELETE ALBUM FILES dialog, the rollback `confirm`, the server-owned cancel and rollback eligibility with their reasons. Approve is the one brass fill; nothing new lives here that has a home elsewhere.
+- `.changes-page` (unlayered, in `styles.css`) gives the small MUI controls 40px, 44px on coarse pointers. It exists because MUI's emotion styles are unlayered and beat the layered `.ops-page` rule.
+
+### Login: the front door
+- A plain, trustworthy sign-in in a `main` landmark on Shelf Black: the record mark beside "Beets Web Manager" as the page's `h1` in the display serif (Pale Brass, like the wordmark), the tagline under it, then one Oak panel with a 1px edge and no shadow, blur or glow.
+- Fields are 44px Walnut-on-black inputs with the Field Border and the global focus ring; 16px text below `sm` so phones do not zoom. Show/Hide is a full-height 44px text button inside the password field. Remember me is a 44px label row. Sign In is the one brass fill, full width, 44px.
+- Errors appear above the fields in a red panel with `role="alert"`, led by "Sign-In Error:", carrying the server's message (wrong password, rate limit) unchanged.
+- The flow, field ids, the default username and the messages are unchanged. No new fonts or images.
 ### Settings: the one editing page
 - Settings is an Operate page: scanning and precision come before expression. It uses the ops frame: `.ops-page`, an `.ops-masthead` with the `ops-title` and the library counts as an `.ops-catalog` line (no stat tiles), then `.ops-split`.
 - **The index.** The split's aside is a `<nav aria-label="Settings sections">` of plain `#id` links (MusicBrainz, Music format, Plugins, config.yaml, Security). From 64rem it is a vertical list on a left rule and stays in view (`.ops-split-aside` is sticky). Below 64rem it is one row of `.ops-filter` links that scrolls sideways inside itself, never the page. Every entry is also a deep link (`/config#plugins`, `#config-yaml`, `#security`, `#musicbrainz`, `#music-format`).
