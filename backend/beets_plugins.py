@@ -224,7 +224,6 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         category=PluginCategory.INTEGRATION,
         plugin_type=PluginType.BUILTIN,
         description="Deezer cover art and metadata search provider.",
-        python_packages=["deezer-python==7.4.0"],
     ),
     "spotify": PluginDefinition(
         name="spotify",
@@ -1037,7 +1036,6 @@ def _check_python_package(pkg_spec: str) -> Tuple[bool, str]:
     import_map = {
         "pyacoustid": "acoustid",
         "beautifulsoup4": "bs4",
-        "deezer-python": "deezer",
         "pylistenbrainz": "pylistenbrainz",
         "pylast": "pylast",
         "pillow": "PIL",
