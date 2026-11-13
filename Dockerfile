@@ -14,7 +14,7 @@ RUN npm run build
 # yt-dlp's YouTube signature/n challenges run in a JS runtime: yt-dlp-ejs
 # (installed with yt-dlp) supplies the solver scripts, Deno >= 2.3 runs them.
 # Digest-pinned like the other bases (SEC-9); Dependabot tracks this FROM.
-FROM denoland/deno:bin-2.9.7@sha256:bc5aa4466e21b6d3021226a85ba2e1911f7c386254d97b9d797903ab74edace2 AS deno
+FROM denoland/deno:bin-2.9.8@sha256:b507583d3c68ba69f3ed2ce5969ae5b8b70f43421c781279c7aea06435263543 AS deno
 
 # ---- Runtime stage ----------------------------------------------------------
 FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3 AS runtime
