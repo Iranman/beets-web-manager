@@ -22,6 +22,7 @@ from backend.acoustid_service import _acoustid_lookup_cached_outcome, acoustid_f
 from backend.ai_evidence_service import _enrich_track_ai_candidate, _item_ai_abs_path, _score_track_ai_candidate
 from backend.ai_service import _classify_openai_error, _compact_track_ai_candidate, _track_ai_evidence_packet
 from backend.app_runtime import _app_logger, _s
+from backend.listenbrainz_mapping import listenbrainz_recording_candidates
 from backend.matching_contract import AiState
 from backend.matching_service import _ai_api_key, _ai_model_and_endpoint
 from backend.musicbrainz_service import _discogs_track_search
@@ -116,6 +117,12 @@ def _gather_evidence(iid: int, current: Dict[str, Any]) -> _Evidence:
             mb_text_cands = _mb_recording_search(title, "", limit=6)
     except provider_boundary.ProviderError:
         musicbrainz_unavailable, mb_text_cands = True, []
+
+    # 2b. No fingerprint answer (none taken, or AcoustID found nothing): the
+    # ListenBrainz mapping adds a MusicBrainz-verified, review-only candidate.
+    if not acoustid_cands:
+        mb_text_cands = list(mb_text_cands) + listenbrainz_recording_candidates(
+            title, artist, current.get("duration_seconds"))["candidates"]
 
     # 3. Discogs (supplemental genre / label info).
     discogs_cands = _discogs_track_search(title, artist, limit=3)

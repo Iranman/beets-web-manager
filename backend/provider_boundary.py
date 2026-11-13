@@ -268,6 +268,7 @@ POLICIES: Dict[str, ProviderPolicy] = {
     "acoustid": ProviderPolicy(2, 1.0),
     "discogs": ProviderPolicy(2, 1.0),
     "spotify": ProviderPolicy(2, 1.0),
+    "listenbrainz": ProviderPolicy(2, 1.0),
     "artwork": ProviderPolicy(2, 0.5),
     "reference-url": ProviderPolicy(1),
     "plex": ProviderPolicy(2, 0.5),

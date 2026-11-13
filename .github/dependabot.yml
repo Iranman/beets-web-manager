@@ -38,6 +38,11 @@ updates:
       # short-lived "Current" releases that never become LTS.
       - dependency-name: node
         versions: [">= 25, < 26", ">= 27, < 28", ">= 29, < 30", ">= 31, < 32"]
+      # Beets 2.9.0 to 2.14.1 declare Requires-Python <3.15, so a 3.15 base
+      # image cannot install the pinned beets==2.14.1. Remove this rule once
+      # the pinned Beets supports Python 3.15.
+      - dependency-name: python
+        versions: [">= 3.15"]
   # The `docker` ecosystem reads Dockerfiles only; this one bumps the
   # digest-pinned third-party images in the compose files (e.g. the
   # bgutil-provider sidecar).

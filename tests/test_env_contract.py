@@ -286,15 +286,16 @@ class BootOrderTests(unittest.TestCase):
         self.assertEqual(limit, 60.0)
         self.assertIn("BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS is invalid", stderr)
 
-    def test_limits_above_their_ceiling_warn_and_use_the_default(self):
+    def test_limits_above_their_ceiling_warn_and_are_capped(self):
         saved = ("BEETS_OUTBOUND_TIMEOUT_SECONDS=301\nBEETS_OUTBOUND_MAX_RESPONSE_BYTES=209715201\n"
                  "BEETS_OUTBOUND_MAX_REDIRECTS=21\nBEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS=601\n")
         code = ("import json, app\nfrom backend import security as s\n"
                 "print(json.dumps([s._DEFAULT_TIMEOUT, s._DEFAULT_MAX_BYTES, s._DEFAULT_MAX_REDIRECTS, s._DEFAULT_TOTAL_TIMEOUT]))\n")
         limits, stderr = self._boot(saved, code)
-        self.assertEqual(limits, [20.0, 20 * 1024 * 1024, 5, 60.0])
+        self.assertEqual(limits, [300.0, 200 * 1024 * 1024, 20, 600.0])
         for name in ("TIMEOUT_SECONDS", "MAX_RESPONSE_BYTES", "MAX_REDIRECTS", "TOTAL_TIMEOUT_SECONDS"):
             self.assertIn(f"BEETS_OUTBOUND_{name} is above its ceiling", stderr)
+        self.assertIn("using the ceiling", stderr)
 
     def test_limits_at_their_ceiling_apply(self):
         saved = ("BEETS_OUTBOUND_TIMEOUT_SECONDS=300\nBEETS_OUTBOUND_MAX_RESPONSE_BYTES=209715200\n"

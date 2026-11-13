@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import Library from '../src/views/Library';
 import { apiGet } from '../src/lib/api';
@@ -31,6 +31,8 @@ const album = (overrides: Partial<LibraryAlbum>): LibraryAlbum => ({
 
 const styles = readFileSync(join(__dirname, '../src/styles.css'), 'utf8');
 
+// These cover the crate grid, now the alternate view behind the Cover Flow / Grid toggle.
+beforeEach(() => localStorage.setItem('library.view', 'grid'));
 afterEach(cleanup);
 
 async function renderLibrary() {
