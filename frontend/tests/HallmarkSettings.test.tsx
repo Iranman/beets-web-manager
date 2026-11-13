@@ -109,4 +109,11 @@ describe('Settings page', () => {
       Element.prototype.scrollIntoView = original;
     }
   });
+
+  it('still renders when the hash is malformed', async () => {
+    window.history.replaceState(null, '', '/config#%E0%A4%A');
+    render(<Config />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Settings' })).toBeTruthy();
+    window.history.replaceState(null, '', '/config');
+  });
 });

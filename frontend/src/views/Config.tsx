@@ -110,7 +110,13 @@ const CHECK = 'size-4 shrink-0 accent-brass-500';
  * or types. Targets carry `scroll-mt-20` to clear the sticky header. */
 function useHashTargetScroll(container: RefObject<HTMLElement | null>) {
   useEffect(() => {
-    const id = decodeURIComponent(window.location.hash.slice(1));
+    const raw = window.location.hash.slice(1);
+    let id = raw;
+    try {
+      id = decodeURIComponent(raw);
+    } catch {
+      // A hand-made malformed hash (#%E0%A4%A) must not take the page down; fall back to the raw text.
+    }
     if (!id) return undefined;
     const scroll = () => document.getElementById(id)?.scrollIntoView?.({ block: 'start' });
     scroll();
