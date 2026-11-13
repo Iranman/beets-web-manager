@@ -90,6 +90,9 @@ export function healthProblems(
   const problems = [...(status.blocking_reasons ?? [])];
   for (const [name, integration] of Object.entries(status.integrations ?? {})) {
     if (!integration.required) continue;
+    // Beets-plugin integrations are summarised by the aggregate plugin line below; counting them
+    // here too would show the same failure twice and inflate the "N problems" badge.
+    if (integration.category === 'beets_plugin') continue;
     const badge = integrationBadge(integration, tests[name as IntegrationKey], false);
     if (badge.tone === 'warn') problems.push(`${SERVICE_NAMES[name] ?? name}: ${badge.label}.`);
   }
@@ -97,7 +100,8 @@ export function healthProblems(
     const unhealthy = plugins.required_count - plugins.required_healthy_count;
     problems.push(`${unhealthy} of ${plugins.required_count} required Beets plugins report a problem. Open Beets plugins below.`);
   }
-  return problems;
+  // A blocking reason and a derived line can phrase the same failure identically; show each once.
+  return [...new Set(problems)];
 }
 
 function Row({ name, state, tone, children }: { name: ReactNode; state: ReactNode; tone: keyof typeof TONE_TEXT; children?: ReactNode }) {
@@ -242,10 +246,10 @@ export default function System() {
     : [];
 
   return (
-    <div className="min-w-0 space-y-6 overflow-x-clip">
+    <div className="touch-controls min-w-0 space-y-6 overflow-x-clip">
       <header className="flex flex-wrap items-start justify-between gap-3 border-b border-graphite-800 pb-4">
         <div className="min-w-0">
-          <h1 className="lib-title">System</h1>
+          <h1 className="lib-title">Diagnostics</h1>
           <p className="lib-catalog">
             <span>{status?.version ? versionLabel(status.version, status.revision) : 'Version unknown'}</span>
             <span>Beets {beets?.version || (beets?.available ? 'available' : 'unavailable')}</span>
