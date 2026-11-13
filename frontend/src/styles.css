@@ -95,7 +95,20 @@
   --bw-accent: #d39e3f;
   --bw-accent-hover: #e2b25c;
   --bw-focus: #f0c46a;
+  /* Bolder brass (DESIGN "deeper walnut + bolder brass"): a defined role for brass only.
+     Polished = a top-to-bottom highlight for a brass fill that should catch the light (primary
+     action, active rail). Patina = the aged, deeper brass for edges and the record ring's body. */
+  --bw-accent-polish: linear-gradient(180deg, #e9bd68 0%, #d39e3f 52%, #bc8a33 100%);
+  --bw-accent-sheen: linear-gradient(180deg, rgba(255, 244, 222, 0.42), rgba(255, 244, 222, 0) 46%);
+  --bw-patina: #8f6420;
   --bw-header-h: 3.5rem;
+  /* Motion tokens: one small set. Hover is quick, press quicker, a lift is the longest at 180ms.
+     The global prefers-reduced-motion rule already caps all transitions to ~0ms, so these are the
+     motion-on values only. Nothing on a frequent action exceeds --dur-lift. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-hover: 120ms;
+  --dur-press: 90ms;
+  --dur-lift: 180ms;
   color: var(--bw-text);
   background: var(--bw-bg);
   font-family:
@@ -118,7 +131,20 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: var(--bw-bg);
+  /* Walnut room, lit from above (DESIGN "walnut texture + directional light"). A fine static grain,
+     a warm brass light from the top, and a soft side-and-floor vignette (linear only — no radial
+     glow, per #612) sit on the deep walnut base. All static (fixed to the viewport, no animation):
+     art and text lead; the texture is barely there. The grain is an inlined SVG data URI (CSP
+     img-src allows data:), so nothing is downloaded. */
+  background-color: var(--bw-bg);
+  background-image:
+    linear-gradient(180deg, rgba(226, 178, 92, 0.07) 0%, transparent 30%),
+    linear-gradient(90deg, rgba(8, 5, 3, 0.5) 0%, transparent 13%, transparent 87%, rgba(8, 5, 3, 0.5) 100%),
+    linear-gradient(180deg, transparent 72%, rgba(8, 5, 3, 0.4) 100%),
+    var(--app-grain);
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+  background-size: 100% 100%, 100% 100%, 100% 100%, 220px 220px;
+  background-attachment: fixed, fixed, fixed, fixed;
 }
 
 button,
@@ -229,6 +255,8 @@ body {
   --wear-speckle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='w'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.55' numOctaves='2' seed='9' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 3 0 0 0 -1.35'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23w)'/%3E%3C/svg%3E");
   /* Fine paper tooth for sleeves. */
   --paper-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.95 0 0 0 0 0.9 0 0 0 0 0.8 0 0 0 0.16 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23p)'/%3E%3C/svg%3E");
+  /* Very fine app-background grain: near-black warm speckle at ~4% alpha, barely perceptible. */
+  --app-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='a'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='2' seed='17' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.16 0 0 0 0 0.10 0 0 0 0 0.05 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23a)'/%3E%3C/svg%3E");
 }
 
 @layer components {
@@ -1564,3 +1592,243 @@ body {
   font-size: 0.9375rem;
 }
 /* ── end Hallmark Library Changes ─────────────────────────────────────────────────────────────── */
+
+/* ── Bolder Shelf (DESIGN "deeper walnut + bolder brass") ───────────────────────────────────────
+   Foundation first (reusable by every later view), then the Library application. A bold evolution
+   inside the Record shelf world: brass gets a defined role and real area, walnut gets texture and
+   light, and the record ring becomes the motif. Operate-tool filter: scanability and speed first,
+   so motion is short (<= --dur-lift) and reduced-motion-aware, and glass is one measured moment. */
+@layer components {
+  /* The record ring signature (components/RecordRing.tsx): one shape, reused as the spinner, the
+     empty-shelf mark and the selected dot. Brass label, patina body, one bright glint. */
+  .record-ring .rr-body { fill: var(--color-walnut-950); stroke: var(--bw-patina); stroke-width: 1; stroke-opacity: 0.5; }
+  .record-ring .rr-groove { stroke: var(--color-graphite-800); stroke-width: 0.8; }
+  .record-ring .rr-glint { stroke: var(--color-brass-300); stroke-width: 2; stroke-opacity: 0.85; }
+  .record-ring .rr-label { fill: var(--bw-patina); }
+  .record-ring .rr-hole { fill: var(--color-walnut-950); }
+  @media (prefers-reduced-motion: no-preference) {
+    .record-ring.is-spinning { animation: rr-spin 1.1s linear infinite; transform-origin: 50% 50%; }
+  }
+  @keyframes rr-spin { to { transform: rotate(360deg); } }
+
+  /* Liner-note metadata label: letterspaced small-caps for format, bitrate, MBID and the like. */
+  .liner-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--bw-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Reusable brass rail: the left edge that marks an active/selected row (DESIGN "brass left-rail on
+     the selected row"). Patina edge plus a polished inner glow, so selection reads as signal. */
+  .brass-rail { box-shadow: inset 3px 0 0 var(--bw-accent), inset 4px 0 0 rgba(246, 223, 174, 0.25); }
+
+  /* The liner-note stat header: a page-top band of oversized display counts over the shelf behind
+     it. The ONE frosted-glass moment (warm glass, a seasoning): a translucent walnut panel that
+     blurs the album art and texture behind it. A near-opaque solid is the fallback where
+     backdrop-filter is unsupported; the fill stays dark enough that cream text clears WCAG AA over
+     any cover. Glass lives on this frame only, never behind the lists below. */
+  .lib-liner {
+    position: relative;
+    overflow: hidden;
+    border-radius: 16px;
+    border: 1px solid var(--bw-border);
+    /* Solid fallback: a dark walnut, essentially opaque. */
+    background-color: color-mix(in srgb, var(--bw-surface) 94%, #000);
+    background-image: linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 42%), var(--app-grain);
+    background-size: 100% 100%, 220px 220px;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.14), 0 18px 40px -28px #000;
+    padding: clamp(1.1rem, 0.8rem + 1.6vw, 2rem) clamp(1.1rem, 0.8rem + 1.6vw, 2.25rem);
+    transition: padding var(--dur-lift) var(--ease-out);
+  }
+  /* A hairline brass edge along the top: the lamp glancing off the frame. */
+  .lib-liner::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 1px rgba(246, 223, 174, 0.1);
+  }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .lib-liner {
+      /* Warm glass: translucent enough to read the art behind, opaque enough to keep text AA. */
+      background-color: color-mix(in srgb, var(--bw-surface) 74%, transparent);
+      -webkit-backdrop-filter: blur(18px) saturate(1.15);
+      backdrop-filter: blur(18px) saturate(1.15);
+    }
+  }
+  .lib-liner-figures {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.4rem 2.25rem;
+  }
+  /* Oversized, confident display counts (Framer-level type scale). Each count stays one text node
+     ("N artists") so it reads as a unit; serif on big counters is allowed in this direction. */
+  .lib-liner-figure {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: clamp(1.9rem, 1.2rem + 3.2vw, 3.1rem);
+    line-height: 1.02;
+    letter-spacing: -0.01em;
+    color: var(--bw-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .lib-liner-figure.is-unknown { color: var(--bw-muted); }
+  .lib-liner-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.25rem;
+    margin-top: 0.9rem;
+    transition: opacity var(--dur-hover) var(--ease-out), max-height var(--dur-lift) var(--ease-out);
+    max-height: 3rem;
+    overflow: hidden;
+  }
+  /* Collapsed (on scroll, or narrow): the band tightens and the metadata line folds away, leaving
+     the counts as one compact row. Scanability first. */
+  .lib-liner.is-collapsed {
+    padding-top: clamp(0.65rem, 0.5rem + 0.6vw, 0.9rem);
+    padding-bottom: clamp(0.65rem, 0.5rem + 0.6vw, 0.9rem);
+  }
+  .lib-liner.is-collapsed .lib-liner-figure {
+    font-size: clamp(1.35rem, 1.05rem + 1.2vw, 1.75rem);
+  }
+  .lib-liner.is-collapsed .lib-liner-meta {
+    max-height: 0;
+    margin-top: 0;
+    opacity: 0;
+  }
+
+  /* Album art as hero (Library-scoped, so Playlists' .sleeve is untouched). A record-sleeve
+     treatment on the crate/flow sleeves: an inner edge highlight, a spine strip down the left, and
+     on hover a 4px lift with a soft shadow and a thin brass edge. */
+  .lib-sleeve {
+    transition:
+      transform var(--dur-lift) var(--ease-out),
+      box-shadow var(--dur-lift) var(--ease-out);
+  }
+  /* Inner top highlight + bottom shade, layered over the sleeve's existing crate depth. */
+  .lib-sleeve.sleeve {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 246, 228, 0.16),
+      inset 0 -14px 22px -16px rgba(0, 0, 0, 0.8),
+      0 1px 0 var(--color-walnut-950),
+      3px 3px 0 -1px var(--color-graphite-850),
+      6px 6px 0 -2px var(--color-graphite-900),
+      0 10px 18px -8px color-mix(in srgb, var(--color-zinc-950) 60%, transparent);
+  }
+  /* The spine: a 3px strip down the left edge, reading as the record's spine in the crate. */
+  .lib-sleeve::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 3px;
+    z-index: 2;
+    background: linear-gradient(180deg, rgba(255, 246, 228, 0.22), rgba(0, 0, 0, 0.35));
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    button.lib-sleeve:hover,
+    .group:hover .lib-sleeve {
+      transform: translateY(-4px);
+    }
+  }
+  /* The brass hover/focus edge + lifted shadow apply in any motion mode (no movement needed). */
+  button.lib-sleeve:hover,
+  button.lib-sleeve:focus-visible,
+  .group:hover .lib-sleeve,
+  .group:focus-within .lib-sleeve {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 246, 228, 0.22),
+      0 0 0 2px color-mix(in srgb, var(--bw-accent) 88%, transparent),
+      0 18px 32px -12px #000,
+      0 2px 0 var(--color-walnut-950);
+  }
+
+  /* Designed placeholder (no art): the blank sleeve keeps the album initial in the display serif. */
+  .lib-sleeve-initial {
+    position: absolute;
+    left: 10%;
+    bottom: 9%;
+    z-index: 3;
+    font-family: var(--font-display);
+    font-size: clamp(1.25rem, 0.9rem + 2.4vw, 2.5rem);
+    font-weight: 600;
+    line-height: 1;
+    color: var(--color-brass-200);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+  }
+
+  /* Cover Flow: the centred sleeve wears the brass edge, so the active one reads as selected. */
+  .cf-item[aria-current="true"] .cf-cover {
+    box-shadow:
+      0 18px 30px -12px #000,
+      0 0 0 1.5px color-mix(in srgb, var(--bw-accent) 75%, transparent);
+  }
+
+  /* Loading skeletons: cover squares and text lines with a slow, low-contrast warm shimmer. */
+  .lib-skeleton-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
+    gap: 1.25rem;
+  }
+  @media (min-width: 640px) {
+    .lib-skeleton-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 12.5rem), 1fr)); }
+  }
+  .lib-skeleton-tile { display: grid; gap: 0.5rem; }
+  .lib-skeleton-box {
+    position: relative;
+    overflow: hidden;
+    border-radius: 3px;
+    background: var(--color-graphite-850);
+  }
+  .lib-skeleton-box.is-cover { aspect-ratio: 1; }
+  .lib-skeleton-line { height: 0.7rem; border-radius: 3px; background: var(--color-graphite-850); overflow: hidden; position: relative; }
+  .lib-skeleton-line.is-short { width: 55%; }
+  @media (prefers-reduced-motion: no-preference) {
+    .lib-skeleton-box::after,
+    .lib-skeleton-line::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent, rgba(246, 223, 174, 0.08) 45%, rgba(246, 223, 174, 0.12) 55%, transparent);
+      animation: lib-shimmer 1.6s ease-in-out infinite;
+    }
+  }
+  @keyframes lib-shimmer { to { transform: translateX(100%); } }
+
+  /* Character empty state: nothing on the shelf yet, the ring mark, and the way in. */
+  .lib-empty {
+    display: grid;
+    justify-items: center;
+    gap: 0.75rem;
+    max-width: 32rem;
+    margin: 2.5rem auto;
+    padding: 2.5rem 1.5rem;
+    text-align: center;
+  }
+  .lib-empty-title { font-family: var(--font-display); font-size: clamp(1.5rem, 1.2rem + 1.6vw, 2.1rem); font-weight: 600; color: var(--bw-text); margin: 0.5rem 0 0; }
+  .lib-empty-body { color: var(--bw-muted); max-width: 26rem; }
+  .lib-empty-cta {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
+    margin-top: 0.5rem;
+    padding: 0 1.1rem;
+    border-radius: 8px;
+    background-image: var(--bw-accent-polish);
+    color: #1a140e;
+    font-weight: 600;
+    box-shadow: inset 0 1px 0 rgba(255, 246, 228, 0.4);
+  }
+  .lib-empty-cta:hover { filter: brightness(1.06); }
+}
+/* ── end Bolder Shelf ───────────────────────────────────────────────────────────────────────── */
