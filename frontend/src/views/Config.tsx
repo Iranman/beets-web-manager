@@ -8,7 +8,6 @@ import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useState } from 'react';
 import {
   apiErrorBody,
-  getHealthDetail,
   getMbidStatus,
   getMusicFormatPreferences,
   getMusicFormatReplacementStatuses,
@@ -18,9 +17,9 @@ import {
   startMusicFormatScan,
 } from '../api/client';
 import { PluginsPanel } from '../features/plugins/PluginsPanel';
+import { ConfigYamlEditor } from '../features/system/ConfigYamlEditor';
+import { SecuritySection } from '../features/system/SecuritySection';
 import type {
-  HealthChecks,
-  HealthResponse,
   MbidStatusResponse,
   MusicFormatKey,
   MusicFormatLayout,
@@ -28,61 +27,6 @@ import type {
   MusicFormatReplacementTrack,
   StatsResponse,
 } from '../api/types';
-
-// ── Token / integration row ───────────────────────────────────────────────────
-
-const INTEGRATIONS: Array<{
-  key: keyof HealthChecks;
-  label: string;
-  description: string;
-}> = [
-  { key: 'beets_web',               label: 'Beets library',      description: 'Embedded Beets library reads' },
-  { key: 'beets_webmanager_plugin', label: 'Web Manager plugin', description: 'In-process library operations' },
-  { key: 'openai_key',     label: 'OpenAI',           description: 'AI matching + batch import' },
-  { key: 'discogs_token',  label: 'Discogs',          description: 'Artist images + discography' },
-  { key: 'lidarr_key',     label: 'Lidarr',           description: 'Wanted albums + monitoring' },
-  { key: 'slskd_key',      label: 'Soulseek (slskd)', description: 'Missing-track downloads' },
-];
-
-// The embedded Beets checks are required; the providers are optional integrations,
-// so an unset one is neutral, not a failure. Keys mirror app.py _health_checks.
-const REQUIRED_CHECKS = new Set<keyof HealthChecks>(['beets_web', 'beets_webmanager_plugin']);
-
-function StatusDot({ ok, required }: { ok: boolean; required: boolean }) {
-  return (
-    <span
-      className={`inline-block size-2.5 shrink-0 rounded-full ${ok ? 'bg-emerald-400' : required ? 'bg-red-500' : 'border border-graphite-500'}`}
-      aria-label={ok ? 'configured' : 'not configured'}
-    />
-  );
-}
-
-function IntegrationRow({
-  label,
-  description,
-  ok,
-  required,
-}: {
-  label: string;
-  description: string;
-  ok: boolean;
-  required: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-3 rounded border border-graphite-800 bg-graphite-900 px-4 py-3">
-      <StatusDot ok={ok} required={required} />
-      <div className="flex-1">
-        <div className="text-sm font-medium text-zinc-200">{label}</div>
-        <div className="text-xs text-muted">{description}</div>
-      </div>
-      <span
-        className={`text-xs font-semibold ${ok ? 'text-emerald-400' : required ? 'text-red-300' : 'text-muted'}`}
-      >
-        {ok ? 'configured' : 'not set'}
-      </span>
-    </div>
-  );
-}
 
 // ── Stat card ─────────────────────────────────────────────────────────────────
 
@@ -189,7 +133,6 @@ function formatLabel(key: MusicFormatKey) {
 
 export default function Config() {
   const engineOffline = useEngineOffline();
-  const [health, setHealth] = useState<HealthResponse | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [mbStatus, setMbStatus] = useState<MbidStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -216,8 +159,7 @@ export default function Config() {
     setLoading(true);
     setError('');
     try {
-      const [h, s, m] = await Promise.all([getHealthDetail(), getStats(), getMbidStatus()]);
-      setHealth(h);
+      const [s, m] = await Promise.all([getStats(), getMbidStatus()]);
       setStats(s);
       setMbStatus(m);
     } catch (err) {
@@ -251,6 +193,13 @@ export default function Config() {
     void load();
     void loadMusicFormat();
   }, [load, loadMusicFormat]);
+
+  // System links here as /config#security, #config-yaml or #plugins; a client-side route change
+  // does not scroll to the hash on its own.
+  useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (id) document.getElementById(id)?.scrollIntoView?.();
+  }, []);
 
   const handleSaveMusicFormat = async () => {
     setFormatBusy(true);
@@ -391,18 +340,6 @@ export default function Config() {
               <HealthMetric label="Inferable albums"   value={inferredAlbumRows}        tone={inferredAlbumRows ? 'warn' : 'ok'} />
               <HealthMetric label="Path token rows"    value={templateTokenRows}        tone={templateTokenRows ? 'warn' : 'ok'} />
             </div>
-          </div>
-        </section>
-      )}
-
-      {/* Integration status */}
-      {health && (
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-zinc-200">Integrations</h2>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {INTEGRATIONS.map(({ key, label, description }) => (
-              <IntegrationRow key={key} label={label} description={description} ok={health.checks[key]} required={REQUIRED_CHECKS.has(key)} />
-            ))}
           </div>
         </section>
       )}
@@ -579,11 +516,22 @@ export default function Config() {
         </fieldset>
       </section>
       {/* Plugin controls */}
-      <section className="space-y-3">
+      <section id="plugins" className="scroll-mt-20 space-y-3">
         <h2 className="text-sm font-semibold text-zinc-200">Plugins</h2>
         <PluginsPanel />
       </section>
 
+      {/* Beets config.yaml (moved from System) */}
+      <section id="config-yaml" aria-labelledby="settings-config-yaml" className="scroll-mt-20 space-y-3">
+        <h2 id="settings-config-yaml" className="text-sm font-semibold text-zinc-200">config.yaml</h2>
+        <ConfigYamlEditor />
+      </section>
+
+      {/* Sign-in, API token and outbound policy (moved from System) */}
+      <section id="security" aria-labelledby="settings-security" className="scroll-mt-20 space-y-3">
+        <h2 id="settings-security" className="text-sm font-semibold text-zinc-200">Security</h2>
+        <SecuritySection />
+      </section>
 
     </div>
   );

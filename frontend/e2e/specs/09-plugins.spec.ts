@@ -11,6 +11,8 @@ test('System reports the plugin enabled in config.yaml and the ones that are not
 
 test('Recheck plugins asks the backend and the report matches the page', async ({ page }) => {
   await page.goto('/system');
+  // Plugin detail is folded away on the diagnostics page; open it first.
+  await page.getByRole('main').getByText('Beets plugins', { exact: true }).click();
   const verified = page.waitForResponse((r) => r.url().includes('/api/plugins/verify'));
   await page.getByRole('button', { name: 'Recheck plugins' }).click();
   const response = await verified;

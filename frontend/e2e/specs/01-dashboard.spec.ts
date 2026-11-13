@@ -35,7 +35,7 @@ test('nav tabs and the system menu reach every section, and System reports the r
   }
 
   await nav.getByRole('button', { name: 'System' }).click();
-  await page.getByRole('menuitem', { name: 'System' }).click();
+  await page.getByRole('menuitem', { name: 'Diagnostics' }).click();
   await expect(page).toHaveURL(/\/system/);
   const version = fs.readFileSync('../VERSION', 'utf8').trim();
   await expect(page.getByRole('main').getByText(`Version ${version}`)).toBeVisible();

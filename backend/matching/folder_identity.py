@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from .track_alignment import _hit_recording_id, _hit_score
+from .track_alignment import _hit_recording_id, _hit_score, strong_only_agrees
 
 #: Codes that block an unattended import outright (audit condition 3).
 HARD_CONFLICTS = frozenset({
@@ -58,9 +58,14 @@ def confirmed_recording(hits: Optional[List[Dict[str, Any]]]) -> str:
     """The one recording a file's AcoustID hits confirm, or "".
 
     Same rule as the canonical evaluator: a hit scoring >= 80 with no other
-    recording within 3 points of it."""
+    recording within 3 points of it. A weakly sourced hit neither confirms
+    nor blocks on its own (``strong_only_agrees``)."""
     if not hits:
         return ""
+    return strong_only_agrees(_confirmed_recording_for_hits, list(hits), "")
+
+
+def _confirmed_recording_for_hits(hits: List[Dict[str, Any]]) -> str:
     high = sorted(
         ((_hit_recording_id(h), _hit_score(h)) for h in hits if isinstance(h, dict)),
         key=lambda row: (-row[1], row[0]),
