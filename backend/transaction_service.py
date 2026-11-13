@@ -210,9 +210,11 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
     The tail snapshots speak only for job-wrapper transactions: an engine
     transaction is reached only by jobs in memory or named by id (#545).
 
-    ``scan_done`` says whether the startup job scan has finished, which
-    decides how unbound rows are logged; it defaults to ``before is not
-    None``, but a retry pass after judging passes it without ``before``.
+    ``scan_done`` says whether the startup job scan has finished (complete or
+    aborted). It decides how unbound rows are logged and gates the tail
+    snapshots: mid-sweep the tail is partial, so it is not consulted until the
+    scan is terminal and fully indexed. It defaults to ``before is not None``,
+    but a retry pass after judging passes it without ``before``.
 
     A row whose candidates cannot be read (a corrupt row or job record, or a
     lazy ``get()`` load that failed; any Exception) is skipped and re-arms the retry, at most
@@ -224,7 +226,11 @@ def _reconcile_running_transactions(job_store, store, before: Optional[float] = 
     if scan_done is None:
         scan_done = before is not None
     grouped = _jobs_by_transaction(job_store)
-    tail = dict(getattr(job_store, "tail_transaction_jobs", None) or {})
+    # Consult the tail snapshots only once the scan is terminal (#545/#557).
+    # Mid-sweep the tail is partial, so a job-wrapper with several on-disk job
+    # records could be settled from the first one loaded before a sibling
+    # record -- e.g. a corrupt one that would confine it -- has been indexed.
+    tail = dict(getattr(job_store, "tail_transaction_jobs", None) or {}) if scan_done else {}
     rows = _running_rows(store)
     ok, unbound = True, []
     for row in rows:
