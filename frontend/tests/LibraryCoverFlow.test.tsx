@@ -290,14 +290,38 @@ describe('Library Cover Flow', () => {
     expect(screen.getByTestId('url').textContent).toBe('/elsewhere');
   });
 
-  it('a vertical wheel scrolls the page; a horizontal wheel or Shift+wheel moves the flow', async () => {
+  it('a plain vertical wheel pans the flow, releases the page at either end, and horizontal and Shift+wheel still pan', async () => {
     await renderLibrary();
     const flow = screen.getByRole('region', { name: 'Artists' });
-    const vertical = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
-    act(() => { flow.dispatchEvent(vertical); });
-    expect(vertical.defaultPrevented).toBe(false);
+
+    // Scroll down/forward moves to the next cover and consumes the event.
+    const down = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(down); });
+    expect(down.defaultPrevented).toBe(true);
+    expect(centred('Artists')).toBe('Artist Beta Choir, 2 of 3');
+
+    // Scroll up/back moves to the previous cover.
+    const up = new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(up); });
+    expect(up.defaultPrevented).toBe(true);
     expect(centred('Artists')).toBe('Artist Alpha Band, 1 of 3');
 
+    // At the first cover, scrolling back does not preventDefault: the page scrolls, no trap.
+    const pastStart = new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(pastStart); });
+    expect(pastStart.defaultPrevented).toBe(false);
+    expect(centred('Artists')).toBe('Artist Alpha Band, 1 of 3');
+
+    // At the last cover, scrolling forward does not preventDefault and never moves past the end.
+    fireEvent.keyDown(flow, { key: 'End' });
+    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+    const pastEnd = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(pastEnd); });
+    expect(pastEnd.defaultPrevented).toBe(false);
+    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+
+    // Horizontal wheel and Shift+wheel still pan.
+    fireEvent.keyDown(flow, { key: 'Home' });
     const horizontal = new WheelEvent('wheel', { deltaX: 120, bubbles: true, cancelable: true });
     act(() => { flow.dispatchEvent(horizontal); });
     expect(horizontal.defaultPrevented).toBe(true);
