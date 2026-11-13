@@ -88,6 +88,6 @@ describe('System integration status', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Settings' }).className).toContain('ops-title');
     cleanup();
     render(<MemoryRouter><System /></MemoryRouter>);
-    expect((await screen.findByRole('heading', { level: 1, name: 'System' })).className).toContain('lib-title');
+    expect((await screen.findByRole('heading', { level: 1, name: 'Diagnostics' })).className).toContain('lib-title');
   });
 });

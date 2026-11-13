@@ -29,7 +29,7 @@ describe('#607 phone layout', () => {
   it('Playlists sticky bars sit below the app header, under its z-index', () => {
     const playlists = src('views/Playlists.tsx');
     // overflow-x-hidden would make the root a scroll container and stop the bars sticking.
-    expect(playlists).toContain('<div className="min-w-0 space-y-6 overflow-x-clip">');
+    expect(playlists).toContain('<div className="touch-controls min-w-0 space-y-6 overflow-x-clip">');
     expect(playlists).not.toContain('overflow-x-hidden');
     expect(playlists).not.toMatch(/sticky top-0/);
     // The pipeline deck (the other sticky bar) moved to the Workbench's Playlist Downloads tab.

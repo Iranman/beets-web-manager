@@ -1521,7 +1521,7 @@ export default function Playlists() {
   ];
 
   return (
-    <div className="min-w-0 space-y-6 overflow-x-clip">
+    <div className="touch-controls min-w-0 space-y-6 overflow-x-clip">
       <div className="border-b border-graphite-800 pb-4">
         <h1 className="lib-title">Playlists</h1>
         <p className="lib-catalog">

@@ -9,7 +9,7 @@ const DEEP_LINKS: [string, string][] = [
   ['/playlists', 'Playlists'],
   ['/jobs', 'Job History'],
   ['/config', 'Settings'],
-  ['/system', 'System'],
+  ['/system', 'Diagnostics'],
   ['/import?tab=changes', 'Library Changes'],
   ['/submissions', 'Submission'],
 ];

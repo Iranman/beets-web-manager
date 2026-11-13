@@ -81,6 +81,8 @@ export default function Login({ onSuccess }: LoginProps) {
               </label>
               <input
                 id="login-username"
+                name="username"
+                autoComplete="username"
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -100,6 +102,8 @@ export default function Login({ onSuccess }: LoginProps) {
               <div className="relative mt-1.5">
                 <input
                   id="login-password"
+                  name="password"
+                  autoComplete="current-password"
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
