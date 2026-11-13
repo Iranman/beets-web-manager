@@ -285,14 +285,11 @@ export default function CoverFlow({
               tabIndex={-1}
               type="button"
               onClick={() => {
-                if (offset === 0) {
-                  onActivate(at);
-                  return;
-                }
-                onIndexChange(at);
                 // A click focuses this sleeve, which leaves the window a few steps on and would drop
                 // focus to <body>; the stage keeps the arrow keys working.
                 stageRef.current?.focus();
+                if (offset === 0) onActivate(at);
+                else onIndexChange(at);
               }}
             >
               <span className="cf-cover">

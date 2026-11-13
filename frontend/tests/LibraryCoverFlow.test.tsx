@@ -115,6 +115,21 @@ async function renderLibrary(entries: string[] = ['/library']) {
 const centred = (region: string) =>
   screen.getByRole('region', { name: region }).querySelector('[aria-current="true"]')?.getAttribute('aria-label');
 
+// A bare 50-item flow, so the clicked sleeve leaves the render window within a few steps.
+function ManyHarness({ onActivate = () => {} }: { onActivate?: (at: number) => void }) {
+  const [index, setIndex] = useState(0);
+  return (
+    <CoverFlow
+      count={50}
+      index={index}
+      item={(at) => ({ key: `k${at}`, label: `Item ${at}`, title: `T${at}`, subtitle: '', art: null })}
+      label="Many"
+      onActivate={onActivate}
+      onIndexChange={setIndex}
+    />
+  );
+}
+
 async function openGammaRay() {
   const artists = screen.getByRole('region', { name: 'Artists' });
   fireEvent.keyDown(artists, { key: 'End' });
@@ -230,20 +245,7 @@ describe('Library Cover Flow', () => {
   });
 
   it('after clicking a side sleeve, focus survives the sleeve leaving the window', () => {
-    function Harness() {
-      const [index, setIndex] = useState(0);
-      return (
-        <CoverFlow
-          count={50}
-          index={index}
-          item={(at) => ({ key: `k${at}`, label: `Item ${at}`, title: `T${at}`, subtitle: '', art: null })}
-          label="Many"
-          onActivate={() => {}}
-          onIndexChange={setIndex}
-        />
-      );
-    }
-    render(<Harness />);
+    render(<ManyHarness />);
     const stage = screen.getByRole('region', { name: 'Many' });
     const sleeve = screen.getByRole('button', { name: 'Item 2' });
     sleeve.focus(); // a real mouse click focuses the sleeve
@@ -251,6 +253,19 @@ describe('Library Cover Flow', () => {
     for (let i = 0; i < 12; i += 1) fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
     expect(stage.contains(document.activeElement)).toBe(true);
     expect(centred('Many')).toBe('Item 14');
+  });
+
+  it('after clicking the centre sleeve, focus survives the sleeve leaving the window', () => {
+    const activated: number[] = [];
+    render(<ManyHarness onActivate={(at) => activated.push(at)} />);
+    const stage = screen.getByRole('region', { name: 'Many' });
+    const sleeve = screen.getByRole('button', { name: 'Item 0' });
+    sleeve.focus(); // a real mouse click focuses the sleeve
+    fireEvent.click(sleeve);
+    expect(activated).toEqual([0]);
+    for (let i = 0; i < 12; i += 1) fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
+    expect(stage.contains(document.activeElement)).toBe(true);
+    expect(centred('Many')).toBe('Item 12');
   });
 
   it('All artists pops the drill-in entry: browser Back does not re-open the artist and history does not grow', async () => {
