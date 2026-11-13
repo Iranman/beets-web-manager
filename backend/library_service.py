@@ -24,6 +24,7 @@ from backend.beets_adapter import beets_adapter, lib, BeetsError, BeetsUnavailab
 import backend.composite_workflows as composite_workflows
 from backend.ai_batch_state_service import _load_album_mb_suggestions
 from backend.library_cache import library_cache
+from backend.listenbrainz_mapping import listenbrainz_recording_candidates
 import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_lookup_cached_outcome, _album_item_abs_path, _album_track_norm, _artist_folder_fingerprint_confirms, _normalize_albumartist, _read_file_media_tags, same_recording_proof
 from backend.artwork_service import _album_dir_for_art, _ART_EXTS, _artist_name_key, _attach_artist_image_cache_urls, _get_album_item_dir
@@ -1228,7 +1229,7 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
         return False
 
 
-def _reconstruct_track_recording_candidates(item, iid: int):
+def _reconstruct_track_recording_candidates(item, iid: int, *, listenbrainz: bool = True):
     """Rebuild the current-tag snapshot and enriched MB/AcoustID recording
     candidates for a singleton item -- the same trusted candidate-generation
     pipeline /api/items/<iid>/ai-suggest uses (AcoustID lookup + MusicBrainz
@@ -1290,6 +1291,11 @@ def _reconstruct_track_recording_candidates(item, iid: int):
     mb_text_cands = _mb_recording_search(_mb_t, _mb_a, limit=6)
     if not mb_text_cands and _mb_a:
         mb_text_cands = _mb_recording_search(_mb_t, "", limit=6)
+    # No fingerprint answer: add the verified, review-only ListenBrainz mapping.
+    # Callers that can only act on fingerprint proof pass listenbrainz=False.
+    if listenbrainz and not acoustid_cands:
+        mb_text_cands = list(mb_text_cands or []) + listenbrainz_recording_candidates(
+            _mb_t, _mb_a, current.get("duration_seconds"))["candidates"]
 
     mb_candidates = recording_review.merge_recording_candidates(
         acoustid_cands, mb_text_cands, item_path=item_path,

@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+
+- **ListenBrainz MBID mapping as an extra recording-candidate source.** When a track has no fingerprint answer (no AcoustID lookup, or AcoustID found nothing), Import Review and the Missing IDs recording list now also ask ListenBrainz's metadata lookup for a MusicBrainz recording, retrying once with a cleaned title (feat., remaster and version words removed). Playlist suggestions ask it too, when text search found nothing safe and the track has a duration. A ListenBrainz answer counts only after a MusicBrainz recording lookup agrees on title, artist, tracklist and duration; it is then a review-only candidate and never attaches a Recording ID by itself. Needs `LISTENBRAINZ_TOKEN` (the endpoint requires a user token); without it nothing is sent. Calls go through the provider boundary as `listenbrainz`. Answers (matches and clean misses) are cached in process for 6 hours (failures never are). A playlist suggestion list stops asking ListenBrainz after its first rate limit, auth failure or outage, and Apply safe suggestions and the Missing IDs batch never ask it, since they cannot use a review-only candidate.
+
 ### Changed
 
 - **`deezer-python` removed.** Nothing imported it: the bundled Beets `deezer` plugin calls the Deezer API through `requests`, and Web Manager only checked that the package imported. It is dropped from `requirements.txt` and from the `deezer` plugin's health check, which no longer lists a Python package. Dependabot also no longer proposes `python` base images 3.15 and later, because Beets 2.9.0 to 2.14.1 require Python below 3.15; the rule goes once the pinned Beets supports 3.15.
