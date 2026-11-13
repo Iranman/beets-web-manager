@@ -4,6 +4,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { getHealth, logout, restartApp } from '../../api/client';
 import { useEngineProbe, useGlobalJobs } from '../../lib/hooks';
 import { EngineOfflineBanner, EngineOfflineContext } from '../EngineOfflineBanner';
+import NowWorkingBar from '../NowWorkingBar';
 import { RecordMark } from '../RecordMark';
 
 interface Tab {
@@ -209,6 +210,10 @@ export default function Shell({ username, onLogout }: ShellProps) {
           <Outlet />
         </EngineOfflineContext.Provider>
       </main>
+
+      {/* The "now working" station: a presentational, docked bar for the running job (reads shared
+          job state only — starts, cancels and changes nothing). Renders nothing when idle. */}
+      <NowWorkingBar />
     </div>
   );
 }

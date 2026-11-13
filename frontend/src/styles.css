@@ -1844,3 +1844,54 @@ body {
   }
 }
 /* ── end touch targets ───────────────────────────────────────────────────────────────────────── */
+
+/* ── Now Working bar (shell chrome signature) ─────────────────────────────────────────────────────
+ * The persistent, compact station docked at the foot of the shell (components/NowWorkingBar.tsx),
+ * showing the one running job from job state the frontend already holds. Presentational only.
+ * Solid walnut (no glass behind page content, so text stays WCAG AA over anything); brass is used
+ * only for live progress and the completion check. Motion is reduced-motion-aware. */
+@layer components {
+  .nowbar {
+    background-color: var(--color-walnut-900);
+    border-top: 1px solid var(--color-walnut-700);
+    box-shadow: 0 -2px 0 var(--color-walnut-950), 0 -14px 28px -22px #000;
+  }
+  /* Determinate brass progress track along the top edge; the fill is the polished brass gradient. */
+  .nowbar-progress {
+    position: relative;
+    height: 3px;
+    overflow: hidden;
+    background-color: var(--color-walnut-950);
+  }
+  .nowbar-progress-fill {
+    height: 100%;
+    width: 0;
+    background: var(--bw-accent-polish);
+    transition: width var(--dur-lift) var(--ease-out);
+  }
+  /* Unknown progress: a short brass sweep. Reduced motion falls back to a static half-lit track. */
+  .nowbar-progress[data-indeterminate="true"] .nowbar-progress-fill {
+    width: 40%;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .nowbar-progress[data-indeterminate="true"] .nowbar-progress-fill {
+      animation: nowbar-indet 1.4s var(--ease-out) infinite;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .nowbar-progress[data-indeterminate="true"] .nowbar-progress-fill {
+      width: 100%;
+      opacity: 0.5;
+    }
+  }
+  @keyframes nowbar-indet {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(320%); }
+  }
+  /* Controls keep a 44px hit target on coarse pointers, the desktop size untouched. */
+  .nowbar-btn { min-height: 2.25rem; }
+  @media (pointer: coarse) {
+    .nowbar-btn { min-height: 2.75rem; min-width: 2.75rem; }
+  }
+}
+/* ── end Now Working bar ──────────────────────────────────────────────────────────────────────── */

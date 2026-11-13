@@ -58,6 +58,7 @@ export function useJobPoll(jobId: string | null, enabled = true): {
 export function useGlobalJobs(): {
   running: number;
   failed: number;
+  jobs: Job[];
   refresh: () => void;
 } {
   const queryClient = useQueryClient();
@@ -95,7 +96,7 @@ export function useGlobalJobs(): {
     return () => window.removeEventListener('beets:jobs-changed', handleJobsChanged);
   }, [refresh]);
 
-  return { running, failed, refresh };
+  return { running, failed, jobs, refresh };
 }
 
 // ── useEngineProbe ────────────────────────────────────────────────────────────
