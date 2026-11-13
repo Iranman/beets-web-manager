@@ -270,6 +270,7 @@ export function PlaylistQualityPanel({
         Playlist
         <select
           className="ops-field box-border w-full min-w-0"
+          style={{ boxSizing: 'border-box' }}
           value={selectedName}
           onChange={(event) => setSelectedName(event.target.value)}
           disabled={loadingPlaylists}
