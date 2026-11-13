@@ -130,10 +130,10 @@ function ManyHarness({ onActivate = () => {} }: { onActivate?: (at: number) => v
   );
 }
 
+// Artist level is grid-only now, so drill in by clicking the artist card; the album
+// flow (the default album view) is what opens.
 async function openGammaRay() {
-  const artists = screen.getByRole('region', { name: 'Artists' });
-  fireEvent.keyDown(artists, { key: 'End' });
-  fireEvent.keyDown(artists, { key: 'Enter' });
+  fireEvent.click(screen.getByRole('button', { name: /Gamma Ray artwork/ }));
   return screen.getByRole('region', { name: 'Albums' });
 }
 
@@ -141,38 +141,46 @@ beforeEach(() => localStorage.clear());
 afterEach(cleanup);
 
 describe('Library Cover Flow', () => {
-  it('is the default view: a labelled carousel driven by the keyboard, announcing the centred sleeve', async () => {
+  it('renders the artist grid with no Cover Flow toggle at the artist level', async () => {
     await renderLibrary();
-    const flow = screen.getByRole('region', { name: 'Artists' });
-    expect(flow.getAttribute('aria-roledescription')).toBe('carousel');
-    expect(flow.tabIndex).toBe(0);
-    expect(screen.getByRole('button', { name: 'Artist Alpha Band, 1 of 3' }).getAttribute('aria-current')).toBe('true');
-    // Artists with no cached image borrow the first album cover from the payload: no extra request.
-    expect(screen.getByRole('button', { name: 'Artist Alpha Band, 1 of 3' }).querySelector('img')?.getAttribute('src')).toMatch(/^\/api\/albums\/1\/art/);
-
-    fireEvent.keyDown(flow, { key: 'End' });
-    expect(screen.getByRole('button', { name: 'Artist Gamma Ray, 3 of 3' }).getAttribute('aria-current')).toBe('true');
-    expect(screen.getByText('Artist Gamma Ray, 3 of 3', { selector: '[aria-live]' })).toBeTruthy();
-    fireEvent.keyDown(flow, { key: 'ArrowLeft' });
-    expect(screen.getByRole('button', { name: 'Artist Beta Choir, 2 of 3' }).getAttribute('aria-current')).toBe('true');
-    fireEvent.keyDown(flow, { key: 'Home' });
-    expect(screen.getByRole('button', { name: 'Artist Alpha Band, 1 of 3' }).getAttribute('aria-current')).toBe('true');
+    // No artist carousel; the crate grid cards are shown instead.
+    expect(screen.queryByRole('region', { name: 'Artists' })).toBeNull();
+    expect(screen.getByRole('button', { name: /Gamma Ray artwork/ })).toBeTruthy();
+    // The Cover Flow / Grid toggle does not appear at the artist level.
+    expect(screen.queryByRole('group', { name: 'Library view' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cover Flow' })).toBeNull();
   });
 
-  it('A to Z jumps to the first match, and clicking a side cover centres it', async () => {
+  it('lands the artist level on the grid even when the persisted view is coverflow', async () => {
+    localStorage.setItem('library.view', 'coverflow');
     await renderLibrary();
-    fireEvent.click(screen.getByRole('button', { name: 'G' }));
-    expect(screen.getByRole('button', { name: 'Artist Gamma Ray, 3 of 3' }).getAttribute('aria-current')).toBe('true');
-    fireEvent.click(screen.getByRole('button', { name: 'Artist Beta Choir, 2 of 3' }));
-    expect(screen.getByRole('button', { name: 'Artist Beta Choir, 2 of 3' }).getAttribute('aria-current')).toBe('true');
+    expect(screen.queryByRole('region', { name: 'Artists' })).toBeNull();
+    expect(screen.getByRole('button', { name: /Gamma Ray artwork/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Cover Flow' })).toBeNull();
+    // Drilling in still honours coverflow for the albums.
+    const albums = await openGammaRay();
+    expect(albums.getAttribute('aria-roledescription')).toBe('carousel');
   });
 
-  it('Enter drills into the artist, then opens the centred album on its back cover', async () => {
+  it('offers Cover Flow at the album level, the default, as a labelled album carousel', async () => {
     await renderLibrary();
-    const artists = screen.getByRole('region', { name: 'Artists' });
-    fireEvent.keyDown(artists, { key: 'End' });
-    fireEvent.keyDown(artists, { key: 'Enter' });
-    const albums = screen.getByRole('region', { name: 'Albums' });
+    const albums = await openGammaRay();
+    expect(albums.getAttribute('aria-roledescription')).toBe('carousel');
+    expect(albums.tabIndex).toBe(0);
+    expect(screen.getByRole('button', { name: 'Album One by Gamma Ray, 1 of 2' }).getAttribute('aria-current')).toBe('true');
+    // The toggle is available at the album level, with Cover Flow pressed by default.
+    expect(screen.getByRole('group', { name: 'Library view' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Cover Flow' }).getAttribute('aria-pressed')).toBe('true');
+
+    fireEvent.keyDown(albums, { key: 'End' });
+    expect(screen.getByRole('button', { name: 'Album Two by Gamma Ray, 2 of 2' }).getAttribute('aria-current')).toBe('true');
+    fireEvent.keyDown(albums, { key: 'Home' });
+    expect(screen.getByRole('button', { name: 'Album One by Gamma Ray, 1 of 2' }).getAttribute('aria-current')).toBe('true');
+  });
+
+  it('Enter opens the centred album on its back cover', async () => {
+    await renderLibrary();
+    const albums = await openGammaRay();
     expect(screen.getByRole('button', { name: 'Album One by Gamma Ray, 1 of 2' })).toBeTruthy();
     fireEvent.keyDown(albums, { key: 'ArrowRight' });
     fireEvent.keyDown(albums, { key: 'Enter' });
@@ -180,45 +188,50 @@ describe('Library Cover Flow', () => {
     expect(await screen.findByRole('dialog', { name: 'Two' })).toBeTruthy();
   });
 
-  it('remembers the Grid choice in localStorage', async () => {
+  it('remembers the album Grid choice in localStorage', async () => {
     await renderLibrary();
+    await openGammaRay();
     fireEvent.click(screen.getByRole('button', { name: 'Grid' }));
     expect(localStorage.getItem('library.view')).toBe('grid');
-    expect(screen.queryByRole('region', { name: 'Artists' })).toBeNull();
-    expect(screen.getByRole('button', { name: /Gamma Ray artwork/ })).toBeTruthy();
+    // The album flow gives way to the album grid.
+    expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open One' })).toBeTruthy();
     cleanup();
     await renderLibrary();
+    // Grid persisted: drilling in again shows the grid with Grid pressed.
+    fireEvent.click(screen.getByRole('button', { name: /Gamma Ray artwork/ }));
     expect(screen.getByRole('button', { name: 'Grid' }).getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('All artists, Escape and Backspace go back to the artist flow centred on the artist you came from', async () => {
+  it('All artists, Escape and Backspace return from the album flow to the artist grid', async () => {
     await renderLibrary();
     await openGammaRay();
     fireEvent.click(screen.getByRole('button', { name: /All artists/ }));
-    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
-    expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Artists' }));
+    expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
+    expect(screen.getByRole('button', { name: /Gamma Ray artwork/ })).toBeTruthy();
 
     for (const key of ['Escape', 'Backspace']) {
       const albums = await openGammaRay();
       expect(document.activeElement).toBe(albums);
       fireEvent.keyDown(albums, { key });
       expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
-      expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+      expect(screen.getByRole('button', { name: /Gamma Ray artwork/ })).toBeTruthy();
     }
   });
 
-  it('browser Back leaves the artist for the artist flow, and a link to an artist opens it', async () => {
+  it('browser Back returns to the artist grid, and a deep link opens the album flow', async () => {
     await renderLibrary();
     await openGammaRay();
     fireEvent.click(screen.getByRole('button', { name: 'history back' }));
     expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
-    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+    expect(screen.getByRole('button', { name: /Gamma Ray artwork/ })).toBeTruthy();
 
     cleanup();
     await renderLibrary(['/library', '/library?artist=Beta%20Choir']);
     expect(centred('Albums')).toBe('Album Loose by Beta Choir, 1 of 1');
     fireEvent.click(screen.getByRole('button', { name: 'history back' }));
-    expect(centred('Artists')).toBe('Artist Beta Choir, 2 of 3');
+    expect(screen.queryByRole('region', { name: 'Albums' })).toBeNull();
+    expect(screen.getByRole('button', { name: /Beta Choir artwork/ })).toBeTruthy();
   });
 
   it('Escape while the back cover is open closes only the dialog', async () => {
@@ -230,18 +243,6 @@ describe('Library Cover Flow', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull(), { timeout: 2000 });
     expect(screen.getByRole('region', { name: 'Albums' })).toBeTruthy();
     expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
-  });
-
-  it('after clicking a side sleeve, the arrow keys still move the flow', async () => {
-    await renderLibrary();
-    const sleeve = screen.getByRole('button', { name: 'Artist Beta Choir, 2 of 3' });
-    sleeve.focus(); // a real mouse click leaves focus on the sleeve
-    fireEvent.click(sleeve);
-    expect(centred('Artists')).toBe('Artist Beta Choir, 2 of 3');
-    fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
-    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
-    fireEvent.keyDown(document.activeElement!, { key: 'Home' });
-    expect(centred('Artists')).toBe('Artist Alpha Band, 1 of 3');
   });
 
   it('after clicking a side sleeve, focus survives the sleeve leaving the window', () => {
@@ -290,55 +291,56 @@ describe('Library Cover Flow', () => {
     expect(screen.getByTestId('url').textContent).toBe('/elsewhere');
   });
 
-  it('a plain vertical wheel pans the flow, releases the page at either end, and horizontal and Shift+wheel still pan', async () => {
+  it('a plain vertical wheel pans the album flow, releases the page at either end, and horizontal and Shift+wheel still pan', async () => {
     await renderLibrary();
-    const flow = screen.getByRole('region', { name: 'Artists' });
+    const flow = await openGammaRay();
 
     // Scroll down/forward moves to the next cover and consumes the event.
     const down = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
     act(() => { flow.dispatchEvent(down); });
     expect(down.defaultPrevented).toBe(true);
-    expect(centred('Artists')).toBe('Artist Beta Choir, 2 of 3');
+    expect(centred('Albums')).toBe('Album Two by Gamma Ray, 2 of 2');
 
     // Scroll up/back moves to the previous cover.
     const up = new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true });
     act(() => { flow.dispatchEvent(up); });
     expect(up.defaultPrevented).toBe(true);
-    expect(centred('Artists')).toBe('Artist Alpha Band, 1 of 3');
+    expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
 
     // At the first cover, scrolling back does not preventDefault: the page scrolls, no trap.
     const pastStart = new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true });
     act(() => { flow.dispatchEvent(pastStart); });
     expect(pastStart.defaultPrevented).toBe(false);
-    expect(centred('Artists')).toBe('Artist Alpha Band, 1 of 3');
+    expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
 
     // At the last cover, scrolling forward does not preventDefault and never moves past the end.
     fireEvent.keyDown(flow, { key: 'End' });
-    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+    expect(centred('Albums')).toBe('Album Two by Gamma Ray, 2 of 2');
     const pastEnd = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
     act(() => { flow.dispatchEvent(pastEnd); });
     expect(pastEnd.defaultPrevented).toBe(false);
-    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+    expect(centred('Albums')).toBe('Album Two by Gamma Ray, 2 of 2');
 
     // Horizontal wheel and Shift+wheel still pan.
     fireEvent.keyDown(flow, { key: 'Home' });
     const horizontal = new WheelEvent('wheel', { deltaX: 120, bubbles: true, cancelable: true });
     act(() => { flow.dispatchEvent(horizontal); });
     expect(horizontal.defaultPrevented).toBe(true);
-    expect(centred('Artists')).toBe('Artist Beta Choir, 2 of 3');
+    expect(centred('Albums')).toBe('Album Two by Gamma Ray, 2 of 2');
 
-    const shifted = new WheelEvent('wheel', { deltaY: 120, shiftKey: true, bubbles: true, cancelable: true });
-    act(() => { flow.dispatchEvent(shifted); });
-    expect(centred('Artists')).toBe('Artist Gamma Ray, 3 of 3');
+    const shift = new WheelEvent('wheel', { deltaY: -120, shiftKey: true, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(shift); });
+    expect(shift.defaultPrevented).toBe(true);
+    expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
   });
 
-  it('the Next arrow hands focus to the flow when it disables itself at the end', async () => {
+  it('the Next arrow hands focus to the album flow when it disables itself at the end', async () => {
     await renderLibrary();
+    const albums = await openGammaRay();
     const next = screen.getAllByRole('button', { name: 'Next' })[0];
     next.focus();
     fireEvent.click(next);
-    fireEvent.click(next);
     expect((next as HTMLButtonElement).disabled).toBe(true);
-    expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Artists' }));
+    expect(document.activeElement).toBe(albums);
   });
 });

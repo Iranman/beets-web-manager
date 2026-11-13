@@ -60,6 +60,7 @@ import { LeakedPathsPanel } from '../features/leakedPaths/LeakedPathsPanel';
 import { FolderPlaceholdersPanel } from '../features/leakedPaths/FolderPlaceholdersPanel';
 import { PlaylistQualityPanel } from '../features/playlists/PlaylistQualityPanel';
 import { SleeveArt, albumArtSources } from '../components/SleeveArt';
+import { RecordRing } from '../components/RecordRing';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1437,7 +1438,7 @@ function MaintenanceRunnerBar({
             variant="determinate"
             sx={{ borderRadius: 1, height: 6 }}
           />
-          <span className="w-12 text-right text-sm tabular-nums text-zinc-300">{Math.round(progress)}%</span>
+          <span className="jobs-clean-pct shrink-0 text-right tabular-nums">{Math.round(progress)}%</span>
         </div>
         {/* The run as a side of a record: eight numbered tracks on one rule, the playing one in brass. */}
         <ol className="ops-pipeline" aria-label="Clean All phases">
@@ -2357,7 +2358,7 @@ function JobDetailsDialog({
 }) {
   return (
     <Dialog className="relative z-50" open={open} onClose={onClose}>
-      <DialogBackdrop className="fixed inset-0 bg-black/65" />
+      <DialogBackdrop className="jobs-modal-glass fixed inset-0" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
         <DialogPanel className="flex h-[min(760px,88vh)] w-[min(920px,calc(100vw-2rem))] flex-col overflow-hidden rounded-lg border border-graphite-700 bg-graphite-950 shadow-2xl shadow-black/50">
           <div className="flex shrink-0 items-center gap-3 border-b border-graphite-800 px-4 py-3">
@@ -2656,6 +2657,7 @@ function CurrentJobFeedSection({
         <section className="ops-station" aria-busy={loading && !error ? true : undefined}>
           <div className="ops-station-head">
             <h2 className="ops-section-title">Current activity</h2>
+            {loading && !error ? <RecordRing spinning className="size-5" /> : null}
             {error ? (
               <Chip color="error" label="Error" size="small" variant="outlined" />
             ) : loading ? (
@@ -2897,7 +2899,7 @@ export default function Jobs() {
   const liveJobGroups = useMemo(() => groupFeedEntries(feed), [feed]);
   return (
     <>
-      <div className="ops-page space-y-10 pb-10">
+      <div className="ops-page jobs-bolder space-y-10 pb-10">
         <header className="ops-masthead">
         <h1 className="ops-title">Jobs &amp; Cleanup</h1>
         <JobStatusBar
