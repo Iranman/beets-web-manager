@@ -637,86 +637,6 @@ function ViewToggle({ view, onChange }: { view: LibraryView; onChange: (view: Li
   );
 }
 
-// An artist's sleeve in the flow: the artist image or first album cover the library payload already
-// carries (no extra request), else a lettered placard on sleeve paper.
-function ArtistFlowArt({ artist, libraryVersion }: { artist: LibraryArtist; libraryVersion?: number }) {
-  const name = displayArtistName(artist);
-  return (
-    <Artwork
-      className="h-full w-full"
-      fallback={<span className="cf-placard h-full w-full"><span>{name}</span></span>}
-      label=""
-      src={artistArtUrl(artist, libraryVersion)}
-    />
-  );
-}
-
-function ArtistFlow({
-  artists,
-  centerKey,
-  libraryVersion,
-  loading,
-  autoFocus,
-  onCenterKeyChange,
-  onSelectArtist,
-}: {
-  artists: LibraryArtist[];
-  centerKey: string;
-  libraryVersion?: number;
-  loading: boolean;
-  autoFocus: boolean;
-  onCenterKeyChange: (key: string) => void;
-  onSelectArtist: (artist: LibraryArtist) => void;
-}) {
-  const availableLetters = useMemo(() => new Set(artists.map(artistLetter)), [artists]);
-  const index = Math.max(0, artists.findIndex((artist) => artist.name === centerKey));
-  const current = artists[index];
-  const n = artists.length;
-  const item = (i: number): CoverFlowItem => {
-    const artist = artists[i];
-    const name = displayArtistName(artist);
-    return {
-      key: artist.name,
-      label: `Artist ${name}, ${i + 1} of ${n}`,
-      title: name,
-      subtitle: `${countLabel(artist.albums.length, 'album')} - ${countLabel(countTracks(artist), 'track')}`,
-      art: <ArtistFlowArt artist={artist} libraryVersion={libraryVersion} />,
-    };
-  };
-
-  return (
-    <section className="space-y-2">
-      {/* In the flow a letter jumps to its first artist instead of filtering; the centred artist's letter shows pressed. */}
-      <AlphabetIndex
-        active={current ? artistLetter(current) : 'all'}
-        available={availableLetters}
-        onChange={(letter) => {
-          const target = letter === 'all' ? artists[0] : artists.find((artist) => artistLetter(artist) === letter);
-          if (target) onCenterKeyChange(target.name);
-        }}
-      />
-      <h2 className="border-b border-graphite-800 pb-2 text-sm font-semibold text-zinc-300">
-        Artists - {numberFmt.format(n)}
-      </h2>
-      {loading ? (
-        <div className="crate rounded-sm p-4 text-sm text-zinc-300">Loading library…</div>
-      ) : n ? (
-        <CoverFlow
-          count={n}
-          index={index}
-          item={item}
-          autoFocus={autoFocus}
-          label="Artists"
-          onActivate={(i) => onSelectArtist(artists[i])}
-          onIndexChange={(i) => onCenterKeyChange(artists[i].name)}
-        />
-      ) : (
-        <div className="crate rounded-sm p-4 text-sm text-zinc-300">No matching artists.</div>
-      )}
-    </section>
-  );
-}
-
 function albumRowKey(row: AlbumRow) {
   return String(row.album.album_id || row.album.aldir || row.album.album);
 }
@@ -1159,15 +1079,12 @@ export default function Library() {
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState('');
   const [view, setView] = useState<LibraryView>(readLibraryView);
-  // The flows remember their centred sleeve by key, so a background reload never yanks them back.
-  // Seeded from the URL, so leaving a deep-linked artist (button or browser Back) centres that artist.
-  const [artistKey, setArtistKey] = useState(() => searchParams.get('artist') ?? '');
   // Focus follows an in-page drill-in or back, so the keyboard keeps working; a page load does not grab focus.
   const [flowFocus, setFlowFocus] = useState(false);
+  // The album flow remembers its centred sleeve by key, so a background reload never yanks it back.
   const [albumKey, setAlbumKey] = useState('');
-  // A new search or sort sends both flows to the first match.
+  // A new search or sort sends the album flow to the first match.
   function resetFlows() {
-    setArtistKey('');
     setAlbumKey('');
   }
   function changeView(next: LibraryView) {
@@ -1346,12 +1263,10 @@ export default function Library() {
   const albumMode = Boolean(selectedArtist);
   function handleSelectArtist(artist: LibraryArtist) {
     setSelectedArtistName(artist.name);
-    setArtistKey(artist.name);
     setAlbumKey('');
     setFlowFocus(true);
   }
   function backToArtists() {
-    if (selectedArtistName) setArtistKey(selectedArtistName);
     setFlowFocus(true);
     if ((location.state as { libraryDrillIn?: boolean } | null)?.libraryDrillIn) navigate(-1);
     else setSelectedArtistName('', true); // deep link: nothing of ours to pop
@@ -1405,7 +1320,8 @@ export default function Library() {
         <span className="text-muted">
           {`${numberFmt.format(filteredArtists.length)} artists visible`}
         </span>
-        <ViewToggle view={view} onChange={changeView} />
+        {/* Cover Flow / Grid toggle is album-only: the artist level is always the grid. */}
+        {albumMode ? <ViewToggle view={view} onChange={changeView} /> : null}
       </div>}
 
       {libraryEmpty ? null : <SearchRow
@@ -1442,17 +1358,8 @@ export default function Library() {
           onBack={backToArtists}
           onDetails={setDetailsRow}
         />
-      ) : view === 'coverflow' ? (
-        <ArtistFlow
-          artists={filteredArtists}
-          centerKey={artistKey}
-          libraryVersion={libraryVersion}
-          loading={loading && !data}
-          autoFocus={flowFocus}
-          onCenterKeyChange={setArtistKey}
-          onSelectArtist={handleSelectArtist}
-        />
       ) : (
+        // Artist level is always the grid; Cover Flow is album-only now.
         <ArtistBrowser
           artists={filteredArtists}
           letter={artistLetterFilter}
