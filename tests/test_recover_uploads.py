@@ -557,6 +557,21 @@ class ResumeAndOrphanCleanup(unittest.TestCase):
             self.assertFalse(orphan_empty.exists())
             self.assertTrue(orphan_audio.exists())
 
+    def test_prune_bails_when_map_read_fails(self):
+        # A read error (live set unknown) must delete nothing, as opposed to a
+        # genuinely empty map — never treat "no map" as "nothing referenced".
+        with tempfile.TemporaryDirectory() as tmp:
+            dl_root = Path(tmp) / "downloads"
+            recovered = dl_root / "recovered" / "youtube"
+            recovered.mkdir(parents=True)
+            orphan_empty = recovered / "oldrun-x"
+            orphan_empty.mkdir()
+            with mock.patch.object(recover_service, "_load_recover_url_map", return_value=None), \
+                 mock.patch.object(recover_service, "validated_downloads_root", return_value=str(dl_root)):
+                removed = recover_service._prune_orphan_recover_dirs()
+            self.assertEqual(removed, 0)
+            self.assertTrue(orphan_empty.exists())
+
 
 class SingleItemFetchRejectsCollections(unittest.TestCase):
     """F3: a channel/playlist/set URL is refused in the single-item fetch path

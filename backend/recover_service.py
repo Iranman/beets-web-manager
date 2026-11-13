@@ -1777,13 +1777,19 @@ _RECOVER_URL_MAP_LOCK = threading.Lock()
 _MAX_RECOVER_URL_MAP = 1000
 
 
-def _load_recover_url_map() -> Dict[str, str]:
-    """Current sanitized-URL -> staging-segment map (empty on any read error)."""
+def _load_recover_url_map() -> Optional[Dict[str, str]]:
+    """Current sanitized-URL -> staging-segment map.
+
+    Returns ``None`` on a read error (store unavailable / unreadable), which the
+    caller must treat as "live set unknown" — distinct from ``{}`` (a genuinely
+    empty but successfully-read map). Pruning bails on ``None`` so a transient
+    read failure can never be mistaken for "nothing is referenced".
+    """
     from backend.web_manager_config_store import get_config_store
     try:
         data = get_config_store().load_json(_RECOVER_URL_MAP_FILENAME, default={"map": {}})
     except Exception:
-        return {}
+        return None
     raw = (data or {}).get("map")
     if not isinstance(raw, dict):
         return {}
@@ -1856,7 +1862,13 @@ def _prune_orphan_recover_dirs() -> int:
         return 0
     if not base.is_dir():
         return 0
-    live = set(_load_recover_url_map().values())
+    url_map = _load_recover_url_map()
+    if url_map is None:
+        # Read error: the live set is UNKNOWN. Bail without deleting anything
+        # rather than treat "no map" as "nothing is referenced" and delete a dir
+        # a concurrent/pending run is still resuming.
+        return 0
+    live = set(url_map.values())
     removed = 0
     try:
         platform_dirs = [p for p in base.iterdir() if p.is_dir()]
@@ -1881,8 +1893,13 @@ def _prune_orphan_recover_dirs() -> int:
                 entries = list(child.iterdir())
             except OSError:
                 continue
+            # Immediate files only (not nested): a recover staging dir is flat --
+            # yt-dlp writes the audio and its sidecar directly into it -- so a
+            # top-level scan is enough to tell "holds recovered audio" from
+            # "empty / .part-only". If the layout ever gains subdirectories this
+            # guard must recurse before any dir is removed.
             if any(e.is_file() and e.suffix.lower() in _RECOVER_AUDIO_EXT for e in entries):
-                continue  # holds recovered audio — never delete it
+                continue  # holds recovered audio -- never delete it
             try:
                 shutil.rmtree(child)
                 removed += 1
