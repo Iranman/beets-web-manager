@@ -181,9 +181,9 @@ export function PluginsPanel() {
   }, [loadPluginStatus]);
 
   return (
-    <section className="space-y-2 rounded-md border border-graphite-800 bg-graphite-950/50 p-3">
-      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-zinc-200">Plugin Controls</h2>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="m-0 text-sm font-semibold text-zinc-100">Plugin Controls</h3>
         <Button size="small" variant="outlined" onClick={() => void loadPluginStatus()}>
           Refresh status
         </Button>
@@ -201,6 +201,6 @@ export function PluginsPanel() {
           which SEC-002 removed (no generic beet-command endpoint). They are gone until each gets its
           own job endpoint; a missing install still shows below. */}
       <MissingPluginSummary items={unavailable} />
-    </section>
+    </div>
   );
 }

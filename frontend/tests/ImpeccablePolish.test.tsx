@@ -85,7 +85,7 @@ describe('System integration status', () => {
 
   it('sets the page titles in the display serif', async () => {
     render(<Config />);
-    expect(screen.getByRole('heading', { level: 1, name: 'Settings' }).className).toContain('font-display');
+    expect(screen.getByRole('heading', { level: 1, name: 'Settings' }).className).toContain('ops-title');
     cleanup();
     render(<MemoryRouter><System /></MemoryRouter>);
     expect((await screen.findByRole('heading', { level: 1, name: 'System' })).className).toContain('lib-title');
