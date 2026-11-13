@@ -278,6 +278,14 @@ Gently rounded rectangles: 6px on buttons, inputs and chips, 8px on panels and c
 - Fields are 44px Walnut-on-black inputs with the Field Border and the global focus ring; 16px text below `sm` so phones do not zoom. Show/Hide is a full-height 44px text button inside the password field. Remember me is a 44px label row. Sign In is the one brass fill, full width, 44px.
 - Errors appear above the fields in a red panel with `role="alert"`, led by "Sign-In Error:", carrying the server's message (wrong password, rate limit) unchanged.
 - The flow, field ids, the default username and the messages are unchanged. No new fonts or images.
+### Settings: the one editing page
+- Settings is an Operate page: scanning and precision come before expression. It uses the ops frame: `.ops-page`, an `.ops-masthead` with the `ops-title` and the library counts as an `.ops-catalog` line (no stat tiles), then `.ops-split`.
+- **The index.** The split's aside is a `<nav aria-label="Settings sections">` of plain `#id` links (MusicBrainz, Music format, Plugins, config.yaml, Security). From 64rem it is a vertical list on a left rule and stays in view (`.ops-split-aside` is sticky). Below 64rem it is one row of `.ops-filter` links that scrolls sideways inside itself, never the page. Every entry is also a deep link (`/config#plugins`, `#config-yaml`, `#security`, `#musicbrainz`, `#music-format`).
+- **Deep links land.** The sections load at their own pace, so a hash target is scrolled to on mount and kept at the top while the page's height changes (a `ResizeObserver`), until the reader scrolls, clicks or types, or 8 seconds pass. Sections carry `scroll-mt-20` to clear the sticky header. The last section can only rise as far as the page's end allows.
+- **Sections** are open on a rule (`SettingsSection` in `views/Config.tsx`): an `h2` in `ops-section-title`, a one-line hint, the section's actions on the right, then the controls. Sub-groups are `h3`s in the sans. No panel in a panel.
+- **One wooden surface:** the preferred-format order, a `.crate` list with the rank in pale brass. Everything else is on the page background.
+- Checkbox and radio rows are labels at least 40px tall (44px on coarse pointers), with the brass accent. Up and Down name their format ("Move FLAC up"). MusicBrainz gaps are `.ops-figures`, green at zero and amber otherwise, always with the number.
+- No motion of its own.
 
 ## Do's and Don'ts
 
