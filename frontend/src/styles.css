@@ -29,6 +29,8 @@
 /* Hallmark · shape: app screen · genre: atmospheric · theme: locked (DESIGN.md, Record shelf) · redesign: full · scope: Workbench (views/Import.tsx, features/intake/IntakePanel.tsx, features/history/HistoryPanel.tsx) · signature: the new-arrivals bin, latest imports as sleeves with the six sections standing in front as dividers */
 /* Hallmark · Workbench pre-emit critique: P4 H4 E4 S4 R4 V4 · weakest: P, Review Queue, Find Music and Library Changes keep their pre-existing internals */
 /* Hallmark · Workbench answered 74 (remapped theme scales), F24 (dialogs keep edge plus shadow) · the divider lift is the page's one motion moment and is off under reduced motion */
+/* Hallmark · shape: app screen · genre: atmospheric · theme: locked (DESIGN.md, Record shelf) · redesign: full · scope: Submissions (views/Submissions.tsx) · signature: the checking counter, the release being checked lies on walnut with its sleeve set down on it · title now the display serif via .ops-title */
+/* Hallmark · Submissions pre-emit critique: P4 H4 E4 S4 R4 V4 · weakest: P, ArtistResolutionCard and SubmissionReadinessCard keep their own boxed internals; answered 74 (remapped theme scales) */
 @import "tailwindcss";
 
 @theme {
@@ -1289,6 +1291,37 @@ body {
     font-size: 0.8125rem;
     font-variant-numeric: tabular-nums;
     color: var(--color-brass-200);
+  }
+  /* Submissions: the checking counter. The release being checked lies on walnut; its sleeve is set
+     down on the counter each time a new one is picked (the page's one motion moment). */
+  .ops-counter {
+    padding: clamp(1.25rem, 1rem + 1.5vw, 2.25rem);
+    border-radius: 10px;
+    border: 1px solid var(--ops-wood-rule);
+    background-color: var(--ops-wood);
+    background-image: var(--ops-grain), linear-gradient(180deg, var(--ops-sheen), transparent 45%);
+    background-size: 520px 180px, auto;
+  }
+  .ops-counter .ops-catalog:empty {
+    display: none;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .ops-counter-sleeve {
+      animation: ops-set-down 280ms ease-out;
+    }
+  }
+  @keyframes ops-set-down {
+    from {
+      transform: translateY(-0.75rem) rotate(-2deg);
+      opacity: 0.6;
+    }
+    to {
+      transform: none;
+      opacity: 1;
+    }
+  }
+  .ops-pipeline > li.is-done {
+    color: var(--color-zinc-300);
   }
   @media (prefers-reduced-motion: reduce) {
     .ops-tonearm,
