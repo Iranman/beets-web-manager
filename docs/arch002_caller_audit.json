@@ -413,6 +413,10 @@
       "CANONICAL_FINAL_DECISION",
       "Applies decide_slot outcomes; non-destructive outcomes hold both rows."
     ],
+    "backend/listenbrainz_mapping.py::verify_mapping": [
+      "CANDIDATE_GENERATION_ONLY",
+      "Filters a ListenBrainz MBID mapping (tier-5 text evidence) against a MusicBrainz recording lookup: the 'similarity('/TITLE_STRONG/ARTIST_STRONG/DURATION_TOLERANCE_SECONDS hits only drop a disagreeing mapping. A survivor is returned as a candidate always marked review_required; it carries no embedded-ID or fingerprint proof, so the canonical recording evaluator never attaches identity from it (playlist suggestions add it with safe=False; library/AI suggest merge it only when AcoustID gave no answer). Narrows, never decides."
+    ],
     "backend/matching/duplicate_identity.py::compare_raw_fingerprints": [
       "SAFE_SPECIALIZED_EVIDENCE",
       "Local raw-fingerprint (fpcalc -raw) bit-error-rate comparison: supporting same/different/inconclusive audio evidence for duplicate grouping only; never sets identity and never authorises a merge or delete."

@@ -51,7 +51,7 @@ used by several domains lives in the lowest layer that uses it
 |---|---|---|
 | 0 | `backend/app_runtime.py` | process config, env boot, primitives (`_s`, `_extract_mb_uuid`), `jobs`/`transactions` singletons, `_app_logger`, the registered Flask app handle |
 | 1 | `auth_service`, `config_service`, `setup_service`, `job_service`, `serializers` | HTTP auth/CSRF/rate limits, config persistence, first-run state, job helpers, response shaping |
-| 2 | `plex_service`, `acoustid_service`, `artwork_service`, `slskd_service`, `matching_service`, `musicbrainz_service` | providers; `matching_service` is adapters over `backend.matching` only |
+| 2 | `plex_service`, `acoustid_service`, `artwork_service`, `slskd_service`, `matching_service`, `musicbrainz_service`, `listenbrainz_mapping` | providers; `matching_service` is adapters over `backend.matching` only |
 | 3 | `cleanup_service`, `ytdlp_service`, `playlist_service` | album/folder cleanup, yt-dlp/SpotiFLAC, playlists |
 | 4 | `ai_batch_state_service`, `import_reconciliation_service`, `pending_review_store`, `ai_evidence_service`, `library_service` | AI batch state, reconciliation orchestration, the review queue store, AI evidence, library/artist/album |
 | 5 | `ai_service`, `import_service`, `acquisition_service`, `replacement_service`, `maintenance_service`, `import_review_service`, `dedup_service`, `transaction_service` | workflows |

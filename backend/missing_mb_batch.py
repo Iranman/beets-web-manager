@@ -291,7 +291,7 @@ def prove_item(item_id: int, row: Optional[Dict[str, Any]] = None) -> Dict[str, 
     if current["mb_trackid"]:
         return _proof("item", item_id, row_id, ["already_has_recording_id"], {}, {}, current)
 
-    _cur, candidates, item_path, _fn = _reconstruct_track_recording_candidates(item, item_id)
+    _cur, candidates, item_path, _fn = _reconstruct_track_recording_candidates(item, item_id, listenbrainz=False)
     reasons: List[str] = []
     outcome = _acoustid_lookup_cached_outcome(item_path) if item_path else None
     fingerprint = confirmed_recording(list(outcome.data or [])) if outcome is not None and outcome.answered else ""
