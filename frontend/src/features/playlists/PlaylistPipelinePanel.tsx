@@ -58,6 +58,7 @@ const PLAYLIST_JOB_STORAGE_KEY = 'beets-playlist-download-job-id';
 const PLAYLIST_LAST_JOB_STORAGE_KEY = 'beets-playlist-download-last-job-id';
 
 const LINK_SOURCE_OPTIONS: Array<{ value: PlaylistSource; label: string }> = [
+  { value: 'local_m3u', label: 'Local M3U' },
   { value: 'url', label: 'Playlist URL' },
   { value: 'text', label: 'Track list' },
 ];
@@ -343,7 +344,9 @@ export function PlaylistPipelinePanel({
     [playlists],
   );
   const activePlaylist = selectedPlaylist || (!selectedName ? fallbackResumablePlaylist : undefined);
-  const activeName = activePlaylist?.name || selectedName;
+  // A ?playlist= that names no saved playlist counts as no selection.
+  const activeName = activePlaylist?.name ?? '';
+  const unknownPlaylist = Boolean(selectedName && !loadingPlaylists && !playlistError && !selectedPlaylist);
   const counts = detail?.counts ?? {};
 
   const loadPlaylists = useCallback(async () => {
@@ -378,6 +381,11 @@ export function PlaylistPipelinePanel({
   useEffect(() => {
     void loadPlaylists();
   }, [loadPlaylists]);
+
+  // Follow ?playlist= when the link changes while this tab is open.
+  useEffect(() => {
+    setSelectedName(initialPlaylist);
+  }, [initialPlaylist]);
 
   useEffect(() => {
     setGroupRows({});
@@ -773,6 +781,9 @@ export function PlaylistPipelinePanel({
           {playlistError ? (
             <Alert severity="error">Saved playlists could not be loaded: {playlistError}. Refresh the page to try again.</Alert>
           ) : null}
+          {unknownPlaylist ? (
+            <Alert severity="warning">No saved playlist is named &quot;{selectedName}&quot;. Pick one from the list.</Alert>
+          ) : null}
 
           <div aria-live="polite">
             <p className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
@@ -837,7 +848,13 @@ export function PlaylistPipelinePanel({
               >
                 Clear Checkpoint
               </Button>
-            ) : null}
+            ) : (
+              <ActionMenu
+                label="More"
+                disabled={!activeName || pipelineIsActive}
+                actions={[{ label: 'Clear Job Status', onClick: () => void handlePipelineAction('clear'), danger: true }]}
+              />
+            )}
           </div>
 
           {notice ? <Alert severity={notice.severity} onClose={() => setNotice(null)}>{notice.message}</Alert> : null}
@@ -944,7 +961,7 @@ export function PlaylistPipelinePanel({
             </label>
             <label className="flex min-w-0 flex-col gap-1 text-sm text-zinc-300">
               Source
-              <select className="ops-field w-full min-w-0" value={linkSource} onChange={(event) => setLinkSource(event.target.value as PlaylistSource)}>
+              <select className="ops-field w-full min-w-0" value={linkSource} onChange={(event) => { setLinkSource(event.target.value as PlaylistSource); setLinkContent(''); }}>
                 {LINK_SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </label>
@@ -955,7 +972,22 @@ export function PlaylistPipelinePanel({
               </select>
             </label>
           </div>
-          {linkSource === 'url' ? (
+          {linkSource === 'local_m3u' ? (
+            <label className="flex min-w-0 flex-col gap-1 text-sm text-zinc-300">
+              Local M3U playlist
+              <select
+                className="ops-field w-full min-w-0"
+                value={linkContent}
+                onChange={(event) => {
+                  setLinkContent(event.target.value);
+                  if (!linkName.trim()) setLinkName(event.target.value);
+                }}
+              >
+                <option value="">Select a playlist from the configured folder</option>
+                {playlists.map((playlist) => <option key={playlist.name} value={playlist.name}>{playlist.name}</option>)}
+              </select>
+            </label>
+          ) : linkSource === 'url' ? (
             <label className="flex min-w-0 flex-col gap-1 text-sm text-zinc-300">
               Playlist URL
               <input

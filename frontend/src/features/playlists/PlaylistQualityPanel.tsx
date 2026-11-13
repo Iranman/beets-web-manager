@@ -119,6 +119,11 @@ export function PlaylistQualityPanel({
     void loadPlaylists();
   }, [loadPlaylists]);
 
+  // Follow ?playlist= when the link changes while this drawer is open.
+  useEffect(() => {
+    setSelectedName(initialPlaylist);
+  }, [initialPlaylist]);
+
   // With no deep link, start on the first playlist that has review rows.
   useEffect(() => {
     if (selectedName || !playlists.length) return;
@@ -149,7 +154,8 @@ export function PlaylistQualityPanel({
   }, [selectedName, loadRows]);
 
   const selectedPlaylist = playlists.find((playlist) => playlist.name === selectedName);
-  // Same gate as before the move: no repair while this playlist's pipeline runs.
+  // No repair while the server reports this playlist's last_pipeline.status as 'running'
+  // (read from the saved-playlist list, refreshed after each queued job).
   const downloadRunning = selectedPlaylist?.last_pipeline?.status === 'running';
   const qualityRows = useMemo(
     () => (rows ?? []).filter((track) => track.quality && track.quality !== 'ok'),
@@ -263,7 +269,7 @@ export function PlaylistQualityPanel({
       <label className="flex max-w-md flex-col gap-1 text-sm text-zinc-300">
         Playlist
         <select
-          className="ops-field w-full min-w-0"
+          className="ops-field box-border w-full min-w-0"
           value={selectedName}
           onChange={(event) => setSelectedName(event.target.value)}
           disabled={loadingPlaylists}

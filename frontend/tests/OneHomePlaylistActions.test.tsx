@@ -11,6 +11,7 @@ import {
   getPlaylists,
   getPlaylistSyncStatus,
   runPlaylistPipelineAction,
+  startPlaylistDownload,
 } from '../src/api/client';
 import { PlaylistPipelinePanel } from '../src/features/playlists/PlaylistPipelinePanel';
 import { PlaylistQualityPanel } from '../src/features/playlists/PlaylistQualityPanel';
@@ -110,6 +111,56 @@ describe('playlist actions have one home', () => {
     render(<MemoryRouter><PlaylistPipelinePanel /></MemoryRouter>);
     await screen.findByText('No saved playlists yet');
     expect(screen.getByRole('button', { name: 'Run Pipeline' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('Workbench keeps Clear Job Status reachable for an idle playlist', async () => {
+    vi.mocked(getPlaylists).mockResolvedValue({ ok: true, playlists: [PLAYLIST] } as never);
+    vi.mocked(getPlaylistDetails).mockResolvedValue({ ok: true, name: PLAYLIST.name } as never);
+    vi.mocked(runPlaylistPipelineAction).mockResolvedValue({ ok: true } as never);
+    render(<MemoryRouter><PlaylistPipelinePanel initialPlaylist="Late Night Drive" /></MemoryRouter>);
+    const more = await screen.findByRole('button', { name: 'More' });
+    await waitFor(() => expect(more.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(more);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Clear Job Status' }));
+    await waitFor(() => expect(runPlaylistPipelineAction).toHaveBeenCalledWith('Late Night Drive', 'clear'));
+  });
+
+  it('Workbench treats a ?playlist= that names no saved playlist as no selection', async () => {
+    vi.mocked(getPlaylists).mockResolvedValue({ ok: true, playlists: [PLAYLIST] } as never);
+    render(<MemoryRouter><PlaylistPipelinePanel initialPlaylist="Gone Mix" /></MemoryRouter>);
+    expect(await screen.findByText(/No saved playlist is named "Gone Mix"/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Run Pipeline' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByRole('heading', { name: 'Single tracks' })).toBeNull();
+    expect(getPlaylistDetails).not.toHaveBeenCalled();
+  });
+
+  it('Workbench follows a changed ?playlist= while the tab is open', async () => {
+    const other = { ...PLAYLIST, name: 'Sunday Records' };
+    vi.mocked(getPlaylists).mockResolvedValue({ ok: true, playlists: [PLAYLIST, other] } as never);
+    vi.mocked(getPlaylistDetails).mockResolvedValue({ ok: true } as never);
+    const { rerender } = render(<MemoryRouter><PlaylistPipelinePanel initialPlaylist="Late Night Drive" /></MemoryRouter>);
+    await waitFor(() => expect(getPlaylistDetails).toHaveBeenCalledWith('Late Night Drive', { mode: 'summary' }));
+    rerender(<MemoryRouter><PlaylistPipelinePanel initialPlaylist="Sunday Records" /></MemoryRouter>);
+    await waitFor(() => expect(getPlaylistDetails).toHaveBeenCalledWith('Sunday Records', { mode: 'summary' }));
+  });
+
+  it('Workbench link download offers Local M3U and sends the same payload as before', async () => {
+    vi.mocked(getPlaylists).mockResolvedValue({ ok: true, playlists: [PLAYLIST] } as never);
+    vi.mocked(startPlaylistDownload).mockResolvedValue({ ok: true, job_id: 'dl-1' } as never);
+    render(<MemoryRouter><PlaylistPipelinePanel /></MemoryRouter>);
+    await screen.findByText('Pick a saved playlist');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Source' }), { target: { value: 'local_m3u' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Local M3U playlist' }), { target: { value: 'Late Night Drive' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Download Missing & Sync' }));
+    const dialog = await screen.findByRole('dialog');
+    const confirmButtons = within(dialog).getAllByRole('button');
+    fireEvent.click(confirmButtons[confirmButtons.length - 1]);
+    await waitFor(() => expect(startPlaylistDownload).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'Late Night Drive',
+      source: 'local_m3u',
+      content: 'Late Night Drive',
+      sync_after_import: true,
+    })));
   });
 
   it('Workbench Delete Staged Download keeps its confirmation', async () => {
