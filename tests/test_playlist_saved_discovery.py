@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = app_family_source()
 PAGE_SOURCE = (ROOT / "frontend" / "src" / "views" / "Playlists.tsx").read_text(encoding="utf-8")
 TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
+# Run/Resume/Clear Checkpoint live on the Workbench's Playlist Downloads panel.
+PANEL_SOURCE = (ROOT / "frontend" / "src" / "features" / "playlists" / "PlaylistPipelinePanel.tsx").read_text(encoding="utf-8")
 
 
 class PlaylistSavedDiscoveryTests(unittest.TestCase):
@@ -37,8 +39,8 @@ class PlaylistSavedDiscoveryTests(unittest.TestCase):
         self.assertIn('"has_checkpoint"', APP_SOURCE)
         self.assertIn('checkpoint orphaned', APP_SOURCE)
         self.assertIn('Checkpoint only', PAGE_SOURCE)
-        self.assertIn('fallbackResumablePlaylist', PAGE_SOURCE)
-        self.assertIn("handleSavedPlaylistPipelineAction(activePlaylist, 'resume')", PAGE_SOURCE)
+        self.assertIn('fallbackResumablePlaylist', PANEL_SOURCE)
+        self.assertIn("hasResumablePipeline ? 'resume' : 'run-full'", PANEL_SOURCE)
 
     def test_manifest_or_checkpoint_is_valid_for_details_and_pipeline(self):
         self.assertIn('def _playlist_saved_playlist_exists', APP_SOURCE)
@@ -66,12 +68,13 @@ class PlaylistSavedDiscoveryTests(unittest.TestCase):
         )
         self.assertIn('desired_source="checkpoint"', APP_SOURCE)
         self.assertIn('"duration_ms": duration_ms', APP_SOURCE)
-    def test_resume_pipeline_is_primary_for_interrupted_rows(self):
+    def test_interrupted_rows_link_to_the_workbench_for_resume(self):
         row_actions = PAGE_SOURCE[PAGE_SOURCE.index('const savedPlaylistRowActions'):PAGE_SOURCE.index('return (', PAGE_SOURCE.index('const savedPlaylistRowActions'))]
-        self.assertLess(row_actions.index("label: 'Resume Pipeline'"), row_actions.index("label: 'Run Pipeline'"))
-        self.assertIn("label: 'Clear Checkpoint'", row_actions)
-        self.assertIn('Resume Pipeline', PAGE_SOURCE)
-        self.assertNotIn('>\n                          Resume\n                        </Button>', PAGE_SOURCE)
+        self.assertIn("label: 'Open in Workbench'", row_actions)
+        self.assertNotIn("label: 'Resume Pipeline'", row_actions)
+        self.assertNotIn("label: 'Clear Checkpoint'", row_actions)
+        self.assertIn("hasResumablePipeline ? 'Resume Pipeline' : 'Run Pipeline'", PANEL_SOURCE)
+        self.assertIn('Clear Checkpoint', PANEL_SOURCE)
 
     def test_saved_playlist_filters_and_metrics_are_visible(self):
         self.assertIn('type SavedPlaylistFilter', PAGE_SOURCE)

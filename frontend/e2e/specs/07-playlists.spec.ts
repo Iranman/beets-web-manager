@@ -3,9 +3,16 @@ import { expect, test } from '../fixtures';
 test('empty state, and actions stay disabled until there is input', async ({ page }) => {
   await page.goto('/playlists');
   await expect(page.getByRole('main').getByRole('alert')).toHaveText('No playlists have been saved yet.');
-  await expect(page.getByRole('button', { name: 'Run Pipeline' })).toBeDisabled();
+  // Pipeline runs live on the Workbench, not here.
+  await expect(page.getByRole('button', { name: 'Run Pipeline' })).toHaveCount(0);
   await page.getByRole('button', { name: /Add or Import Playlist/ }).click();
   await expect(page.getByRole('button', { name: 'Preview Matches' })).toBeDisabled();
+});
+
+test('Run Pipeline lives on the Workbench and waits for a saved playlist', async ({ page }) => {
+  await page.goto('/import?tab=playlists');
+  await expect(page.getByRole('heading', { name: 'Playlist Downloads' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Run Pipeline' })).toBeDisabled();
 });
 
 test('a track list previews against the library and marks what is already owned', async ({ page }) => {

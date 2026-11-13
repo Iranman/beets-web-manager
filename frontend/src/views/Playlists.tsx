@@ -1,40 +1,32 @@
-import { formatShortDateTime, formatShortTime } from '../lib/dates';
+import { formatShortTime } from '../lib/dates';
 import { useInterval } from '../lib/hooks';
 import { errorMessage, panelError } from '../lib/errors';
-import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
-import Menu from '@mui/material/Menu';
-import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import {
   applySafePlaylistSuggestions,
-  cleanupPlaylistQuality,
   createPlaylist,
   deletePlaylist,
   applyPlaylistTrackAction,
   getJob,
   getPlaylistDetails,
-  getPlaylistDownloadStatus,
   getPlaylistRows,
   getPlaylistSyncStatus,
   getPlaylists,
   getPlaylistSuggestions,
-  placePlaylistQuality,
   parsePlaylist,
   resolvePlaylistTrack,
   runPlaylistPipelineAction,
-  startPlaylistDownload,
   syncPlaylists,
   apiErrorBody,
 } from '../api/client';
 import type {
   PlaylistCreateResponse,
-  PlaylistDownloadStatusResponse,
   PlaylistDetailResponse,
   PlaylistEntry,
   PlaylistMatchedTrack,
@@ -46,15 +38,28 @@ import type {
   PlaylistTrack,
   PlaylistTrackSuggestion,
 } from '../api/types';
-import { LogViewer } from '../components/LogViewer';
 import { useEngineOffline } from '../components/EngineOfflineBanner';
 import { MusicBrainzUnavailableNotice, fingerprintNotCheckedLabel } from '../components/MusicBrainzUnavailableNotice';
 import { PlaylistSyncSummary, playlistSyncStatusLabel } from '../features/playlists/PlaylistSyncSummary';
-
-type Notice = {
-  severity: 'info' | 'success' | 'warning' | 'error';
-  message: string;
-};
+import {
+  ActionMenu,
+  canonicalNote,
+  durationLabel,
+  isFailedReviewTrack,
+  isWaitingImportTrack,
+  matchedAsTracks,
+  normalizedPlaylistStatus,
+  playlistHasResumableCheckpoint,
+  playlistPollDelay,
+  playlistStatusMessage,
+  playlistStatusSeverity,
+  qualityColor,
+  statusLabel,
+  trackKey,
+  type MenuAction,
+  type Notice,
+  type PlaylistPipelineAction,
+} from '../features/playlists/playlistShared';
 
 type ResolveDraft = {
   key: string;
@@ -63,29 +68,20 @@ type ResolveDraft = {
   title: string;
 };
 
-type PlaylistPipelineAction =
-  | 'sync-sources'
-  | 'download-missing'
-  | 'import-downloaded'
-  | 'sync-plex'
-  | 'reconcile-state'
-  | 'run-full'
-  | 'resume'
-  | 'pause'
-  | 'stop'
-  | 'clear';
-
 type TrackGroupId = 'available' | 'missing' | 'waiting' | 'failed' | 'pending_plex' | 'removed';
 
 const PLAYLIST_ROW_PAGE_SIZE = 100;
 const PLAYLIST_SYNC_STATUS_POLL_MS = 60_000;
-const PLAYLIST_DOWNLOAD_POLL_MS = 3_000;
-const PLAYLIST_DOWNLOAD_RETRY_POLL_MS = 6_000;
 const PLAYLIST_PIPELINE_JOB_POLL_MS = 5_000;
-const PLAYLIST_HIDDEN_POLL_MS = 15_000;
 
-function playlistPollDelay(ms: number): number {
-  return typeof document !== 'undefined' && document.hidden ? Math.max(ms, PLAYLIST_HIDDEN_POLL_MS) : ms;
+// Downloads, imports and pipeline runs live on the Workbench; review-row repair and
+// placement live on Jobs & Cleanup. This page links there and does neither itself.
+function workbenchPath(playlistName: string): string {
+  return `/import?tab=playlists&playlist=${encodeURIComponent(playlistName)}`;
+}
+
+function reviewRowsPath(playlistName: string): string {
+  return `/jobs?tab=playlist-repair&playlist=${encodeURIComponent(playlistName)}`;
 }
 
 const TRACK_GROUP_LABELS: Record<TrackGroupId, string> = {
@@ -97,36 +93,12 @@ const TRACK_GROUP_LABELS: Record<TrackGroupId, string> = {
   removed: 'Removed/Excluded',
 };
 
+// Download and import retries (retry_download, retry_import, delete_staged) live on the
+// Workbench's Playlist Downloads tab; this page keeps the playlist's own membership.
 type TrackAction =
   | 'remove'
   | 'exclude'
-  | 'restore'
-  | 'delete_staged'
-  | 'retry_download'
-  | 'retry_import';
-
-type MenuAction = {
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  danger?: boolean;
-};
-
-type QualityPlaceDraft = {
-  itemId: number;
-  artist: string;
-  title: string;
-  albumartist: string;
-  album: string;
-  year: string;
-  track: string;
-  disc: string;
-  tracktotal: string;
-  disctotal: string;
-  mbTrackId: string;
-  mbAlbumId: string;
-  mbReleaseGroupId: string;
-};
+  | 'restore';
 
 const SOURCE_OPTIONS: Array<{ value: PlaylistSource; label: string }> = [
   { value: 'local_m3u', label: 'Local M3U' },
@@ -134,20 +106,9 @@ const SOURCE_OPTIONS: Array<{ value: PlaylistSource; label: string }> = [
   { value: 'text', label: 'Track list' },
 ];
 
-const DOWNLOAD_METHOD_OPTIONS = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'slskd', label: 'SLSKD' },
-  { value: 'spotiflac', label: 'SpotiFLAC' },
-  { value: 'ytdlp', label: 'YouTube' },
-  { value: 'soundcloud', label: 'SoundCloud' },
-];
-
 const sampleTrackList = `Pink Floyd - Breathe
 Radiohead - Creep
 The Beatles - Come Together`;
-
-const PLAYLIST_JOB_STORAGE_KEY = 'beets-playlist-download-job-id';
-const PLAYLIST_LAST_JOB_STORAGE_KEY = 'beets-playlist-download-last-job-id';
 
 // SEC-002 CodeQL repository-wide closure finding (alerts #4-#8,
 // js/incomplete-url-substring-sanitization): platformLabel() only ever
@@ -195,53 +156,10 @@ function platformLabel(value: string): { label: string; tone: string } {
   return { label: 'URL', tone: 'border-graphite-700 text-zinc-300' };
 }
 
-function playlistStatusMessage(result: PlaylistCreateResponse | null | undefined): string {
-  if (!result) return '';
-  const tracks = result.tracks_in_m3u ?? 0;
-  const desired = result.desired_tracks ?? tracks;
-  const missing = result.missing_tracks ?? 0;
-  const plex = result.plex ?? {};
-  const parts = [`M3U saved with ${tracks.toLocaleString()}${desired > tracks ? ` of ${desired.toLocaleString()}` : ''} track${tracks === 1 ? '' : 's'}`];
-  if (missing) parts.push(`${missing.toLocaleString()} still unavailable`);
-  const matched = plex.tracks_matched ?? plex.tracks_added ?? 0;
-  const pending = plex.pending_plex_count ?? plex.tracks_unmatched ?? 0;
-  if (plex.error || plex.status === 'failed') {
-    parts.push(plex.error || plex.summary_message || plex.issue_reason || 'Plex sync failed');
-    if ((plex.issue_reason || '').toLowerCase().includes('path mapping') && plex.path_mapping_used) {
-      parts.push(`Path map ${plex.path_mapping_used}`);
-    }
-  } else if (plex.created && (plex.status === 'partial_success' || plex.status === 'partial' || pending > 0)) {
-    parts.push(`Plex playlist updated with ${matched.toLocaleString()} track${matched === 1 ? '' : 's'}; ${pending.toLocaleString()} pending Plex match${pending === 1 ? '' : 'es'}`);
-  } else if (plex.created) {
-    const verified = plex.verified_count ?? plex.tracks_added ?? matched;
-    parts.push(`Plex synced ${verified.toLocaleString()} track${verified === 1 ? '' : 's'}`);
-  } else {
-    parts.push('Plex not configured');
-  }
-  return parts.join(' · ');
-}
-
-function playlistStatusSeverity(result: PlaylistCreateResponse | null | undefined): Notice['severity'] {
-  const plex = result?.plex;
-  if (!plex) return 'success';
-  if (plex.error || plex.status === 'failed') return 'error';
-  if (plex.status === 'partial_success' || plex.status === 'partial' || (plex.pending_plex_count ?? plex.tracks_unmatched ?? 0) > 0) return 'warning';
-  if (plex.status === 'not_configured' || (!plex.created && !plex.error)) return 'info';
-  return 'success';
-}
-
 function queryLabel(track: PlaylistMatchedTrack): string {
   const artist = track.query_artist || track.artist || '';
   const title = track.query_title || track.title || '';
   return [artist, title].filter(Boolean).join(' - ');
-}
-
-function canonicalNote(track: PlaylistTrack | PlaylistMatchedTrack): string {
-  if (!track.canonicalized) return '';
-  const source = [track.source_artist, track.source_title].filter(Boolean).join(' - ');
-  const current = [track.artist, track.title].filter(Boolean).join(' - ');
-  if (!source || source === current) return '';
-  return `corrected from ${source}`;
 }
 
 function scoreLabel(score: number | undefined): string {
@@ -254,61 +172,6 @@ function suggestionLabel(suggestion: PlaylistTrackSuggestion): string {
   const confidence = scoreLabel(suggestion.confidence);
   const source = suggestion.source === 'beets-title' ? 'beets' : suggestion.source;
   return `${suggestion.artist ? `${suggestion.artist} - ` : ''}${suggestion.title}${confidence ? ` · ${confidence}` : ''} · ${source}`;
-}
-
-function durationLabel(seconds: number | undefined): string {
-  if (!seconds || Number.isNaN(seconds)) return '';
-  const minutes = Math.floor(seconds / 60);
-  const rest = Math.round(seconds % 60).toString().padStart(2, '0');
-  return `${minutes}:${rest}`;
-}
-
-function optionalNumber(value: string): number | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function yearDraft(value: number | undefined): string {
-  if (!value || value < 1000 || value > 9999) return '';
-  return String(value);
-}
-
-function qualityPlaceDraftForTrack(track: PlaylistMatchedTrack): QualityPlaceDraft {
-  return {
-    itemId: track.id,
-    artist: track.artist || track.query_artist || '',
-    title: track.title || track.query_title || '',
-    albumartist: track.albumartist || track.artist || track.query_artist || '',
-    album: track.album && track.album !== 'Unknown' ? track.album : '',
-    year: yearDraft(track.year),
-    track: track.track && track.track > 0 ? String(track.track) : '',
-    disc: track.disc && track.disc > 0 ? String(track.disc) : '1',
-    tracktotal: '',
-    disctotal: '1',
-    mbTrackId: '',
-    mbAlbumId: '',
-    mbReleaseGroupId: '',
-  };
-}
-
-function qualityColor(quality: string | undefined): 'success' | 'warning' | 'error' | 'default' {
-  if (quality === 'bad') return 'error';
-  if (quality === 'review') return 'warning';
-  if (quality === 'ok') return 'success';
-  return 'default';
-}
-
-function statusTone(status: string): string {
-  if (status === 'matched' || status === 'downloaded' || status === 'waiting_import') return 'text-success';
-  if (status === 'searching' || status === 'importing' || status === 'queued') return 'text-info';
-  if (status === 'failed' || status === 'source_failed') return 'text-danger-text';
-  return 'text-zinc-300';
-}
-
-function statusLabel(status: string): string {
-  return status.replace(/_/g, ' ');
 }
 
 function identityEvidenceLabel(track: PlaylistTrack): string {
@@ -336,106 +199,12 @@ function identityEvidenceLabel(track: PlaylistTrack): string {
   return parts.join(' · ');
 }
 
-function metric(label: string, value: number | string, tone = 'text-zinc-100') {
-  return (
-    <div className="min-w-0 border-t border-graphite-800 pt-1.5">
-      <div className={`text-lg font-semibold tabular-nums ${tone}`}>{value}</div>
-      <div className="mt-0.5 text-xs text-muted">{label}</div>
-    </div>
-  );
-}
-
-function compactStat(label: string, value: number | string, tone = 'text-zinc-300') {
-  return (
-    <span className={`inline-flex items-baseline text-xs ${tone}`}>
-      <span className="font-semibold tabular-nums">{value}</span>
-      <span className="ml-1 text-muted">{label}</span>
-    </span>
-  );
-}
-
-function isWaitingImportTrack(track: PlaylistTrack): boolean {
-  const status = (track.pipeline_status || '').toString().toLowerCase();
-  return Boolean(track.staged_path) || status === 'downloaded' || status === 'waiting_import' || status === 'importing';
-}
-
-function isFailedReviewTrack(track: PlaylistTrack): boolean {
-  const status = (track.pipeline_status || '').toString().toLowerCase();
-  return status === 'failed' || status === 'source_failed' || status === 'review_required' || Boolean(track.failure_reason);
-}
-
-function ActionMenu({
-  label = 'Actions',
-  actions,
-  disabled,
-  color = 'primary',
-}: {
-  label?: string;
-  actions: MenuAction[];
-  disabled?: boolean;
-  color?: 'primary' | 'warning';
-}) {
-  const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
-  const visibleActions = actions.filter(Boolean);
-  if (!visibleActions.length) return null;
-  const open = Boolean(anchorEl);
-  return (
-    <>
-      <Button
-        variant="outlined"
-        size="small"
-        color={color}
-        disabled={disabled}
-        onClick={(event) => setAnchorEl(event.currentTarget)}
-      >
-        {label}
-      </Button>
-      <Menu
-        anchorEl={anchorEl}
-        open={open}
-        onClose={() => setAnchorEl(null)}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-      >
-        {visibleActions.map((action, idx) => (
-          <MenuItem
-            key={`${action.label}:${idx}`}
-            disabled={action.disabled}
-            sx={action.danger ? { color: 'error.main' } : undefined}
-            onClick={() => {
-              setAnchorEl(null);
-              action.onClick();
-            }}
-          >
-            {action.label}
-          </MenuItem>
-        ))}
-      </Menu>
-    </>
-  );
-}
-
-function trackKey(track: PlaylistTrack): string {
-  return `${(track.artist || '').toLowerCase()}|${(track.title || '').toLowerCase()}|${track.path || ''}`;
-}
-
 function suggestionRowsByTrack(rows: PlaylistSuggestionRow[]): Map<string, PlaylistSuggestionRow> {
   const map = new Map<string, PlaylistSuggestionRow>();
   rows.forEach((row) => {
     map.set(trackKey(row.track), row);
   });
   return map;
-}
-
-function matchedAsTracks(items: PlaylistMatchedTrack[]): PlaylistTrack[] {
-  return items.map((item) => ({
-    artist: item.query_artist || item.artist || '',
-    title: item.query_title || item.title || '',
-    source_artist: item.source_artist,
-    source_title: item.source_title,
-    canonicalized: item.canonicalized,
-    canonical_source: item.canonical_source,
-  }));
 }
 
 function allTracksFromResult(result: PlaylistParseResponse | null): PlaylistTrack[] {
@@ -448,34 +217,6 @@ function playlistCoverageNote(playlist: PlaylistEntry): string {
   if (playlist.m3u_tracks === undefined || playlist.m3u_tracks === playlist.tracks) return '';
   const source = playlist.desired_source === 'checkpoint' ? 'checkpoint' : 'desired';
   return `M3U ${playlist.m3u_tracks.toLocaleString()} · ${source} ${playlist.tracks.toLocaleString()}`;
-}
-
-const RESUMABLE_PLAYLIST_STATUSES = new Set(['interrupted', 'paused', 'stopped', 'failed', 'error']);
-const DIRECT_RESUME_PLAYLIST_STATUSES = new Set(['interrupted', 'paused', 'stopped']);
-const FAILED_RESUME_PLAYLIST_STATUSES = new Set(['failed', 'error']);
-
-function normalizedPlaylistStatus(value?: string | null): string {
-  return String(value || '').trim().toLowerCase();
-}
-
-function playlistHasResumableCheckpoint(
-  detail?: Partial<PlaylistDetailResponse> | null,
-  playlist?: Partial<PlaylistEntry> | null,
-): boolean {
-  const checkpointStatus = normalizedPlaylistStatus(detail?.checkpoint_status || playlist?.checkpoint_status);
-  const checkpointPhase = normalizedPlaylistStatus(detail?.checkpoint_phase || playlist?.checkpoint_phase);
-  const lastPipelineStatus = normalizedPlaylistStatus(detail?.last_pipeline?.status || playlist?.last_pipeline?.status);
-  const hasCheckpointEvidence = Boolean(
-    detail?.checkpoint_job_id
-      || playlist?.checkpoint_job_id
-      || detail?.checkpoint_updated_at
-      || playlist?.checkpoint_updated_at,
-  );
-  if (detail?.checkpoint_interrupted || playlist?.checkpoint_interrupted) return true;
-  if (RESUMABLE_PLAYLIST_STATUSES.has(checkpointStatus)) return true;
-  if (RESUMABLE_PLAYLIST_STATUSES.has(checkpointPhase)) return true;
-  if (DIRECT_RESUME_PLAYLIST_STATUSES.has(lastPipelineStatus)) return true;
-  return hasCheckpointEvidence && FAILED_RESUME_PLAYLIST_STATUSES.has(lastPipelineStatus);
 }
 
 function playlistCheckpointNote(playlist: PlaylistEntry): string {
@@ -944,52 +685,6 @@ function SavedPlaylistExpandedDetails({ summary }: { summary: SavedPlaylistSumma
   );
 }
 
-function DownloadConfirmDialog({
-  open,
-  missing,
-  total,
-  needsPull,
-  busy,
-  onClose,
-  onConfirm,
-}: {
-  open: boolean;
-  missing: number;
-  total: number;
-  needsPull: boolean;
-  busy: boolean;
-  onClose: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <Dialog open={open} onClose={busy ? () => undefined : onClose} className="relative z-50">
-      <DialogBackdrop className="fixed inset-0 bg-graphite-950/70" />
-      <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-md rounded-md border border-graphite-700 bg-graphite-900 p-5">
-          <DialogTitle className="text-base font-semibold text-zinc-100">
-            {needsPull ? 'Download missing tracks and sync?' : missing ? 'Download missing tracks and sync?' : 'Sync playlist to Plex?'}
-          </DialogTitle>
-          <p className="mt-2 text-sm text-zinc-400">
-            {needsPull
-              ? 'The backend will read the playlist, match it against Beets, download missing tracks, import them, then rebuild the playlist from library matches.'
-              : missing
-                ? `${missing} missing track(s) will be searched/downloaded, imported into Beets, then the playlist will be rebuilt from library matches.`
-                : `${total} library-matched track(s) will be written to M3U and synced to Plex when Plex is configured.`}
-          </p>
-          <div className="mt-5 flex justify-end gap-2">
-            <Button variant="outlined" onClick={onClose} disabled={busy}>
-              Cancel
-            </Button>
-            <Button variant="contained" color="primary" onClick={onConfirm} disabled={busy}>
-              {busy ? 'Starting...' : (needsPull || missing) ? 'Download Missing & Sync' : 'Sync'}
-            </Button>
-          </div>
-        </DialogPanel>
-      </div>
-    </Dialog>
-  );
-}
-
 function TrackList({
   title,
   tone,
@@ -1013,153 +708,10 @@ function TrackList({
   );
 }
 
-function PlaylistJobProgress({
-  downloadState,
-  downloadError,
-  detail,
-  onClear,
-  onRetryMissing,
-  canRetryMissing,
-}: {
-  downloadState: PlaylistDownloadStatusResponse | null;
-  downloadError: string;
-  detail: string;
-  onClear: () => void;
-  onRetryMissing?: () => void;
-  canRetryMissing?: boolean;
-}) {
-  if (!downloadState && !downloadError) return null;
-  const trackStatuses = downloadState?.track_status_list ?? [];
-  const statusCounts = trackStatuses.reduce<Record<string, number>>((counts, row) => {
-    counts[row.status] = (counts[row.status] ?? 0) + 1;
-    return counts;
-  }, {});
-  const available = downloadState?.matched_after_import
-    ?? downloadState?.matched?.length
-    ?? downloadState?.matched_initial
-    ?? statusCounts.matched
-    ?? 0;
-  const missing = downloadState?.missing_after_import
-    ?? downloadState?.missing?.length
-    ?? downloadState?.missing_initial
-    ?? statusCounts.missing
-    ?? 0;
-  const downloaded = (statusCounts.downloaded ?? 0) + (statusCounts.waiting_import ?? 0);
-  const failed = (statusCounts.failed ?? 0) + (statusCounts.source_failed ?? 0);
-  const total = downloadState?.tracks?.length || (available + missing) || downloadState?.total || trackStatuses.length;
-  const percent = total ? Math.max(0, Math.min(100, Math.round((available / total) * 100))) : 0;
-  const active = downloadState?.status === 'running';
-  const methods = downloadState?.download_methods?.length ? downloadState.download_methods.join(', ') : 'auto';
-  const orderedStatuses = ['matched', 'downloaded', 'waiting_import', 'importing', 'searching', 'queued', 'missing', 'failed', 'source_failed'];
-  const statusSummary = orderedStatuses
-    .filter((status) => statusCounts[status])
-    .map((status) => `${statusLabel(status)} ${statusCounts[status]}`);
-  const doneSeverity = playlistStatusSeverity(downloadState?.playlist);
-  const doneLabel = doneSeverity === 'error'
-    ? 'Playlist saved; Plex sync failed'
-    : doneSeverity === 'warning'
-      ? 'Playlist saved; Plex sync partially completed'
-      : doneSeverity === 'info'
-        ? 'Playlist saved; Plex not configured'
-        : 'Playlist sync complete';
-  const doneNoticeTone = doneSeverity === 'error'
-    ? 'text-danger-text'
-    : doneSeverity === 'warning'
-      ? 'text-warning'
-      : doneSeverity === 'info'
-        ? 'text-info'
-        : 'text-success';
-
-  return (
-    <div className="border-y border-graphite-800 py-3">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-medium text-zinc-200">
-          {downloadState?.status === 'done'
-            ? doneLabel
-            : downloadState?.status === 'error'
-              ? 'Playlist job failed'
-              : downloadState?.current || 'Playlist job running'}
-        </div>
-        <div className="text-xs text-muted">
-          {detail}
-        </div>
-      </div>
-      {downloadError ? <Alert severity="error" sx={{ mb: 2 }}>{downloadError}</Alert> : null}
-      {downloadState ? (
-        <div className="mb-3 space-y-2">
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
-            {metric('Available', available, 'text-success')}
-            {metric('Missing', missing, missing ? 'text-danger-text' : 'text-zinc-100')}
-            {metric('Waiting Import', downloaded, downloaded ? 'text-info' : 'text-zinc-100')}
-            {metric('Failed', failed, failed ? 'text-danger-text' : 'text-zinc-100')}
-            {metric('Round', downloadState.round ? `${downloadState.round}/${downloadState.max_rounds || '?'}` : '-', 'text-brass-300')}
-            {metric('Sources', methods, 'text-zinc-300')}
-          </div>
-          <LinearProgress
-            value={percent}
-            variant={total ? 'determinate' : 'indeterminate'}
-            sx={{ borderRadius: 1 }}
-          />
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap gap-1.5">
-              {downloadState.resumed ? <Chip label="resumed" size="small" variant="outlined" /> : null}
-              {statusSummary.map((label) => (
-                <Chip key={label} label={label} size="small" variant="outlined" />
-              ))}
-            </div>
-            {!active ? (
-              <div className="flex flex-wrap gap-2">
-                {canRetryMissing && onRetryMissing ? (
-                  <Button size="small" variant="contained" onClick={onRetryMissing}>
-                    Continue Missing
-                  </Button>
-                ) : null}
-                <Button size="small" variant="outlined" onClick={onClear}>
-                  Clear
-                </Button>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-      {trackStatuses.length ? (
-        <div className="mb-3 max-h-52 overflow-auto border-y border-graphite-800">
-          <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] border-b border-graphite-800 px-3 py-2 text-xs font-semibold text-muted">
-            <span>Track</span>
-            <span>Source</span>
-            <span>Status</span>
-          </div>
-          {trackStatuses.map((row) => (
-            <div key={row.id} className="grid grid-cols-[minmax(0,1fr)_8rem_8rem] items-start gap-2 border-t border-graphite-800 px-3 py-2 text-xs first:border-t-0">
-              <div className="min-w-0">
-                <div className="truncate text-zinc-200">{[row.artist, row.title].filter(Boolean).join(' - ')}</div>
-                {canonicalNote(row) ? <div className="truncate text-info">{canonicalNote(row)}</div> : null}
-                {row.message ? <div className="truncate text-muted">{row.message}</div> : null}
-              </div>
-              <span className="truncate text-zinc-400">{row.method || '-'}</span>
-              <span className={`truncate ${statusTone(row.status)}`}>
-                {statusLabel(row.status)}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      <div className="text-xs text-muted">
-        Live log output is shown in the top pipeline bar. Open Jobs for the full persisted job log.
-      </div>
-      {downloadState?.status === 'done' && playlistStatusMessage(downloadState.playlist) ? (
-        <div className={`mt-3 border-t border-graphite-800 pt-2 text-sm ${doneNoticeTone}`}>
-          {playlistStatusMessage(downloadState.playlist)}
-          {downloadState.missing_after_import ? ` · ${downloadState.missing_after_import} still missing` : ''}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 export default function Playlists() {
   // Sync and pipeline runs need the Beets engine; disabled while it is down.
   const engineOffline = useEngineOffline();
+  const navigate = useNavigate();
   const [playlists, setPlaylists] = useState<PlaylistEntry[]>([]);
   const [loadingPlaylists, setLoadingPlaylists] = useState(true);
   const [playlistError, setPlaylistError] = useState('');
@@ -1183,30 +735,21 @@ export default function Playlists() {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [providerStatus, setProviderStatus] = useState<{ musicbrainz_unavailable?: boolean; acoustid_status?: string } | null>(null);
-  const [confirmDownload, setConfirmDownload] = useState(false);
-  const [downloadJobId, setDownloadJobId] = useState(() => localStorage.getItem(PLAYLIST_JOB_STORAGE_KEY) ?? '');
-  const [lastDownloadJobId, setLastDownloadJobId] = useState(() => localStorage.getItem(PLAYLIST_LAST_JOB_STORAGE_KEY) ?? '');
-  const [downloadState, setDownloadState] = useState<PlaylistDownloadStatusResponse | null>(null);
-  const [downloadError, setDownloadError] = useState('');
-  const [startingDownload, setStartingDownload] = useState(false);
-  const [downloadMethod, setDownloadMethod] = useState('auto');
   const [resolveDraft, setResolveDraft] = useState<ResolveDraft | null>(null);
   const [resolvingKey, setResolvingKey] = useState('');
   const [suggestionRows, setSuggestionRows] = useState<PlaylistSuggestionRow[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [applyingSuggestions, setApplyingSuggestions] = useState(false);
-  const [repairingQuality, setRepairingQuality] = useState(false);
-  const [qualityPlaceDraft, setQualityPlaceDraft] = useState<QualityPlaceDraft | null>(null);
-  const [placingQuality, setPlacingQuality] = useState(false);
   const [pipelineJobId, setPipelineJobId] = useState('');
   const [pipelineJob, setPipelineJob] = useState<JobResponse | null>(null);
   const [pipelineActionBusy, setPipelineActionBusy] = useState('');
   const [savedRowActionBusy, setSavedRowActionBusy] = useState('');
+  // Notices from saved-playlist row actions; the Sync to Plex band shows only Sync All.
+  const [savedRowNotice, setSavedRowNotice] = useState<Notice | null>(null);
   const [expandedPlaylistRows, setExpandedPlaylistRows] = useState<Record<string, boolean>>({});
   const [savedPlaylistFilter, setSavedPlaylistFilter] = useState<SavedPlaylistFilter>('all');
   const [savedPlaylistSearch, setSavedPlaylistSearch] = useState('');
   const [trackActionKey, setTrackActionKey] = useState('');
-  const [logExpanded, setLogExpanded] = useState(false);
   const [importExpanded, setImportExpanded] = useState(false);
   const [trackGroup, setTrackGroup] = useState<TrackGroupId>('available');
 
@@ -1219,10 +762,6 @@ export default function Playlists() {
     () => matched.filter((track) => track.quality && track.quality !== 'ok'),
     [matched],
   );
-  const qualityRepairRows = useMemo(
-    () => qualityRows.filter((track) => track.quality !== 'bad' && track.id > 0),
-    [qualityRows],
-  );
   const suggestionsByTrack = useMemo(() => suggestionRowsByTrack(suggestionRows), [suggestionRows]);
   const safeSuggestionCount = suggestionRows.filter((row) => row.best?.safe).length;
   const savedPlaylistName = (parseResult as { name?: string } | null)?.name || '';
@@ -1234,11 +773,7 @@ export default function Playlists() {
   const removedExcluded = savedDetail?.removed_excluded ?? [];
   const pipelineCounts = savedDetail?.counts ?? {};
   const selectedPlaylist = playlists.find((playlist) => playlist.name === savedPlaylistName);
-  const fallbackResumablePlaylist = useMemo(
-    () => playlists.find((playlist) => playlistHasResumableCheckpoint(null, playlist)),
-    [playlists],
-  );
-  const activePlaylist = selectedPlaylist || (!savedPlaylistName ? fallbackResumablePlaylist : undefined);
+  const activePlaylist = selectedPlaylist;
   const savedPlaylistRows = useMemo<SavedPlaylistRow[]>(
     () => playlists.map((playlist) => ({ playlist, summary: summarizeSavedPlaylist(playlist) })),
     [playlists],
@@ -1276,11 +811,10 @@ export default function Playlists() {
   const savedPlaylistCoveragePercent = savedPlaylistMetrics.tracks
     ? Math.round((savedPlaylistMetrics.available / savedPlaylistMetrics.tracks) * 100)
     : 0;
-  const downloadRunning = Boolean(downloadJobId) || startingDownload;
+  // A download or import run (started on the Workbench) shows here as the playlist's last pipeline status.
+  const downloadRunning = savedDetail?.last_pipeline?.status === 'running';
   const pipelineRunning = downloadRunning || pipelineJob?.status === 'running' || Boolean(pipelineActionBusy);
   const canSave = Boolean(name.trim() && allTracks.length && !saving);
-  const canDownload = Boolean((allTracks.length || content) && !downloadRunning);
-  const downloadNeedsPull = Boolean(!allTracks.length && content);
   const hasPartialTrackRows = Boolean(matched.length || missing.length || removedExcluded.length);
   const partialDetailRows = Boolean(savedDetail?.partial_tracks_loaded);
   const savedDetailRowsLoaded = !viewingSavedPlaylist || savedDetail?.tracks_loaded !== false || partialDetailRows || hasPartialTrackRows;
@@ -1365,113 +899,6 @@ export default function Playlists() {
   };
 
   useEffect(() => {
-    if (downloadJobId || !lastDownloadJobId || downloadState || downloadError) return undefined;
-    let cancelled = false;
-    getPlaylistDownloadStatus(lastDownloadJobId)
-      .then((state) => {
-        if (cancelled) return;
-        if (state.status === 'running') {
-          localStorage.setItem(PLAYLIST_JOB_STORAGE_KEY, lastDownloadJobId);
-          setDownloadJobId(lastDownloadJobId);
-          return;
-        }
-        setDownloadState(state);
-        if (state.status !== 'error' && (state.tracks?.length || state.matched?.length || state.missing?.length)) {
-          setParseResult((current) => ({
-            ...current,
-            ok: true,
-            tracks: state.tracks ?? current?.tracks ?? [],
-            matched: state.matched ?? current?.matched ?? [],
-            missing: state.missing ?? current?.missing ?? [],
-            total: state.tracks?.length ?? ((state.matched?.length ?? 0) + (state.missing?.length ?? 0)),
-          }));
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        localStorage.removeItem(PLAYLIST_LAST_JOB_STORAGE_KEY);
-        setLastDownloadJobId('');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [downloadError, downloadJobId, downloadState, lastDownloadJobId]);
-
-  useEffect(() => {
-    if (!downloadJobId) return undefined;
-    let cancelled = false;
-    let timer: number | undefined;
-
-    const poll = async () => {
-      try {
-        const state = await getPlaylistDownloadStatus(downloadJobId);
-        if (cancelled) return;
-        setDownloadState(state);
-        setDownloadError('');
-        if (state.status !== 'error' && (state.tracks?.length || state.matched?.length || state.missing?.length)) {
-          setParseResult((current) => ({
-            ...current,
-            ok: true,
-            tracks: state.tracks ?? current?.tracks ?? [],
-            matched: state.matched ?? current?.matched ?? [],
-            missing: state.missing ?? current?.missing ?? [],
-            total: state.tracks?.length ?? ((state.matched?.length ?? 0) + (state.missing?.length ?? 0)),
-          }));
-        }
-        if (state.status === 'done' || state.status === 'error') {
-          setDownloadJobId('');
-          setLastDownloadJobId(downloadJobId);
-          localStorage.removeItem(PLAYLIST_JOB_STORAGE_KEY);
-          localStorage.setItem(PLAYLIST_LAST_JOB_STORAGE_KEY, downloadJobId);
-          if (state.status === 'done') {
-            setNotice({
-              severity: playlistStatusSeverity(state.playlist),
-              message: playlistStatusMessage(state.playlist) || 'Playlist files saved.',
-            });
-            setParseResult((current) => {
-              return {
-                ...current,
-                ok: true,
-                tracks: state.tracks ?? current?.tracks ?? [],
-                matched: state.matched ?? current?.matched ?? [],
-                missing: state.missing ?? current?.missing ?? [],
-                total: (state.matched_after_import ?? state.matched?.length ?? current?.matched.length ?? 0)
-                  + (state.missing_after_import ?? state.missing?.length ?? current?.missing.length ?? 0),
-              };
-            });
-            void loadPlaylists();
-          } else {
-            setDownloadError(state.interrupted
-              ? 'Previous playlist job was interrupted. Use Resume Pipeline to continue from the checkpoint.'
-              : 'Playlist import/sync job failed.');
-          }
-          return;
-        }
-        timer = window.setTimeout(poll, playlistPollDelay(PLAYLIST_DOWNLOAD_POLL_MS));
-      } catch (err) {
-        if (cancelled) return;
-        setDownloadError(errorMessage(err));
-        if (err instanceof Error && err.message.toLowerCase().includes('job not found')) {
-          setDownloadJobId('');
-          localStorage.removeItem(PLAYLIST_JOB_STORAGE_KEY);
-          if (lastDownloadJobId === downloadJobId) {
-            setLastDownloadJobId('');
-            localStorage.removeItem(PLAYLIST_LAST_JOB_STORAGE_KEY);
-          }
-          return;
-        }
-        timer = window.setTimeout(poll, playlistPollDelay(PLAYLIST_DOWNLOAD_RETRY_POLL_MS));
-      }
-    };
-
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [downloadJobId, lastDownloadJobId, loadPlaylists]);
-
-  useEffect(() => {
     if (!pipelineJobId) return undefined;
     let cancelled = false;
     let timer: number | undefined;
@@ -1522,15 +949,6 @@ export default function Playlists() {
     };
   }, [pipelineJobId, savedPlaylistName, loadPlaylists]);
 
-  const clearDownloadPanel = useCallback(() => {
-    setDownloadJobId('');
-    setLastDownloadJobId('');
-    setDownloadState(null);
-    setDownloadError('');
-    localStorage.removeItem(PLAYLIST_JOB_STORAGE_KEY);
-    localStorage.removeItem(PLAYLIST_LAST_JOB_STORAGE_KEY);
-  }, []);
-
   const handleParse = async () => {
     if (!content) {
       setParseError(source === 'url' ? 'Paste a playlist URL first.' : 'Paste at least one track first.');
@@ -1541,12 +959,6 @@ export default function Playlists() {
     setNotice(null);
     setSuggestionRows([]);
     setProviderStatus(null);
-    setDownloadState(null);
-    setDownloadError('');
-    setDownloadJobId('');
-    setLastDownloadJobId('');
-    localStorage.removeItem(PLAYLIST_JOB_STORAGE_KEY);
-    localStorage.removeItem(PLAYLIST_LAST_JOB_STORAGE_KEY);
     try {
       const result = await parsePlaylist(source, content);
       setParseResult(result);
@@ -1587,7 +999,7 @@ export default function Playlists() {
       `Delete the saved playlist "${playlist.name}" from M3U/Plex only? Songs in Beets will not be deleted.`,
     );
     if (!ok) return;
-    setPlaylistSyncNotice(null);
+    setSavedRowNotice(null);
     setPlaylistDetailsError('');
     try {
       const result = await deletePlaylist(playlist.name, true);
@@ -1596,7 +1008,7 @@ export default function Playlists() {
         : result.plex_deleted
           ? ` Deleted ${result.plex_deleted} Plex playlist(s).`
           : '';
-      setPlaylistSyncNotice({
+      setSavedRowNotice({
         severity: 'success',
         message: `Deleted playlist ${playlist.name}. Library songs were not deleted.${plexNote}`,
       });
@@ -1613,7 +1025,6 @@ export default function Playlists() {
     setLoadingPlaylistDetails(playlist.name);
     setPlaylistDetailsError('');
     setNotice(null);
-    clearDownloadPanel();
     setSuggestionRows([]);
     setProviderStatus(null);
     try {
@@ -1707,40 +1118,20 @@ export default function Playlists() {
     }
   };
 
-  const handlePipelineAction = async (action: PlaylistPipelineAction) => {
+  // Run, resume, pause, stop, clear and the download/import steps are on the Workbench.
+  const handlePipelineAction = async (action: Extract<PlaylistPipelineAction, 'sync-sources' | 'sync-plex' | 'reconcile-state'>) => {
     if (!savedPlaylistName) return;
     setPipelineActionBusy(action);
     setNotice(null);
     setPlaylistDetailsError('');
     try {
       const started = await runPlaylistPipelineAction(savedPlaylistName, action);
-      if (action === 'clear') {
-        clearDownloadPanel();
-        setPipelineJobId('');
-        setPipelineJob(null);
-      } else if (action === 'pause' || action === 'stop') {
-        setDownloadJobId('');
-        setPipelineJobId('');
-        setNotice({ severity: 'info', message: `Playlist pipeline ${action === 'pause' ? 'paused at its checkpoint' : 'stopped'}.` });
-      } else if (action === 'download-missing' || action === 'run-full' || action === 'resume') {
-        if (started.job_id) {
-          setDownloadJobId(started.job_id);
-          setLastDownloadJobId(started.job_id);
-          localStorage.setItem(PLAYLIST_JOB_STORAGE_KEY, started.job_id);
-          localStorage.setItem(PLAYLIST_LAST_JOB_STORAGE_KEY, started.job_id);
-        }
-      } else if (started.jobs_job_id || started.job_id) {
+      if (started.jobs_job_id || started.job_id) {
         const jobId = started.jobs_job_id || started.job_id || '';
         setPipelineJobId(jobId);
         setPipelineJob({ ok: true, job_id: jobId, status: 'running', log: ['(starting...)'] });
       }
-      if (!['pause', 'stop', 'clear'].includes(action)) {
-        setNotice({ severity: 'info', message: `${action.replace(/-/g, ' ')} started for ${savedPlaylistName}.` });
-      }
-      if (action === 'clear') {
-        const detail = await getPlaylistDetails(savedPlaylistName, { mode: 'summary' });
-        setParseResult(detail);
-      }
+      setNotice({ severity: 'info', message: `${action.replace(/-/g, ' ')} started for ${savedPlaylistName}.` });
     } catch (err) {
       setNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
@@ -1753,22 +1144,13 @@ export default function Playlists() {
     track: PlaylistTrack,
   ) => {
     if (!savedPlaylistName) return;
-    if (action === 'delete_staged') {
-      const ok = window.confirm(
-        'Delete this downloaded staging file? The Beets music library copy will not be deleted.',
-      );
-      if (!ok) return;
-    }
     const key = `${action}:${trackKey(track)}`;
     setTrackActionKey(key);
     setNotice(null);
     try {
       const result = await applyPlaylistTrackAction(savedPlaylistName, action, track);
       setParseResult(result.playlist);
-      if (result.job?.job_id && (action === 'retry_download')) {
-        setDownloadJobId(result.job.job_id);
-        setLastDownloadJobId(result.job.job_id);
-      } else if (result.job?.jobs_job_id) {
+      if (result.job?.jobs_job_id) {
         setPipelineJobId(result.job.jobs_job_id);
       }
       setNotice({
@@ -1781,62 +1163,6 @@ export default function Playlists() {
     } finally {
       setTrackActionKey('');
     }
-  };
-
-  const handleStartDownload = async (
-    requestedTracks: PlaylistTrack[] = missing,
-    playlistTracks: PlaylistTrack[] = allTracks,
-  ) => {
-    if (!playlistTracks.length && !requestedTracks.length && !content) return;
-    const useParsedTracks = Boolean(playlistTracks.length || requestedTracks.length);
-    const tracksToDownload = requestedTracks;
-    const tracksForPlaylist = playlistTracks.length ? playlistTracks : requestedTracks;
-    setStartingDownload(true);
-    setConfirmDownload(false);
-    setDownloadError('');
-    setNotice(null);
-    setDownloadState({
-      ok: true,
-      status: 'running',
-      phase: useParsedTracks ? (tracksToDownload.length ? 'download' : 'sync') : 'parse',
-      current: useParsedTracks ? (tracksToDownload.length ? 'starting missing-track download' : 'starting playlist sync') : 'reading playlist track list',
-      log: ['(starting...)'],
-      done: 0,
-      failed: 0,
-      total: useParsedTracks ? tracksToDownload.length : 0,
-      download_methods: downloadMethod === 'auto' ? ['slskd', 'ytdlp', 'soundcloud'] : [downloadMethod],
-    });
-    try {
-      const started = await startPlaylistDownload({
-        name: savedPlaylistName || name.trim() || 'Playlist',
-        tracks: useParsedTracks ? tracksToDownload : undefined,
-        all_tracks: useParsedTracks ? tracksForPlaylist : undefined,
-        source: useParsedTracks ? undefined : source,
-        content: useParsedTracks ? undefined : content,
-        methods: downloadMethod === 'auto' ? undefined : [downloadMethod],
-        sync_after_import: true,
-      });
-      localStorage.setItem(PLAYLIST_JOB_STORAGE_KEY, started.job_id);
-      localStorage.setItem(PLAYLIST_LAST_JOB_STORAGE_KEY, started.job_id);
-      setLastDownloadJobId(started.job_id);
-      setDownloadJobId(started.job_id);
-      if (started.resumed) {
-        setNotice({ severity: 'info', message: 'Resumed the existing playlist download job.' });
-      }
-    } catch (err) {
-      setDownloadError(errorMessage(err));
-    } finally {
-      setStartingDownload(false);
-    }
-  };
-
-  const handleRetryMissingFromJob = () => {
-    const retryMissing = downloadState?.missing ?? [];
-    const retryTracks = downloadState?.tracks?.length
-      ? downloadState.tracks
-      : [...matchedAsTracks(downloadState?.matched ?? []), ...retryMissing];
-    if (!retryMissing.length && !retryTracks.length) return;
-    void handleStartDownload(retryMissing, retryTracks);
   };
 
   const handleIgnoreMissing = (track: PlaylistTrack) => {
@@ -1932,113 +1258,10 @@ export default function Playlists() {
     }
   };
 
-  const handleRepairQualityRows = async () => {
-    const itemIds = qualityRepairRows.map((track) => track.id).filter((id) => id > 0);
-    if (!itemIds.length) {
-      setNotice({ severity: 'info', message: 'No repairable playlist quality rows are selected.' });
-      return;
-    }
-    const ok = window.confirm(
-      `Queue playlist quality repair for ${itemIds.length} review row(s)? The job will write tags and move repaired tracks into normal album folders.`,
-    );
-    if (!ok) return;
-    setRepairingQuality(true);
-    setNotice(null);
-    try {
-      const result = await cleanupPlaylistQuality({
-        dry_run: false,
-        action: 'repair',
-        filter: 'repair',
-        item_ids: itemIds,
-        limit: Math.max(50, itemIds.length),
-      });
-      if (result.queued && result.job_id) {
-        setNotice({
-          severity: 'success',
-          message: `Queued playlist quality repair for ${itemIds.length.toLocaleString()} row(s). Track progress on Jobs: ${result.job_id}`,
-        });
-      } else {
-        setNotice({
-          severity: 'info',
-          message: 'No matching repair rows were queued. Refresh the playlist after current jobs finish.',
-        });
-      }
-      await loadPlaylists();
-    } catch (err) {
-      setNotice({ severity: 'error', message: errorMessage(err) });
-    } finally {
-      setRepairingQuality(false);
-    }
-  };
-
-  const handleBeginQualityPlace = (track: PlaylistMatchedTrack) => {
-    setQualityPlaceDraft(qualityPlaceDraftForTrack(track));
-    setNotice(null);
-  };
-
-  const updateQualityPlaceDraft = (field: keyof Omit<QualityPlaceDraft, 'itemId'>, value: string) => {
-    setQualityPlaceDraft((draft) => (draft ? { ...draft, [field]: value } : draft));
-  };
-
-  const handleQueueQualityPlace = async () => {
-    if (!qualityPlaceDraft) return;
-    if (!qualityPlaceDraft.artist.trim() || !qualityPlaceDraft.title.trim() || !qualityPlaceDraft.albumartist.trim() || !qualityPlaceDraft.album.trim()) {
-      setNotice({ severity: 'error', message: 'Artist, title, album artist, and album are required to place a review row.' });
-      return;
-    }
-    setPlacingQuality(true);
-    setNotice(null);
-    try {
-      const result = await placePlaylistQuality({
-        item_id: qualityPlaceDraft.itemId,
-        playlist: savedPlaylistName || undefined,
-        placement: {
-          artist: qualityPlaceDraft.artist.trim(),
-          title: qualityPlaceDraft.title.trim(),
-          albumartist: qualityPlaceDraft.albumartist.trim(),
-          album: qualityPlaceDraft.album.trim(),
-          year: optionalNumber(qualityPlaceDraft.year),
-          track: optionalNumber(qualityPlaceDraft.track),
-          disc: optionalNumber(qualityPlaceDraft.disc),
-          tracktotal: optionalNumber(qualityPlaceDraft.tracktotal),
-          disctotal: optionalNumber(qualityPlaceDraft.disctotal),
-          mb_trackid: qualityPlaceDraft.mbTrackId.trim() || undefined,
-          mb_albumid: qualityPlaceDraft.mbAlbumId.trim() || undefined,
-          mb_releasegroupid: qualityPlaceDraft.mbReleaseGroupId.trim() || undefined,
-        },
-      });
-      setQualityPlaceDraft(null);
-      setNotice({
-        severity: 'success',
-        message: `Queued manual placement job ${result.job_id}. Track progress on Jobs; the playlist will sync after the file moves.`,
-      });
-      await loadPlaylists();
-    } catch (err) {
-      setNotice({ severity: 'error', message: errorMessage(err) });
-    } finally {
-      setPlacingQuality(false);
-    }
-  };
-
-  const downloadRound = downloadState?.round
-    ? `round ${downloadState.round}${downloadState.max_rounds ? `/${downloadState.max_rounds}` : ''}`
-    : '';
-  const downloadProgress = downloadState?.total
-    ? `${downloadState.done ?? 0} / ${downloadState.total}${downloadState.failed ? ` (${downloadState.failed} failed)` : ''}`
-    : downloadState?.matched_after_import !== undefined
-      ? `${downloadState.matched_after_import} matched`
-      : '';
-  const downloadStatusDetail = [downloadState?.phase, downloadRound, downloadProgress].filter(Boolean).join(' · ');
-  const pipelineStatus = downloadState?.status
-    || pipelineJob?.status
+  const pipelineStatus = pipelineJob?.status
     || savedDetail?.last_pipeline?.status
     || activePlaylist?.last_pipeline?.status
     || 'idle';
-  const pipelineAction = downloadState?.phase
-    || savedDetail?.last_pipeline?.action
-    || activePlaylist?.last_pipeline?.action
-    || 'none';
-  const pipelineLog = downloadState?.log ?? pipelineJob?.log ?? [];
   const pipelineIsActive = pipelineStatus === 'running' || pipelineRunning;
   const downloadedWaitingFromCounts = (pipelineCounts.downloaded ?? 0) + (pipelineCounts.waiting_import ?? 0);
   const downloadedWaitingCount = downloadedWaitingFromCounts
@@ -2051,38 +1274,7 @@ export default function Playlists() {
     + qualityRows.length;
   const removedExcludedCount = (pipelineCounts.removed ?? activePlaylist?.removed ?? 0)
     + (pipelineCounts.excluded ?? activePlaylist?.excluded ?? 0);
-  const plexSyncedCount = pipelineCounts.plex_synced
-    ?? activePlaylist?.plex_synced_count
-    ?? savedDetail?.last_plex?.verified_count
-    ?? savedDetail?.last_plex?.existing_playlist_count
-    ?? activePlaylist?.plex_tracks
-    ?? savedDetail?.last_plex?.tracks_added
-    ?? savedDetail?.last_plex?.tracks_matched
-    ?? 0;
   const hasResumablePipeline = playlistHasResumableCheckpoint(savedDetail, activePlaylist);
-  const mainPipelineAction: PlaylistPipelineAction = hasResumablePipeline ? 'resume' : 'run-full';
-  const mainPipelineLabel = hasResumablePipeline ? 'Resume Pipeline' : 'Run Pipeline';
-  const lastCheckpointAt = savedDetail?.checkpoint_updated_at || activePlaylist?.checkpoint_updated_at;
-  const lastCheckpointLabel = lastCheckpointAt ? formatShortDateTime(lastCheckpointAt * 1000) : '-';
-  const nextPipelineAction = pipelineIsActive
-    ? (downloadState?.current || pipelineAction.replace(/_/g, ' '))
-    : hasResumablePipeline
-      ? 'Reconcile, import staged downloads, then continue missing tracks'
-      : downloadedWaitingCount
-        ? 'Import downloaded tracks'
-        : missingCount
-          ? 'Download missing tracks'
-          : matchedCount
-            ? 'Sync playlist to Plex'
-            : 'Select a saved playlist';
-  const pipelineMoreActions: MenuAction[] = [
-    { label: 'Sync Sources', onClick: () => void handlePipelineAction('sync-sources') },
-    { label: 'Download Missing Only', onClick: () => void handlePipelineAction('download-missing'), disabled: !missingCount },
-    { label: 'Import Downloaded Only', onClick: () => void handlePipelineAction('import-downloaded'), disabled: !downloadedWaitingCount },
-    { label: 'Sync to Plex Only', onClick: () => void handlePipelineAction('sync-plex'), disabled: !matchedCount },
-    { label: 'Reconcile State', onClick: () => void handlePipelineAction('reconcile-state') },
-    { label: 'Clear Job Status', onClick: () => void handlePipelineAction('clear'), danger: true },
-  ];
   const waitingImportTracks = missing.filter(isWaitingImportTrack);
   const failedReviewTracks = missing.filter(isFailedReviewTrack);
   const pendingPlexTracks = missing.filter(isPendingPlexTrack);
@@ -2095,11 +1287,6 @@ export default function Playlists() {
       : pipelineStatus === 'failed' || pipelineStatus === 'error'
         ? 'failed'
         : 'idle';
-  const latestStatusLine = pipelineIsActive
-    ? (downloadState?.current || pipelineAction.replace(/_/g, ' '))
-    : nextPipelineAction;
-  const showLastPipelineError = Boolean(savedDetail?.last_pipeline?.error && !hasResumablePipeline);
-  const visiblePipelineLog = logExpanded ? pipelineLog : pipelineLog.slice(-5);
   const loadedRowsAreComplete = savedDetailRowsLoaded && !partialDetailRows;
   const trackGroups: Array<{ id: TrackGroupId; label: string; count: number }> = [
     { id: 'available', label: 'Available', count: matchedCount },
@@ -2144,11 +1331,15 @@ export default function Playlists() {
       },
       disabled: saving,
     }] : []),
-    ...(viewingSavedPlaylist ? [{
-      label: 'Reconcile Playlist State',
-      onClick: () => void handlePipelineAction('reconcile-state'),
-      disabled: pipelineIsActive,
-    }] : []),
+    ...(viewingSavedPlaylist ? [
+      { label: 'Sync Sources', onClick: () => void handlePipelineAction('sync-sources'), disabled: pipelineIsActive },
+      { label: 'Sync to Plex', onClick: () => void handlePipelineAction('sync-plex'), disabled: pipelineIsActive || !matchedCount },
+      {
+        label: 'Reconcile Playlist State',
+        onClick: () => void handlePipelineAction('reconcile-state'),
+        disabled: pipelineIsActive,
+      },
+    ] : []),
   ];
 
   const showTrackError = (track: PlaylistTrack) => {
@@ -2175,12 +1366,12 @@ export default function Playlists() {
   const missingTrackActions = (track: PlaylistTrack, rowKey: string): MenuAction[] => {
     if (!viewingSavedPlaylist) {
       return [
-        { label: 'Download', onClick: () => void handleStartDownload([track], allTracks), disabled: downloadRunning },
         { label: 'Ignore', onClick: () => handleIgnoreMissing(track), disabled: downloadRunning },
       ];
     }
     const status = trackStatus(track, 'missing');
     const hasStagedFile = Boolean(track.staged_path);
+    // Import Now, Delete Staged Download and the download retries are on the Workbench.
     const plexPending = status === 'plex_pending' || track.retry_action === 'retry_pending_plex_match' || Boolean(track.plex_issue);
     if (plexPending) {
       return [
@@ -2193,15 +1384,12 @@ export default function Playlists() {
     const downloadedNotImported = hasStagedFile || status === 'downloaded' || status === 'waiting_import' || status === 'importing';
     if (downloadedNotImported) {
       return [
-        { label: 'Import Now', onClick: () => void handleTrackAction('retry_import', track) },
-        ...(hasStagedFile ? [{ label: 'Delete Staged Download', onClick: () => void handleTrackAction('delete_staged', track), danger: true }] : []),
         { label: 'Resolve Match', onClick: () => handleBeginResolve(track, rowKey) },
         { label: 'Exclude from Future Sync', onClick: () => void handleTrackAction('exclude', track) },
       ];
     }
     if (failed) {
       return [
-        { label: 'Retry', onClick: () => void handleTrackAction(hasStagedFile ? 'retry_import' : 'retry_download', track) },
         { label: 'View Error', onClick: () => showTrackError(track) },
         { label: 'Resolve Manually', onClick: () => handleBeginResolve(track, rowKey) },
         { label: 'Exclude from Future Sync', onClick: () => void handleTrackAction('exclude', track) },
@@ -2209,7 +1397,6 @@ export default function Playlists() {
     }
     return [
       { label: 'Resolve Match', onClick: () => handleBeginResolve(track, rowKey) },
-      { label: 'Retry Download', onClick: () => void handleTrackAction('retry_download', track) },
       { label: 'Remove from Playlist', onClick: () => void handleTrackAction('remove', track) },
       { label: 'Exclude from Future Sync', onClick: () => void handleTrackAction('exclude', track) },
     ];
@@ -2228,25 +1415,20 @@ export default function Playlists() {
 
   const handleSavedPlaylistPipelineAction = async (
     playlist: PlaylistEntry,
-    action: Extract<PlaylistPipelineAction, 'download-missing' | 'import-downloaded' | 'sync-plex' | 'reconcile-state' | 'run-full' | 'resume' | 'clear'>,
+    action: Extract<PlaylistPipelineAction, 'sync-plex' | 'reconcile-state'>,
   ) => {
     const busyKey = `${playlist.name}:${action}`;
     setSavedRowActionBusy(busyKey);
-    setPlaylistSyncNotice(null);
+    setSavedRowNotice(null);
     setPlaylistDetailsError('');
     try {
       const started = await runPlaylistPipelineAction(playlist.name, action);
-      if ((action === 'download-missing' || action === 'run-full' || action === 'resume') && started.job_id) {
-        setDownloadJobId(started.job_id);
-        setLastDownloadJobId(started.job_id);
-        localStorage.setItem(PLAYLIST_JOB_STORAGE_KEY, started.job_id);
-        localStorage.setItem(PLAYLIST_LAST_JOB_STORAGE_KEY, started.job_id);
-      } else if (started.jobs_job_id || started.job_id) {
+      if (started.jobs_job_id || started.job_id) {
         const jobId = started.jobs_job_id || started.job_id || '';
         setPipelineJobId(jobId);
         setPipelineJob({ ok: true, job_id: jobId, status: 'running', log: ['(starting...)'] });
       }
-      setPlaylistSyncNotice({
+      setSavedRowNotice({
         severity: 'info',
         message: `${action.replace(/-/g, ' ')} started for ${playlist.name}.`,
       });
@@ -2256,7 +1438,7 @@ export default function Playlists() {
       }
       await loadPlaylists();
     } catch (err) {
-      setPlaylistSyncNotice({ severity: 'error', message: errorMessage(err) });
+      setSavedRowNotice({ severity: 'error', message: errorMessage(err) });
     } finally {
       setSavedRowActionBusy('');
     }
@@ -2271,38 +1453,19 @@ export default function Playlists() {
     }
     await handleViewPlaylist(playlist);
     if (summary.plexIssue) {
-      setPlaylistSyncNotice({ severity: summary.plexPending > 0 ? 'warning' : 'error', message: summary.plexIssue });
+      setSavedRowNotice({ severity: summary.plexPending > 0 ? 'warning' : 'error', message: summary.plexIssue });
     }
   };
 
   const savedPlaylistRowActions = (playlist: PlaylistEntry, summary: SavedPlaylistSummary): MenuAction[] => [
-    ...(summary.interrupted ? [{
-      label: 'Resume Pipeline',
-      onClick: () => {
-        void handleSavedPlaylistPipelineAction(playlist, 'resume');
-      },
-      disabled: pipelineIsActive || Boolean(savedRowActionBusy) || engineOffline,
+    // Running, resuming, downloading, importing and clearing a checkpoint are on the Workbench.
+    ...(summary.interrupted || summary.missing > 0 || summary.waitingImport > 0 || summary.pipelineFailed ? [{
+      label: 'Open in Workbench',
+      onClick: () => navigate(workbenchPath(playlist.name)),
     }] : []),
-    {
-      label: 'Run Pipeline',
-      onClick: () => {
-        void handleSavedPlaylistPipelineAction(playlist, 'run-full');
-      },
-      disabled: pipelineIsActive || Boolean(savedRowActionBusy) || engineOffline,
-    },
-    ...(summary.missing > 0 ? [{
-      label: 'Download Missing',
-      onClick: () => {
-        void handleSavedPlaylistPipelineAction(playlist, 'download-missing');
-      },
-      disabled: pipelineIsActive || Boolean(savedRowActionBusy),
-    }] : []),
-    ...(summary.waitingImport > 0 ? [{
-      label: 'Import Downloaded',
-      onClick: () => {
-        void handleSavedPlaylistPipelineAction(playlist, 'import-downloaded');
-      },
-      disabled: pipelineIsActive || Boolean(savedRowActionBusy),
+    ...(summary.qualityReview > 0 ? [{
+      label: 'Open Review Rows in Jobs',
+      onClick: () => navigate(reviewRowsPath(playlist.name)),
     }] : []),
     ...(summary.libraryMatched > 0 || summary.plexNeedsSync ? [{
       label: summary.plexPending > 0 ? 'Retry Pending Plex Matches' : 'Sync to Plex',
@@ -2348,14 +1511,6 @@ export default function Playlists() {
       },
       disabled: pipelineIsActive || Boolean(savedRowActionBusy),
     },
-    ...((summary.interrupted || summary.pipelineFailed) ? [{
-      label: 'Clear Checkpoint',
-      onClick: () => {
-        void handleSavedPlaylistPipelineAction(playlist, 'clear');
-      },
-      disabled: pipelineIsActive || Boolean(savedRowActionBusy),
-      danger: true,
-    }] : []),
     {
       label: 'Delete Playlist',
       onClick: () => {
@@ -2422,7 +1577,7 @@ export default function Playlists() {
 
         {importExpanded ? (
           <div className="mt-3">
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_13rem_13rem]">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_13rem]">
           <TextField
             label="Playlist name"
             value={name}
@@ -2442,18 +1597,6 @@ export default function Playlists() {
               className="h-9 rounded border border-graphite-700 bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-brass-400"
             >
               {SOURCE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-zinc-400">
-            Download Source
-            <select
-              value={downloadMethod}
-              onChange={(event) => setDownloadMethod(event.target.value)}
-              className="h-9 rounded border border-field-border bg-graphite-950 px-3 text-sm text-zinc-200 outline-none focus:border-brass-400"
-            >
-              {DOWNLOAD_METHOD_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
@@ -2523,11 +1666,6 @@ export default function Playlists() {
         )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
-          {!parseResult ? (
-            <Button variant="contained" onClick={() => setConfirmDownload(true)} disabled={!canDownload}>
-              Download Missing & Sync
-            </Button>
-          ) : null}
           <Button variant="outlined" onClick={handleParse} disabled={parsing || !content}>
             {parsing ? 'Previewing...' : 'Preview Matches'}
           </Button>
@@ -2546,108 +1684,6 @@ export default function Playlists() {
         ) : null}
         </div>
       </section>
-
-      {/* The deck: what the selected playlist is doing now. Flat, on rules, pinned under the header. */}
-      <section className="sticky top-[var(--bw-header-h)] z-[15] -mx-3 border-y border-graphite-800 bg-graphite-950 px-3 py-2.5 sm:-mx-4 sm:px-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0 flex-1 basis-full sm:basis-0">
-            <div className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
-              <span className="truncate font-display text-base font-semibold text-zinc-100">
-                {savedPlaylistName || activePlaylist?.name || 'Select a saved playlist'}
-              </span>
-              <span className="text-zinc-400">{pipelineAction.replace(/_/g, ' ')}</span>
-              <span className={pipelineStateLabel === 'interrupted' ? 'text-warning' : pipelineStateLabel === 'running' ? 'text-info' : pipelineStateLabel === 'failed' ? 'text-danger-text' : 'text-zinc-400'}>
-                {pipelineStateLabel}
-              </span>
-              {lastCheckpointLabel !== '-' ? (
-                <span className="text-xs text-muted">checkpoint {lastCheckpointLabel}</span>
-              ) : null}
-            </div>
-            <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
-              {compactStat('available', matchedCount, 'text-success')}
-              {compactStat('missing', missingCount, missingCount ? 'text-danger-text' : 'text-zinc-300')}
-              {compactStat('waiting import', downloadedWaitingCount, downloadedWaitingCount ? 'text-info' : 'text-zinc-300')}
-              {compactStat('failed/review', failedReviewCount, failedReviewCount ? 'text-warning' : 'text-zinc-300')}
-              {compactStat('removed/excluded', removedExcludedCount, removedExcludedCount ? 'text-warning' : 'text-zinc-300')}
-              {compactStat('Plex synced', plexSyncedCount, plexSyncedCount ? 'text-brass-300' : 'text-zinc-300')}
-              {compactStat('pending Plex', savedDetail?.last_plex?.pending_plex_count ?? activePlaylist?.plex_pending_count ?? 0, (savedDetail?.last_plex?.pending_plex_count ?? activePlaylist?.plex_pending_count ?? 0) ? 'text-warning' : 'text-zinc-300')}
-            </div>
-          </div>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-            {pipelineIsActive ? (
-              <>
-                <Button variant="outlined" size="small" onClick={() => void handlePipelineAction('pause')}>
-                  Pause
-                </Button>
-                <Button variant="outlined" color="error" size="small" onClick={() => void handlePipelineAction('stop')}>
-                  Stop
-                </Button>
-              </>
-            ) : (
-              <Button
-                variant="contained"
-                color={hasResumablePipeline ? 'warning' : 'primary'}
-                size="small"
-                disabled={(!savedPlaylistName && !activePlaylist) || engineOffline}
-                onClick={() => {
-                  if (savedPlaylistName) {
-                    void handlePipelineAction(mainPipelineAction);
-                  } else if (activePlaylist) {
-                    void handleSavedPlaylistPipelineAction(activePlaylist, 'resume');
-                  }
-                }}
-              >
-                {mainPipelineLabel}
-              </Button>
-            )}
-            <ActionMenu
-              label="More Actions"
-              actions={pipelineMoreActions}
-              disabled={!savedPlaylistName || pipelineIsActive}
-            />
-          </div>
-        </div>
-
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-graphite-800 pt-2 text-xs">
-          <div className="min-w-0 flex-1 truncate text-zinc-400" title={latestStatusLine}>
-            <span className="text-muted">Now:</span> {latestStatusLine}
-          </div>
-          <button
-            type="button"
-            className="min-h-8 rounded px-2 text-xs text-zinc-300 underline underline-offset-4 hover:text-zinc-100 active:text-brass-200"
-            onClick={() => setLogExpanded((value) => !value)}
-          >
-            {logExpanded ? 'Collapse Log' : 'Expand Log'}
-          </button>
-        </div>
-
-        {showLastPipelineError ? (
-          <Alert severity="error" sx={{ mt: 1.5 }}>{savedDetail?.last_pipeline?.error}</Alert>
-        ) : null}
-        {pipelineLog.length ? (
-          <div className="mt-2">
-            <LogViewer
-              className={`${logExpanded ? 'max-h-72' : 'max-h-24'} text-xs leading-5 text-zinc-400`}
-              emptyText="No playlist pipeline log yet."
-              lines={visiblePipelineLog}
-              showControls={false}
-            />
-          </div>
-        ) : null}
-      </section>
-
-      {!parseResult && (downloadState || downloadError) ? (
-        <section aria-label="Playlist job">
-          <PlaylistJobProgress
-            downloadState={downloadState}
-            downloadError={downloadError}
-            detail={downloadStatusDetail}
-            onClear={clearDownloadPanel}
-            onRetryMissing={handleRetryMissingFromJob}
-            canRetryMissing={Boolean((downloadState?.missing?.length ?? 0) > 0 && !downloadRunning)}
-          />
-        </section>
-      ) : null}
 
       {parseResult ? (
         // The open playlist: its tracklist, filed by state, set on rules like a back cover.
@@ -2752,170 +1788,13 @@ export default function Playlists() {
           ) : null}
 
           {viewingSavedPlaylist && savedDetailRowsLoaded && qualityRows.length && trackGroup === 'failed' ? (
-            <div className="border-y border-graphite-800 py-3">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <div className="text-xs font-semibold text-warning">
-                    Needs cleanup
-                  </div>
-                  <div className="mt-1 text-xs text-muted">
-                    {qualityRows.length.toLocaleString()} playlist row(s) are playable but need album placement or metadata repair.
-                  </div>
-                </div>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => {
-                    void handleRepairQualityRows();
-                  }}
-                  disabled={repairingQuality || downloadRunning || qualityRepairRows.length === 0}
-                >
-                  {repairingQuality ? 'Queueing...' : `Repair Review Rows (${qualityRepairRows.length})`}
-                </Button>
-              </div>
-              <div className="max-h-44 overflow-auto border-y border-graphite-800">
-                <div className="divide-y divide-graphite-800">
-                  {qualityRows.map((track, idx) => (
-                    <div key={`quality-${idx}:${track.id}:${track.path || track.title}`} className="px-3 py-2 text-sm">
-                      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
-                        <div className="min-w-0">
-                          <div className="truncate font-medium text-zinc-200">
-                            {track.artist} - {track.title}
-                          </div>
-                          <div className="truncate text-xs text-muted">
-                            {track.album || 'blank album'} · {track.path || 'no path'}
-                          </div>
-                        </div>
-                        <div className="flex flex-wrap items-start justify-start gap-1 md:justify-end">
-                          <Chip
-                            label={track.quality_flags?.length ? track.quality_flags.join(', ') : track.quality}
-                            size="small"
-                            color={qualityColor(track.quality)}
-                            variant="outlined"
-                          />
-                          {durationLabel(track.length) ? <Chip label={durationLabel(track.length)} size="small" variant="outlined" /> : null}
-                          {track.quality !== 'bad' && track.id > 0 ? (
-                            <Button
-                              variant="outlined"
-                              size="small"
-                              onClick={() => handleBeginQualityPlace(track)}
-                              disabled={placingQuality}
-                            >
-                              Place
-                            </Button>
-                          ) : null}
-                        </div>
-                      </div>
-                      {qualityPlaceDraft?.itemId === track.id ? (
-                        <div className="mt-3 border-t border-graphite-800 pt-3">
-                          <div className="grid gap-2 md:grid-cols-2">
-                            <TextField
-                              label="Artist"
-                              size="small"
-                              value={qualityPlaceDraft.artist}
-                              onChange={(event) => updateQualityPlaceDraft('artist', event.target.value)}
-                            />
-                            <TextField
-                              label="Title"
-                              size="small"
-                              value={qualityPlaceDraft.title}
-                              onChange={(event) => updateQualityPlaceDraft('title', event.target.value)}
-                            />
-                            <TextField
-                              label="Album Artist"
-                              size="small"
-                              value={qualityPlaceDraft.albumartist}
-                              onChange={(event) => updateQualityPlaceDraft('albumartist', event.target.value)}
-                            />
-                            <TextField
-                              label="Album"
-                              size="small"
-                              value={qualityPlaceDraft.album}
-                              onChange={(event) => updateQualityPlaceDraft('album', event.target.value)}
-                            />
-                          </div>
-                          <div className="mt-2 grid gap-2 sm:grid-cols-5">
-                            <TextField
-                              label="Year"
-                              size="small"
-                              value={qualityPlaceDraft.year}
-                              onChange={(event) => updateQualityPlaceDraft('year', event.target.value)}
-                            />
-                            <TextField
-                              label="Disc"
-                              size="small"
-                              value={qualityPlaceDraft.disc}
-                              onChange={(event) => updateQualityPlaceDraft('disc', event.target.value)}
-                            />
-                            <TextField
-                              label="Track"
-                              size="small"
-                              value={qualityPlaceDraft.track}
-                              onChange={(event) => updateQualityPlaceDraft('track', event.target.value)}
-                            />
-                            <TextField
-                              label="Track Total"
-                              size="small"
-                              value={qualityPlaceDraft.tracktotal}
-                              onChange={(event) => updateQualityPlaceDraft('tracktotal', event.target.value)}
-                            />
-                            <TextField
-                              label="Disc Total"
-                              size="small"
-                              value={qualityPlaceDraft.disctotal}
-                              onChange={(event) => updateQualityPlaceDraft('disctotal', event.target.value)}
-                            />
-                          </div>
-                          <div className="mt-2 grid gap-2 md:grid-cols-3">
-                            <TextField
-                              label="MB Recording ID"
-                              size="small"
-                              value={qualityPlaceDraft.mbTrackId}
-                              onChange={(event) => updateQualityPlaceDraft('mbTrackId', event.target.value)}
-                            />
-                            <TextField
-                              label="MB Release ID"
-                              size="small"
-                              value={qualityPlaceDraft.mbAlbumId}
-                              onChange={(event) => updateQualityPlaceDraft('mbAlbumId', event.target.value)}
-                            />
-                            <TextField
-                              label="MB Release Group ID"
-                              size="small"
-                              value={qualityPlaceDraft.mbReleaseGroupId}
-                              onChange={(event) => updateQualityPlaceDraft('mbReleaseGroupId', event.target.value)}
-                            />
-                          </div>
-                          <div className="mt-3 flex flex-wrap justify-end gap-2">
-                            <Button
-                              variant="outlined"
-                              size="small"
-                              onClick={() => setQualityPlaceDraft(null)}
-                              disabled={placingQuality}
-                            >
-                              Cancel
-                            </Button>
-                            <Button
-                              variant="contained"
-                              size="small"
-                              onClick={() => {
-                                void handleQueueQualityPlace();
-                              }}
-                              disabled={placingQuality}
-                            >
-                              {placingQuality ? 'Queueing...' : 'Queue Placement'}
-                            </Button>
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="mt-2 text-xs text-muted">
-                Repair runs in Jobs and will not delete playlist audio.
-              </div>
-            </div>
+            <p className="border-y border-graphite-800 py-3 text-sm text-zinc-300">
+              <span className="font-semibold text-warning">Needs cleanup: </span>
+              {qualityRows.length.toLocaleString()} playlist row(s) are playable but need album placement or metadata repair.{' '}
+              <Link className="text-zinc-100 underline underline-offset-4 hover:text-brass-200" to={reviewRowsPath(savedPlaylistName)}>
+                Repair them in Jobs &amp; Cleanup
+              </Link>
+            </p>
           ) : null}
 
           {savedDetailRowsLoaded && trackGroup === 'available' ? (
@@ -3116,16 +1995,6 @@ export default function Playlists() {
             </TrackList>
           ) : null}
 
-          {!viewingSavedPlaylist ? (
-            <PlaylistJobProgress
-              downloadState={downloadState}
-              downloadError={downloadError}
-              detail={downloadStatusDetail}
-              onClear={clearDownloadPanel}
-              onRetryMissing={handleRetryMissingFromJob}
-              canRetryMissing={Boolean((downloadState?.missing?.length ?? 0) > 0 && !downloadRunning)}
-            />
-          ) : null}
         </section>
       ) : null}
 
@@ -3194,6 +2063,11 @@ export default function Playlists() {
         {panelError(playlistError, engineOffline) && <Alert severity="error">{playlistError}</Alert>}
         {playlistDetailsError ? (
           <Alert severity="error" sx={{ mt: 2 }}>{playlistDetailsError}</Alert>
+        ) : null}
+        {savedRowNotice ? (
+          <Alert severity={savedRowNotice.severity} onClose={() => setSavedRowNotice(null)} sx={{ mb: 2 }}>
+            {savedRowNotice.message}
+          </Alert>
         ) : null}
 
         {playlists.length > 0 ? (
@@ -3315,35 +2189,15 @@ export default function Playlists() {
                       className="flex w-full shrink-0 items-center justify-end gap-1.5 sm:w-auto"
                       onClick={(event) => event.stopPropagation()}
                     >
-                      {summary.nextStepKey === 'resume' ? (
+                      {summary.nextStepKey === 'resume' || summary.nextStepKey === 'import-downloaded' || summary.nextStepKey === 'download-missing' ? (
                         <Button
-                          variant="contained"
-                          size="small"
-                          color="warning"
-                          disabled={Boolean(savedRowActionBusy)}
-                          onClick={() => void handleSavedPlaylistPipelineAction(playlist, 'resume')}
-                        >
-                          Resume Pipeline
-                        </Button>
-                      ) : summary.nextStepKey === 'import-downloaded' ? (
-                        <Button
+                          component={Link}
+                          to={workbenchPath(playlist.name)}
                           variant="outlined"
                           size="small"
-                          color="warning"
-                          disabled={Boolean(savedRowActionBusy)}
-                          onClick={() => void handleSavedPlaylistPipelineAction(playlist, 'import-downloaded')}
+                          color={summary.nextStepKey === 'download-missing' ? 'error' : 'warning'}
                         >
-                          Import Downloaded
-                        </Button>
-                      ) : summary.nextStepKey === 'download-missing' ? (
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          color="error"
-                          disabled={Boolean(savedRowActionBusy)}
-                          onClick={() => void handleSavedPlaylistPipelineAction(playlist, 'download-missing')}
-                        >
-                          Download Missing
+                          Open in Workbench
                         </Button>
                       ) : summary.nextStepKey === 'review' ? (
                         <Button
@@ -3392,17 +2246,6 @@ export default function Playlists() {
         ) : null}
       </section>
 
-      <DownloadConfirmDialog
-        open={confirmDownload}
-        missing={missing.length}
-        total={allTracks.length}
-        needsPull={downloadNeedsPull}
-        busy={startingDownload}
-        onClose={() => setConfirmDownload(false)}
-        onConfirm={() => {
-          void handleStartDownload();
-        }}
-      />
     </div>
   );
 }

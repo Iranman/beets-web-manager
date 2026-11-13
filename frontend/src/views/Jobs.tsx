@@ -58,6 +58,7 @@ import { DedupPanel } from '../features/dedup/DedupPanel';
 import { LibraryHealthPanel } from '../features/libraryHealth/LibraryHealthPanel';
 import { LeakedPathsPanel } from '../features/leakedPaths/LeakedPathsPanel';
 import { FolderPlaceholdersPanel } from '../features/leakedPaths/FolderPlaceholdersPanel';
+import { PlaylistQualityPanel } from '../features/playlists/PlaylistQualityPanel';
 import { SleeveArt, albumArtSources } from '../components/SleeveArt';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1618,6 +1619,8 @@ function CommonActionsSection({
   onReviewFailed,
   onSelectJob,
   linked = false,
+  linkedPlaylistRepair = false,
+  linkedPlaylist = '',
 }: {
   jobs: Job[];
   onStarted: () => Promise<void>;
@@ -1626,8 +1629,13 @@ function CommonActionsSection({
   onSelectJob: (job: Job, options?: JobOpenOptions) => void;
   /** A ?tab=library-db link: open Database Health and bring it into view. */
   linked?: boolean;
+  /** A ?tab=playlist-repair link from Playlists: open Playlist Review Rows. */
+  linkedPlaylistRepair?: boolean;
+  linkedPlaylist?: string;
 }) {
   const databaseHealthRef = useLinkedPanelScroll<HTMLDetailsElement>(linked);
+  const playlistRepairRef = useLinkedPanelScroll<HTMLDetailsElement>(linkedPlaylistRepair);
+  const [playlistRepairOpen, setPlaylistRepairOpen] = useState(linkedPlaylistRepair);
   return (
     <section className="ops-split">
       <div className="ops-split-aside">
@@ -1663,6 +1671,23 @@ function CommonActionsSection({
               <DuplicatesPanel />
             </MaintenanceCard>
           </div>
+        </details>
+
+        <details
+          ref={playlistRepairRef}
+          open={playlistRepairOpen}
+          onToggle={(event) => setPlaylistRepairOpen(event.currentTarget.open)}
+          className="ops-drawer scroll-mt-16"
+        >
+          <summary>
+            Playlist Review Rows
+          </summary>
+          {/* Loads only when opened: the playlist reads are not needed for the rest of the page. */}
+          {playlistRepairOpen ? (
+            <div className="pb-6 pt-2">
+              <PlaylistQualityPanel initialPlaylist={linkedPlaylist} onStarted={onStarted} />
+            </div>
+          ) : null}
         </details>
 
         <details ref={databaseHealthRef} open={linked} className="ops-drawer scroll-mt-16">
@@ -2906,7 +2931,7 @@ export default function Jobs() {
           onSelectJob={(job, options) => void handleSelectJob(job, options)}
         />
 
-        <CommonActionsSection jobs={jobs} failedCount={failedJobs.length} onReviewFailed={handleReviewFailed} onSelectJob={(job, options) => void handleSelectJob(job, options)} onStarted={refreshAll} linked={linkedPanel === 'library-db'} />
+        <CommonActionsSection jobs={jobs} failedCount={failedJobs.length} onReviewFailed={handleReviewFailed} onSelectJob={(job, options) => void handleSelectJob(job, options)} onStarted={refreshAll} linked={linkedPanel === 'library-db'} linkedPlaylistRepair={linkedPanel === 'playlist-repair'} linkedPlaylist={searchParams.get('playlist') ?? ''} />
 
         <AdvancedMaintenanceSection linked={linkedPanel === 'album-tracks'} />
 
