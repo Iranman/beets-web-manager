@@ -1099,7 +1099,8 @@ body {
     padding-left: 0;
     list-style: none;
   }
-  .ops-track-list > li + li {
+  .ops-track-list > li + li,
+  dl.ops-track-list > div + div {
     border-top: 1px solid var(--ops-rule);
   }
 
