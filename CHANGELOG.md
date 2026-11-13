@@ -45,6 +45,7 @@ The project uses Semantic Versioning.
 
 ### Fixed
 
+- **Transaction reconcile no longer settles a job-wrapper from a half-read tail.** On startup the reconcile could read `tail_transaction_jobs` while the background job tail sweep was still filling it, and settle a job-wrapper transaction from the first of its on-disk job records to load -- before a sibling record (for example a corrupt one that should leave the row untouched) had been indexed. It now consults the tail snapshots only once the scan is terminal (complete or aborted) and so fully indexed. This removed a timing race that made the #545/#557 tail-index tests flaky under load.
 - **No traceback for album art whose file is gone.** When an album's Beets `artpath` names a cover file that no longer exists or cannot be read, Beets' own `/album/<id>/art` raised `FileNotFoundError`, logged a full traceback and answered 500 each time the Library loaded covers. The embedded web app now answers 404 for it (one debug line, no path), and `GET /api/albums/<id>/art` falls through to folder art, the release-art cache or the placeholder as before. `artpath` is left unchanged.
 
 ### Security

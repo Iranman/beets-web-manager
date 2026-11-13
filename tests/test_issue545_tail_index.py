@@ -232,6 +232,26 @@ class TailIndexTests(_Sync):
     def test_unhashable_job_id_in_a_tail_snapshot(self):
         self._corrupt_snapshot_is_confined_to_its_row(("badid", {"job_id": ["not", "hashable"]}))
 
+    def test_partial_tail_is_not_consulted_before_the_scan_is_terminal(self):
+        # Deterministic form of the race behind #545/#557: a job-wrapper with
+        # several on-disk job records must not be settled from a partial tail.
+        # Here a single valid snapshot is indexed while the scan is still
+        # running; consulting it would settle the wrapper before a sibling
+        # record (the corrupt one that confines it) could load.
+        from job_engine import PythonJob
+        bad = self.wrapper()
+        jobs = JobStore(self.data / "empty_jobs")  # nothing on disk: _jobs stays empty
+        self.stores.append(jobs)
+        now = time.time()
+        rec = {"job_id": "numjob", "label": "numjob", "status": "success", "created_at": now - 5,
+               "finished_at": now - 4, "returncode": 0, "log_tail": [],
+               "metadata": {"type": "playlist-sync", "transaction_id": bad["id"]}}
+        jobs.tail_transaction_jobs[bad["id"]] = [PythonJob.from_record(rec)]  # as the sweep indexes it
+        ts._reconcile_running_transactions(jobs, self.store, before=None, scan_done=False)
+        self.assertEqual(self.store.get(bad["id"])["status"], "Running")  # partial tail left alone
+        ts._reconcile_running_transactions(jobs, self.store, before=None, scan_done=True)
+        self.assertEqual(self.store.get(bad["id"])["status"], "Completed")  # terminal scan: now settled
+
     def test_mixed_created_at_types_in_tail_snapshots(self):
         self._corrupt_snapshot_is_confined_to_its_row(("textjob", {"created_at": "yesterday"}),
                                                       ("numjob", {}))
