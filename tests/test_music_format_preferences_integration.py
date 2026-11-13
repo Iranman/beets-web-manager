@@ -11,6 +11,7 @@ APP_SOURCE = app_family_source()
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 CONFIG_SOURCE = (ROOT / "frontend" / "src" / "views" / "Config.tsx").read_text(encoding="utf-8")
 SYSTEM_SOURCE = (ROOT / "frontend" / "src" / "views" / "System.tsx").read_text(encoding="utf-8")
+CONFIG_YAML_SOURCE = (ROOT / "frontend" / "src" / "features" / "system" / "ConfigYamlEditor.tsx").read_text(encoding="utf-8")
 APP_ROUTES_SOURCE = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
 SHELL_SOURCE = (ROOT / "frontend" / "src" / "components" / "layout" / "Shell.tsx").read_text(encoding="utf-8")
 
@@ -100,17 +101,20 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertLess(verify_index, remove_index)
 
 
-    def test_system_page_owns_raw_config_editor(self):
+    def test_settings_page_owns_raw_config_editor(self):
         self.assertIn('path="system"', APP_ROUTES_SOURCE)
         self.assertIn('path="setup"', APP_ROUTES_SOURCE)
         self.assertIn('to="/system"', APP_ROUTES_SOURCE)
         self.assertIn("navigate('/system')", SHELL_SOURCE)
         self.assertIn('System', SHELL_SOURCE)
-        self.assertIn('/config/config.yaml', SYSTEM_SOURCE)
-        self.assertIn('Save config.yaml?', SYSTEM_SOURCE)
-        self.assertIn('Revert config.yaml?', SYSTEM_SOURCE)
-        self.assertNotIn('/config/config.yaml', CONFIG_SOURCE)
-        self.assertNotIn('Save config.yaml?', CONFIG_SOURCE)
+        # The config.yaml editor moved from System to Settings; System only links to it.
+        self.assertIn('/config/config.yaml', CONFIG_YAML_SOURCE)
+        self.assertIn('Save config.yaml?', CONFIG_YAML_SOURCE)
+        self.assertIn('Revert config.yaml?', CONFIG_YAML_SOURCE)
+        self.assertIn('<ConfigYamlEditor />', CONFIG_SOURCE)
+        self.assertNotIn('Save config.yaml?', SYSTEM_SOURCE)
+        self.assertNotIn('saveConfigFile', SYSTEM_SOURCE)
+        self.assertIn('/config#config-yaml', SYSTEM_SOURCE)
 
     def test_frontend_settings_controls_are_present(self):
         self.assertIn('getMusicFormatPreferences', CLIENT_SOURCE)

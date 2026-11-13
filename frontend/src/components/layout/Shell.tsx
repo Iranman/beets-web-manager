@@ -176,7 +176,7 @@ export default function Shell({ username, onLogout }: ShellProps) {
                     className="flex min-h-9 w-full items-center px-3 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-zinc-50 active:bg-graphite-700 data-[focus]:bg-graphite-800 data-[focus]:text-zinc-50 data-[focus]:outline-2 data-[focus]:-outline-offset-2 data-[focus]:outline-brass-300"
                     onClick={() => void navigate('/system')}
                   >
-                    System
+                    Diagnostics
                   </button>
                 </MenuItem>
                 {/* App-level actions sit apart from the pages above. */}
