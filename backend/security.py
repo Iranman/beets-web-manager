@@ -55,7 +55,8 @@ def _env_limit(name: str, default: Any, cast: Any, minimum: Any, maximum: Any) -
     """A numeric limit from the environment or saved settings. A bad saved
     value falls back to the default, because this runs at import and must not
     stop the app (and the Settings page that could fix it) from starting. The
-    ceiling keeps a saved value from removing the protection the limit gives."""
+    ceiling keeps a saved value from removing the protection the limit gives:
+    a value above it is capped to the ceiling."""
     raw = os.environ.get(name, "")
     if not raw:
         return default
@@ -63,12 +64,13 @@ def _env_limit(name: str, default: Any, cast: Any, minimum: Any, maximum: Any) -
         value = cast(raw)
     except ValueError:
         value = None
-    if value is None or not minimum <= value:  # "not <=" also rejects nan
+    # "not <=" also rejects nan; inf is invalid too, not capped to the ceiling
+    if value is None or not minimum <= value or value == float("inf"):
         LOG.warning("%s is invalid; using the default %s.", name, default)
         return default
     if value > maximum:
-        LOG.warning("%s is above its ceiling of %s; using the default %s.", name, maximum, default)
-        return default
+        LOG.warning("%s is above its ceiling of %s; using the ceiling.", name, maximum)
+        return maximum
     return value
 
 
