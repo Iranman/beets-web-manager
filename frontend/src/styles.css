@@ -2012,6 +2012,77 @@ body {
   }
 }
 /* ── end Bolder Jobs & Cleanup ───────────────────────────────────────────────────────────────── */
+
+/* ── Bolder Playlists (views/Playlists.tsx) ──────────────────────────────────────────────────────
+   The mixtape bench raised into the Bolder Shelf world, scoped to .playlists-bolder so the shared
+   crate / mixtape / lib-* materials other pages use stay untouched. Nothing new is invented: this
+   reuses the foundation tokens that shipped with the Bolder Shelf — brass with its defined role (the
+   MUI contained primary and the LinearProgress bar are already polished brass from theme.ts; here
+   brass marks the selected row via the shared .brass-rail and edges the lit walnut), the walnut room
+   light with a hairline brass edge on the crate and the sync band, the aged --bw-patina on the
+   mixtape sleeve edge, the .liner-label small-caps for metadata, the display serif for the title,
+   and the shared RecordRing as the loading spinner. The one measured frosted-glass moment is the
+   open-playlist sticky track bar (.pl-tracks-bar) — a frame the track list scrolls under, never the
+   background of a list — with an @supports guard and a near-opaque walnut fallback. Operate filter:
+   scanability first, motion <= --dur-lift and reduced-motion-aware, no new motion on a frequent
+   action. Behaviour, every handler, confirmation, API call and test id are unchanged. */
+@layer components {
+  /* The page title at full display strength: the page's serif anchor, like the Jobs masthead. */
+  .playlists-bolder .lib-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    letter-spacing: -0.02em;
+  }
+  /* The section headings (Playlist Tracks, Sync to Plex, Saved playlists) read as true serif
+     headings; they already carry font-display in the markup, this only tightens them. */
+  .playlists-bolder h2 {
+    letter-spacing: -0.012em;
+  }
+
+  /* Walnut, lit. The crate carries the room's warm light from the top and a hairline brass edge,
+     over the deep walnut base — the same material language as the Library crate and Jobs station. */
+  .playlists-bolder .crate {
+    border-top-color: color-mix(in srgb, var(--bw-accent) 20%, var(--color-walnut-700));
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 30%),
+      var(--wood-grain);
+    background-size: 100% 100%, 100% 240px;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+
+  /* The mixtape J-card gets the record-sleeve treatment: an inner top highlight and bottom shade
+     plus a hairline patina-brass edge, so the art reads as a pressed sleeve on the shelf. No motion;
+     the card is decorative and aria-hidden, the name is printed beside it. */
+  .playlists-bolder .mixtape {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 246, 228, 0.24),
+      inset 0 -14px 22px -16px rgba(0, 0, 0, 0.7),
+      0 0 0 1px color-mix(in srgb, var(--bw-patina) 55%, transparent),
+      0 10px 20px -12px #000;
+  }
+
+  /* The Sync-to-Plex band sits on a brass-lit rule, so the page's second job reads as a station. */
+  .playlists-bolder section[aria-labelledby="playlist-sync-heading"] {
+    border-color: color-mix(in srgb, var(--bw-accent) 16%, var(--bw-border));
+  }
+
+  /* The one measured frosted-glass moment: the open-playlist sticky track bar. It is a frame the
+     track list scrolls under, never the background of the list. A near-opaque walnut is the solid
+     fallback where backdrop-filter is unsupported; the fill stays dark enough that cream text clears
+     WCAG AA over whatever scrolls behind it. A hairline brass edge sits along its foot. */
+  .playlists-bolder .pl-tracks-bar {
+    background-color: color-mix(in srgb, var(--color-graphite-950) 94%, #000);
+    border-bottom-color: color-mix(in srgb, var(--bw-accent) 22%, var(--color-graphite-800));
+    box-shadow: inset 0 -1px 0 rgba(246, 223, 174, 0.12);
+  }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .playlists-bolder .pl-tracks-bar {
+      background-color: color-mix(in srgb, var(--color-graphite-950) 72%, transparent);
+      -webkit-backdrop-filter: blur(14px) saturate(1.1);
+      backdrop-filter: blur(14px) saturate(1.1);
+    }
+  }
+}
+/* ── end Bolder Playlists ────────────────────────────────────────────────────────────────────── */
 /* ── Bolder Submissions (views/Submissions.tsx) ──────────────────────────────────────────────────
    The checking counter raised into the Bolder Shelf world, scoped to .submissions-bolder so the
    shared ops-* surfaces Workbench also uses stay untouched. Nothing new is invented: this reuses
@@ -2126,6 +2197,143 @@ body {
 @layer components {
   /* The one section heading (the Workbench h2) at full display strength, on the shelf's serif. */
   .changes-bolder .ops-section-title {
+/* ── Bolder Login (views/Login.tsx) ──────────────────────────────────────────────────────────────
+   The front door raised into the Bolder Shelf world, scoped to .login-bolder so nothing else moves.
+   It stays a plain, trustworthy sign-in: no card shadow stack, no intro motion, no custom cursor.
+   It reuses only what the foundation shipped — the shared RecordRing mark, the display serif in pale
+   brass for the wordmark, the walnut room light with a hairline brass edge on the panel, the brass
+   primary action's polished sheen (--bw-accent-polish, the same gradient theme.ts gives contained
+   buttons), and the motion tokens (<= --dur-lift, reduced-motion-aware). The panel is this view's one
+   measured frosted-glass moment: there is no data behind it, only the textured room, and a near-opaque
+   walnut fallback keeps cream text WCAG AA where backdrop-filter is unsupported. */
+@layer components {
+  /* The wordmark: the display serif pulled up to front-door scale, pale brass like the shelf brand. */
+  .login-bolder .login-wordmark {
+    font-size: clamp(1.5rem, 1.35rem + 0.9vw, 1.85rem);
+    letter-spacing: -0.015em;
+  }
+
+  /* Lit walnut panel with a hairline brass edge — the same material language as the Library liner and
+     the Jobs station, no heavy card shadow. The ::after is the lamp glancing off the top edge. */
+  .login-bolder .login-panel {
+    position: relative;
+    border: 1px solid color-mix(in srgb, var(--bw-accent) 20%, var(--bw-border));
+    /* Solid fallback: near-opaque dark walnut, so labels and the error clear AA without the blur. */
+    background-color: color-mix(in srgb, var(--bw-surface) 93%, #000);
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.1), transparent 34%),
+      var(--app-grain);
+    background-size: 100% 100%, 220px 220px;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.12);
+  }
+  .login-bolder .login-panel::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 1px rgba(246, 223, 174, 0.08);
+  }
+  /* The one frosted-glass moment: translucent walnut over the room's texture, dark enough for AA,
+     guarded so the solid fallback above stands in where backdrop-filter is unsupported. */
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .login-bolder .login-panel {
+      background-color: color-mix(in srgb, var(--bw-surface) 82%, transparent);
+      -webkit-backdrop-filter: blur(16px) saturate(1.1);
+      backdrop-filter: blur(16px) saturate(1.1);
+    }
+  }
+
+  /* Fields keep the base 44px / 16px-on-phones sizing; the brass focus adds a soft glow over the
+     global focus ring so the active field reads at a glance. Motion-gated, <= --dur-hover. */
+  .login-bolder .login-field {
+    transition: border-color var(--dur-hover) var(--ease-out), box-shadow var(--dur-hover) var(--ease-out);
+  }
+  .login-bolder .login-field:focus {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--bw-accent) 26%, transparent);
+    outline: none;
+  }
+
+  /* Primary action: the solid brass fill (bg-brass-500, kept in the markup) wears the polished
+     top-to-bottom sheen, matching theme.ts's contained button. Only while enabled — the disabled
+     look (#610, recessed walnut) is left to the markup's disabled: utilities. */
+  .login-bolder .login-submit:enabled {
+    background-image: var(--bw-accent-polish);
+  }
+  .login-bolder .login-submit:enabled:hover {
+    background-image: var(--bw-accent-sheen), var(--bw-accent-polish);
+  }
+
+  /* Keep the error panel as the prominent, announced surface it is; a brass-free red left rail makes
+     it read as a block without touching its role="alert" text or its AA red-on-deep-red contrast. */
+  .login-bolder .login-error {
+    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-red-500, #ef4444) 70%, transparent);
+  }
+}
+/* ── end Bolder Login ────────────────────────────────────────────────────────────────────────── */
+/* ── Bolder System / Diagnostics (views/System.tsx) ──────────────────────────────────────────────
+   The read-only diagnostics page raised into the Bolder Shelf world, scoped to .system-bolder so no
+   other view is touched. Nothing new is invented: this reuses the foundation tokens the Bolder Shelf
+   shipped — the display serif for the page title, the walnut room light with a hairline brass edge
+   on the crate panels (the same material language as the Library crate and the Jobs station), brass
+   kept in its defined role (the primary "Mark system ready" action is already the foundation's
+   polished-brass contained button in theme.ts; the problems badge stays the shipped brass
+   .lib-review.is-flag and the "All systems OK" badge stays green), the .liner-label small-caps for
+   the metric/section
+   labels, and the shared RecordRing as the loading spinner. Operate filter: this is a calm, scannable
+   diagnostics page, so precision beats expression — no glass (nothing here is an overlay, and glass
+   never sits behind data), no motion of its own beyond the motion-gated RecordRing spin. Status words
+   keep their green/amber/red semantics. No horizontal overflow at 320/390/1440. */
+@layer components {
+  /* The page title at full display strength: the serif anchor, bolder than the base .lib-title. */
+  .system-bolder .lib-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+  }
+
+  /* Walnut, lit. The diagnostics crates carry the room's warm light from the top and a hairline
+     brass top edge over the deep walnut grain — the same treatment as the Jobs station. Text on
+     walnut-900 stays >= 14:1; the ~8% warm overlay barely shifts luminance, so WCAG AA holds. */
+  .system-bolder .crate {
+    border-top-color: color-mix(in srgb, var(--bw-accent) 18%, var(--color-walnut-700));
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 30%),
+      var(--wood-grain);
+    background-size: 100% 100%, 100% 240px;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+}
+
+/* The masthead rule picks up a brass tint, matching the ops mastheads. Unlayered because the base
+   border colour is the Tailwind `border-graphite-800` utility, which would otherwise win the cascade;
+   .system-bolder's root header is the one direct-child header, so the selector stays precise. */
+.system-bolder > header {
+  border-bottom-color: color-mix(in srgb, var(--bw-accent) 24%, var(--color-graphite-800));
+}
+/* ── end Bolder System / Diagnostics ─────────────────────────────────────────────────────────── */
+/* ── Bolder Workbench (views/Import.tsx) ─────────────────────────────────────────────────────────
+   The new-arrivals bin raised into the Bolder Shelf world, scoped to .workbench-bolder so the
+   shared ops-* surfaces Jobs and Submissions also use stay untouched. Nothing new is invented: this
+   reuses the foundation tokens the Bolder Shelf shipped — brass with its defined role (--bw-accent /
+   --bw-accent-hover for the active divider and the selected ledger row), the aged --bw-patina for the
+   arrival-sleeve edge, the walnut room light, the motion tokens, the .liner-label small-caps and the
+   shared RecordRing (the arrivals-loading spinner, added in the view). Operate filter: scanability
+   first, motion <= --dur-lift and reduced-motion-aware. No new glass: the Workbench has no docked bar
+   or overlay of its own, so glass stays the Library liner's one moment (the Library Changes delete
+   dialog keeps its own identity). The theme.ts contained button and LinearProgress are already
+   polished brass and are left untouched. No horizontal overflow at 320/390/1440. */
+@layer components {
+  /* Masthead title + the section counters at full display strength, on a brass-lit rule — the same
+     anchor the Jobs station and the Submissions counter carry. */
+  .workbench-bolder .ops-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    letter-spacing: -0.02em;
+  }
+  .workbench-bolder .ops-masthead {
+    border-bottom-color: color-mix(in srgb, var(--bw-accent) 24%, var(--bw-border));
+  }
+  .workbench-bolder .ops-section-title {
     font-size: clamp(1.375rem, 1.2rem + 0.55vw, 1.6rem);
     letter-spacing: -0.012em;
   }
@@ -2137,6 +2345,11 @@ body {
   .changes-bolder .changes-record {
     border: 1px solid color-mix(in srgb, var(--bw-accent) 18%, var(--ops-wood-rule));
     background-color: var(--ops-wood);
+  /* The bin is the page's one focal walnut surface: the room's warm light from the top and a hairline
+     brass edge over the deep walnut base — the same material language as the Library crate, the Jobs
+     station and the Submissions counter. No glass: the bin holds the arrivals and the divider tabs. */
+  .workbench-bolder .ops-bin {
+    border-color: color-mix(in srgb, var(--bw-accent) 18%, var(--ops-wood-rule));
     background-image:
       linear-gradient(180deg, rgba(226, 178, 92, 0.1), transparent 32%),
       var(--ops-grain),
@@ -2167,8 +2380,48 @@ body {
   /* The selected ledger row wears the shared brass rail (the Bolder Shelf's active-row signature):
      a patina edge plus a polished inner glint, instead of the base's single hairline. */
   .changes-bolder .ops-ledger-row.is-selected {
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+
+  /* The latest imports leaning in the bin wear the record-sleeve treatment: an inner top highlight
+     and bottom shade, a patina edge and a left spine, so each arrival reads as a pressed record set
+     down in the bin. They are presentational (not interactive), so there is no hover lift. */
+  .workbench-bolder .ops-arrivals .ops-sleeve {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 246, 228, 0.16),
+      inset 0 -14px 22px -16px rgba(0, 0, 0, 0.85),
+      0 8px 16px -10px color-mix(in srgb, var(--color-zinc-950) 60%, transparent);
+    outline-color: color-mix(in srgb, var(--bw-patina) 70%, var(--ops-edge));
+  }
+  .workbench-bolder .ops-arrivals .ops-sleeve::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 3px;
+    z-index: 2;
+    background: linear-gradient(180deg, rgba(255, 246, 228, 0.22), rgba(0, 0, 0, 0.35));
+    pointer-events: none;
+  }
+
+  /* The selected section divider stands proud of the bin (the pull-up stays the ops base's one
+     motion moment): its brass top edge thickens to the bolder-brass active state, and its count
+     reads in brass. data-selected / aria already carry the meaning for assistive tech. */
+  .workbench-bolder .ops-divider[data-selected] {
+    box-shadow: inset 0 3px 0 var(--bw-accent), inset 0 4px 0 rgba(246, 223, 174, 0.22);
+  }
+  .workbench-bolder .ops-divider[data-selected] .ops-divider-count {
+    color: var(--bw-accent-hover);
+  }
+
+  /* The selected ledger row (the Library Changes audit ledger inside the Workbench) wears the shared
+     brass rail — the Bolder Shelf's active-row signature: a patina edge plus a polished inner glint,
+     instead of the ops base's single hairline. */
+  .workbench-bolder .ops-ledger-row.is-selected {
     background: color-mix(in oklab, var(--bw-accent) 11%, transparent);
     box-shadow: inset 3px 0 0 var(--bw-accent), inset 4px 0 0 rgba(246, 223, 174, 0.25);
   }
 }
 /* ── end Bolder Library Changes ──────────────────────────────────────────────────────────────── */
+/* ── end Bolder Workbench ─────────────────────────────────────────────────────────────────────── */
