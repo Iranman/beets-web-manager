@@ -2111,3 +2111,44 @@ body {
   }
 }
 /* ── end Bolder Submissions ──────────────────────────────────────────────────────────────────── */
+/* ── Bolder System / Diagnostics (views/System.tsx) ──────────────────────────────────────────────
+   The read-only diagnostics page raised into the Bolder Shelf world, scoped to .system-bolder so no
+   other view is touched. Nothing new is invented: this reuses the foundation tokens the Bolder Shelf
+   shipped — the display serif for the page title, the walnut room light with a hairline brass edge
+   on the crate panels (the same material language as the Library crate and the Jobs station), brass
+   kept in its defined role (the primary "Mark system ready" action is already the foundation's
+   polished-brass contained button in theme.ts; the problems badge stays the shipped brass
+   .lib-review.is-flag and the "All systems OK" badge stays green), the .liner-label small-caps for
+   the metric/section
+   labels, and the shared RecordRing as the loading spinner. Operate filter: this is a calm, scannable
+   diagnostics page, so precision beats expression — no glass (nothing here is an overlay, and glass
+   never sits behind data), no motion of its own beyond the motion-gated RecordRing spin. Status words
+   keep their green/amber/red semantics. No horizontal overflow at 320/390/1440. */
+@layer components {
+  /* The page title at full display strength: the serif anchor, bolder than the base .lib-title. */
+  .system-bolder .lib-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+  }
+
+  /* Walnut, lit. The diagnostics crates carry the room's warm light from the top and a hairline
+     brass top edge over the deep walnut grain — the same treatment as the Jobs station. Text on
+     walnut-900 stays >= 14:1; the ~8% warm overlay barely shifts luminance, so WCAG AA holds. */
+  .system-bolder .crate {
+    border-top-color: color-mix(in srgb, var(--bw-accent) 18%, var(--color-walnut-700));
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 30%),
+      var(--wood-grain);
+    background-size: 100% 100%, 100% 240px;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+}
+
+/* The masthead rule picks up a brass tint, matching the ops mastheads. Unlayered because the base
+   border colour is the Tailwind `border-graphite-800` utility, which would otherwise win the cascade;
+   .system-bolder's root header is the one direct-child header, so the selector stays precise. */
+.system-bolder > header {
+  border-bottom-color: color-mix(in srgb, var(--bw-accent) 24%, var(--color-graphite-800));
+}
+/* ── end Bolder System / Diagnostics ─────────────────────────────────────────────────────────── */
