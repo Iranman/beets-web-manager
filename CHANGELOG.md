@@ -8,6 +8,7 @@ The project uses Semantic Versioning.
 
 ### Changed
 
+- **Frontend runtime dependency bump (react group).** `react` and `react-dom` 19.3.0 -> 19.3.1 (patch; RSC transport-protocol fix, no API change). Supersedes Dependabot #437, which was blocked by skipped CodeQL checks.
 - **Frontend dev-dependency bumps (batches #706/#707/#708).** `typescript-eslint` 8.71.1 -> 8.72.2, `@types/node` 26.6.4 -> 26.6.6, `vitest` 5.0.4 -> 5.1.0 (dev-only; no runtime change).
 
 ### Fixed
