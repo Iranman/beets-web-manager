@@ -4,7 +4,6 @@ import { errorMessage, sentences } from '../lib/errors';
 import { Description, Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
-import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -26,6 +25,18 @@ import type {
   TransactionSettings,
   TransactionSummary,
 } from '../api/types';
+import { RecordRing } from '../components/RecordRing';
+
+// The shelf's loading signature: the record ring turning beside a plain-language status, instead of
+// a bar. Decorative ring (aria-hidden) + a role="status" label, so assistive tech hears the load.
+function LedgerLoading({ label }: { label: string }) {
+  return (
+    <div role="status" className="changes-loading flex items-center gap-2 text-sm text-muted">
+      <RecordRing spinning className="size-5" />
+      {label}
+    </div>
+  );
+}
 
 const STATUS_OPTIONS = ['all', 'Pending', 'Preview', 'Approved', 'Running', 'Completed', 'Cancelled', 'Failed', 'Rolled Back', 'Partially Rolled Back', 'Recovery Required'];
 const OPERATION_OPTIONS = [
@@ -431,13 +442,13 @@ export default function LibraryChanges() {
   ] : [];
 
   return (
-    <section aria-labelledby="library-changes-title" className="ops-page changes-page space-y-6">
+    <section aria-labelledby="library-changes-title" className="ops-page changes-page changes-bolder space-y-6">
       <div className="max-w-3xl">
         <h2 id="library-changes-title" className="ops-section-title">Library Changes</h2>
         <p className="mt-1 text-sm text-zinc-400">Transaction history, previews, confidence, exports, and rollback status for library-changing work.</p>
       </div>
 
-      {loading && <LinearProgress />}
+      {loading && <LedgerLoading label="Loading transactions…" />}
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
       <DeleteFilesApproveDialog
         open={confirmOpen}
@@ -496,10 +507,10 @@ export default function LibraryChanges() {
         </section>
 
         <div className="min-w-0 space-y-6">
-          {!detail && selected && <LinearProgress />}
+          {!detail && selected && <LedgerLoading label="Loading transaction…" />}
           {detail ? (
             <>
-              <article aria-labelledby="transaction-detail-title" className="rounded-lg border border-graphite-700 bg-graphite-900 p-4 sm:p-5">
+              <article aria-labelledby="transaction-detail-title" className="changes-record rounded-lg p-4 sm:p-5">
                 <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
                   <div className="min-w-0">
                     <h3 id="transaction-detail-title" className="font-display text-2xl leading-tight font-semibold break-words text-zinc-50">{detail.operation_type}</h3>

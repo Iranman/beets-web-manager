@@ -3,9 +3,9 @@ import { useEngineOffline } from '../components/EngineOfflineBanner';
 import { WarningIcon } from '../components/WarningIcon';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
-import CircularProgress from '@mui/material/CircularProgress';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
+import { RecordRing } from '../components/RecordRing';
 import {
   completeSetup,
   getSetupStatus,
@@ -224,8 +224,12 @@ export default function System() {
 
   if (loading && !status) {
     return (
-      <div className="flex min-h-[24rem] items-center justify-center">
-        <CircularProgress size={28} aria-label="Loading system status" />
+      <div className="system-bolder flex min-h-[24rem] flex-col items-center justify-center gap-3" aria-busy="true">
+        {/* The record ring is the Bolder Shelf's loading motif; it is decorative, so the visible
+            caption below carries the accessible name. It uses aria-live rather than role="status" so
+            it never collides with the health line's status region once the page loads. */}
+        <RecordRing spinning className="size-10" />
+        <span aria-live="polite" className="liner-label">Loading diagnostics…</span>
       </div>
     );
   }
@@ -246,7 +250,7 @@ export default function System() {
     : [];
 
   return (
-    <div className="touch-controls min-w-0 space-y-6 overflow-x-clip">
+    <div className="system-bolder touch-controls min-w-0 space-y-6 overflow-x-clip">
       <header className="flex flex-wrap items-start justify-between gap-3 border-b border-graphite-800 pb-4">
         <div className="min-w-0">
           <h1 className="lib-title">Diagnostics</h1>
@@ -263,7 +267,7 @@ export default function System() {
         </div>
         <div className="flex flex-wrap gap-2">
           {status && !status.setup_complete ? (
-            <Button variant="outlined" size="small" disabled={completing} onClick={() => void markComplete()}>
+            <Button variant="contained" size="small" disabled={completing} onClick={() => void markComplete()}>
               {completing ? 'Marking...' : 'Mark system ready'}
             </Button>
           ) : null}
@@ -353,11 +357,11 @@ export default function System() {
               {pluginsMsg && <Alert severity="success">{pluginsMsg}</Alert>}
               {panelError(pluginsError, engineOffline) && <Alert severity="error">{pluginsError}</Alert>}
               <dl className="m-0 grid gap-x-6 gap-y-1 text-xs text-zinc-300 sm:grid-cols-2">
-                <div><dt className="inline font-semibold text-zinc-100">Plugin path:</dt> <dd className="inline m-0">{beets.pluginpath?.join(' then ') || 'not configured'}</dd></div>
-                <div><dt className="inline font-semibold text-zinc-100">ReplayGain:</dt> <dd className="inline m-0">{beets.replaygain_backend || beets.replaygain_command || 'not configured'}</dd></div>
-                <div><dt className="inline font-semibold text-zinc-100">Enabled plugins:</dt> <dd className="inline m-0">{beets.configured_plugins?.length ?? 0}</dd></div>
+                <div><dt className="liner-label inline">Plugin path:</dt> <dd className="inline m-0">{beets.pluginpath?.join(' then ') || 'not configured'}</dd></div>
+                <div><dt className="liner-label inline">ReplayGain:</dt> <dd className="inline m-0">{beets.replaygain_backend || beets.replaygain_command || 'not configured'}</dd></div>
+                <div><dt className="liner-label inline">Enabled plugins:</dt> <dd className="inline m-0">{beets.configured_plugins?.length ?? 0}</dd></div>
                 <div>
-                  <dt className="inline font-semibold text-zinc-100">Plugin loader:</dt>{' '}
+                  <dt className="liner-label inline">Plugin loader:</dt>{' '}
                   <dd className={`inline m-0 font-semibold ${pluginLoaderLabel(beets) === 'loaded' ? 'text-emerald-300' : 'text-red-300'}`}>{pluginLoaderLabel(beets)}</dd>
                 </div>
               </dl>
@@ -369,7 +373,7 @@ export default function System() {
               {pluginsReport && (
                 <div className="grid gap-x-8 gap-y-3 lg:grid-cols-2">
                   <div className="min-w-0">
-                    <h3 className="m-0 mb-1 text-xs font-semibold text-zinc-300">
+                    <h3 className="liner-label m-0 mb-1">
                       Required core plugins ({pluginsReport.required_healthy_count} of {pluginsReport.required_count} healthy)
                     </h3>
                     <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
@@ -381,7 +385,7 @@ export default function System() {
                     </ul>
                   </div>
                   <div className="min-w-0">
-                    <h3 className="m-0 mb-1 text-xs font-semibold text-zinc-300">Optional & integration plugins</h3>
+                    <h3 className="liner-label m-0 mb-1">Optional & integration plugins</h3>
                     <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
                       {[...pluginsReport.categories.optional, ...pluginsReport.categories.integration].map((plugin) => (
                         <Row key={plugin.name} name={plugin.display_name || plugin.name} tone={plugin.enabled ? 'ok' : 'neutral'} state={plugin.enabled ? '✓ Enabled' : '○ Available'}>
@@ -394,7 +398,7 @@ export default function System() {
               )}
               {pluginIntegrations.length > 0 && (
                 <div className="min-w-0">
-                  <h3 className="m-0 mb-1 text-xs font-semibold text-zinc-300">Plugins used by Web Manager features</h3>
+                  <h3 className="liner-label m-0 mb-1">Plugins used by Web Manager features</h3>
                   <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
                     {pluginIntegrations.map(([name, integration]) => {
                       const badge = integrationBadge(integration, undefined, false);
@@ -422,10 +426,10 @@ export default function System() {
         {status && (
           <Disclosure title="Beets config" hint={status.paths.beets_config.path || 'not configured'}>
             <dl className="m-0 grid gap-y-1 text-xs text-zinc-300">
-              <div><dt className="inline font-semibold text-zinc-100">Config file:</dt> <dd className="inline m-0 break-all"><code>{status.paths.beets_config.path || 'not configured'}</code> {status.paths.beets_config.exists ? '(found)' : '(missing)'}</dd></div>
-              {beets?.path ? <div><dt className="inline font-semibold text-zinc-100">Beets:</dt> <dd className="inline m-0 break-all"><code>{beets.path}</code></dd></div> : null}
-              {beets?.engine_compatibility?.message ? <div><dt className="inline font-semibold text-zinc-100">Compatibility:</dt> <dd className="inline m-0">{beets.engine_compatibility.message}</dd></div> : null}
-              <div><dt className="inline font-semibold text-zinc-100">Readiness marker:</dt> <dd className="inline m-0">{status.setup_complete ? 'complete' : 'open'}</dd></div>
+              <div><dt className="liner-label inline">Config file:</dt> <dd className="inline m-0 break-all"><code>{status.paths.beets_config.path || 'not configured'}</code> {status.paths.beets_config.exists ? '(found)' : '(missing)'}</dd></div>
+              {beets?.path ? <div><dt className="liner-label inline">Beets:</dt> <dd className="inline m-0 break-all"><code>{beets.path}</code></dd></div> : null}
+              {beets?.engine_compatibility?.message ? <div><dt className="liner-label inline">Compatibility:</dt> <dd className="inline m-0">{beets.engine_compatibility.message}</dd></div> : null}
+              <div><dt className="liner-label inline">Readiness marker:</dt> <dd className="inline m-0">{status.setup_complete ? 'complete' : 'open'}</dd></div>
             </dl>
             <p className="m-0 mt-3 text-xs text-muted">
               Edit, reload or revert config.yaml in{' '}
