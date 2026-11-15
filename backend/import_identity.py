@@ -25,6 +25,7 @@ from backend.library_service import _build_folder_evidence
 from backend.matching.folder_identity import (
     HARD_CONFLICTS, confirmed_recording, decide_auto_import, file_conflicts, rank_folder_candidates,
 )
+from backend.matching.normalize import lookup_title, normalize_artist, normalize_title
 from backend.matching.track_alignment import _hit_recording_id
 from backend.matching_service import _compact_preflight, _folder_release_preflight
 from backend.musicbrainz_service import _mb_release_search_by_folder_tracks
@@ -214,6 +215,46 @@ def _top(counter: Counter, limit: int) -> List[str]:
     return [key for key, _ in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
 
 
+#: Clean-then-retry usable floor (matching-roadmap). ``0`` (default) retries
+#: only when the raw tag cascade found nothing; a positive MusicBrainz
+#: relevance score also retries when every raw hit scores below it. At most one
+#: extra MB search per folder regardless.
+try:
+    _MB_TEXT_USABLE_SCORE = max(0, int(os.environ.get("MB_TEXT_USABLE_SCORE", "0") or "0"))
+except ValueError:
+    _MB_TEXT_USABLE_SCORE = 0
+
+
+def _mb_text_usable(found: List[Dict[str, Any]]) -> bool:
+    """Whether the raw text cascade is usable without a cleaned retry: any
+    candidate when no score floor is configured, else at least one scoring at
+    or above ``MB_TEXT_USABLE_SCORE``."""
+    if not found:
+        return False
+    if _MB_TEXT_USABLE_SCORE <= 0:
+        return True
+    return any(int(c.get("score") or 0) >= _MB_TEXT_USABLE_SCORE for c in found)
+
+
+def _mb_clean_retry_query(album: str, artist: str) -> Optional[Tuple[str, str]]:
+    """Cleaned ``(album, artist)`` for ONE bounded MusicBrainz retry, or
+    ``None`` when cleaning changes nothing a plain case/whitespace fold already
+    would (the retry would just repeat the same query).
+
+    Reuses the existing ``lookup_title`` / ``normalize_artist`` cleaners, which
+    strip bracketed junk ("[Explicit]", "(Remastered 2009)", "(Deluxe
+    Edition)"), ``feat.`` credits and trailing version words; folding also
+    drops the Lucene-breaking punctuation a raw phrase search would otherwise
+    quote verbatim. QUERY-only -- the original tags still carry identity and
+    scoring downstream."""
+    c_album, c_artist = lookup_title(album), normalize_artist(artist)
+    if not c_album:
+        return None
+    if (c_album, c_artist) == (normalize_title(album), normalize_title(artist)):
+        return None
+    return c_album, c_artist
+
+
 def _text_search(ev: Dict[str, Any], folder: str, log: List[str]) -> List[str]:
     """MusicBrainz text search, same cascade as the folder suggestion path
     (tier-5 evidence: it only proposes releases; the decision comes from
@@ -226,9 +267,29 @@ def _text_search(ev: Dict[str, Any], folder: str, log: List[str]) -> List[str]:
         found = _mb_release_search(album, "", **kwargs)
     if not found and album:
         found = _mb_release_search(" ".join(album.split()[:3]), artist, **kwargs)
+    # Clean-then-retry (matching-roadmap): when the raw tag cascade is unusable,
+    # widen the net with ONE more search built from a cleaned query. Purely
+    # supplemental -- the extra releases are seeded as tier-5 candidates that
+    # pass the SAME ranking/acceptance gates, so they can never change the
+    # Release Group identity or auto-accept. Bounded to a single extra MB
+    # search per folder.
+    if not _mb_text_usable(found):
+        retry = _mb_clean_retry_query(album, artist)
+        if retry is not None:
+            extra = _mb_release_search(retry[0], retry[1], **kwargs) or []
+            if log is not None and extra:
+                log.append(f"  Clean-retry widened text search: {len(extra)} more candidate(s)")
+            found = (found or []) + extra
     if not found:
         found = _mb_release_search_by_folder_tracks(folder, artist=artist, log=log, limit=8)
-    return [_uuid(c.get("mb_albumid")) for c in found or [] if _uuid(c.get("mb_albumid"))]
+    seen: set = set()
+    out: List[str] = []
+    for c in found or []:
+        u = _uuid(c.get("mb_albumid"))
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
 def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]:
