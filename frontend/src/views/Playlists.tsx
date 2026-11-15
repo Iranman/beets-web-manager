@@ -40,6 +40,7 @@ import type {
 } from '../api/types';
 import { useEngineOffline } from '../components/EngineOfflineBanner';
 import { MusicBrainzUnavailableNotice, fingerprintNotCheckedLabel } from '../components/MusicBrainzUnavailableNotice';
+import { RecordRing } from '../components/RecordRing';
 import { PlaylistSyncSummary, playlistSyncStatusLabel } from '../features/playlists/PlaylistSyncSummary';
 import {
   ActionMenu,
@@ -644,7 +645,7 @@ function SavedPlaylistDetailMetric({
   return (
     <div className="min-w-0 border-t border-graphite-800 pt-1.5">
       <div className={`text-sm font-semibold tabular-nums ${tone}`}>{typeof value === 'number' ? value.toLocaleString() : value}</div>
-      <div className="mt-1 text-xs text-muted">{label}</div>
+      <div className="liner-label mt-1">{label}</div>
     </div>
   );
 }
@@ -1521,6 +1522,7 @@ export default function Playlists() {
   ];
 
   return (
+    <div className="playlists-bolder">
     <div className="touch-controls min-w-0 space-y-6 overflow-x-clip">
       <div className="border-b border-graphite-800 pb-4">
         <h1 className="lib-title">Playlists</h1>
@@ -1537,7 +1539,7 @@ export default function Playlists() {
       </div>
 
       {/* The focal point: the bench where a playlist is made. Its J-card takes the name as it is typed. */}
-      <section aria-label="Make a playlist" className="grid grid-cols-[6rem_minmax(0,1fr)] gap-4 sm:grid-cols-[8rem_minmax(0,1fr)] md:gap-6 lg:grid-cols-[11rem_minmax(0,1fr)]">
+      <section aria-label="Make a playlist" className="grid grid-cols-[6rem_minmax(0,1fr)] gap-4 sm:grid-cols-[9rem_minmax(0,1fr)] md:gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
         <MixtapeSleeve name={name || savedPlaylistName} className="w-full self-start" />
         <div className="min-w-0">
         <button
@@ -1565,7 +1567,12 @@ export default function Playlists() {
             ) : content ? (
               <span className="truncate">{source === 'url' ? detected.label : SOURCE_OPTIONS.find((option) => option.value === source)?.label}</span>
             ) : null}
-            {parsing ? <Chip label="Matching" size="small" color="primary" /> : null}
+            {parsing ? (
+              <span className="inline-flex items-center gap-1.5">
+                <RecordRing spinning className="size-4" />
+                <span className="liner-label">Matching</span>
+              </span>
+            ) : null}
           </span>
         </button>
 
@@ -1688,7 +1695,7 @@ export default function Playlists() {
       {parseResult ? (
         // The open playlist: its tracklist, filed by state, set on rules like a back cover.
         <section aria-label="Playlist tracks" className="space-y-3">
-          <div className="sticky top-[var(--bw-header-h)] z-10 -mx-3 border-b border-graphite-800 bg-graphite-950 px-3 py-2 sm:-mx-4 sm:px-4">
+          <div className="pl-tracks-bar sticky top-[var(--bw-header-h)] z-10 -mx-3 border-b border-graphite-800 px-3 py-2 sm:-mx-4 sm:px-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
                 <h2 className="truncate font-display text-xl font-semibold text-zinc-100">
@@ -2059,7 +2066,12 @@ export default function Playlists() {
           </Button>
         </div>
 
-        {loadingPlaylists && <LinearProgress sx={{ borderRadius: 1 }} />}
+        {loadingPlaylists ? (
+          <div className="flex items-center gap-2 py-2" role="status" aria-live="polite">
+            <RecordRing spinning className="size-5" />
+            <span className="liner-label">Loading saved playlists…</span>
+          </div>
+        ) : null}
         {panelError(playlistError, engineOffline) && <Alert severity="error">{playlistError}</Alert>}
         {playlistDetailsError ? (
           <Alert severity="error" sx={{ mt: 2 }}>{playlistDetailsError}</Alert>
@@ -2123,7 +2135,7 @@ export default function Playlists() {
               const fileBadge = playlistFileBadge(playlist);
               return (
                 <div key={playlist.name}>
-                  <div className={`flex flex-wrap items-center gap-3 px-3 py-3 sm:flex-nowrap ${expanded ? 'bg-walnut-800' : 'hover:bg-walnut-800'}`}>
+                  <div className={`flex flex-wrap items-center gap-3 px-3 py-3 sm:flex-nowrap ${expanded ? 'bg-walnut-800 brass-rail' : 'hover:bg-walnut-800'}`}>
                     <MixtapeSleeve name={playlist.name} small className="w-12 shrink-0 self-start sm:w-14" />
                     {/* Left: name + meta + compact stats — clickable to toggle details */}
                     <div
@@ -2152,9 +2164,9 @@ export default function Playlists() {
                         ) : null}
                       </div>
                       <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 text-xs text-zinc-400">
-                        <span>{summary.sourceLabel}</span>
-                        <span>{summary.sourceStatus}</span>
-                        <span>{summary.updatedLabel}</span>
+                        <span className="liner-label">{summary.sourceLabel}</span>
+                        <span className="liner-label">{summary.sourceStatus}</span>
+                        <span className="liner-label">{summary.updatedLabel}</span>
                       </div>
                       <SavedPlaylistRowContext summary={summary} />
                       <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
@@ -2246,6 +2258,7 @@ export default function Playlists() {
         ) : null}
       </section>
 
+    </div>
     </div>
   );
 }
