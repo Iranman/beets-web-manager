@@ -2012,3 +2012,74 @@ body {
   }
 }
 /* ── end Bolder Jobs & Cleanup ───────────────────────────────────────────────────────────────── */
+
+/* ── Bolder Playlists (views/Playlists.tsx) ──────────────────────────────────────────────────────
+   The mixtape bench raised into the Bolder Shelf world, scoped to .playlists-bolder so the shared
+   crate / mixtape / lib-* materials other pages use stay untouched. Nothing new is invented: this
+   reuses the foundation tokens that shipped with the Bolder Shelf — brass with its defined role (the
+   MUI contained primary and the LinearProgress bar are already polished brass from theme.ts; here
+   brass marks the selected row via the shared .brass-rail and edges the lit walnut), the walnut room
+   light with a hairline brass edge on the crate and the sync band, the aged --bw-patina on the
+   mixtape sleeve edge, the .liner-label small-caps for metadata, the display serif for the title,
+   and the shared RecordRing as the loading spinner. The one measured frosted-glass moment is the
+   open-playlist sticky track bar (.pl-tracks-bar) — a frame the track list scrolls under, never the
+   background of a list — with an @supports guard and a near-opaque walnut fallback. Operate filter:
+   scanability first, motion <= --dur-lift and reduced-motion-aware, no new motion on a frequent
+   action. Behaviour, every handler, confirmation, API call and test id are unchanged. */
+@layer components {
+  /* The page title at full display strength: the page's serif anchor, like the Jobs masthead. */
+  .playlists-bolder .lib-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    letter-spacing: -0.02em;
+  }
+  /* The section headings (Playlist Tracks, Sync to Plex, Saved playlists) read as true serif
+     headings; they already carry font-display in the markup, this only tightens them. */
+  .playlists-bolder h2 {
+    letter-spacing: -0.012em;
+  }
+
+  /* Walnut, lit. The crate carries the room's warm light from the top and a hairline brass edge,
+     over the deep walnut base — the same material language as the Library crate and Jobs station. */
+  .playlists-bolder .crate {
+    border-top-color: color-mix(in srgb, var(--bw-accent) 20%, var(--color-walnut-700));
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 30%),
+      var(--wood-grain);
+    background-size: 100% 100%, 100% 240px;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+
+  /* The mixtape J-card gets the record-sleeve treatment: an inner top highlight and bottom shade
+     plus a hairline patina-brass edge, so the art reads as a pressed sleeve on the shelf. No motion;
+     the card is decorative and aria-hidden, the name is printed beside it. */
+  .playlists-bolder .mixtape {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 246, 228, 0.24),
+      inset 0 -14px 22px -16px rgba(0, 0, 0, 0.7),
+      0 0 0 1px color-mix(in srgb, var(--bw-patina) 55%, transparent),
+      0 10px 20px -12px #000;
+  }
+
+  /* The Sync-to-Plex band sits on a brass-lit rule, so the page's second job reads as a station. */
+  .playlists-bolder section[aria-labelledby="playlist-sync-heading"] {
+    border-color: color-mix(in srgb, var(--bw-accent) 16%, var(--bw-border));
+  }
+
+  /* The one measured frosted-glass moment: the open-playlist sticky track bar. It is a frame the
+     track list scrolls under, never the background of the list. A near-opaque walnut is the solid
+     fallback where backdrop-filter is unsupported; the fill stays dark enough that cream text clears
+     WCAG AA over whatever scrolls behind it. A hairline brass edge sits along its foot. */
+  .playlists-bolder .pl-tracks-bar {
+    background-color: color-mix(in srgb, var(--color-graphite-950) 94%, #000);
+    border-bottom-color: color-mix(in srgb, var(--bw-accent) 22%, var(--color-graphite-800));
+    box-shadow: inset 0 -1px 0 rgba(246, 223, 174, 0.12);
+  }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .playlists-bolder .pl-tracks-bar {
+      background-color: color-mix(in srgb, var(--color-graphite-950) 72%, transparent);
+      -webkit-backdrop-filter: blur(14px) saturate(1.1);
+      backdrop-filter: blur(14px) saturate(1.1);
+    }
+  }
+}
+/* ── end Bolder Playlists ────────────────────────────────────────────────────────────────────── */
