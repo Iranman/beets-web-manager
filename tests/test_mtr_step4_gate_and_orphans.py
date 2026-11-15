@@ -287,9 +287,43 @@ class OrphanStagingReconcileTests(_CarrierStateMixin):
         for c in calls:
             self.assertEqual(os.path.commonpath([c, self.root_real]), self.root_real)
 
-    def test_unmarked_old_orphan_is_kept_and_logged(self):
+    def test_review_backlog_keeps_all_without_per_folder_spam(self):
+        # Regression: the automatic sweep runs every ~2 min. A backlog of folders
+        # all "queued for Review" must stay kept EVERY run (counts unchanged), but
+        # must NOT re-emit one INFO line per folder each tick (the log flood the
+        # owner saw). The single per-run "done" line carries kept==N instead.
+        n = 6
+        for i in range(n):
+            self._folder(f"deadbeef-review-{i}", age_s=self.old)
+        spy = mock.MagicMock()
+        log = []
+        with mock.patch.object(recovery_service, "_live_carrier_prefixes", return_value={}), \
+                mock.patch("backend.pending_review_store._pending_review_has_path_or_overlap",
+                           return_value=True), \
+                mock.patch("backend.composite_workflows.delete_file", spy):
+            summary = recovery_service.reconcile_orphan_staging_folders(log=log)
+        # Decision/counts unchanged: every folder kept, none deleted or adopted.
+        spy.assert_not_called()
+        self.assertEqual(summary["kept"], n, summary)
+        self.assertEqual(summary["kept_in_review"], n, summary)
+        self.assertEqual(summary["removed"], 0, summary)
+        self.assertEqual(summary["adopted"], 0, summary)
+        self.assertEqual(summary["scanned"], n, summary)
+        # No per-folder "queued for Review" lines -- that was the flood.
+        self.assertFalse(any("queued for Review" in m for m in log), log)
+        # Exactly one per-run "done" line, carrying the aggregate kept==N.
+        done = [m for m in log if m.startswith("[recovery-reconcile] done:")]
+        self.assertEqual(len(done), 1, log)
+        self.assertIn(f"kept {n}", done[0])
+        self.assertIn(f"in_review {n}", done[0])
+        # One summary line total -- not one line per folder.
+        self.assertEqual(len(log), 1, log)
+
+    def test_unmarked_old_orphan_is_kept_and_counted(self):
         # #583: location is not ownership. An aged, carrier-unowned folder with
-        # no app marker is the user's: kept and logged, never handed to delete.
+        # no app marker is the user's: kept, never handed to delete. The keep is
+        # recorded in the per-run aggregate (not one INFO line per folder every
+        # sweep, which flooded the job log for a steady-state backlog).
         orphan = self._folder("deadbeef-user-folder", age_s=self.old)
         spy = mock.MagicMock()
         log = []
@@ -300,7 +334,14 @@ class OrphanStagingReconcileTests(_CarrierStateMixin):
         self.assertTrue(os.path.exists(orphan))
         self.assertEqual(summary["removed"], 0, summary)
         self.assertEqual(summary["kept"], 1, summary)
-        self.assertTrue(any("deadbeef-user-folder (no app ownership marker)" in m for m in log), log)
+        self.assertEqual(summary["kept_unmarked"], 1, summary)
+        # No per-folder "kept" line is emitted for the steady-state case.
+        self.assertFalse(any("no app ownership marker" in m for m in log), log)
+        # The single per-run "done" line carries the aggregate + breakdown.
+        done = [m for m in log if m.startswith("[recovery-reconcile] done:")]
+        self.assertEqual(len(done), 1, log)
+        self.assertIn("kept 1", done[0])
+        self.assertIn("unmarked 1", done[0])
 
     @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd,
                          "markers need the no-follow fd primitives (POSIX)")
