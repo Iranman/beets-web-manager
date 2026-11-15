@@ -2111,3 +2111,64 @@ body {
   }
 }
 /* ── end Bolder Submissions ──────────────────────────────────────────────────────────────────── */
+/* ── Bolder Library Changes (views/LibraryChanges.tsx) ───────────────────────────────────────────
+   The audit ledger raised into the Bolder Shelf world, scoped to .changes-bolder so the shared
+   ops-* surfaces (the Workbench bin above it, Submissions) stay untouched. Nothing new is invented:
+   this reuses only what the foundation shipped — brass in its defined role (--bw-accent for the
+   selected transaction's rail and the one Approve fill, which is already theme.ts's polished-brass
+   contained button), the aged --bw-patina edge, the walnut room light (--ops-wood / --ops-grain /
+   --ops-sheen) with a hairline brass edge on the one focal panel, the figure labels as .liner-label
+   small-caps over sans tabular values, and the shared RecordRing as the loading spinner. Operate
+   filter: scanability first, so the ledger stays open composition on rules and the walnut sits only
+   on the one focal object — the selected transaction, the record pulled from the shelf — never
+   behind the ledger rows or the diff data. No new glass: the typed DELETE ALBUM FILES dialog and the
+   rollback confirm keep their own scrims, unchanged. No horizontal overflow at 320/390/1440. */
+@layer components {
+  /* The one section heading (the Workbench h2) at full display strength, on the shelf's serif. */
+  .changes-bolder .ops-section-title {
+    font-size: clamp(1.375rem, 1.2rem + 0.55vw, 1.6rem);
+    letter-spacing: -0.012em;
+  }
+
+  /* The selected transaction is the record pulled from the shelf: the one focal walnut surface, with
+     the room's warm light from the top, the interim walnut grain, a hairline brass edge, and the
+     shared brass left-rail (.brass-rail) marking it as the selected record. The ledger rows and the
+     metadata/filesystem diffs stay open on rules below — walnut never sits behind that data. */
+  .changes-bolder .changes-record {
+    border: 1px solid color-mix(in srgb, var(--bw-accent) 18%, var(--ops-wood-rule));
+    background-color: var(--ops-wood);
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.1), transparent 32%),
+      var(--ops-grain),
+      linear-gradient(180deg, var(--ops-sheen), transparent 45%);
+    background-size: 100% 100%, 520px 180px, auto;
+    box-shadow:
+      inset 3px 0 0 var(--bw-accent),
+      inset 4px 0 0 rgba(246, 223, 174, 0.25),
+      inset 0 1px 0 rgba(246, 223, 174, 0.1),
+      0 10px 22px -14px #000;
+  }
+  /* The operation name is the record's label: the display serif pulled a touch tighter. */
+  .changes-bolder .changes-record [id="transaction-detail-title"] {
+    letter-spacing: -0.015em;
+  }
+
+  /* Metadata as liner notes: the figure labels (Date, Job, Dry run, Undo, the confidences) become
+     the letterspaced small-caps liner label; the values stay sans + tabular (table data, kept out
+     of the serif), matching the Jobs station. */
+  .changes-bolder .ops-figures dt {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--bw-muted);
+  }
+
+  /* The selected ledger row wears the shared brass rail (the Bolder Shelf's active-row signature):
+     a patina edge plus a polished inner glint, instead of the base's single hairline. */
+  .changes-bolder .ops-ledger-row.is-selected {
+    background: color-mix(in oklab, var(--bw-accent) 11%, transparent);
+    box-shadow: inset 3px 0 0 var(--bw-accent), inset 4px 0 0 rgba(246, 223, 174, 0.25);
+  }
+}
+/* ── end Bolder Library Changes ──────────────────────────────────────────────────────────────── */
