@@ -13,6 +13,7 @@ import type { QueueFilter } from '../features/importReview/ImportReviewPage';
 import { IntakePanel } from '../features/intake/IntakePanel';
 import { PlaylistPipelinePanel } from '../features/playlists/PlaylistPipelinePanel';
 import { SleeveArt, albumArtSources } from '../components/SleeveArt';
+import { RecordRing } from '../components/RecordRing';
 import type { Job, JobListResponse } from '../types/api';
 import LibraryChanges from './LibraryChanges';
 
@@ -270,7 +271,7 @@ export default function Import() {
   if (movedMissingIdsLink) return <Navigate to={MISSING_IDS_PATH} replace />;
 
   return (
-    <section className="ops-page space-y-8 pb-10">
+    <section className="ops-page workbench-bolder space-y-8 pb-10">
       <header className="ops-masthead">
         <div className="min-w-0">
           <h1 className="ops-title">Workbench</h1>
@@ -316,8 +317,10 @@ export default function Import() {
                   </li>
                 ))}
               </ul>
+            ) : summary.loading ? (
+              <p className="flex items-center gap-2 text-sm text-zinc-300"><RecordRing spinning className="size-4" />Checking the bin...</p>
             ) : (
-              <p className="text-sm text-zinc-300">{summary.loading ? 'Checking the bin...' : 'Nothing has arrived yet. Start from Import Source or Find Music.'}</p>
+              <p className="text-sm text-zinc-300">Nothing has arrived yet. Start from Import Source or Find Music.</p>
             )}
           </div>
           <TabList className="ops-dividers">
