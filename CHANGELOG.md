@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Changed
+
+- **Frontend dev-dependency bumps (batches #706/#707/#708).** `typescript-eslint` 8.71.1 -> 8.72.2, `@types/node` 26.6.4 -> 26.6.6, `vitest` 5.0.4 -> 5.1.0 (dev-only; no runtime change).
+
 ### Fixed
 
 - **Recovery sweep no longer floods the job log in steady state (ARCH-030).** The automatic missing-track recovery sweep runs every `RECOVERY_ADVANCE_INTERVAL_SECONDS` (120 s by default). It used to append one INFO line per staging folder every tick for folders in a steady state — a Review backlog of ~120 folders re-logged ~120 identical "kept (queued for Review)" lines each run, forever. The steady-state per-folder "kept" lines (`kept (queued for Review)`, `kept (kept for a retry)`, `kept (no app ownership marker)` in the orphan reconcile; `carrier … kept in review -- <reason>` in the advancer) are dropped; the per-run "done" summary is now emitted every run and the reconcile summary carries a kept breakdown (`in_review` / `retry` / `unmarked`) so no information is lost at the aggregate level. Per-folder lines for genuine state changes (adopted, removed) and for errors/skips are unchanged. This is a logging-only change: every keep/adopt/delete/skip decision, every fail-closed containment guard (F6/F8), all counts and all control flow are identical.
