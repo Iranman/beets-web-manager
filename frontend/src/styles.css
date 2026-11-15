@@ -2281,7 +2281,6 @@ body {
   /* The page title at full display strength: the serif anchor, bolder than the base .lib-title. */
   .system-bolder .lib-title {
     font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
-    line-height: 1.08;
     letter-spacing: -0.02em;
   }
 
@@ -2490,7 +2489,7 @@ body {
   .settings-bolder .crate {
     border-top-color: color-mix(in srgb, var(--bw-accent) 18%, var(--color-walnut-700));
     background-image:
-      linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 34%),
+      linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 30%),
       var(--wood-grain),
       linear-gradient(180deg, var(--ops-sheen), transparent 46%);
     background-repeat: no-repeat, repeat, no-repeat;
