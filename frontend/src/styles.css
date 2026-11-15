@@ -2047,7 +2047,7 @@ body {
   /* Walnut, lit. The crate carries the room's warm light from the top and a hairline brass edge,
      over the deep walnut base — the same material language as the Library crate and Jobs station. */
   .playlists-bolder .crate {
-    border-top-color: color-mix(in srgb, var(--bw-accent) 20%, var(--color-walnut-700));
+    border-top-color: color-mix(in srgb, var(--bw-accent) 18%, var(--color-walnut-700));
     background-image:
       linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 30%),
       var(--wood-grain);
@@ -2488,7 +2488,7 @@ body {
      crate and the Jobs station. The rank badge is already pale brass (markup). No glass: it holds a
      list, and the Bolder Shelf keeps glass off lists and off form fields. */
   .settings-bolder .crate {
-    border-top-color: color-mix(in srgb, var(--bw-accent) 20%, var(--color-walnut-700));
+    border-top-color: color-mix(in srgb, var(--bw-accent) 18%, var(--color-walnut-700));
     background-image:
       linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 34%),
       var(--wood-grain),
