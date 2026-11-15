@@ -183,7 +183,7 @@ export function PluginsPanel() {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="m-0 text-sm font-semibold text-zinc-100">Plugin Controls</h3>
+        <h3 className="liner-label m-0">Plugin Controls</h3>
         <Button size="small" variant="outlined" onClick={() => void loadPluginStatus()}>
           Refresh status
         </Button>

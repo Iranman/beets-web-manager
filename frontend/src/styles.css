@@ -2439,3 +2439,55 @@ body {
   }
 }
 /* ── end Bolder Library Changes ──────────────────────────────────────────────────────────────── */
+
+/* ── Bolder Settings (views/Config.tsx, features/plugins/PluginsPanel.tsx) ───────────────────────
+   The one editing page raised into the Bolder Shelf world, scoped to .settings-bolder so the shared
+   ops-* surfaces Workbench, Jobs and Submissions also use stay untouched. Nothing new is invented:
+   this reuses only the foundation tokens the Bolder Shelf shipped — brass with its defined role
+   (--bw-accent for the primary/Save action via theme.ts, the active state and the index rail), the
+   walnut room light with a hairline brass edge on the one wooden surface (the preferred-format
+   crate), the figure/group/field labels as .liner-label small-caps, and the shared RecordRing as the
+   refresh/loading spinner. Operate filter: scanability and precision first — motion <= --dur-lift and
+   reduced-motion-aware, and no new glass (Settings is a form page; glass never sits behind a field or
+   a secret). Behaviour is unchanged: every setting and its save flow, the revision-conflict handling,
+   the /config#section deep-link scroll, the section index/nav, secret masking/reveal, every
+   confirmation, API call and test id is the same. No horizontal overflow at 320/390/1440. */
+@layer components {
+  /* Masthead title + section titles at full display strength, on a brass-lit rule. */
+  .settings-bolder .ops-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    letter-spacing: -0.02em;
+  }
+  .settings-bolder .ops-masthead {
+    border-bottom-color: color-mix(in srgb, var(--bw-accent) 24%, var(--bw-border));
+  }
+  .settings-bolder .ops-section-title {
+    font-size: clamp(1.375rem, 1.2rem + 0.55vw, 1.6rem);
+    letter-spacing: -0.012em;
+  }
+
+  /* The sticky section index: from 64rem its left rule reads as a faint brass rail, so the index of
+     sections wears brass as the page's "where am I" edge. The entries are .ops-filter (44px on coarse
+     pointers, a brass underline/edge on hover and focus via the view's existing utilities), unchanged. */
+  @media (min-width: 64rem) {
+    .settings-bolder nav[aria-label="Settings sections"] > ul {
+      border-inline-start-color: color-mix(in srgb, var(--bw-accent) 20%, var(--bw-border));
+    }
+  }
+
+  /* The one wooden surface: the preferred-format order crate carries the room's warm light from the
+     top and a hairline brass edge over the walnut base — the same material language as the Library
+     crate and the Jobs station. The rank badge is already pale brass (markup). No glass: it holds a
+     list, and the Bolder Shelf keeps glass off lists and off form fields. */
+  .settings-bolder .crate {
+    border-top-color: color-mix(in srgb, var(--bw-accent) 20%, var(--color-walnut-700));
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.08), transparent 34%),
+      var(--wood-grain),
+      linear-gradient(180deg, var(--ops-sheen), transparent 46%);
+    background-repeat: no-repeat, repeat, no-repeat;
+    background-size: 100% 100%, 100% 240px, 100% 100%;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+}
+/* ── end Bolder Settings ─────────────────────────────────────────────────────────────────────── */

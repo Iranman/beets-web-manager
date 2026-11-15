@@ -17,6 +17,7 @@ import {
   startMusicFormatScan,
 } from '../api/client';
 import { PluginsPanel } from '../features/plugins/PluginsPanel';
+import { RecordRing } from '../components/RecordRing';
 import { ConfigYamlEditor } from '../features/system/ConfigYamlEditor';
 import { SecuritySection } from '../features/system/SecuritySection';
 import type {
@@ -101,7 +102,7 @@ function SettingsSection({
   );
 }
 
-const SUBHEAD = 'm-0 text-sm font-semibold text-zinc-100';
+const SUBHEAD = 'liner-label m-0';
 const CHECK_ROW = 'flex min-h-10 cursor-pointer items-center gap-2 text-sm text-zinc-200 pointer-coarse:min-h-11';
 const CHECK = 'size-4 shrink-0 accent-brass-500';
 
@@ -344,7 +345,7 @@ export default function Config() {
   ];
 
   return (
-    <div ref={pageRef} className="ops-page min-w-0 space-y-8 overflow-x-clip pb-10">
+    <div ref={pageRef} className="ops-page settings-bolder min-w-0 space-y-8 overflow-x-clip pb-10">
       <header className="ops-masthead">
         <div className="min-w-0">
           <h1 className="ops-title">Settings</h1>
@@ -356,9 +357,12 @@ export default function Config() {
             </p>
           ) : null}
         </div>
-        <Button variant="outlined" size="small" onClick={refreshAll} disabled={loading || formatLoading}>
-          Refresh
-        </Button>
+        <div className="flex items-center gap-3">
+          {loading || formatLoading ? <RecordRing spinning className="size-5" /> : null}
+          <Button variant="outlined" size="small" onClick={refreshAll} disabled={loading || formatLoading}>
+            Refresh
+          </Button>
+        </div>
       </header>
 
       {panelError(error, engineOffline) && <Alert severity="error">{error}</Alert>}
@@ -488,7 +492,7 @@ export default function Config() {
                   </div>
                   <div className="grid gap-4 sm:grid-cols-2">
                     <label className="block space-y-1 text-xs text-zinc-300">
-                      <span>Custom max channel count</span>
+                      <span className="liner-label">Custom max channel count</span>
                       <TextField
                         fullWidth
                         size="small"
@@ -529,7 +533,7 @@ export default function Config() {
                     <h3 className={SUBHEAD}>Rejected audio handling</h3>
                     <div className="grid gap-4 sm:grid-cols-2">
                       <label className="block space-y-1 text-xs text-zinc-300">
-                        <span>Rejected downloads</span>
+                        <span className="liner-label">Rejected downloads</span>
                         <select
                           className="ops-field w-full"
                           value={formatPrefs.rejected_download_handling}
