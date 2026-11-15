@@ -2182,3 +2182,83 @@ body {
   }
 }
 /* ── end Bolder Submissions ──────────────────────────────────────────────────────────────────── */
+/* ── Bolder Workbench (views/Import.tsx) ─────────────────────────────────────────────────────────
+   The new-arrivals bin raised into the Bolder Shelf world, scoped to .workbench-bolder so the
+   shared ops-* surfaces Jobs and Submissions also use stay untouched. Nothing new is invented: this
+   reuses the foundation tokens the Bolder Shelf shipped — brass with its defined role (--bw-accent /
+   --bw-accent-hover for the active divider and the selected ledger row), the aged --bw-patina for the
+   arrival-sleeve edge, the walnut room light, the motion tokens, the .liner-label small-caps and the
+   shared RecordRing (the arrivals-loading spinner, added in the view). Operate filter: scanability
+   first, motion <= --dur-lift and reduced-motion-aware. No new glass: the Workbench has no docked bar
+   or overlay of its own, so glass stays the Library liner's one moment (the Library Changes delete
+   dialog keeps its own identity). The theme.ts contained button and LinearProgress are already
+   polished brass and are left untouched. No horizontal overflow at 320/390/1440. */
+@layer components {
+  /* Masthead title + the section counters at full display strength, on a brass-lit rule — the same
+     anchor the Jobs station and the Submissions counter carry. */
+  .workbench-bolder .ops-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    letter-spacing: -0.02em;
+  }
+  .workbench-bolder .ops-masthead {
+    border-bottom-color: color-mix(in srgb, var(--bw-accent) 24%, var(--bw-border));
+  }
+  .workbench-bolder .ops-section-title {
+    font-size: clamp(1.375rem, 1.2rem + 0.55vw, 1.6rem);
+    letter-spacing: -0.012em;
+  }
+
+  /* The bin is the page's one focal walnut surface: the room's warm light from the top and a hairline
+     brass edge over the deep walnut base — the same material language as the Library crate, the Jobs
+     station and the Submissions counter. No glass: the bin holds the arrivals and the divider tabs. */
+  .workbench-bolder .ops-bin {
+    border-color: color-mix(in srgb, var(--bw-accent) 18%, var(--ops-wood-rule));
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.1), transparent 32%),
+      var(--ops-grain),
+      linear-gradient(180deg, var(--ops-sheen), transparent 45%);
+    background-size: 100% 100%, 520px 180px, auto;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+
+  /* The latest imports leaning in the bin wear the record-sleeve treatment: an inner top highlight
+     and bottom shade, a patina edge and a left spine, so each arrival reads as a pressed record set
+     down in the bin. They are presentational (not interactive), so there is no hover lift. */
+  .workbench-bolder .ops-arrivals .ops-sleeve {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 246, 228, 0.16),
+      inset 0 -14px 22px -16px rgba(0, 0, 0, 0.85),
+      0 8px 16px -10px color-mix(in srgb, var(--color-zinc-950) 60%, transparent);
+    outline-color: color-mix(in srgb, var(--bw-patina) 70%, var(--ops-edge));
+  }
+  .workbench-bolder .ops-arrivals .ops-sleeve::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 3px;
+    z-index: 2;
+    background: linear-gradient(180deg, rgba(255, 246, 228, 0.22), rgba(0, 0, 0, 0.35));
+    pointer-events: none;
+  }
+
+  /* The selected section divider stands proud of the bin (the pull-up stays the ops base's one
+     motion moment): its brass top edge thickens to the bolder-brass active state, and its count
+     reads in brass. data-selected / aria already carry the meaning for assistive tech. */
+  .workbench-bolder .ops-divider[data-selected] {
+    box-shadow: inset 0 3px 0 var(--bw-accent), inset 0 4px 0 rgba(246, 223, 174, 0.22);
+  }
+  .workbench-bolder .ops-divider[data-selected] .ops-divider-count {
+    color: var(--bw-accent-hover);
+  }
+
+  /* The selected ledger row (the Library Changes audit ledger inside the Workbench) wears the shared
+     brass rail — the Bolder Shelf's active-row signature: a patina edge plus a polished inner glint,
+     instead of the ops base's single hairline. */
+  .workbench-bolder .ops-ledger-row.is-selected {
+    background: color-mix(in oklab, var(--bw-accent) 11%, transparent);
+    box-shadow: inset 3px 0 0 var(--bw-accent), inset 4px 0 0 rgba(246, 223, 174, 0.25);
+  }
+}
+/* ── end Bolder Workbench ─────────────────────────────────────────────────────────────────────── */
