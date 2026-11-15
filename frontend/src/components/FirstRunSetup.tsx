@@ -343,10 +343,13 @@ export default function FirstRunSetup() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold text-zinc-300">
+                  <label htmlFor="setup-username" className="block text-xs font-semibold text-zinc-300">
                     Username
                   </label>
                   <input
+                    id="setup-username"
+                    name="username"
+                    autoComplete="username"
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
@@ -356,11 +359,14 @@ export default function FirstRunSetup() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-zinc-300">
+                  <label htmlFor="setup-password" className="block text-xs font-semibold text-zinc-300">
                     Password
                   </label>
                   <div className="relative mt-1.5">
                     <input
+                      id="setup-password"
+                      name="new-password"
+                      autoComplete="new-password"
                       type={showPassword ? 'text' : 'password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
@@ -369,6 +375,7 @@ export default function FirstRunSetup() {
                     />
                     <button
                       type="button"
+                      aria-controls="setup-password"
                       onClick={() => setShowPassword(!showPassword)}
                       className="absolute inset-y-0 right-0 flex items-center pr-3 text-xs font-medium text-zinc-400 hover:text-zinc-200"
                     >
@@ -378,10 +385,13 @@ export default function FirstRunSetup() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-zinc-300">
+                  <label htmlFor="setup-confirm-password" className="block text-xs font-semibold text-zinc-300">
                     Confirm password
                   </label>
                   <input
+                    id="setup-confirm-password"
+                    name="confirm-password"
+                    autoComplete="new-password"
                     type="password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
