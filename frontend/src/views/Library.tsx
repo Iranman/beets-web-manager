@@ -1290,7 +1290,7 @@ export default function Library() {
   const shownError = panelError(error, engineOffline);
 
   return (
-    <div className="space-y-4">
+    <div className="touch-controls space-y-4">
       {/* Liner-note stat header: oversized display counts on a frosted-glass band, with the library's
           own album art blurred behind it (the one measured "warm glass" moment; the lists below stay on
           solid surfaces). Each count is one text node. The band collapses to one line once scrolled. */}

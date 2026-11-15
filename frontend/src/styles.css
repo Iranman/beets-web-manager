@@ -1825,20 +1825,26 @@ body {
 }
 /* ── end Bolder Shelf ───────────────────────────────────────────────────────────────────────── */
 /* ── Touch targets (unlayered) ───────────────────────────────────────────────────────────────────
-   MUI's emotion styles are unlayered, so a min-height rule inside @layer components loses to them.
-   These sit outside the layer, like .changes-page above, so the ops pages' 40px / 44px-under-a-finger
-   sizing actually lands. .touch-controls is the minimal hook for pages (Playlists, System) that are
-   neither an ops page nor the changes ledger; it only bumps their MUI small buttons on coarse
-   pointers, leaving the desktop appearance untouched. .crate-tab covers the A-Z / view / filter
-   tabs, whose Tailwind heights (h-8/min-h-9/h-10) sit below 44px. */
+   MUI's emotion styles (including the theme's 32px MuiButton minHeight) are unlayered, so a min-height
+   rule inside @layer components always loses to them. These sit outside the layer, like .changes-page
+   above, and stay two classes deep for the MUI surfaces so they outrank emotion on specificity rather
+   than source order. The ops pages' and touch-hooked pages' controls then land at 40px, 44px under a
+   finger.
+   Covered on coarse pointers: MUI small buttons AND MUI small inputs (text fields / selects) — a small
+   MUI input is only ~40px, so a finger misses the 44px target without this — plus .ops-filter /
+   .ops-field and the .crate-tab A-Z / view / filter tabs, whose Tailwind heights (h-8/min-h-9/h-10)
+   sit below 44px. .touch-controls is the minimal hook for pages that are neither an ops page nor the
+   changes ledger (Playlists, System, Library). Desktop (fine-pointer) sizing is left untouched. */
 .ops-page .MuiButton-sizeSmall {
   min-height: 2.5rem;
 }
 @media (pointer: coarse) {
   .ops-page .MuiButton-sizeSmall,
+  .ops-page .MuiInputBase-sizeSmall,
+  .touch-controls .MuiButton-sizeSmall,
+  .touch-controls .MuiInputBase-sizeSmall,
   .ops-filter,
   .ops-field,
-  .touch-controls .MuiButton-sizeSmall,
   .crate-tab {
     min-height: 2.75rem;
   }
