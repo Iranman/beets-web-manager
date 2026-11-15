@@ -2235,14 +2235,16 @@ body {
     }
   }
 
-  /* Fields keep the base 44px / 16px-on-phones sizing; the brass focus adds a soft glow over the
-     global focus ring so the active field reads at a glance. Motion-gated, <= --dur-hover. */
+  /* Fields keep the base 44px / 16px-on-phones sizing; on keyboard focus a brass glow layers over the
+     global :focus-visible ring (kept, never replaced) so the active field reads at a glance. Scoped to
+     :focus-visible, not :focus, so a mouse click shows no ring, matching every other control. The
+     global 2px outline stays visible, so focus is never softer than the rest of the app (WCAG 2.4.7).
+     Motion-gated, <= --dur-hover. */
   .login-bolder .login-field {
     transition: border-color var(--dur-hover) var(--ease-out), box-shadow var(--dur-hover) var(--ease-out);
   }
-  .login-bolder .login-field:focus {
+  .login-bolder .login-field:focus-visible {
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--bw-accent) 26%, transparent);
-    outline: none;
   }
 
   /* Primary action: the solid brass fill (bg-brass-500, kept in the markup) wears the polished
