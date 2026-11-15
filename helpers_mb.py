@@ -620,6 +620,114 @@ def _fetch_mb_release_candidate(mb_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
+#: Bounds on the edition-key MusicBrainz lookup (supporting evidence only):
+#: at most this many ISRC recording lookups per folder, and this many release
+#: UUIDs kept per key kind. Keeps the lookup bounded and off the critical path.
+_EDITION_MAX_ISRC_LOOKUPS = 4
+_EDITION_MAX_RELEASES_PER_KEY = 8
+
+
+def _mb_edition_search_release_ids(query: str, limit: int) -> List[str]:
+    """Release UUIDs for one MusicBrainz release-search query (barcode / catno).
+
+    Edition-level SUPPORTING evidence only: any failure or outage returns [],
+    never raises -- edition evidence is off the critical path and must be a
+    clean no-op when MusicBrainz is unreachable (never a block)."""
+    params = _up.urlencode({"query": query, "limit": limit, "fmt": "json"})
+    req = _ur.Request(f"https://musicbrainz.org/ws/2/release?{params}",
+                      headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"})
+    try:
+        with provider_boundary.opened("musicbrainz", req, timeout=15) as r:
+            data = json.loads(r.read())
+    except Exception:
+        return []
+    out: List[str] = []
+    for rel in (data.get("releases") or []):
+        rid = str((rel or {}).get("id") or "").strip().lower()
+        if _MB_UUID_RE.match(rid):
+            out.append(rid)
+    return out
+
+
+def _mb_isrc_release_ids(isrc: str) -> List[str]:
+    """Release UUIDs an ISRC maps to (ISRC -> recordings -> releases).
+
+    Edition-level SUPPORTING evidence only: any failure returns [] (clean
+    no-op)."""
+    req = _ur.Request(
+        f"https://musicbrainz.org/ws/2/isrc/{_up.quote(isrc, safe='')}?inc=releases&fmt=json",
+        headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"})
+    try:
+        with provider_boundary.opened("musicbrainz", req, timeout=15) as r:
+            data = json.loads(r.read())
+    except Exception:
+        return []
+    out: List[str] = []
+    for rec in (data.get("recordings") or []):
+        for rel in ((rec or {}).get("releases") or []):
+            rid = str((rel or {}).get("id") or "").strip().lower()
+            if _MB_UUID_RE.match(rid):
+                out.append(rid)
+    return out
+
+
+def _mb_releases_for_edition_keys(barcode: str = "", catalog_number: str = "",
+                                  label: str = "", isrcs: Any = (),
+                                  log: Optional[list] = None) -> Dict[str, List[str]]:
+    """Edition-level SUPPORTING evidence (ARCH-002 CANDIDATE_GENERATION_ONLY).
+
+    MusicBrainz release UUIDs that an exact barcode, catalogue number (+label
+    when known), or ISRC carried by the local files names. The result is used
+    only to prefer/confirm the right EDITION (release) within a Release Group a
+    stronger evidence tier already proposed, and as surfaced supporting
+    evidence -- it NEVER establishes a Release Group on its own and can never
+    change the canonical album identity (``mb_releasegroupid``); each release
+    it names still passes the same identity gate as any other candidate.
+
+    Returns ``{release_uuid: [kind, ...]}`` where kind is ``"barcode"``,
+    ``"catalog_number"`` or ``"isrc"``. Absent keys, or any failed/empty
+    lookup, yield ``{}``. Never raises (clean no-op off the critical path).
+    Bounded: one barcode query, one catno query, and at most
+    ``_EDITION_MAX_ISRC_LOOKUPS`` ISRC queries."""
+    out: Dict[str, List[str]] = {}
+
+    def _add(rids: List[str], kind: str) -> None:
+        for rid in rids:
+            kinds = out.setdefault(rid, [])
+            if kind not in kinds:
+                kinds.append(kind)
+
+    clean_barcode = re.sub(r"\s+", "", str(barcode or ""))
+    if clean_barcode.isdigit():
+        _add(_mb_edition_search_release_ids(f'barcode:{clean_barcode}',
+                                            _EDITION_MAX_RELEASES_PER_KEY), "barcode")
+
+    catno = str(catalog_number or "").strip()
+    if catno:
+        query = f'catno:"{catno}"'
+        lbl = str(label or "").strip()
+        if lbl:
+            query += f' AND label:"{lbl}"'
+        _add(_mb_edition_search_release_ids(query, _EDITION_MAX_RELEASES_PER_KEY), "catalog_number")
+
+    seen: set = set()
+    for raw in isrcs or []:
+        code = re.sub(r"[^A-Za-z0-9]", "", str(raw or "")).upper()
+        if len(code) != 12 or code in seen:
+            continue
+        if len(seen) >= _EDITION_MAX_ISRC_LOOKUPS:
+            break
+        seen.add(code)
+        _add(_mb_isrc_release_ids(code), "isrc")
+
+    for rid in out:
+        out[rid] = sorted(out[rid])
+    if log is not None and out:
+        log.append(f"  Edition evidence matched {len(out)} MusicBrainz release(s) "
+                   "by barcode/catalogue number/ISRC")
+    return out
+
+
 def _clean_for_mb(title: str, artist: str):
     """Strip YouTube-style junk and split 'Artist - Title' when artist is missing."""
     if not artist and " - " in title:

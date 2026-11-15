@@ -44,6 +44,8 @@ class _FolderFixture(unittest.TestCase):
         self.file_hits = {p: [_hit(RECS[i])] for i, p in enumerate(self.paths)}
         self.outcome = None  # override: one ProviderResult for every file
         self.embedded = {}
+        self.edition = {}  # path -> {"barcode"/"catalog_number"/"label"/"isrc": ...}
+        self.edition_map = {}  # {release_id: ["barcode"/"catalog_number"/"isrc", ...]}
         self.search = [REL_A]
         self.rg_to_release = {RG_A: REL_A, RG_B: REL_B}
 
@@ -79,6 +81,10 @@ class _FolderFixture(unittest.TestCase):
                 "mb_trackid": "", "mb_albumid": "", "mb_releasegroupid": "", **self.embedded.get(p, {})}),
             mock.patch.object(ii, "_mb_release_search", side_effect=lambda *a, **k: [{"mb_albumid": r} for r in self.search]),
             mock.patch.object(ii, "_mb_release_search_by_folder_tracks", return_value=[]),
+            mock.patch.object(ii, "_embedded_edition_keys", side_effect=lambda p: {
+                "barcode": "", "catalog_number": "", "label": "", "isrc": "", **self.edition.get(p, {})}),
+            mock.patch.object(ii, "_mb_releases_for_edition_keys",
+                              side_effect=lambda **k: {r: list(v) for r, v in self.edition_map.items()}),
             mock.patch.object(ii, "_resolve_release_group_to_release",
                               side_effect=lambda rg, log, **k: self.rg_to_release.get(rg, "")),
         ]
@@ -305,6 +311,140 @@ class PreflightFingerprintEvidenceTests(_FolderFixture):
         self.assertEqual(canonical["local_tracks_verified"], 0)
         statuses = {a["acoustid_status"] for a in canonical["track_alignment"]["assignments"]}
         self.assertEqual(statuses, {"unavailable"})
+
+
+REL_A2 = "a2000000-0000-0000-0000-00000000000a"  # a second edition of RG_A
+
+
+class EditionEvidenceTests(_FolderFixture):
+    """Barcode / catalogue-number+label / ISRC edition evidence. SUPPORTING
+    only: it picks the right EDITION within an already-decided Release Group
+    and is surfaced as evidence, but can never change the Release Group
+    (canonical album identity). Synthetic data; no provider is called."""
+
+    def _two_editions_same_tracks(self):
+        # REL_A and REL_A2 are two editions of RG_A with identical tracks, both
+        # proven by fingerprint -> they tie on every deterministic key, so only
+        # the edition tiebreak can decide which represents RG_A. Default
+        # (release-id) order prefers REL_A over REL_A2.
+        self.releases[REL_A2] = (RG_A, _tracks(3))
+        self.search = [REL_A, REL_A2]
+
+    def test_barcode_selects_right_edition_within_release_group(self):
+        self._two_editions_same_tracks()
+        self.edition = {p: {"barcode": "0123456789012"} for p in self.paths}
+        self.edition_map = {REL_A2: ["barcode"]}
+        result = self.identify()
+        top = result["candidates"][0]
+        self.assertEqual(top["release_group_id"], RG_A)  # identity unchanged
+        self.assertEqual(top["representative_release_id"], REL_A2)  # edition picked
+        self.assertEqual(result["auto_import"]["release_group_id"], RG_A)
+        self.assertEqual(result["auto_import"]["release_id"], REL_A2)
+        self.assertIn("edition_barcode", top["evidence"]["sources"])
+        self.assertIn(REL_A2, top["evidence"]["edition_match"])
+
+    def test_catno_label_selects_right_edition_within_release_group(self):
+        self._two_editions_same_tracks()
+        self.edition = {p: {"catalog_number": "ABC-123", "label": "Some Label"} for p in self.paths}
+        self.edition_map = {REL_A2: ["catalog_number"]}
+        result = self.identify()
+        top = result["candidates"][0]
+        self.assertEqual(top["release_group_id"], RG_A)
+        self.assertEqual(top["representative_release_id"], REL_A2)
+        self.assertIn("edition_catalog_number", top["evidence"]["sources"])
+
+    def test_isrc_contributes_supporting_evidence(self):
+        # ISRC points at the proven edition REL_A: it is surfaced as supporting
+        # evidence without changing the already-correct identity.
+        self.edition = {p: {"isrc": "USABC%07d" % i} for i, p in enumerate(self.paths)}
+        self.edition_map = {REL_A: ["isrc"]}
+        result = self.identify()
+        top = result["candidates"][0]
+        self.assertEqual(top["release_group_id"], RG_A)
+        self.assertIn("edition_isrc", top["evidence"]["sources"])
+        self.assertIn(REL_A, top["evidence"]["edition_match"])
+        self.assertTrue(result["auto_import"]["eligible"], result["auto_import"])
+
+    # ── identity-safety guarantees ────────────────────────────────────────
+
+    def test_edition_hit_cannot_change_release_group(self):
+        # Fingerprints prove RG_A. A barcode points at REL_B (a DIFFERENT
+        # Release Group) whose recordings do not match the folder: it must not
+        # become the identity, and RG_A stays the auto-import target.
+        self.edition = {p: {"barcode": "9999999999999"} for p in self.paths}
+        self.edition_map = {REL_B: ["barcode"]}
+        result = self.identify()
+        auto = result["auto_import"]
+        self.assertTrue(auto["eligible"], auto)
+        self.assertEqual(auto["release_group_id"], RG_A)  # NEVER RG_B
+        self.assertNotEqual(auto["release_group_id"], RG_B)
+        rg_b = next((c for c in result["candidates"] if c["release_group_id"] == RG_B), None)
+        if rg_b is not None:  # surfaced, but never accepted on edition evidence
+            self.assertFalse(rg_b["evidence"]["action_allowed"], rg_b)
+
+    def test_edition_hit_in_other_group_cannot_force_identity_and_goes_to_review(self):
+        # A barcode names REL_B whose recordings DO match (same tracks). Edition
+        # evidence cannot pick a Release Group: now two groups are proven, so
+        # the folder goes to review rather than silently importing to RG_B.
+        self.releases[REL_B] = (RG_B, _tracks(3))
+        self.edition = {p: {"barcode": "9999999999999"} for p in self.paths}
+        self.edition_map = {REL_B: ["barcode"]}
+        result = self.identify()
+        self.assertEqual({c["release_group_id"] for c in result["candidates"]}, {RG_A, RG_B})
+        self.assertNotEligible(result, "multiple_release_groups_verified")
+
+    def test_empty_edition_lookup_is_a_clean_no_op(self):
+        # Tags present but MusicBrainz returns nothing: identical to no edition
+        # evidence at all (still eligible, representative unchanged).
+        self.edition = {p: {"barcode": "0123456789012"} for p in self.paths}
+        self.edition_map = {}
+        result = self.identify()
+        top = result["candidates"][0]
+        self.assertTrue(result["auto_import"]["eligible"], result["auto_import"])
+        self.assertEqual(top["release_group_id"], RG_A)
+        self.assertEqual(top["evidence"]["edition_match"], [])
+        self.assertFalse(any(s.startswith("edition_") for s in top["evidence"]["sources"]))
+
+    def test_absent_edition_tags_do_not_query_musicbrainz(self):
+        # No edition tags on any file -> the edition lookup is never called.
+        import helpers_mb
+        with mock.patch.object(
+            ii, "_mb_releases_for_edition_keys",
+            side_effect=AssertionError("edition lookup must not run without tags"),
+        ):
+            result = self.identify()
+        self.assertTrue(result["auto_import"]["eligible"], result["auto_import"])
+
+
+class EditionHelperUnitTests(unittest.TestCase):
+    """Pure helpers: aggregation agreement rule and the no-request guard."""
+
+    def test_aggregate_requires_single_agreed_value(self):
+        rows = [{"barcode": "111"}, {"barcode": "222"}]  # disagreement -> dropped
+        self.assertEqual(ii._aggregate_edition_keys(rows)["barcode"], "")
+        rows = [{"barcode": "111"}, {"barcode": "111"}, {}]  # agree -> used
+        self.assertEqual(ii._aggregate_edition_keys(rows)["barcode"], "111")
+
+    def test_aggregate_collects_distinct_isrcs(self):
+        rows = [{"isrc": "A"}, {"isrc": "B"}, {"isrc": "A"}]
+        self.assertEqual(ii._aggregate_edition_keys(rows)["isrcs"], ["A", "B"])
+
+    def test_edition_lookup_without_keys_makes_no_request(self):
+        import helpers_mb
+        with mock.patch.object(helpers_mb, "_mb_edition_search_release_ids",
+                               side_effect=AssertionError("no query expected")), \
+             mock.patch.object(helpers_mb, "_mb_isrc_release_ids",
+                               side_effect=AssertionError("no query expected")):
+            self.assertEqual(helpers_mb._mb_releases_for_edition_keys(), {})
+            self.assertEqual(helpers_mb._mb_releases_for_edition_keys(barcode="not-digits"), {})
+
+    def test_edition_lookup_merges_kinds_per_release(self):
+        import helpers_mb
+        with mock.patch.object(helpers_mb, "_mb_edition_search_release_ids", return_value=[REL_A]), \
+             mock.patch.object(helpers_mb, "_mb_isrc_release_ids", return_value=[REL_A]):
+            out = helpers_mb._mb_releases_for_edition_keys(
+                barcode="0123456789012", isrcs=["USABC0000001"])
+        self.assertEqual(out, {REL_A: ["barcode", "isrc"]})
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ from backend.matching.folder_identity import (
 from backend.matching.track_alignment import _hit_recording_id
 from backend.matching_service import _compact_preflight, _folder_release_preflight
 from backend.musicbrainz_service import _mb_release_search_by_folder_tracks
-from helpers_mb import _mb_release_search, _resolve_release_group_to_release
+from helpers_mb import _mb_release_search, _mb_releases_for_edition_keys, _resolve_release_group_to_release
 
 #: Upper bound on releases evaluated per folder (each costs one cached
 #: MusicBrainz tracklist fetch and a preflight).
@@ -64,6 +64,63 @@ def _embedded_mb_ids(path: str) -> Dict[str, str]:
             values = None
         out[field] = _uuid(values[0]) if values else ""
     return out
+
+
+#: EasyID3/Vorbis tag names for the edition-disambiguation keys. ``label`` is
+#: ``label`` in Vorbis comments (FLAC/OGG) and ``organization`` in EasyID3.
+_EDITION_TAG_KEYS = {
+    "barcode": ("barcode",),
+    "catalog_number": ("catalognumber",),
+    "label": ("label", "organization"),
+    "isrc": ("isrc",),
+}
+
+
+def _embedded_edition_keys(path: str) -> Dict[str, str]:
+    """Edition-disambiguation tags embedded in one audio file: barcode,
+    catalogue number, label and ISRC (supporting edition-level evidence only,
+    never identity). Returns each key as a stripped string, "" when the file
+    does not carry it -- an absent tag is a clean no-op downstream. Reading is
+    best-effort (FLAC/OGG Vorbis comments and MP3 EasyID3); an unreadable file
+    or a format without these tags yields all-empty."""
+    try:
+        import mutagen
+        media = mutagen.File(path, easy=True)
+    except Exception:
+        media = None
+    out = {key: "" for key in _EDITION_TAG_KEYS}
+    if media is None:
+        return out
+    for key, names in _EDITION_TAG_KEYS.items():
+        for name in names:
+            try:
+                values = media.get(name)
+            except Exception:
+                values = None
+            if values:
+                out[key] = _s(values[0]).strip()
+                break
+    return out
+
+
+def _aggregate_edition_keys(rows: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Fold per-file edition tags into one folder-level set of lookup keys.
+
+    Barcode, catalogue number and label are album-level: a value is used only
+    when the files that carry it AGREE on a single value (a mixed folder yields
+    "" -- a clean no-op rather than a lookup on a stray tag). ISRCs are
+    per-track, so every distinct code is collected."""
+    def _single(key: str) -> str:
+        values = {_s(r.get(key)).strip() for r in rows if _s(r.get(key)).strip()}
+        return next(iter(values)) if len(values) == 1 else ""
+
+    isrcs = sorted({_s(r.get("isrc")).strip() for r in rows if _s(r.get("isrc")).strip()})
+    return {
+        "barcode": _single("barcode"),
+        "catalog_number": _single("catalog_number"),
+        "label": _single("label"),
+        "isrcs": isrcs,
+    }
 
 
 def _recursive_audio(folder: str) -> Tuple[List[str], bool]:
@@ -208,6 +265,7 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
 
     # Per-file evidence: embedded IDs (tier 1) and AcoustID (tier 3).
     files: List[Dict[str, Any]] = []
+    edition_rows: List[Dict[str, str]] = []  # per-file barcode/catno/label/ISRC tags
     statuses: Counter = Counter()
     release_hits: Counter = Counter()
     group_hits: Counter = Counter()
@@ -223,6 +281,7 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
             statuses["lookup_failed"] += 1
         row = {"path": path, "acoustid_hits": hits, **_embedded_mb_ids(path)}
         files.append(row)
+        edition_rows.append(_embedded_edition_keys(path))
         recording = confirmed_recording(hits)
         if not recording:
             continue
@@ -274,6 +333,32 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
         if "musicbrainz_unavailable" not in warnings:
             warnings.append("musicbrainz_unavailable")
 
+    # Edition-level SUPPORTING evidence (barcode / catalogue number+label /
+    # ISRC the local files carry): ask MusicBrainz for the exact EDITIONS these
+    # tags name and seed them so the right edition within a Release Group is
+    # evaluated. These seeds pass the same identity gate as any text seed, so
+    # edition tags can never by themselves decide a Release Group (ADR-0002);
+    # ``edition_release_ids`` only lets ``rank_folder_candidates`` prefer the
+    # matching edition within an already-chosen group and surfaces it as
+    # evidence. An absent tag or an empty/failed lookup is a clean no-op.
+    edition_release_ids: set = set()
+    edition_keys = _aggregate_edition_keys(edition_rows)
+    if audio_files and (edition_keys["barcode"] or edition_keys["catalog_number"] or edition_keys["isrcs"]):
+        try:
+            edition_map = _mb_releases_for_edition_keys(
+                barcode=edition_keys["barcode"], catalog_number=edition_keys["catalog_number"],
+                label=edition_keys["label"], isrcs=edition_keys["isrcs"], log=log)
+        except Exception as exc:  # defensive: the helper already fails closed to {}
+            _app_logger.warning("Edition-key lookup failed during folder identification: %s", type(exc).__name__)
+            edition_map = {}
+        for rid, kinds in edition_map.items():
+            rid_u = _uuid(rid)
+            if not rid_u:
+                continue
+            edition_release_ids.add(rid_u)
+            for kind in kinds:
+                _seed(rid_u, f"edition_{kind}")
+
     releases: List[Dict[str, Any]] = []
     audio_count = len(audio_files)
     for release_id, sources in seeds.items():
@@ -298,7 +383,7 @@ def identify_import_folder(folder: str, skip_reason: str = "") -> Dict[str, Any]
     tagged_groups = set(embedded_groups) | {
         r["release_group_id"] for r in releases
         if "embedded_release_id" in r["sources"] and r["release_group_id"]}
-    candidates = rank_folder_candidates(releases, track_count, tagged_groups)
+    candidates = rank_folder_candidates(releases, track_count, tagged_groups, edition_release_ids)
     folder_level = file_conflicts(files)
     if len(tagged_groups) > 1:
         folder_level.append("embedded_release_group_conflict")
