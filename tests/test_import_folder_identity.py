@@ -515,5 +515,82 @@ class EditionHelperUnitTests(unittest.TestCase):
         self.assertEqual(out, {REL_A: ["barcode", "isrc"]})
 
 
+class EditionDurationFitTests(unittest.TestCase):
+    """Edition fit (pure ranking): within a Release Group already chosen by
+    stronger evidence, the representative edition is the one whose track
+    durations best match the folder. Fit sits strictly BELOW the track-count /
+    action_allowed / hard-proof gates, so it can only ever reorder editions
+    inside one group -- never pick a group, change acceptance, or auto-import."""
+
+    def _edition(self, rid, rg=RG_A, *, allowed=True, verified=3, matched=3,
+                 total=3, score=0.9, deltas=None, hard=True):
+        deltas = deltas if deltas is not None else [None] * total
+        assignments = [{"status": "matched", "is_deterministic": hard,
+                        "duration_delta": deltas[i] if i < len(deltas) else None}
+                       for i in range(total)]
+        canonical = {"score": score, "local_tracks_verified": verified,
+                     "local_tracks_total": total, "target_tracks_matched": matched,
+                     "track_alignment": {"assignments": assignments}}
+        return {"release_id": rid, "release_group_id": rg, "track_count": total,
+                "sources": ["musicbrainz_search"], "preflight": {}, "error": "",
+                "matching_decision": {"action_allowed": allowed, "conflicts": [],
+                                      "evidence": {"canonical_match": canonical}}}
+
+    def test_duration_fit_picks_the_closer_edition_within_a_group(self):
+        from backend.matching.folder_identity import rank_folder_candidates
+        # Two editions of RG_A, tied on every gate (count/accept/verified) and on
+        # tracklist alignment (target_tracks_matched=3): only duration decides.
+        far = self._edition(REL_A, deltas=[10, 10, 10])      # ~30s off
+        close = self._edition(REL_A2, deltas=[1, 1, 1])      # ~3s off (within tolerance)
+        for releases in ([far, close], [close, far]):
+            candidates = rank_folder_candidates(releases, 3, (), ())
+            self.assertEqual(len(candidates), 1)             # one group
+            self.assertEqual(candidates[0]["release_group_id"], RG_A)
+            self.assertEqual(candidates[0]["representative_release_id"], REL_A2)
+
+    def test_duration_fit_never_crosses_the_acceptance_gates(self):
+        # Within RG_A: the action_allowed edition fits durations POORLY; a second
+        # edition fits PERFECTLY but is NOT action_allowed. The gate outranks fit,
+        # so the allowed (poor-fit) edition must stay the representative and the
+        # group must stay eligible. FAILS if duration fit were lifted above the
+        # action_allowed / verified gates in _release_key.
+        from backend.matching.folder_identity import decide_auto_import, rank_folder_candidates
+        allowed_poor = self._edition(REL_A, allowed=True, verified=3, deltas=[12, 12, 12])
+        perfect_unallowed = self._edition(REL_A2, allowed=False, verified=0, deltas=[0, 0, 0])
+        candidates = rank_folder_candidates([perfect_unallowed, allowed_poor], 3, (), ())
+        self.assertEqual(candidates[0]["release_group_id"], RG_A)
+        self.assertEqual(candidates[0]["representative_release_id"], REL_A)  # not the perfect-fit one
+        self.assertTrue(candidates[0]["evidence"]["action_allowed"], candidates[0])
+        auto = decide_auto_import(candidates, skip_reason="no_strong_match",
+                                  audio_count=3, unconfirmed_files=0)
+        self.assertTrue(auto["eligible"], auto)
+        self.assertEqual((auto["release_group_id"], auto["release_id"]), (RG_A, REL_A))
+
+    def test_duration_fit_does_not_change_the_release_group_ranking(self):
+        # A DIFFERENT, non-accepted group with a PERFECT duration fit must never
+        # outrank or become the real winner on fit alone (fit is edition-only).
+        from backend.matching.folder_identity import decide_auto_import, rank_folder_candidates
+        winner = self._edition(REL_A, rg=RG_A, allowed=True, verified=3, deltas=[9, 9, 9])
+        other = self._edition(REL_B, rg=RG_B, allowed=False, verified=0, deltas=[0, 0, 0])
+        candidates = rank_folder_candidates([winner, other], 3, (), ())
+        self.assertEqual(candidates[0]["release_group_id"], RG_A)
+        rg_b = next(c for c in candidates if c["release_group_id"] == RG_B)
+        self.assertFalse(rg_b["evidence"]["action_allowed"], rg_b)
+        auto = decide_auto_import(candidates, skip_reason="no_strong_match",
+                                  audio_count=3, unconfirmed_files=0)
+        self.assertEqual(auto["release_group_id"], RG_A)
+
+    def test_absent_durations_are_a_clean_no_op(self):
+        # No track carries a duration delta on either edition: duration fit is 0
+        # for both, so the representative falls through to the stable release-id
+        # tiebreak exactly as before this feature existed.
+        from backend.matching.folder_identity import rank_folder_candidates
+        a = self._edition(REL_A, deltas=[None, None, None])
+        a2 = self._edition(REL_A2, deltas=[None, None, None])
+        for releases in ([a, a2], [a2, a]):
+            candidates = rank_folder_candidates(releases, 3, (), ())
+            self.assertEqual(candidates[0]["representative_release_id"], REL_A)  # lexical tiebreak
+
+
 if __name__ == "__main__":
     unittest.main()

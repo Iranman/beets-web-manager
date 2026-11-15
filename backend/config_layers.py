@@ -151,6 +151,7 @@ APP_KEYS = frozenset({
     "BEETS_OUTBOUND_MAX_REDIRECTS",
     "BEETS_OUTBOUND_MAX_RESPONSE_BYTES",
     "MB_TEXT_USABLE_SCORE",      # import matching clean-retry tuning knob
+    "MB_EDITION_PREFERENCE",     # preferred edition format/country/type (secondary to fit)
     "AI_BASE_URL",
     "AI_MODEL",
     "PLEX_URL",
