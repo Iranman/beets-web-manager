@@ -361,6 +361,79 @@ def _mb_recording_search(title: str, artist: str, limit: int = 8):
         return []
 
 
+# ── Edition preference (MB_EDITION_PREFERENCE) ───────────────────────────────
+# Which EDITION of a Release Group to prefer once tracklist fit has ranked the
+# candidate editions. It is SECONDARY to fit: the release-search ranker sorts by
+# how well each edition fits the folder (track count) FIRST, then applies this
+# preference. It only ever reorders editions WITHIN a Release Group and can
+# never pick or change a Release Group (mb_releasegroupid), a score, or any
+# acceptance gate.
+#
+# Syntax (all three fields optional, case-insensitive, ';'-separated):
+#   "format=cd,digital,vinyl; country=us,gb; type=album,ep"
+# An unset, blank, or unparseable value reproduces the long-standing default:
+# non-vinyl media before vinyl, US/worldwide before other countries, and no
+# release-type opinion -- so nothing changes for anyone who sets nothing.
+_DEFAULT_COUNTRY_RANK = {"US": 0, "USA": 0, "XW": 1, "WORLDWIDE": 1, "GB": 2, "CA": 3, "AU": 4}
+
+
+def _parse_edition_preference(raw: str) -> Dict[str, tuple]:
+    """MB_EDITION_PREFERENCE -> {"format"/"country"/"type": ordered tuple}.
+    A field the user did not set is absent, so its default applies."""
+    pref: Dict[str, tuple] = {}
+    for part in (raw or "").split(";"):
+        name, sep, values = part.partition("=")
+        name = name.strip().lower()
+        if not sep or name not in ("format", "country", "type"):
+            continue
+        items = tuple(v.strip().lower() for v in values.split(",") if v.strip())
+        if items:
+            pref[name] = items
+    return pref
+
+
+_EDITION_PREFERENCE = _parse_edition_preference(os.environ.get("MB_EDITION_PREFERENCE", ""))
+
+
+def _rel_format_tokens(rel: Dict[str, Any]) -> List[str]:
+    toks = [str(f).lower() for f in (rel.get("formats") or [])]
+    if rel.get("format_summary"):
+        toks.append(str(rel["format_summary"]).lower())
+    if rel.get("is_vinyl"):
+        toks.append("vinyl")
+    return toks
+
+
+def _edition_preference_key(rel: Dict[str, Any], pref: Dict[str, tuple]) -> tuple:
+    """(format_rank, country_rank, type_rank); lower is more preferred. With no
+    configured preference this is exactly the historical non-vinyl/US ranking
+    (plus a constant no-opinion release-type term that never reorders)."""
+    fmt_order = pref.get("format")
+    if fmt_order is None:
+        fmt_rank = 1 if rel.get("is_vinyl") else 0
+    else:
+        toks = _rel_format_tokens(rel)
+        fmt_rank = next((i for i, want in enumerate(fmt_order)
+                         if any(want in t for t in toks)), len(fmt_order))
+
+    country = str(rel.get("country") or "").upper()
+    country_order = pref.get("country")
+    if country_order is None:
+        country_rank = _DEFAULT_COUNTRY_RANK.get(country, 99)
+    else:
+        country_rank = next((i for i, c in enumerate(country_order) if c == country.lower()),
+                            len(country_order))
+
+    type_order = pref.get("type")
+    if not type_order:
+        type_rank = 0
+    else:
+        ptype = str(rel.get("release_group_primary_type") or "").lower()
+        type_rank = next((i for i, t in enumerate(type_order) if t == ptype), len(type_order))
+
+    return (fmt_rank, country_rank, type_rank)
+
+
 def _mb_release_search(album: str, artist: str, limit: int = 8,
                        year: str = "", track_count: int = 0,
                        log: Optional[list] = None,
@@ -416,11 +489,6 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
         if unavailable is not None:
             raise unavailable from ex
         return []
-
-    _COUNTRY_RANK = {"US": 0, "USA": 0, "XW": 1, "WORLDWIDE": 1, "GB": 2, "CA": 3, "AU": 4}
-
-    def _country_rank(c: str) -> int:
-        return _COUNTRY_RANK.get((c or "").upper(), 99)
 
     def _edition_summary(rel: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -502,8 +570,9 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
         })
 
     def _rank(rel) -> tuple:
-        vinyl_pen    = 10 if rel["is_vinyl"] else 0
-        country_pts  = _country_rank(rel["country"])
+        # Edition preference (format/country/type; default non-vinyl/US) is
+        # SECONDARY -- tracklist fit (track-count match/closeness) ranks first.
+        pref_key     = _edition_preference_key(rel, _EDITION_PREFERENCE)
         year_miss    = 0 if (not year or rel["year"][:4] == str(year)[:4]) else 2
         # tracks == 0 is an unknown count (_mb_total_track_count): below any valid edition.
         track_unknown = 1 if track_count and not rel["tracks"] else 0
@@ -511,8 +580,8 @@ def _mb_release_search(album: str, artist: str, limit: int = 8,
         track_miss   = 0 if (not track_count or rel["tracks"] == track_count) else 1
         score_pts    = -rel["score"]
         if track_count:
-            return (track_unknown, track_miss, track_delta, vinyl_pen, country_pts, year_miss, score_pts)
-        return (vinyl_pen, country_pts, year_miss, track_miss, score_pts)
+            return (track_unknown, track_miss, track_delta, *pref_key, year_miss, score_pts)
+        return (*pref_key, year_miss, track_miss, score_pts)
 
     groups: dict = OrderedDict()
     for rel in all_releases:

@@ -131,26 +131,55 @@ def hard_proven(release: Dict[str, Any]) -> bool:
     return total > 0 and sum(1 for row in rows if row.get("is_deterministic")) >= total
 
 
+#: Editions whose total measured-vs-release duration mismatch differs by less
+#: than this many seconds tie on duration fit (a few seconds of pressing/gap
+#: variance is not a real difference). Duration is tier-4 structure evidence.
+_EDITION_DURATION_TOLERANCE_S = 4.0
+
+
+def _edition_duration_fit(canonical: Mapping[str, Any]) -> int:
+    """Total measured-vs-release duration mismatch across this edition's matched
+    tracks, in whole ``_EDITION_DURATION_TOLERANCE_S``-second buckets (lower is a
+    better fit). 0 when no matched track carries a duration on both sides -- the
+    local track lengths are a folder-level property shared by every edition, so
+    within one Release Group either all tied editions have duration data or none
+    do, which makes the absent-data case a clean no-op (every edition scores 0)."""
+    rows = (canonical.get("track_alignment") or {}).get("assignments") or []
+    total = 0.0
+    for row in rows:
+        delta = row.get("duration_delta")
+        if row.get("status") == "matched" and delta is not None:
+            total += abs(float(delta))
+    return int(total // _EDITION_DURATION_TOLERANCE_S)
+
+
 def _release_key(release: Dict[str, Any], folder_track_count: int,
                  edition_release_ids: Iterable[str] = ()) -> tuple:
     """Representative release inside one Release Group (condition 6): same
-    track count first, then alignment, then a stable ID tiebreak.
+    track count first, then edition fit (tracklist alignment, then duration
+    closeness), then a stable ID tiebreak.
 
     ``edition_release_ids`` (supporting edition-level evidence: barcode /
-    catalogue number / ISRC the local files carry) only breaks ties AFTER the
-    track-count, ``action_allowed`` and hard-proof gates -- it picks which
-    EDITION of an already-chosen Release Group to represent, and never changes
-    which Release Group wins, its score, or whether it is action_allowed."""
+    catalogue number / ISRC the local files carry) and the tracklist/duration
+    fit terms only break ties AFTER the track-count, ``action_allowed`` and
+    hard-proof gates -- they pick which EDITION of an already-chosen Release
+    Group to represent, and never change which Release Group wins, its score, or
+    whether it is action_allowed. Fit is PRIMARY among the edition terms: an
+    exact edition tag is honoured first, then the edition that best matches the
+    folder's tracklist and track durations."""
     canonical = _canonical(release)
     verified, _ = track_proof(release)
     pre = release.get("preflight") or {}
     edition = {_s(r) for r in edition_release_ids if _s(r)}
     return (
+        # ── acceptance gates (unchanged): never influenced by fit ──
         0 if int(release.get("track_count") or 0) == int(folder_track_count or -1) else 1,
         0 if (release.get("matching_decision") or {}).get("action_allowed") else 1,
         -verified,
-        0 if _s(release.get("release_id")) in edition else 1,
-        -int(canonical.get("target_tracks_matched") or 0),
+        # ── edition selection, strictly below the gates ──
+        0 if _s(release.get("release_id")) in edition else 1,     # exact edition tag (#734)
+        -int(canonical.get("target_tracks_matched") or 0),        # fit: tracklist alignment
+        _edition_duration_fit(canonical),                         # fit: duration closeness
         -int(pre.get("acoustid_target_hits") or 0),
         -float(canonical.get("score") or 0.0),
         _s(release.get("release_id")),
