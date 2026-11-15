@@ -150,6 +150,7 @@ APP_KEYS = frozenset({
     "BEETS_OUTBOUND_TOTAL_TIMEOUT_SECONDS",
     "BEETS_OUTBOUND_MAX_REDIRECTS",
     "BEETS_OUTBOUND_MAX_RESPONSE_BYTES",
+    "MB_TEXT_USABLE_SCORE",      # import matching clean-retry tuning knob
     "AI_BASE_URL",
     "AI_MODEL",
     "PLEX_URL",
