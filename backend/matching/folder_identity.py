@@ -131,16 +131,25 @@ def hard_proven(release: Dict[str, Any]) -> bool:
     return total > 0 and sum(1 for row in rows if row.get("is_deterministic")) >= total
 
 
-def _release_key(release: Dict[str, Any], folder_track_count: int) -> tuple:
+def _release_key(release: Dict[str, Any], folder_track_count: int,
+                 edition_release_ids: Iterable[str] = ()) -> tuple:
     """Representative release inside one Release Group (condition 6): same
-    track count first, then alignment, then a stable ID tiebreak."""
+    track count first, then alignment, then a stable ID tiebreak.
+
+    ``edition_release_ids`` (supporting edition-level evidence: barcode /
+    catalogue number / ISRC the local files carry) only breaks ties AFTER the
+    track-count, ``action_allowed`` and hard-proof gates -- it picks which
+    EDITION of an already-chosen Release Group to represent, and never changes
+    which Release Group wins, its score, or whether it is action_allowed."""
     canonical = _canonical(release)
     verified, _ = track_proof(release)
     pre = release.get("preflight") or {}
+    edition = {_s(r) for r in edition_release_ids if _s(r)}
     return (
         0 if int(release.get("track_count") or 0) == int(folder_track_count or -1) else 1,
         0 if (release.get("matching_decision") or {}).get("action_allowed") else 1,
         -verified,
+        0 if _s(release.get("release_id")) in edition else 1,
         -int(canonical.get("target_tracks_matched") or 0),
         -int(pre.get("acoustid_target_hits") or 0),
         -float(canonical.get("score") or 0.0),
@@ -149,17 +158,26 @@ def _release_key(release: Dict[str, Any], folder_track_count: int) -> tuple:
 
 
 def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_count: int,
-                           embedded_release_groups: Iterable[str] = ()) -> List[Dict[str, Any]]:
+                           embedded_release_groups: Iterable[str] = (),
+                           edition_release_ids: Iterable[str] = ()) -> List[Dict[str, Any]]:
     """Group evaluated releases by Release Group, pick each group's
     representative release, and rank the groups deterministically:
     ``can_auto_accept`` first, then verified local tracks, then canonical
     score. Releases with no Release Group are dropped (no canonical album
     identity to offer).
 
+    ``edition_release_ids`` (supporting edition-level evidence: MusicBrainz
+    releases an exact barcode / catalogue number / ISRC on the local files
+    names) ONLY influences which EDITION represents a Release Group (via
+    ``_release_key``) and is surfaced per candidate as ``edition_match``. It
+    never changes the Release Group ranking, acceptance or score below, so it
+    can never change the canonical album identity.
+
     Returns ``[{release_group_id, representative_release_id,
     matching_decision, deterministic_rank, ai_rank, evidence}]``.
     """
     embedded = [rg for rg in embedded_release_groups]
+    edition = {_s(r) for r in edition_release_ids if _s(r)}
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for release in releases:
         rgid = _s(release.get("release_group_id"))
@@ -168,7 +186,7 @@ def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_coun
 
     rows: List[Dict[str, Any]] = []
     for rgid, members in groups.items():
-        members.sort(key=lambda r: _release_key(r, folder_track_count))
+        members.sort(key=lambda r: _release_key(r, folder_track_count, edition))
         rep = members[0]
         conflicts = release_conflicts(rep, embedded)
         verified, total = track_proof(rep)
@@ -189,6 +207,8 @@ def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_coun
                 "local_tracks_verified": verified,
                 "local_tracks_total": total,
                 "any_track_proof": any(track_proof(m)[0] > 0 for m in members),
+                "edition_match": sorted({_s(m.get("release_id")) for m in members
+                                         if _s(m.get("release_id")) in edition}),
                 "preflight": rep.get("preflight") or {},
                 "releases_evaluated": [
                     {"release_id": _s(m.get("release_id")), "track_count": int(m.get("track_count") or 0),
