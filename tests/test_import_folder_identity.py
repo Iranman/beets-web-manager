@@ -393,6 +393,27 @@ class EditionEvidenceTests(_FolderFixture):
         self.assertEqual({c["release_group_id"] for c in result["candidates"]}, {RG_A, RG_B})
         self.assertNotEligible(result, "multiple_release_groups_verified")
 
+    def test_edition_cannot_override_stronger_edition_signal_in_winning_group(self):
+        # RG_A has a 5-track and a 3-track edition; the folder has 3 files, so
+        # the 3-track edition is the right representative (track-count signal).
+        # Edition evidence pointing at the WRONG (5-track) edition must NOT
+        # override that -- the outcome stays identical to the no-edition
+        # baseline. Guards the position of the edition tiebreak in _release_key
+        # (it must rank BELOW track-count, not couple into the score).
+        rel_a2 = "a2000000-0000-0000-0000-00000000000a"
+        self.releases[REL_A] = (RG_A, _tracks(5))
+        self.releases[rel_a2] = (RG_A, _tracks(3))
+        self.search = [REL_A, rel_a2]
+        baseline = self.identify()
+        self.edition = {p: {"barcode": "0123456789012"} for p in self.paths}
+        self.edition_map = {REL_A: ["barcode"]}  # the wrong (5-track) edition
+        with_edition = self.identify()
+        self.assertEqual(with_edition["auto_import"]["release_id"], rel_a2)
+        for key in ("eligible", "release_group_id", "release_id"):
+            self.assertEqual(with_edition["auto_import"][key], baseline["auto_import"][key], key)
+        self.assertEqual(with_edition["candidates"][0]["representative_release_id"],
+                         baseline["candidates"][0]["representative_release_id"])
+
     def test_empty_edition_lookup_is_a_clean_no_op(self):
         # Tags present but MusicBrainz returns nothing: identical to no edition
         # evidence at all (still eligible, representative unchanged).
@@ -414,6 +435,53 @@ class EditionEvidenceTests(_FolderFixture):
         ):
             result = self.identify()
         self.assertTrue(result["auto_import"]["eligible"], result["auto_import"])
+
+
+class EditionGroupAcceptanceGuardTests(unittest.TestCase):
+    """Guard (pure ranking): edition evidence must never reach GROUP-level
+    acceptance or the Release Group sort. A DIFFERENT-group release that is
+    edition-seeded, ``action_allowed=False`` and WITHOUT any independent
+    conflict must still never be accepted and must not change the chosen
+    Release Group. This FAILS if a future change ORs edition evidence into
+    group ``action_allowed`` or lets it reorder groups -- unlike the
+    integration case, the other-group release here carries NO conflict, so a
+    leak cannot be masked by ``and not conflicts``."""
+
+    def _release(self, rid, rgid, score, *, allowed, verified, hard=None, total=3):
+        # `hard` decoupled from `allowed`: the other-group release below is
+        # hard_proven so the close_runner_up net can never mask an acceptance
+        # leak by re-demoting it (while verified=0 keeps it a non-competitor).
+        hard = allowed if hard is None else hard
+        assignments = [{"status": "matched", "is_deterministic": hard} for _ in range(total)]
+        canonical = {"score": score, "local_tracks_verified": verified, "local_tracks_total": total,
+                     "track_alignment": {"assignments": assignments}}
+        return {"release_id": rid, "release_group_id": rgid, "track_count": total,
+                "sources": ["musicbrainz_search"], "preflight": {}, "error": "",
+                "matching_decision": {"action_allowed": allowed, "conflicts": [],
+                                      "evidence": {"canonical_match": canonical}}}
+
+    def test_edition_seeded_other_group_without_conflict_is_never_accepted(self):
+        from backend.matching.folder_identity import decide_auto_import, rank_folder_candidates
+        winner = self._release(REL_A, RG_A, 0.90, allowed=True, verified=3)
+        # Different group, seeded ONLY by edition evidence: not accepted, no
+        # conflict, no competing track proof (verified=0), but hard_proven so a
+        # leak into group acceptance surfaces instead of being demoted away.
+        other = self._release(REL_B, RG_B, 0.90, allowed=False, verified=0, hard=True)
+        other["sources"] = ["edition_barcode"]
+        candidates = rank_folder_candidates([winner, other], 3, (), {REL_B})
+        rg_b = next(c for c in candidates if c["release_group_id"] == RG_B)
+        # Precondition: the guard is meaningful only because there is no conflict.
+        self.assertEqual(rg_b["evidence"]["conflicts"], [])
+        self.assertIn(REL_B, rg_b["evidence"]["edition_match"])
+        # Edition evidence must NOT make the different group acceptable...
+        self.assertFalse(rg_b["evidence"]["action_allowed"], rg_b)
+        # ...nor sort it ahead of the real winner...
+        self.assertEqual(candidates[0]["release_group_id"], RG_A)
+        # ...and the chosen Release Group stays RG_A (identity unchanged).
+        auto = decide_auto_import(candidates, skip_reason="no_strong_match",
+                                  audio_count=3, unconfirmed_files=0)
+        self.assertTrue(auto["eligible"], auto)
+        self.assertEqual(auto["release_group_id"], RG_A)
 
 
 class EditionHelperUnitTests(unittest.TestCase):

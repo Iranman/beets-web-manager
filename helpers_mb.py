@@ -702,10 +702,13 @@ def _mb_releases_for_edition_keys(barcode: str = "", catalog_number: str = "",
         _add(_mb_edition_search_release_ids(f'barcode:{clean_barcode}',
                                             _EDITION_MAX_RELEASES_PER_KEY), "barcode")
 
-    catno = str(catalog_number or "").strip()
+    # Strip embedded double quotes so a stray ``"`` in a catalogue number or
+    # label cannot break out of the quoted Lucene phrase (a malformed query
+    # would just match nothing -- this keeps it well-formed, not a security fix).
+    catno = str(catalog_number or "").replace('"', "").strip()
     if catno:
         query = f'catno:"{catno}"'
-        lbl = str(label or "").strip()
+        lbl = str(label or "").replace('"', "").strip()
         if lbl:
             query += f' AND label:"{lbl}"'
         _add(_mb_edition_search_release_ids(query, _EDITION_MAX_RELEASES_PER_KEY), "catalog_number")
