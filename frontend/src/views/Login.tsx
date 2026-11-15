@@ -1,7 +1,7 @@
 import { errorMessage } from '../lib/errors';
 import { useState } from 'react';
 import { login } from '../api/client';
-import { RecordMark } from '../components/RecordMark';
+import { RecordRing } from '../components/RecordRing';
 
 interface LoginProps {
   onSuccess?: () => void;
@@ -46,12 +46,12 @@ export default function Login({ onSuccess }: LoginProps) {
   };
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-graphite-950 px-4 py-12 text-zinc-100">
+    <main className="login-bolder flex min-h-screen flex-col items-center justify-center px-4 py-12 text-zinc-100">
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-3.5">
-          <RecordMark className="size-12" />
+          <RecordRing className="login-mark size-12" />
           <div className="min-w-0">
-            <h1 className="font-display text-2xl leading-tight font-semibold text-brass-200">
+            <h1 className="login-wordmark font-display leading-tight font-semibold text-brass-200">
               Beets Web Manager
             </h1>
             <p className="mt-0.5 text-sm text-zinc-400">
@@ -62,10 +62,10 @@ export default function Login({ onSuccess }: LoginProps) {
 
         <form
           onSubmit={handleSubmit}
-          className="mt-7 rounded-lg border border-graphite-700 bg-graphite-900 p-5 sm:p-6"
+          className="login-panel mt-7 rounded-lg p-5 sm:p-6"
         >
           {errorMsg && (
-            <div role="alert" className="mb-5 rounded-md border border-red-500/40 bg-red-950/60 p-3 text-sm text-red-200">
+            <div role="alert" className="login-error mb-5 rounded-md border border-red-500/40 bg-red-950/60 p-3 text-sm text-red-200">
               <span className="font-semibold">Sign-In Error: </span>
               {errorMsg}
             </div>
@@ -86,7 +86,7 @@ export default function Login({ onSuccess }: LoginProps) {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="mt-1.5 h-11 w-full rounded-md border border-field-border bg-graphite-950 px-3 text-base text-zinc-50 placeholder:text-muted focus:border-brass-400 sm:text-sm"
+                className="login-field mt-1.5 h-11 w-full rounded-md border border-field-border bg-graphite-950 px-3 text-base text-zinc-50 placeholder:text-muted focus:border-brass-400 sm:text-sm"
                 required
                 autoFocus
               />
@@ -107,7 +107,7 @@ export default function Login({ onSuccess }: LoginProps) {
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="h-11 w-full rounded-md border border-field-border bg-graphite-950 pr-16 pl-3 text-base text-zinc-50 placeholder:text-muted focus:border-brass-400 sm:text-sm"
+                  className="login-field h-11 w-full rounded-md border border-field-border bg-graphite-950 pr-16 pl-3 text-base text-zinc-50 placeholder:text-muted focus:border-brass-400 sm:text-sm"
                   required
                 />
                 <button
@@ -134,14 +134,14 @@ export default function Login({ onSuccess }: LoginProps) {
             <button
               type="submit"
               disabled={submitting || !username.trim() || !password}
-              className="h-11 w-full rounded-md bg-brass-500 px-4 text-sm font-semibold text-graphite-950 transition-colors hover:bg-brass-400 active:bg-brass-600 disabled:cursor-not-allowed disabled:bg-graphite-900 disabled:text-graphite-400 disabled:ring-1 disabled:ring-graphite-700"
+              className="login-submit h-11 w-full rounded-md bg-brass-500 px-4 text-sm font-semibold text-graphite-950 transition-colors hover:bg-brass-400 active:bg-brass-600 disabled:cursor-not-allowed disabled:bg-graphite-900 disabled:text-graphite-400 disabled:ring-1 disabled:ring-graphite-700"
             >
               {submitting ? 'Signing In...' : 'Sign In'}
             </button>
           </div>
         </form>
 
-        <p className="mt-6 text-center text-xs text-muted">
+        <p className="liner-label mt-6 text-center">
           Beets Web Manager &bull; Administrator Access Only
         </p>
       </div>

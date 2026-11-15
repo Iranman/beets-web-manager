@@ -60,8 +60,13 @@ describe('Hallmark Library Changes ledger', () => {
 describe('Hallmark Login', () => {
   it('is a main landmark with one serif title, labelled fields and an announced error', async () => {
     vi.mocked(login).mockResolvedValue({ ok: false, error: 'Too many attempts. Try again in 60 seconds.' } as Awaited<ReturnType<typeof login>>);
-    render(<Login onSuccess={() => {}} />);
-    expect(screen.getByRole('main')).toBeTruthy();
+    const { container } = render(<Login onSuccess={() => {}} />);
+    // Bolder Shelf: scoped .login-bolder root, lit-walnut .login-panel surface, decorative record ring.
+    expect(screen.getByRole('main').className).toContain('login-bolder');
+    expect(container.querySelector('.login-panel')).toBeTruthy();
+    const ring = container.querySelector('.record-ring');
+    expect(ring).toBeTruthy();
+    expect(ring?.getAttribute('aria-hidden')).toBe('true');
     expect(screen.getByRole('heading', { level: 1, name: 'Beets Web Manager' }).className).toContain('font-display');
     expect(screen.getByLabelText('Username').id).toBe('login-username');
     const password = screen.getByLabelText('Password');
