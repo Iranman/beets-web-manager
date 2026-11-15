@@ -2182,6 +2182,80 @@ body {
   }
 }
 /* ── end Bolder Submissions ──────────────────────────────────────────────────────────────────── */
+/* ── Bolder Login (views/Login.tsx) ──────────────────────────────────────────────────────────────
+   The front door raised into the Bolder Shelf world, scoped to .login-bolder so nothing else moves.
+   It stays a plain, trustworthy sign-in: no card shadow stack, no intro motion, no custom cursor.
+   It reuses only what the foundation shipped — the shared RecordRing mark, the display serif in pale
+   brass for the wordmark, the walnut room light with a hairline brass edge on the panel, the brass
+   primary action's polished sheen (--bw-accent-polish, the same gradient theme.ts gives contained
+   buttons), and the motion tokens (<= --dur-lift, reduced-motion-aware). The panel is this view's one
+   measured frosted-glass moment: there is no data behind it, only the textured room, and a near-opaque
+   walnut fallback keeps cream text WCAG AA where backdrop-filter is unsupported. */
+@layer components {
+  /* The wordmark: the display serif pulled up to front-door scale, pale brass like the shelf brand. */
+  .login-bolder .login-wordmark {
+    font-size: clamp(1.5rem, 1.35rem + 0.9vw, 1.85rem);
+    letter-spacing: -0.015em;
+  }
+
+  /* Lit walnut panel with a hairline brass edge — the same material language as the Library liner and
+     the Jobs station, no heavy card shadow. The ::after is the lamp glancing off the top edge. */
+  .login-bolder .login-panel {
+    position: relative;
+    border: 1px solid color-mix(in srgb, var(--bw-accent) 20%, var(--bw-border));
+    /* Solid fallback: near-opaque dark walnut, so labels and the error clear AA without the blur. */
+    background-color: color-mix(in srgb, var(--bw-surface) 93%, #000);
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.1), transparent 34%),
+      var(--app-grain);
+    background-size: 100% 100%, 220px 220px;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.12);
+  }
+  .login-bolder .login-panel::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 1px rgba(246, 223, 174, 0.08);
+  }
+  /* The one frosted-glass moment: translucent walnut over the room's texture, dark enough for AA,
+     guarded so the solid fallback above stands in where backdrop-filter is unsupported. */
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .login-bolder .login-panel {
+      background-color: color-mix(in srgb, var(--bw-surface) 82%, transparent);
+      -webkit-backdrop-filter: blur(16px) saturate(1.1);
+      backdrop-filter: blur(16px) saturate(1.1);
+    }
+  }
+
+  /* Fields keep the base 44px / 16px-on-phones sizing; the brass focus adds a soft glow over the
+     global focus ring so the active field reads at a glance. Motion-gated, <= --dur-hover. */
+  .login-bolder .login-field {
+    transition: border-color var(--dur-hover) var(--ease-out), box-shadow var(--dur-hover) var(--ease-out);
+  }
+  .login-bolder .login-field:focus {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--bw-accent) 26%, transparent);
+    outline: none;
+  }
+
+  /* Primary action: the solid brass fill (bg-brass-500, kept in the markup) wears the polished
+     top-to-bottom sheen, matching theme.ts's contained button. Only while enabled — the disabled
+     look (#610, recessed walnut) is left to the markup's disabled: utilities. */
+  .login-bolder .login-submit:enabled {
+    background-image: var(--bw-accent-polish);
+  }
+  .login-bolder .login-submit:enabled:hover {
+    background-image: var(--bw-accent-sheen), var(--bw-accent-polish);
+  }
+
+  /* Keep the error panel as the prominent, announced surface it is; a brass-free red left rail makes
+     it read as a block without touching its role="alert" text or its AA red-on-deep-red contrast. */
+  .login-bolder .login-error {
+    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-red-500, #ef4444) 70%, transparent);
+  }
+}
+/* ── end Bolder Login ────────────────────────────────────────────────────────────────────────── */
 /* ── Bolder System / Diagnostics (views/System.tsx) ──────────────────────────────────────────────
    The read-only diagnostics page raised into the Bolder Shelf world, scoped to .system-bolder so no
    other view is touched. Nothing new is invented: this reuses the foundation tokens the Bolder Shelf

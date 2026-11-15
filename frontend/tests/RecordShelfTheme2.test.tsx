@@ -27,10 +27,14 @@ const sources = (dir: string): string[] =>
   });
 
 describe('record shelf theme, slice 2', () => {
-  it('Login and first-run setup use the shared record mark and brass primary buttons', () => {
+  it('Login and first-run setup use a shared record mark and brass primary buttons', () => {
+    // Login was raised into the Bolder Shelf and now carries the shared RecordRing signature mark;
+    // first-run setup keeps the RecordMark disc. Both stay brass-primary with no red field styling.
+    const loginSrc = src('views/Login.tsx');
+    expect(loginSrc).toContain("import { RecordRing } from '");
+    expect(src('components/FirstRunSetup.tsx')).toContain("import { RecordMark } from '");
     for (const file of ['views/Login.tsx', 'components/FirstRunSetup.tsx']) {
       const s = src(file);
-      expect(s).toContain("import { RecordMark } from '");
       expect(s).not.toContain('BeetsLogo');
       expect(s).not.toMatch(/bg-red-700|focus:border-red-|ring-red-/);
       expect(s).toContain('bg-brass-500');
