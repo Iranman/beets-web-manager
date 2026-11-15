@@ -153,8 +153,10 @@ export default function CoverFlow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Only a horizontal wheel (trackpad swipe, or Shift+wheel) moves the flow; a vertical wheel scrolls
-  // the page. Non-passive so a horizontal swipe does not also trigger browser back/forward.
+  // Any wheel over the stage pans the flow: a horizontal wheel (trackpad swipe or Shift+wheel) by
+  // deltaX, a plain vertical wheel by deltaY (scroll down/forward -> next cover). Non-passive so a
+  // swipe does not also trigger browser back/forward. At either end the event is left alone so the
+  // page scrolls normally and the reader is never trapped on content above or below.
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return undefined;
@@ -162,7 +164,6 @@ export default function CoverFlow({
     const onWheel = (event: WheelEvent) => {
       const { centre: at, count: n, onIndexChange: move } = live.current;
       const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY);
-      if (!horizontal && !event.shiftKey) return;
       const delta = horizontal ? event.deltaX : event.deltaY;
       const target = clampIndex(at + Math.sign(delta), n);
       if (!delta || target === at) return; // at an end: let the page scroll on

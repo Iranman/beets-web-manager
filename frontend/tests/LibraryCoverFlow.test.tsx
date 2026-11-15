@@ -291,18 +291,47 @@ describe('Library Cover Flow', () => {
     expect(screen.getByTestId('url').textContent).toBe('/elsewhere');
   });
 
-  it('a vertical wheel scrolls the page; a horizontal wheel moves the album flow', async () => {
+  it('a plain vertical wheel pans the album flow, releases the page at either end, and horizontal and Shift+wheel still pan', async () => {
     await renderLibrary();
     const flow = await openGammaRay();
-    const vertical = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
-    act(() => { flow.dispatchEvent(vertical); });
-    expect(vertical.defaultPrevented).toBe(false);
+
+    // Scroll down/forward moves to the next cover and consumes the event.
+    const down = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(down); });
+    expect(down.defaultPrevented).toBe(true);
+    expect(centred('Albums')).toBe('Album Two by Gamma Ray, 2 of 2');
+
+    // Scroll up/back moves to the previous cover.
+    const up = new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(up); });
+    expect(up.defaultPrevented).toBe(true);
     expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
 
+    // At the first cover, scrolling back does not preventDefault: the page scrolls, no trap.
+    const pastStart = new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(pastStart); });
+    expect(pastStart.defaultPrevented).toBe(false);
+    expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
+
+    // At the last cover, scrolling forward does not preventDefault and never moves past the end.
+    fireEvent.keyDown(flow, { key: 'End' });
+    expect(centred('Albums')).toBe('Album Two by Gamma Ray, 2 of 2');
+    const pastEnd = new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(pastEnd); });
+    expect(pastEnd.defaultPrevented).toBe(false);
+    expect(centred('Albums')).toBe('Album Two by Gamma Ray, 2 of 2');
+
+    // Horizontal wheel and Shift+wheel still pan.
+    fireEvent.keyDown(flow, { key: 'Home' });
     const horizontal = new WheelEvent('wheel', { deltaX: 120, bubbles: true, cancelable: true });
     act(() => { flow.dispatchEvent(horizontal); });
     expect(horizontal.defaultPrevented).toBe(true);
     expect(centred('Albums')).toBe('Album Two by Gamma Ray, 2 of 2');
+
+    const shift = new WheelEvent('wheel', { deltaY: -120, shiftKey: true, bubbles: true, cancelable: true });
+    act(() => { flow.dispatchEvent(shift); });
+    expect(shift.defaultPrevented).toBe(true);
+    expect(centred('Albums')).toBe('Album One by Gamma Ray, 1 of 2');
   });
 
   it('the Next arrow hands focus to the album flow when it disables itself at the end', async () => {

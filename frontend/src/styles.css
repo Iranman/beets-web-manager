@@ -2083,3 +2083,102 @@ body {
   }
 }
 /* ── end Bolder Playlists ────────────────────────────────────────────────────────────────────── */
+/* ── Bolder Submissions (views/Submissions.tsx) ──────────────────────────────────────────────────
+   The checking counter raised into the Bolder Shelf world, scoped to .submissions-bolder so the
+   shared ops-* surfaces Workbench also uses stay untouched. Nothing new is invented: this reuses
+   the foundation tokens the Bolder Shelf shipped — brass with its defined role (--bw-accent /
+   --bw-accent-hover for the current step, the active/selected state and live progress), the aged
+   --bw-patina for the record-sleeve edge, the walnut room light, the motion tokens, the .liner-label
+   small-caps and the shared RecordRing (the loading/running spinner). Operate filter: scanability
+   first, motion <= --dur-lift and reduced-motion-aware. No new glass here: the one docked bar is
+   solid warm walnut, the same rule the Now Working bar follows, so its text clears AA over any
+   content scrolling behind it. The primary action is already the foundation's polished-brass
+   contained button (theme.ts). No horizontal overflow at 320/390/1440. */
+@layer components {
+  /* Masthead title + the section counters at full display strength, on a brass-lit rule. */
+  .submissions-bolder .ops-title {
+    font-size: clamp(2rem, 1.5rem + 1.7vw, 2.6rem);
+    letter-spacing: -0.02em;
+  }
+  .submissions-bolder .ops-masthead {
+    border-bottom-color: color-mix(in srgb, var(--bw-accent) 24%, var(--bw-border));
+  }
+  .submissions-bolder .ops-section-title {
+    font-size: clamp(1.375rem, 1.2rem + 0.55vw, 1.6rem);
+    letter-spacing: -0.012em;
+  }
+
+  /* The checking counter is the focal walnut surface: the room's warm light from the top and a
+     hairline brass edge over the deep walnut base — the same material language as the Library crate
+     and the Jobs station. No glass: the counter holds the Known/Needs/Optional lists. */
+  .submissions-bolder .ops-counter {
+    border-color: color-mix(in srgb, var(--bw-accent) 18%, var(--ops-wood-rule));
+    background-image:
+      linear-gradient(180deg, rgba(226, 178, 92, 0.1), transparent 32%),
+      var(--ops-grain),
+      linear-gradient(180deg, var(--ops-sheen), transparent 45%);
+    background-size: 100% 100%, 520px 180px, auto;
+    box-shadow: inset 0 1px 0 rgba(246, 223, 174, 0.1);
+  }
+
+  /* The release laid on the counter, shown large: the record-sleeve treatment — an inner top
+     highlight and bottom shade, a patina edge, and a spine strip down the left, so the sleeve reads
+     as a pressed record set down on the wood. The set-down motion stays the ops base's one moment. */
+  .submissions-bolder .ops-counter-sleeve {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 246, 228, 0.16),
+      inset 0 -16px 26px -18px rgba(0, 0, 0, 0.85),
+      0 10px 20px -10px color-mix(in srgb, var(--color-zinc-950) 60%, transparent);
+    outline-color: color-mix(in srgb, var(--bw-patina) 70%, var(--ops-edge));
+  }
+  .submissions-bolder .ops-counter-sleeve::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 3px;
+    z-index: 2;
+    background: linear-gradient(180deg, rgba(255, 246, 228, 0.22), rgba(0, 0, 0, 0.35));
+    pointer-events: none;
+  }
+
+  /* The release title is the counter's focal name: the display serif pulled a touch tighter. */
+  .submissions-bolder .ops-now-title {
+    letter-spacing: -0.015em;
+  }
+
+  /* The numbered step rule: the current step is a filled brass track number (dark brass-ink on
+     brass) with its label in brass; done steps keep a quiet patina number. aria-current="step"
+     already marks the current one for assistive tech, so brass is decoration on top of the meaning. */
+  .submissions-bolder .ops-pipeline > li.is-current {
+    color: var(--bw-accent-hover);
+  }
+  .submissions-bolder .ops-pipeline > li.is-current .ops-pipeline-no {
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    background: var(--bw-accent);
+    color: var(--bw-bg);
+    font-weight: 600;
+  }
+  .submissions-bolder .ops-pipeline > li.is-done .ops-pipeline-no {
+    color: color-mix(in srgb, var(--bw-patina) 85%, var(--bw-muted));
+  }
+
+  /* The selected queue row wears the shared brass rail (the Bolder Shelf's active-row signature):
+     a patina edge plus a polished inner glint, instead of the base's single hairline. */
+  .submissions-bolder .ops-ledger-row.is-selected {
+    background: color-mix(in oklab, var(--bw-accent) 11%, transparent);
+    box-shadow: inset 3px 0 0 var(--bw-accent), inset 4px 0 0 rgba(246, 223, 174, 0.25);
+  }
+
+  /* The one docked bar (the sticky submission action bar): solid warm walnut — never glass behind
+     scrolling content, so its text clears AA over anything — with a hairline brass top edge and the
+     room's shadow. This is the same rule the Now Working bar follows (.nowbar). */
+  .submissions-bolder .submissions-bar {
+    background-color: var(--color-walnut-900);
+    border-top-color: color-mix(in srgb, var(--bw-accent) 22%, var(--color-walnut-700));
+    box-shadow: 0 -2px 0 var(--color-walnut-950), 0 -14px 28px -22px #000;
+  }
+}
+/* ── end Bolder Submissions ──────────────────────────────────────────────────────────────────── */

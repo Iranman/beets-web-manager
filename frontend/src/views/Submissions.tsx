@@ -9,6 +9,7 @@ import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import ArtistResolutionCard from '../components/ArtistResolutionCard';
+import { RecordRing } from '../components/RecordRing';
 import { SleeveArt, albumArtSources } from '../components/SleeveArt';
 import SubmissionReadinessCard, { ACTION_LABEL, readinessSummary } from '../components/SubmissionReadinessCard';
 import {
@@ -549,13 +550,14 @@ export default function Submissions() {
   })();
 
   return (
-    <section className="ops-page space-y-6 md:pb-24">
+    <section className="ops-page submissions-bolder space-y-6 md:pb-24">
       <header className="ops-masthead">
         <div className="min-w-0">
           <h1 className="ops-title">Submissions</h1>
           <p className="mt-2 max-w-prose text-sm text-zinc-300">Check a release against MusicBrainz and AcoustID before it goes in the racks.</p>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+          {targetLoading ? <RecordRing spinning className="size-5" /> : null}
           <p className="ops-catalog" aria-label="Submission status">
             <span className={stage === 'Complete' ? 'text-emerald-300' : stage.includes('Ready') ? 'text-info' : undefined}>{stageLabel}</span>
             {activeAlbumId ? <span>Album {activeAlbumId}</span> : null}
@@ -647,7 +649,7 @@ export default function Submissions() {
             {target ? (
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div>
-                  <div className="text-xs font-semibold text-emerald-400">Known</div>
+                  <div className="liner-label text-emerald-400">Known</div>
                   <ul className="mt-1 space-y-1 text-xs text-zinc-300">
                     <li>Artist: {target.summary.albumartist || '—'}</li>
                     <li>Title: {target.summary.title || '—'}</li>
@@ -658,13 +660,13 @@ export default function Submissions() {
                   </ul>
                 </div>
                 <div>
-                  <div className="text-xs font-semibold text-amber-400">Needs review</div>
+                  <div className="liner-label text-amber-400">Needs review</div>
                   {needsReviewFields.length ? (
                     <ul className="mt-1 space-y-1 text-xs text-zinc-300">{needsReviewFields.map(([key, label]) => <li key={key}>{label}</li>)}</ul>
                   ) : <p className="mt-1 text-xs text-muted">Nothing outstanding.</p>}
                 </div>
                 <div>
-                  <div className="text-xs font-semibold text-muted">Optional</div>
+                  <div className="liner-label text-muted">Optional</div>
                   {optionalMissingFields.length ? (
                     <ul className="mt-1 space-y-1 text-xs text-muted">{optionalMissingFields.map(([key, label]) => <li key={key}>{label}</li>)}</ul>
                   ) : <p className="mt-1 text-xs text-muted">Nothing to add.</p>}
@@ -758,7 +760,7 @@ export default function Submissions() {
           </section>
 
           {targetLoading ? (
-            <div className="border-t border-graphite-700 pt-5 text-sm text-zinc-400">Checking readiness…</div>
+            <div className="flex items-center gap-2 border-t border-graphite-700 pt-5 text-sm text-zinc-400"><RecordRing spinning className="size-4" />Checking readiness…</div>
           ) : artistStageActive ? (
             <ArtistResolutionCard
               artistName={target?.summary.albumartist || itemArtist(selectedItem)}
@@ -850,7 +852,7 @@ export default function Submissions() {
         </div>
       </div>
 
-      <div data-testid="submission-action-bar" className="sticky bottom-0 z-10 -mx-3 mt-4 border-t border-graphite-800 bg-graphite-950/95 px-3 py-3 backdrop-blur sm:-mx-4 sm:px-4 md:fixed md:inset-x-0 md:z-20 md:mx-0 md:mt-0">
+      <div data-testid="submission-action-bar" className="submissions-bar sticky bottom-0 z-10 -mx-3 mt-4 border-t px-3 py-3 sm:-mx-4 sm:px-4 md:fixed md:inset-x-0 md:z-20 md:mx-0 md:mt-0">
         <div className="mx-auto flex max-w-screen-2xl flex-col gap-2 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0 truncate text-sm text-zinc-400">
             {footerText}
