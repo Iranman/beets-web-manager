@@ -19,6 +19,7 @@ import {
 import { PluginsPanel } from '../features/plugins/PluginsPanel';
 import { RecordRing } from '../components/RecordRing';
 import { ConfigYamlEditor } from '../features/system/ConfigYamlEditor';
+import { ConfigOverview } from '../features/system/ConfigOverview';
 import { SecuritySection } from '../features/system/SecuritySection';
 import type {
   MbidStatusResponse,
@@ -65,6 +66,7 @@ const SECTIONS = [
   { id: 'music-format', label: 'Music format' },
   { id: 'plugins', label: 'Plugins' },
   { id: 'config-yaml', label: 'config.yaml' },
+  { id: 'config-overview', label: 'Configuration Overview' },
   { id: 'security', label: 'Security' },
 ] as const;
 
@@ -604,6 +606,15 @@ export default function Config() {
           {/* Beets config.yaml (moved from System) */}
           <SettingsSection id="config-yaml" title="config.yaml" hint="Beets' own configuration. Saving and reverting ask first.">
             <ConfigYamlEditor />
+          </SettingsSection>
+
+          {/* Read-only: where each setting comes from and whether a change needs a restart (#753 D1) */}
+          <SettingsSection
+            id="config-overview"
+            title="Configuration Overview"
+            hint="Read-only. Where each setting comes from (environment, saved settings, or built-in default), and whether a change needs a restart. Secrets and host paths are never shown."
+          >
+            <ConfigOverview />
           </SettingsSection>
 
           {/* Sign-in, API token and outbound policy (moved from System) */}
