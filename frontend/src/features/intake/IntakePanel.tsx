@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, reconcileArtwork, recoverAiBatch, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
 import type { AiBatchFolderState, AiBatchSource, AiBatchSourceReport, AiBatchState, PreflightFolder, PreflightResponse } from '../../api/types';
+import { CleanEmptyState } from '../../components/CleanPanel';
 import { LogViewer } from '../../components/LogViewer';
 import { downloadsRootProblem, useDownloadsRoot, useJobPoll } from '../../lib/hooks';
 
@@ -1365,7 +1366,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
               ))}
             </div>
           ) : (
-            <Alert severity="success">No audio folders found.</Alert>
+            <CleanEmptyState title="No audio folders found" tone="success" />
           )}
         </div>
       ) : null}

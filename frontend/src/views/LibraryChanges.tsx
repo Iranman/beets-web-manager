@@ -1,4 +1,5 @@
 import { formatEpochDateTime } from '../lib/dates';
+import { CleanEmptyState } from '../components/CleanPanel';
 import { useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 import { errorMessage, sentences } from '../lib/errors';
 import { Description, Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
@@ -482,7 +483,7 @@ export default function LibraryChanges() {
               )}
             </div>
             <div>
-              {rows.length === 0 && !loading && !listFailed && <p className="py-6 text-sm text-muted">No transactions found.</p>}
+              {rows.length === 0 && !loading && !listFailed && <CleanEmptyState title="No transactions found" />}
               {rows.map((row) => (
                 <button
                   key={row.id}

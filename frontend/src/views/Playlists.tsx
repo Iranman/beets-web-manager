@@ -38,6 +38,7 @@ import type {
   PlaylistTrack,
   PlaylistTrackSuggestion,
 } from '../api/types';
+import { CleanEmptyState } from '../components/CleanPanel';
 import { useEngineOffline } from '../components/EngineOfflineBanner';
 import { MusicBrainzUnavailableNotice, fingerprintNotCheckedLabel } from '../components/MusicBrainzUnavailableNotice';
 import { RecordRing } from '../components/RecordRing';
@@ -2121,11 +2122,11 @@ export default function Playlists() {
         ) : null}
 
         {!loadingPlaylists && !playlistError && playlists.length === 0 ? (
-          <Alert severity="info">No playlists have been saved yet.</Alert>
+          <CleanEmptyState title="No playlists have been saved yet" />
         ) : null}
 
         {!loadingPlaylists && !playlistError && playlists.length > 0 && filteredSavedPlaylistRows.length === 0 ? (
-          <Alert severity="info">No saved playlists match the current filters.</Alert>
+          <CleanEmptyState title="No saved playlists match the current filters" />
         ) : null}
 
         {filteredSavedPlaylistRows.length > 0 ? (
