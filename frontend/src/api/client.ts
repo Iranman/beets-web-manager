@@ -239,6 +239,29 @@ export function getReviewQueue(options: number | ReviewQueueParams = 500): Promi
   return apiJson<ReviewQueueResponse>(`/api/import/review-queue?${params.toString()}`);
 }
 
+export interface ReleaseArtResponse {
+  ok: boolean;
+  url?: string;
+  error?: string;
+  unavailable?: boolean;
+}
+
+/** Fetch-and-store a cover from the server-side cache, returning its local URL.
+ *  `level` picks the Cover Art Archive entity: 'release-group' (default) or 'release'
+ *  for edition-level art. Omitting it keeps the default release-group behavior. */
+export function getReleaseArt(
+  mbid: string,
+  artist?: string,
+  album?: string,
+  level?: 'release' | 'release-group',
+): Promise<ReleaseArtResponse> {
+  const params = new URLSearchParams({ mbid });
+  if (artist) params.set('artist', artist);
+  if (album) params.set('album', album);
+  if (level) params.set('level', level);
+  return apiJson<ReleaseArtResponse>(`/api/release-art?${params.toString()}`);
+}
+
 export function getLibraryMissingMbIds(options: LibraryMissingMbParams = {}): Promise<LibraryMissingMbResponse> {
   const params = new URLSearchParams();
   params.set('limit', String(options.limit ?? 100));
