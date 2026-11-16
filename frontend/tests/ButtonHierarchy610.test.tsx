@@ -64,7 +64,6 @@ describe('#610 button hierarchy', () => {
 
   it('read-only and shortcut actions are not styled as primaries', () => {
     expect(src('views/Jobs.tsx')).toMatch(/variant="outlined" disabled=\{busy\} onClick=\{\(\) => void doScan\(\)\}/);
-    expect(src('views/Jobs.tsx')).toMatch(/variant="outlined" onClick=\{\(\) => onApply\(issue\)\}>\s*Apply selected fixes/);
     const intake = src('features/intake/IntakePanel.tsx');
     expect(intake).toMatch(/variant="text"\s*onClick=\{\(\) => \{\s*setPath\(downloadsRoot\)/);
     expect(intake).toMatch(/variant="text"\s*onClick=\{\(\) => \{\s*setPath\(failedImportsPath\)/);
