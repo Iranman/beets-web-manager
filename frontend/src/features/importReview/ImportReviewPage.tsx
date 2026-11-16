@@ -5086,7 +5086,7 @@ export function ImportReviewPage({
             </div>
           ) : (
           <>
-          <div className="mt-4 flex flex-wrap gap-2">
+          <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Review queue filter">
             {filters.map((entry) => {
               const count = filterCounts[entry.id];
               const active = filter === entry.id;
@@ -5097,6 +5097,7 @@ export function ImportReviewPage({
                   size="small"
                   color={entry.id === 'failed' || entry.id === 'audio_mismatch' ? 'error' : entry.id === 'blocked' ? 'warning' : 'primary'}
                   variant={active ? 'contained' : 'outlined'}
+                  aria-pressed={active}
                   onClick={() => selectFilter(entry.id)}
                 >
                   {entry.label} ({count})
@@ -5109,7 +5110,7 @@ export function ImportReviewPage({
               This filter applies to the {items.length} item{items.length === 1 ? '' : 's'} on this page.
             </div>
           ) : null}
-          <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Source filter">
             <span className="text-xs font-semibold text-muted">Source</span>
             {originFilters.map((entry) => {
               const count = sourceFilterCounts[entry.id];
@@ -5121,6 +5122,7 @@ export function ImportReviewPage({
                   size="small"
                   color={active ? 'primary' : 'inherit'}
                   variant={active ? 'contained' : 'outlined'}
+                  aria-pressed={active}
                   onClick={() => selectSourceFilter(entry.id)}
                 >
                   {entry.label} ({count})
