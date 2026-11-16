@@ -551,12 +551,12 @@ function WorkflowCard({
       </div>
       {/* Selected action description */}
       <p className="min-h-[2.75rem] text-sm leading-relaxed text-zinc-300">{action.description}</p>
-      {error ? <p className="text-sm text-rose-300">{error}</p> : null}
+      {error ? <p className="text-sm text-danger-text">{error}</p> : null}
       <div className="flex items-center gap-2">
         <Button color={action.dangerous ? 'error' : 'primary'} disabled={busy} size="small" variant="contained" onClick={handleRun}>
           {busy ? 'Starting…' : 'Run'}
         </Button>
-        {action.dangerous && <span className="text-sm font-semibold text-rose-300">Destructive: asks you to confirm</span>}
+        {action.dangerous && <span className="text-sm font-semibold text-danger-text">Destructive: asks you to confirm</span>}
       </div>
     </div>
   );
@@ -1056,10 +1056,10 @@ function AlbumFolderCleanupPanel({
         : latestReadableLine(scanJob!) || 'Scanning album folders...')
     : null;
   const stats = [
-    { label: 'Safe fixes', value: safeCount, tone: safeCount ? 'text-emerald-300' : 'text-muted' },
-    { label: 'Needs review', value: reviewCount, tone: reviewCount ? 'text-amber-300' : 'text-muted' },
-    { label: 'Blocked', value: blockedCount, tone: blockedCount ? 'text-rose-300' : 'text-muted' },
-    { label: 'Completed', value: completedCount, tone: completedCount ? 'text-sky-300' : 'text-muted' },
+    { label: 'Safe fixes', value: safeCount, tone: safeCount ? 'text-success' : 'text-muted' },
+    { label: 'Needs review', value: reviewCount, tone: reviewCount ? 'text-warning' : 'text-muted' },
+    { label: 'Blocked', value: blockedCount, tone: blockedCount ? 'text-danger-text' : 'text-muted' },
+    { label: 'Completed', value: completedCount, tone: completedCount ? 'text-info' : 'text-muted' },
   ];
   const detailStats = [
     { label: 'Empty folders', value: count('empty_folders'), tone: 'text-zinc-100' },
@@ -1131,7 +1131,7 @@ function AlbumFolderCleanupPanel({
 
       {summary && (
         <div className="space-y-3">
-          <p className={cx('text-base font-semibold', totalIssues > 0 ? 'text-amber-200' : 'text-emerald-200')}>
+          <p className={cx('text-base font-semibold', totalIssues > 0 ? 'text-warning' : 'text-success')}>
             {numberFmt.format(totalIssues)} issue{totalIssues === 1 ? '' : 's'} found
           </p>
           <FigureRow items={stats.map((stat) => ({ label: stat.label, value: numberFmt.format(stat.value), tone: stat.tone }))} />
@@ -1456,7 +1456,7 @@ function MaintenanceRunnerBar({
               <span>Next scheduled run: Manual only</span>
           </div>
             {checkpointResumable ? (
-              <div className="text-sm text-amber-300">
+              <div className="text-sm text-warning">
                 Resume checkpoint ready. Next phase: {checkpointNextLabel}.{' '}
                 <Button
                   disabled={busy || running || engineOffline}
@@ -1474,7 +1474,7 @@ function MaintenanceRunnerBar({
               </div>
           ) : null}
           {artistFolderSkip ? (
-            <div className="text-sm text-amber-300">Artist Folder Merge skipped: {artistFolderSkip.detail}</div>
+            <div className="text-sm text-warning">Artist Folder Merge skipped: {artistFolderSkip.detail}</div>
           ) : null}
         </div>
         <div>
@@ -1554,10 +1554,10 @@ function MaintenanceRunnerReportDialog({
             <div className="mt-4 space-y-4">
               <FigureRow
                 items={[
-                  { label: 'Candidates', value: duplicateCandidates.toLocaleString(), tone: 'text-sky-200' },
+                  { label: 'Candidates', value: duplicateCandidates.toLocaleString(), tone: 'text-info' },
                   { label: 'Album groups', value: duplicateAlbumGroups.toLocaleString() },
                   { label: 'RGID groups', value: releaseGroupGroups.toLocaleString() },
-                  { label: 'Deleted files', value: deletedFiles.toLocaleString(), tone: deletedFiles ? 'text-rose-200' : 'text-emerald-200' },
+                  { label: 'Deleted files', value: deletedFiles.toLocaleString(), tone: deletedFiles ? 'text-danger-text' : 'text-success' },
                 ]}
               />
               <FigureRow
@@ -1978,11 +1978,11 @@ function RawLogDetails({
 }
 
 function toneText(tone: JobFeedStatus) {
-  if (tone === 'success') return 'text-emerald-300';
-  if (tone === 'warning') return 'text-amber-300';
-  if (tone === 'error') return 'text-rose-300';
+  if (tone === 'success') return 'text-success';
+  if (tone === 'warning') return 'text-warning';
+  if (tone === 'error') return 'text-danger-text';
   if (tone === 'cancelled') return 'text-muted';
-  return 'text-sky-300';
+  return 'text-info';
 }
 
 function toneRule(tone: JobFeedStatus) {
@@ -2191,7 +2191,7 @@ function JobSummaryHeader({
           {found !== null && found >= 0 ? (
             <div>
               <span className="mr-1.5 text-muted">Duplicates/candidates:</span>
-              <span className="font-semibold text-amber-300">{found} found</span>
+              <span className="font-semibold text-warning">{found} found</span>
             </div>
           ) : null}
         </div>
@@ -2243,7 +2243,7 @@ function FeedTimeline({ items, groups, emptyText }: { items: JobFeedItem[]; grou
                   <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
                     {item.time ? <span className="text-xs tabular-nums text-muted">{formatClock(item.time)}</span> : null}
                     <span className="sr-only">{item.status}</span>
-                    <div className={cx('min-w-0 flex-1 text-sm', item.status === 'error' ? 'text-rose-200' : item.status === 'warning' ? 'text-amber-200' : 'text-zinc-100')}>{item.title}</div>
+                    <div className={cx('min-w-0 flex-1 text-sm', item.status === 'error' ? 'text-danger-text' : item.status === 'warning' ? 'text-warning' : 'text-zinc-100')}>{item.title}</div>
                   </div>
                   {item.message ? <div className="mt-1 text-sm text-zinc-300">{item.message}</div> : null}
                   {item.detail ? <div className="mt-1 text-sm text-zinc-300">{item.detail}</div> : null}
@@ -2489,10 +2489,10 @@ function JobStatusBar({
   return (
     <section aria-label="Job status" className="flex flex-wrap items-center gap-x-6 gap-y-3">
       <p className="ops-catalog">
-        <span className={counts?.running ? 'text-sky-300' : undefined}>
+        <span className={counts?.running ? 'text-info' : undefined}>
           {counts ? numberFmt.format(counts.running) : '—'} running
         </span>
-        <span className={counts?.failed ? 'text-rose-300' : undefined}>
+        <span className={counts?.failed ? 'text-danger-text' : undefined}>
           {counts ? numberFmt.format(counts.failed) : '—'} failed
         </span>
         <span>
@@ -2667,7 +2667,7 @@ function CurrentJobFeedSection({
           <div className="ops-deck">
             <Platter playing={false} pct={null} sources={[]} />
             <div className="min-w-0 self-center">
-              <p className={cx('ops-now-title', error ? 'text-rose-200' : loading ? 'text-zinc-300' : '')}>
+              <p className={cx('ops-now-title', error ? 'text-danger-text' : loading ? 'text-zinc-300' : '')}>
                 {error ? error : loading ? 'Loading job activity...' : 'No job is running.'}
               </p>
               {latestJob && latestSummary ? (

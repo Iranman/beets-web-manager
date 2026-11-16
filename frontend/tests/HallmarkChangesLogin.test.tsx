@@ -51,7 +51,7 @@ describe('Hallmark Library Changes ledger', () => {
     // Recovery Required is a failure-family state: a red word, never colour alone.
     const words = screen.getAllByText('Recovery Required');
     expect(words.length).toBe(2);
-    for (const w of words) expect(w.className).toContain('text-red-300');
+    for (const w of words) expect(w.className).toContain('text-danger-text');
     const exportGroup = screen.getByRole('group', { name: 'Export this transaction' });
     expect(exportGroup.querySelectorAll('a')).toHaveLength(3);
   });

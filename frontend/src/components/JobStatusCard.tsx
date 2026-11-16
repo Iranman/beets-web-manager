@@ -31,10 +31,10 @@ const STATUS_DOT: Record<string, string> = {
 };
 
 const STATUS_TEXT: Record<string, string> = {
-  running:   'text-amber-300',
-  success:   'text-emerald-300',
-  failed:    'text-red-300',
-  killed:    'text-red-300',
+  running:   'text-warning',
+  success:   'text-success',
+  failed:    'text-danger-text',
+  killed:    'text-danger-text',
   cancelled: 'text-zinc-400',
   recovery_required: 'text-orange-300',
 };

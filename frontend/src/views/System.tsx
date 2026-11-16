@@ -66,7 +66,7 @@ function integrationBadge(
   return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
 }
 
-const TONE_TEXT = { ok: 'text-emerald-300', warn: 'text-amber-300', neutral: 'text-zinc-300' } as const;
+const TONE_TEXT = { ok: 'text-success', warn: 'text-warning', neutral: 'text-zinc-300' } as const;
 
 /** Reflects the backend-reported plugin-loader probe state only (never
  * recomputed client-side from configured_plugins/plugin_failures) --
@@ -284,7 +284,7 @@ export default function System() {
         <ul aria-label="Problems" className="m-0 list-none space-y-1 p-0">
           {problems.map((problem, index) => (
             <li key={index} className="flex gap-2 text-sm text-zinc-100">
-              <span className="shrink-0 font-semibold text-amber-300">Problem</span>
+              <span className="shrink-0 font-semibold text-warning">Problem</span>
               <span className="min-w-0 break-words">{problem}</span>
             </li>
           ))}
@@ -362,7 +362,7 @@ export default function System() {
                 <div><dt className="liner-label inline">Enabled plugins:</dt> <dd className="inline m-0">{beets.configured_plugins?.length ?? 0}</dd></div>
                 <div>
                   <dt className="liner-label inline">Plugin loader:</dt>{' '}
-                  <dd className={`inline m-0 font-semibold ${pluginLoaderLabel(beets) === 'loaded' ? 'text-emerald-300' : 'text-red-300'}`}>{pluginLoaderLabel(beets)}</dd>
+                  <dd className={`inline m-0 font-semibold ${pluginLoaderLabel(beets) === 'loaded' ? 'text-success' : 'text-danger-text'}`}>{pluginLoaderLabel(beets)}</dd>
                 </div>
               </dl>
               {beets.plugin_failures?.length ? (

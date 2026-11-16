@@ -408,7 +408,7 @@ export default function Config() {
                   {healthFigures.map((figure) => (
                     <div key={figure.label}>
                       <dt>{figure.label}</dt>
-                      <dd className={figure.value ? 'text-amber-300' : 'text-emerald-300'}>{figure.value.toLocaleString()}</dd>
+                      <dd className={figure.value ? 'text-warning' : 'text-success'}>{figure.value.toLocaleString()}</dd>
                     </div>
                   ))}
                 </dl>
@@ -441,7 +441,7 @@ export default function Config() {
               </Alert>
             )}
             {formatLoading && <LinearProgress aria-label="Loading music format preferences" sx={{ borderRadius: 1 }} />}
-            {formatDirty && formatLoaded ? <p className="m-0 text-xs font-semibold text-amber-300">Unsaved changes</p> : null}
+            {formatDirty && formatLoaded ? <p className="m-0 text-xs font-semibold text-warning">Unsaved changes</p> : null}
             <fieldset disabled={!formatLoaded} aria-label="Music format preference fields" className="m-0 min-w-0 space-y-8 border-0 p-0">
               <div className="grid gap-x-10 gap-y-8 xl:grid-cols-2">
                 <div className="min-w-0 space-y-3">
@@ -579,7 +579,7 @@ export default function Config() {
                       <li key={`${row.item_id ?? row.path}-${row.updated_at ?? ''}`} className="py-2 text-sm">
                         <div className="flex flex-wrap items-baseline justify-between gap-x-2">
                           <span className="min-w-0 break-words font-medium text-zinc-100">{row.artist || 'Unknown artist'} - {row.title || 'Unknown track'}</span>
-                          <span className="text-xs font-semibold text-amber-300">{row.replacement_status || row.status}</span>
+                          <span className="text-xs font-semibold text-warning">{row.replacement_status || row.status}</span>
                         </div>
                         {row.reason ? <div className="mt-1 text-xs text-zinc-300">{row.reason}</div> : null}
                         {(row.failure_stage || row.attempt_count || row.next_retry_at) ? (
