@@ -7,6 +7,29 @@
 
 ---
 
+## What a production install needs
+
+You do **not** need a Git checkout of this repository on the host, and you should not run from one. The container runs entirely from the published image `ghcr.io/iranman/beets-web-manager:latest`; nothing in the source tree (`app.py`, `backend/`, `frontend/`, `tests/`, `docs/`, the `Dockerfile`, `requirements*.txt`) executes on the host. The production footprint is just three things:
+
+1. **`docker-compose.yml`** — one file. Copy it from the repository, or paste the trimmed sample in [Step 2](#step-2-create-docker-composeyml).
+2. **An environment file (optional)** — a `.env` next to the Compose file holding ports, host paths and credentials. See [`docs/CONFIGURATION.md`](CONFIGURATION.md). Without one, the defaults in the Compose file apply.
+3. **The persistent folders the Compose file mounts** — the Beets `/config` folder, your music and downloads folders, and the `web-manager` data folder. These hold your library and settings and are the only state that must survive an upgrade.
+
+`docker compose up -d` pulls the image and starts it; `docker compose pull && docker compose up -d` updates it later. No build, and no Python, Beets, `pip` or `uv` on the host.
+
+> [!WARNING]
+> **Do not `git clone` this repository onto the host and run the stack from inside the clone.** The container never reads the source tree, so a clone just leaves dev-only files (`.git/`, `app.py`, `backend/`, `frontend/`, `tests/`, `docs/`, `Dockerfile`, `requirements*.txt`) littering your stack directory, mixed in with the data folders above. Keep only the files in the list above on a production host.
+
+### Which Compose file
+
+| File | Use it for | How it runs |
+|---|---|---|
+| **`docker-compose.yml`** | **Production.** One hardened container, pulls the published image. This is the one to use. | `docker compose up -d` |
+| `docker-compose.full.yml` | Production **plus** the optional bgutil yt-dlp PO-token sidecar (some YouTube downloads need it); web port bound to loopback by default. Also pulls the published image. | `docker compose -f docker-compose.full.yml up -d` |
+| `docker-compose.dev.yml` | **Development only.** Builds the image from the source tree. Needs the repository checked out; not for a production host. | `docker compose -f docker-compose.dev.yml up -d --build` |
+
+---
+
 ## Install
 
 Needs only Docker and Docker Compose.

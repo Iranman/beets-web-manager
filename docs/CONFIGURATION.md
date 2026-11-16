@@ -21,6 +21,23 @@ Precedence for any given web-manager value, highest first:
 
 Concretely: `_first_config_secret()`/`_security_auth_password()` and friends in `backend/auth_service.py` always check `os.environ` first. `/web-manager-data/.env` (see below) only ever *fills in* a variable that is still blank in the process environment -- it can never override a non-blank Docker-supplied value. This means a value pinned by an operator in `docker-compose.yml` cannot be silently overridden by a Settings-page save, and the System page reports each variable's `source` (`process` = Docker env, `file` = `.env`, `example` = default) so "why is this value X?" always has a concrete answer.
 
+## I want to change X — where do I do it?
+
+The precedence above is the full model; this table is the short answer for the common cases. "Applies" is how a change takes effect: **live** (running process picks it up), **restart** (restart Web Manager), **deploy** (edit Compose/`.env` and `docker compose up -d` to recreate the container). The System page shows the same label on each field.
+
+| I want to change… | Do this | Applies |
+|---|---|---|
+| **Administrator password** | Set it in the first-run wizard on first visit. Later, change it in **System → Settings** (the `BEETS_WEB_PASSWORD` field). It is stored only as a hash in `/web-manager-data/.browser_password`, never in plaintext and never returned by any API. | live |
+| **Administrator password — locked out / reset** | Set `BEETS_WEB_PASSWORD` in the Compose environment (or the stack `.env`) and recreate the container: the new value is hashed and stored on start. Then clear it from Compose again (a non-blank Compose value wins over the Settings page, so a later in-app change would silently revert while it is set). Do not log or echo the value. | deploy |
+| **Administrator username** | **System → Settings** (`BEETS_WEB_USERNAME`), or set it in the Compose environment. Default `admin`. | live |
+| **AcoustID application key** | **System → Settings** (`ACOUSTID_API_KEY`), or set it in the stack `.env`. If you set it in Compose, recreate the container. Register a free key at <https://acoustid.org/new-application>. | live |
+| **Other provider keys / URLs** (AI, Plex, Lidarr, slskd, Discogs, qBittorrent, Spotify, ListenBrainz) | **System → Settings**, or the stack `.env`. These are application settings/secrets (see the tables under [Optional integrations](#optional-integrations)). A value pinned in the Compose environment wins and makes the field read-only. | live (a few need restart — the field says which) |
+| **Published web port** | Change the host side of `WEBCONTROL_PORT` in `ports:` (`"<host>:8337"`). The app always listens on `8337` inside the container. | deploy |
+| **Host folders for music / downloads / Beets config / app data** | Change the **left** side of the matching volume (or its `*_PATH` variable: `MUSIC_PATH`, `DOWNLOADS_PATH`, `BEETS_CONFIG_PATH`, `WEB_MANAGER_DATA_PATH`). The right side is the container path and stays as is. | deploy |
+| **Container-side paths** (`MUSIC_ROOT`, `DOWNLOADS_ROOT`, `BEETS_CONFIG`) | Change them in the Compose `environment:` block **together with** the matching volume target. `MUSIC_ROOT` must equal Beets' `directory:`. | deploy |
+| **Enabled Beets plugins / importer behavior** | Edit `/config/config.yaml` (the Beets config), or the allowed subset via **System → Settings**' config editor, then restart Web Manager so Beets re-reads it. | restart |
+| **Operator-only / security settings** (`BEETS_OUTBOUND_ALLOWLIST`, auth rate limits, quarantine dirs, yt-dlp runtimes, …) | Compose `environment:` only, then recreate. The System page shows them read-only and the Settings API refuses to save them (see [Operator-only settings](#operator-only-settings-compose-environment-only)). | deploy |
+
 ## Web-manager secrets: what's stored where
 
 | File | Contents | Format |
