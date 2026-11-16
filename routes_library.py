@@ -1085,9 +1085,10 @@ def release_art_api():
     mbid = request.args.get("mbid", "").strip()
     artist_name = request.args.get("artist", "").strip()
     album_title = request.args.get("album", "").strip()
+    level = request.args.get("level", "release-group").strip()
     if not mbid:
         return jsonify({"ok": False, "error": "mbid required"})
-    return jsonify(_ensure_release_group_art(mbid, artist_name, album_title))
+    return jsonify(_ensure_release_group_art(mbid, artist_name, album_title, level))
 
 
 @app.get("/api/artist-image-url")

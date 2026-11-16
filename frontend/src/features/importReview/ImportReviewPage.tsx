@@ -32,6 +32,7 @@ import {
   getFolderStats,
   getJob,
   getLibraryMissingMbIds,
+  getReleaseArt,
   getReviewQueue,
   importWithId,
   matchAlbum,
@@ -69,6 +70,7 @@ import {
 } from './importReviewDecision';
 import type { IdentityRejectionSource, MatchBucket, MatchConfidenceLevel, TrackRow, TargetPreviewState, SelectedMatch } from './importReviewDecision';
 import { MusicBrainzUnavailableNotice, acoustidNotCheckedText, fingerprintNotCheckedLabel } from '../../components/MusicBrainzUnavailableNotice';
+import { BlankSleeve } from '../../components/SleeveArt';
 import type {
   AiSuggestResponse,
   AiSuggestion,
@@ -594,6 +596,62 @@ function candidateName(candidate: ReviewCandidate): string {
   const base = [candidate.album || '(unknown album)', candidate.artist || '(unknown artist)'].join(' - ');
   const date = candidate.date || candidate.year;
   return date ? `${base} (${date})` : base;
+}
+
+/**
+ * A small square recognition thumbnail for an edition candidate, showing release-level
+ * Cover Art Archive art fetched-and-stored by the server. Purely visual: it never touches
+ * identity, matching, or any action. Falls back to the calm BlankSleeve on no id / miss /
+ * error so the layout never shifts and no broken-image icon shows.
+ */
+export function EditionArtThumb({
+  mbid,
+  album,
+  artist,
+  size = 36,
+}: {
+  mbid?: string;
+  album?: string;
+  artist?: string;
+  size?: number;
+}) {
+  const [artUrl, setArtUrl] = useState('');
+  const [artFailed, setArtFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setArtUrl('');
+    setArtFailed(false);
+    if (!isMusicBrainzUuid(mbid)) return undefined;
+    getReleaseArt(mbid as string, artist, album, 'release')
+      .then((res) => {
+        if (!cancelled) setArtUrl(res.ok && res.url ? res.url : '');
+      })
+      .catch(() => {
+        if (!cancelled) setArtFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mbid, album, artist]);
+  const showArt = Boolean(artUrl) && !artFailed;
+  return (
+    <span className="ops-sleeve shrink-0" style={{ width: size, height: size }} aria-hidden={showArt ? undefined : true}>
+      {showArt ? (
+        <img
+          alt={`${album || 'release'} cover art`}
+          className="ops-sleeve-img"
+          decoding="async"
+          height={size}
+          loading="lazy"
+          src={artUrl}
+          width={size}
+          onError={() => setArtFailed(true)}
+        />
+      ) : (
+        <BlankSleeve />
+      )}
+    </span>
+  );
 }
 
 function candidateFormat(candidate: ReviewCandidate): string {
@@ -3059,10 +3117,13 @@ export function ReviewCard({
                 {manualValidation.releaseGroupCandidates?.length ? (
                   <div className="mt-2">
                     <div className="font-medium">Available releases</div>
-                    <ul className="mt-1 space-y-0.5">
+                    <ul className="mt-1 space-y-1">
                       {manualValidation.releaseGroupCandidates.slice(0, 4).map((release) => (
-                        <li key={release.mb_albumid} className="truncate">
-                          {release.title || 'Untitled'} {release.date ? `(${release.date})` : ''} · {release.country || 'unknown'} · {release.track_count} tracks
+                        <li key={release.mb_albumid} className="flex items-center gap-2">
+                          <EditionArtThumb mbid={release.mb_albumid} album={release.title} artist={item.albumartist || item.artist} />
+                          <span className="min-w-0 truncate">
+                            {release.title || 'Untitled'} {release.date ? `(${release.date})` : ''} · {release.country || 'unknown'} · {release.track_count} tracks
+                          </span>
                         </li>
                       ))}
                     </ul>

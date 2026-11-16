@@ -596,22 +596,40 @@ def _fetch_release_group_art_discogs(artist_name: str, album_title: str) -> str:
     return ""
 
 
-def _ensure_release_group_art(mbid: str, artist_name: str = "", album_title: str = "") -> Dict[str, Any]:
-    """Serve a locally-stored release-group cover, downloading+caching on first request.
-    Tries Cover Art Archive first, then Discogs (if configured) so a release with no
-    MusicBrainz-registered art can still get a thumbnail. Misses are cached too, so a
-    release with genuinely no art anywhere isn't re-fetched on every page load."""
+# Cover Art Archive exposes front art at both the release-group and the release level.
+# Only these two path segments may be interpolated into the CAA URL; anything else is
+# coerced to the default so no user-controlled value reaches the host path.
+_CAA_ART_LEVELS = {"release", "release-group"}
+
+
+def _release_art_level(level: str) -> str:
+    return level if level in _CAA_ART_LEVELS else "release-group"
+
+
+def _ensure_release_group_art(
+    mbid: str, artist_name: str = "", album_title: str = "", level: str = "release-group"
+) -> Dict[str, Any]:
+    """Serve a locally-stored cover, downloading+caching on first request.
+    `level` picks the Cover Art Archive entity ("release-group" default, or "release" for
+    edition-level art); it is whitelisted to those two values. Tries Cover Art Archive first,
+    then Discogs (if configured) so an entry with no MusicBrainz-registered art can still get
+    a thumbnail. Misses are cached too, so an entry with genuinely no art anywhere isn't
+    re-fetched on every page load. The disk cache keys purely on mbid; release and
+    release-group UUIDs never collide, so no cache-key change is needed."""
     if not _RELEASE_ART_MBID_RE.match(mbid or ""):
         return {"ok": False, "error": "invalid mbid"}
     mbid = mbid.lower()
+    level = _release_art_level(level)
     with _release_art_locks_guard:
         lock = _release_art_locks.setdefault(mbid, threading.Lock())
     # ponytail: one lock per mbid ever seen, never pruned; bounded by library size.
     with lock:  # concurrent requests for one album download it once
-        return _ensure_release_group_art_locked(mbid, artist_name, album_title)
+        return _ensure_release_group_art_locked(mbid, artist_name, album_title, level)
 
 
-def _ensure_release_group_art_locked(mbid: str, artist_name: str, album_title: str) -> Dict[str, Any]:
+def _ensure_release_group_art_locked(
+    mbid: str, artist_name: str, album_title: str, level: str = "release-group"
+) -> Dict[str, Any]:
     cached = _release_art_cache_info(mbid)
     if cached.get("url"):
         return {"ok": True, "url": cached["url"]}
@@ -621,7 +639,7 @@ def _ensure_release_group_art_locked(mbid: str, artist_name: str, album_title: s
     unavailable = False
     try:
         url = _release_art_download(
-            mbid, f"https://coverartarchive.org/release-group/{mbid}/front-250", "coverartarchive")
+            mbid, f"https://coverartarchive.org/{_release_art_level(level)}/{mbid}/front-250", "coverartarchive")
     except ReleaseArtUnavailable:
         url, unavailable = "", True
     if not url and (artist_name or album_title):

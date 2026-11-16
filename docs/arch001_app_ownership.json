@@ -9072,6 +9072,27 @@
    ]
   },
   {
+   "name": "_release_art_level",
+   "module": "backend/musicbrainz_service.py",
+   "lines": [
+    605,
+    606
+   ],
+   "size": 2,
+   "body_lines": 1,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "ARTWORK",
+   "desired_owner": "backend/artwork_service.py",
+   "migration_status": "EXTRACTED_SHARED",
+   "callers": [
+    "_ensure_release_group_art",
+    "_ensure_release_group_art_locked"
+   ],
+   "caller_count": 2,
+   "dependencies": []
+  },
+  {
    "name": "_parse_manual_musicbrainz_identifier",
    "module": "backend/musicbrainz_service.py",
    "lines": [

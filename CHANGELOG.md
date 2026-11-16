@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Added
+
+- **Edition candidate cards in the import review queue now show a release-level cover thumbnail.** The "Available releases" list under manual MusicBrainz-ID validation renders a small square Cover Art Archive thumbnail for each edition, fetched-and-stored server-side (download + 7-day cache, served from disk — not a bare external link) and reusing the existing release-art cache stack. `GET /api/release-art` gained a whitelisted `level` parameter (`release` or `release-group`, default `release-group`; any other value is coerced to `release-group`, so no user-controlled value is interpolated into the Cover Art Archive URL) so the fetcher can hit `coverartarchive.org/release/{mbid}/front-250` for edition-level art. Artwork only — it never touches identity, matching, scoring, acceptance, auto-import, `mb_releasegroupid`, or any gate, and falls back to the calm blank-sleeve placeholder on no id / miss / error. The default (no `level`) path is byte-for-byte unchanged, so Library and all other callers are unaffected.
+
 ### Changed
 
 - **Frontend runtime dependency bump (react group).** `react` and `react-dom` 19.3.0 -> 19.3.1 (patch; RSC transport-protocol fix, no API change). Supersedes Dependabot #437, which was blocked by skipped CodeQL checks.
