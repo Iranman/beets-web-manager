@@ -874,9 +874,6 @@ function AlbumFolderIssueDialog({
                 <Button disabled={busy || blocked} size="small" variant="contained" onClick={() => onApply(issue)}>
                   {busy ? 'Applying...' : 'Apply fix'}
                 </Button>
-                <Button disabled={busy || blocked} size="small" variant="outlined" onClick={() => onApply(issue)}>
-                  Apply selected fixes
-                </Button>
                 <Button size="small" variant="text" onClick={onClose}>Close</Button>
               </div>
             </div>
