@@ -4,7 +4,7 @@
 import Button from '@mui/material/Button';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type {
   PlaylistCreateResponse,
   PlaylistDetailResponse,
@@ -159,16 +159,21 @@ export function playlistHasResumableCheckpoint(
 
 export function ActionMenu({
   label = 'Actions',
+  triggerAriaLabel,
   actions,
   disabled,
   color = 'primary',
 }: {
   label?: string;
+  // Per-row accessible name so screen-reader users can tell otherwise-identical
+  // "Actions" triggers apart. Falls back to the visible label when omitted.
+  triggerAriaLabel?: string;
   actions: MenuAction[];
   disabled?: boolean;
   color?: 'primary' | 'warning';
 }) {
   const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
+  const menuId = useId();
   const visibleActions = actions.filter(Boolean);
   if (!visibleActions.length) return null;
   const open = Boolean(anchorEl);
@@ -179,11 +184,16 @@ export function ActionMenu({
         size="small"
         color={color}
         disabled={disabled}
+        aria-label={triggerAriaLabel}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
         onClick={(event) => setAnchorEl(event.currentTarget)}
       >
         {label}
       </Button>
       <Menu
+        id={menuId}
         anchorEl={anchorEl}
         open={open}
         onClose={() => setAnchorEl(null)}
