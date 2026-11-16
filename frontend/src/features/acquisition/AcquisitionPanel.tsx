@@ -1,5 +1,6 @@
 import { formatShortDateTime, normaliseEpochSeconds } from '../../lib/dates';
 import { errorMessage, sentences } from '../../lib/errors';
+import { CleanEmptyState } from '../../components/CleanPanel';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -939,11 +940,11 @@ export function AcquisitionPanel({
 
           {!visibleItems.length ? (
             filtersActive ? (
-              <p className="text-sm text-muted">No rows match these filters.</p>
+              <CleanEmptyState title="No rows match these filters" />
             ) : cacheState === 'ready' || cacheState === 'stale' ? (
-              <Alert severity="success">No missing library music or monitored Lidarr wanted albums need download.</Alert>
+              <CleanEmptyState title="Nothing to download" message="No missing library music or monitored Lidarr wanted albums need download." tone="success" />
             ) : (
-              <p className="text-sm text-muted">The previous list had no rows. It may be out of date; see the status above.</p>
+              <CleanEmptyState title="List may be out of date" message="The previous list had no rows. It may be out of date; see the status above." tone="warning" />
             )
           ) : (
             <div className="overflow-hidden rounded border border-graphite-800 bg-graphite-950">

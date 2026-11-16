@@ -8,6 +8,7 @@ import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
+import { CleanEmptyState } from '../components/CleanPanel';
 import ArtistResolutionCard from '../components/ArtistResolutionCard';
 import { RecordRing } from '../components/RecordRing';
 import { SleeveArt, albumArtSources } from '../components/SleeveArt';
@@ -616,7 +617,7 @@ export default function Submissions() {
                 </button>
               );
             })}
-            {!visibleItems.length && !loading && !error ? <p className="py-4 text-sm text-zinc-400">No items match this filter.</p> : null}
+            {!visibleItems.length && !loading && !error ? <CleanEmptyState title="No items match this filter" /> : null}
           </div>
         </aside>
 

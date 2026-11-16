@@ -42,6 +42,7 @@ import {
 } from '../lib/jobFeed';
 import { useGlobalJobs, useInterval, useJobPoll } from '../lib/hooks';
 import { panelError } from '../lib/errors';
+import { CleanEmptyState } from '../components/CleanPanel';
 import { useEngineOffline, useReloadOnEngineReturn } from '../components/EngineOfflineBanner';
 import type { ApiOkResponse } from '../api/types';
 import type {
@@ -2460,7 +2461,7 @@ function ConsoleHistory({
             </div>
           );
         })}
-        {!filtered.length && <p className="py-6 text-sm text-muted">No jobs match filter.</p>}
+        {!filtered.length && <CleanEmptyState title="No jobs match filter" />}
       </div>
     </div>
   );
