@@ -1845,6 +1845,7 @@ export default function Playlists() {
                             <Chip label={scoreLabel(track.score)} size="small" variant="outlined" />
                           ) : null}
                           <ActionMenu
+                            triggerAriaLabel={`Actions for ${[track.artist, track.title].filter(Boolean).join(' – ') || 'track'}`}
                             actions={availableTrackActions(track)}
                             disabled={pipelineRunning || Boolean(trackActionKey)}
                           />
@@ -1957,6 +1958,7 @@ export default function Playlists() {
                               </>
                             ) : (
                               <ActionMenu
+                                triggerAriaLabel={`Actions for ${[track.artist, track.title].filter(Boolean).join(' – ') || 'track'}`}
                                 actions={missingTrackActions(track, rowKey)}
                                 disabled={pipelineRunning || Boolean(trackActionKey) || Boolean(resolvingKey)}
                               />
@@ -1993,6 +1995,7 @@ export default function Playlists() {
                       </div>
                     </div>
                     <ActionMenu
+                      triggerAriaLabel={`Actions for ${[track.artist, track.title].filter(Boolean).join(' – ') || 'track'}`}
                       actions={removedTrackActions(track)}
                       disabled={pipelineRunning || Boolean(trackActionKey)}
                     />
@@ -2243,6 +2246,7 @@ export default function Playlists() {
                         </Button>
                       )}
                       <ActionMenu
+                        triggerAriaLabel={`Actions for ${playlist.name}`}
                         actions={savedPlaylistRowActions(playlist, summary)}
                         disabled={Boolean(
                           (loadingPlaylistDetails && loadingPlaylistDetails !== playlist.name)
