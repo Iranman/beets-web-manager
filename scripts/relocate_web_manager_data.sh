@@ -275,11 +275,15 @@ fi
 # Apply
 # =============================================================================
 # 1) Backup-first.
+require_cmd tar
 ( umask 077; mkdir -p "$BACKUP_DIR" )
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 BACKUP_FILE="$BACKUP_DIR/web-manager-data-${STAMP}.tar.gz"
 log "Backing up $SRC_CANON -> $BACKUP_FILE ..."
-tar -czf "$BACKUP_FILE" -C "$(dirname "$SRC_CANON")" "$(basename "$SRC_CANON")"
+# The archive holds secrets (.env/.auth_token/.browser_password/...). Create it
+# under a restrictive umask so it is mode 600 from birth, not 644-then-chmod
+# (which left a brief world-readable window and was best-effort).
+( umask 077; tar -czf "$BACKUP_FILE" -C "$(dirname "$SRC_CANON")" "$(basename "$SRC_CANON")" )
 chmod 600 "$BACKUP_FILE" 2>/dev/null || true
 [[ -s "$BACKUP_FILE" ]] || die "backup is missing or empty: $BACKUP_FILE -- refusing to proceed"
 log "Backup ok ($(wc -c < "$BACKUP_FILE") bytes)."
@@ -352,6 +356,13 @@ fi
 
 # 6) Remove old dir only if asked and only after everything above passed.
 if [[ "$REMOVE_OLD" -eq 1 ]]; then
+  # Defense-in-depth: refuse to rm -rf a suspiciously shallow path (root or a
+  # single top-level component), even though SRC_CANON is a verified data dir
+  # and a backup exists. Requires at least two path segments (e.g. /a/b).
+  case "$SRC_CANON" in
+    /*/*) : ;;
+    *) die "refusing to 'rm -rf' a too-shallow source path: $SRC_CANON" ;;
+  esac
   log "Removing OLD data dir (--remove-old): $SRC_CANON"
   rm -rf -- "$SRC_CANON"
   log "Old data dir removed. Backup remains at $BACKUP_FILE"
