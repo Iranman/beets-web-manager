@@ -1807,3 +1807,97 @@ class RoutesSetupConfigLayerTests(unittest.TestCase):
             r = self.client.get("/health/ready")
         self.assertEqual(r.status_code, 503)
         self.assertEqual(r.get_json()["blocking_reasons"], ["Beets engine unavailable"])
+
+
+class RoutesSetupConfigOverviewTests(unittest.TestCase):
+    """#753 D1: read-only GET /api/setup/config-overview -- secret/host-path
+    redaction, source/restart/operator flags, and auth-gating."""
+
+    def setUp(self):
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
+        self.client = self.flask_app.test_client()
+        self.tempdir = tempfile.TemporaryDirectory()
+        root = Path(self.tempdir.name)
+        self.env_file = root / ".env"
+        self.example_file = root / ".env.example"
+        self.example_file.write_text(
+            "PLEX_URL=\nPLEX_TOKEN=\nLIDARR_URL=\nAI_MODEL=\n"
+            "BEETS_OUTBOUND_ALLOWLIST=\nMUSIC_PATH=./music\n",
+            encoding="utf-8",
+        )
+        self.module._SETUP_ENV_FILE = self.env_file
+        self.module._ENV_EXAMPLE_FILE = self.example_file
+        self._saved_env = dict(os.environ)
+        for var in ("PLEX_URL", "PLEX_TOKEN", "LIDARR_URL", "AI_MODEL",
+                    "BEETS_OUTBOUND_ALLOWLIST", "MUSIC_PATH"):
+            os.environ.pop(var, None)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.tempdir.cleanup()
+        os.environ.clear()
+        os.environ.update(self._saved_env)
+
+    def _rows(self):
+        r = self.client.get("/api/setup/config-overview")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertTrue(body["ok"])
+        self.assertIsInstance(body["settings"], list)
+        return body, {row["name"]: row for row in body["settings"]}
+
+    def test_config_overview_never_returns_a_secret_value(self):
+        secret = "supersecrettokenvalue12345"
+        self.env_file.write_text(f"PLEX_TOKEN={secret}\n", encoding="utf-8")
+        body, rows = self._rows()
+        self.assertNotIn(secret, json.dumps(body))
+        plex = rows["PLEX_TOKEN"]
+        self.assertTrue(plex["secret"])
+        self.assertTrue(plex["configured"])
+        self.assertEqual(plex["layer"], "secret")
+        self.assertNotEqual(plex["value"], secret)
+        self.assertEqual(plex["value"], self.module._SECRET_MASK)
+
+    def test_config_overview_reports_source_restart_and_operator_flags(self):
+        self.env_file.write_text("LIDARR_URL=http://lidarr:8686\n", encoding="utf-8")
+        os.environ["AI_MODEL"] = "gpt-test"
+        _, rows = self._rows()
+
+        # Restart-required application setting, saved in the settings file.
+        lidarr = rows["LIDARR_URL"]
+        self.assertEqual(lidarr["layer"], "app")
+        self.assertEqual(lidarr["source"], "persisted")
+        self.assertTrue(lidarr["restart_required"])
+        self.assertFalse(lidarr["operator"])
+        self.assertFalse(lidarr["missing"])
+
+        # Live application setting read from the process environment.
+        ai = rows["AI_MODEL"]
+        self.assertEqual(ai["layer"], "app")
+        self.assertEqual(ai["source"], "environment")
+        self.assertFalse(ai["restart_required"])
+        self.assertFalse(ai["operator"])
+        self.assertEqual(ai["value"], "gpt-test")
+
+        # Operator-only (security boundary) key: flagged, and its value is
+        # never emitted here (deployment layer).
+        allow = rows["BEETS_OUTBOUND_ALLOWLIST"]
+        self.assertTrue(allow["operator"])
+        self.assertEqual(allow["layer"], "deployment")
+        self.assertIsNone(allow["value"])
+        self.assertEqual(allow["apply"], "deploy")
+
+    def test_config_overview_suppresses_host_path_values(self):
+        self.env_file.write_text("", encoding="utf-8")
+        body, rows = self._rows()
+        music = rows["MUSIC_PATH"]
+        self.assertEqual(music["layer"], "host")
+        self.assertIsNone(music["value"])
+        # The host-side default (./music) must not leak through any field.
+        self.assertNotIn("./music", json.dumps(body))
+
+    def test_config_overview_is_auth_gated_like_other_setup_routes(self):
+        from backend import auth_service
+        self.assertNotIn(("GET", "setup_config_overview"), auth_service._AUTH_PUBLIC_ENDPOINTS)
+        # Same global-before_request gating as its sibling read endpoint.
+        self.assertNotIn(("GET", "setup_get_env"), auth_service._AUTH_PUBLIC_ENDPOINTS)

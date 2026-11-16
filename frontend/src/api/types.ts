@@ -936,6 +936,35 @@ export interface SetupEnvVariable {
   runtime_value: string;
 }
 
+/** One row of the read-only Configuration Overview (GET /api/setup/config-overview).
+ * `value` is always redacted: masked for secrets, and null for host/deployment/
+ * container-layer keys (which can be host bind-mount sources or container
+ * paths). The endpoint never returns a plaintext secret or a host path. */
+export interface ConfigOverviewSetting {
+  name: string;
+  section: string;
+  /** host | deployment | container | app | secret | unknown */
+  layer: string;
+  /** environment | persisted | runtime | default | not_configured */
+  source: string;
+  /** live | restart | deploy */
+  apply: string;
+  restart_required: boolean;
+  /** Operator-only (security boundary / command / credential-file) setting. */
+  operator: boolean;
+  secret: boolean;
+  configured: boolean;
+  missing: boolean;
+  value: string | null;
+  status_message?: string | null;
+}
+
+export interface ConfigOverviewResponse {
+  ok: boolean;
+  settings: ConfigOverviewSetting[];
+  error?: string;
+}
+
 /** Response from POST /api/setup/env/<name>/reveal. `value` is the single
  * requested secret's plaintext, returned only when `revealable` was true
  * for that setting and it currently has an effective value -- never bulk,

@@ -91,6 +91,7 @@ import type {
   ImportReviewDecisionResponse,
   ImportTargetPreviewResponse,
   StatsResponse,
+  ConfigOverviewResponse,
   SetupAuthTokenRegenerateResponse,
   SetupEnvResponse,
   SetupEnvRevealAuthResponse,
@@ -433,6 +434,13 @@ export function submitFirstRunSetup(payload: SetupFirstRunRequest): Promise<Setu
 
 export function getSetupEnv(): Promise<SetupEnvResponse> {
   return apiJson<SetupEnvResponse>('/api/setup/env');
+}
+
+/** Read-only Configuration Overview: where each setting comes from and whether
+ * a change needs a restart. Values are redacted server-side (secrets masked,
+ * host/container paths withheld). */
+export function getConfigOverview(): Promise<ConfigOverviewResponse> {
+  return apiJson<ConfigOverviewResponse>('/api/setup/config-overview');
 }
 
 export function saveSetupEnv(payload: SetupEnvSavePayload): Promise<SetupEnvResponse> {

@@ -1692,6 +1692,83 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return payload
 
 
+def _config_overview_payload() -> Dict[str, Any]:
+    """Read-only Configuration Overview (#753 D1): one row per user-relevant
+    setting showing its effective source/layer, whether a change needs a
+    restart, whether it is operator-only, and a REDACTED value status.
+
+    The key set is driven by backend.config_layers (APP_KEYS, SECRET_KEYS,
+    OPERATOR_KEYS) plus the documented env names from the .env.example catalog
+    and anything already persisted -- never a second hand-maintained list.
+    Every value is resolved and masked by the same
+    _resolve_setting_item()/_redact_url_setting() path GET /api/setup/env
+    uses, so this endpoint adds no new secret-handling path. As defence in
+    depth it also never emits a value for a host/deployment/container-layer
+    key (those can be host bind-mount sources or container paths); secrets
+    stay masked.
+    """
+    catalog = _env_catalog()
+    _, persisted, _ = _load_env_file()
+    names = (
+        set(catalog)
+        | set(persisted)
+        | set(config_layers.APP_KEYS)
+        | set(config_layers.SECRET_KEYS)
+        | set(config_layers.OPERATOR_KEYS)
+    )
+    names = {n for n in names if _ENV_NAME_RE.match(n) and n not in _BLOCKED_ENV_NAMES}
+
+    rows: List[Dict[str, Any]] = []
+    for name in sorted(names):
+        meta = catalog.get(name)
+        if meta is None:
+            sm = _SETTING_METADATA.get(name, {})
+            secret = bool(sm.get("secret", _is_secret_env(name) or config_layers.is_secret_name(name)))
+            meta = {
+                "name": name,
+                "section": sm.get("section") or "Other",
+                "default": sm.get("default", ""),
+                "secret": secret,
+                "container_path": sm.get("container_path"),
+                "host_path": sm.get("host_path"),
+                "description": sm.get("description"),
+                "editable": sm.get("editable", True),
+                "restart_required": bool(sm.get("restart_required", False)),
+                "type": sm.get("type") or ("secret" if secret else "string"),
+                "revealable": bool(sm.get("secret", False) and sm.get("revealable")),
+            }
+            _annotate_layer(name, meta)
+
+        item = _resolve_setting_item(name, meta, persisted)
+        _redact_url_setting(
+            name,
+            item,
+            (persisted.get(name, "").strip(), config_layers.legacy_env_value(name).strip()),
+        )
+        layer = meta.get("layer") or config_layers.reported_layer(name)
+        configured = bool(item.get("configured"))
+        value = item.get("value")
+        # Defence in depth: a host/deployment/container value can be a host
+        # bind-mount source or a container path -- report presence only.
+        if layer in (config_layers.LAYER_HOST, config_layers.LAYER_DEPLOYMENT, config_layers.LAYER_CONTAINER):
+            value = None
+        rows.append({
+            "name": name,
+            "section": item.get("section") or meta.get("section") or "Other",
+            "layer": layer,
+            "source": item.get("source"),
+            "apply": meta.get("apply") or config_layers.apply_mode(name),
+            "restart_required": bool(meta.get("restart_required") or item.get("restart_required")),
+            "operator": name in config_layers.OPERATOR_KEYS,
+            "secret": bool(item.get("secret")),
+            "configured": configured,
+            "missing": not configured,
+            "value": value,
+            "status_message": item.get("status_message"),
+        })
+    return {"ok": True, "settings": rows}
+
+
 def _resolve_secret_effective_value(name: str) -> Optional[str]:
     """Return the actual effective plaintext for a revealable secret setting,
     using the exact same source precedence _resolve_setting_item() already
@@ -3334,6 +3411,16 @@ def setup_diagnostics():
 def setup_get_env():
     """Return editable .env metadata with secret values masked."""
     return jsonify(_setup_env_payload())
+
+
+@app.get("/api/setup/config-overview")
+def setup_config_overview():
+    """Read-only Configuration Overview (#753 D1): where each setting comes
+    from (effective source/layer), whether a change needs a restart, whether
+    it is operator-only, and a redacted value status. Auth-gated by the global
+    before_request guard like the other /api/setup routes. Never returns a
+    secret value or a host filesystem path."""
+    return jsonify(_config_overview_payload())
 
 
 @app.post("/api/setup/env")
