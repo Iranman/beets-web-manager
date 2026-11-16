@@ -277,6 +277,7 @@ class ApiContractTests(unittest.TestCase):
             ("/api/providers/health", "providers_health"),
             ("/api/setup/plugins/recommended", "setup_plugins_recommended_preview"),
             ("/api/setup/plugins/recommended/apply", "setup_plugins_recommended_apply"),
+            ("/api/setup/config-overview", "setup_config_overview"),
             ("/api/acquisition/queue/refresh", "acquisition_queue_refresh"),
             ("/api/library/missing-mb-ids", "library_missing_mb_ids"),
             ("/api/library/missing-mb-ids/batch/preview", "library_missing_mb_ids_batch_preview"),
