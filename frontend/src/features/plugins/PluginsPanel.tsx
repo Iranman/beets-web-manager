@@ -48,8 +48,8 @@ function JobLog({ job }: { job: { status: string; log?: string[] } | null }) {
   if (!job) return null;
   const log = (job.log ?? []).join('\n');
   const color =
-    job.status === 'success' ? 'text-emerald-400' :
-    job.status === 'failed' || job.status === 'killed' ? 'text-red-400' :
+    job.status === 'success' ? 'text-success' :
+    job.status === 'failed' || job.status === 'killed' ? 'text-danger-text' :
     'text-zinc-400';
   if (!log) return null;
   return (
@@ -137,10 +137,10 @@ function PlexPlugin() {
           Refresh Library
         </Button>
         {statusChip(job?.status)}
-        {error && <span className="text-xs text-red-400">{error}</span>}
+        {error && <span className="text-xs text-danger-text">{error}</span>}
       </div>
       {statusMsg && (
-        <p className={`text-xs ${statusColor === 'success' ? 'text-emerald-400' : statusColor === 'error' ? 'text-red-400' : 'text-zinc-400'}`}>
+        <p className={`text-xs ${statusColor === 'success' ? 'text-success' : statusColor === 'error' ? 'text-danger-text' : 'text-zinc-400'}`}>
           {statusMsg}
         </p>
       )}

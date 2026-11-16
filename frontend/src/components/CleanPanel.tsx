@@ -8,10 +8,10 @@ function cx(...classes: Array<string | false | null | undefined>) {
 
 const toneText: Record<Tone, string> = {
   neutral: 'text-zinc-300',
-  success: 'text-emerald-300',
-  warning: 'text-amber-300',
-  danger: 'text-red-300',
-  info: 'text-sky-300',
+  success: 'text-success',
+  warning: 'text-warning',
+  danger: 'text-danger-text',
+  info: 'text-info',
 };
 
 const toneBorder: Record<Tone, string> = {

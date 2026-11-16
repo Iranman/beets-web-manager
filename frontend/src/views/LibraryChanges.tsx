@@ -208,10 +208,10 @@ function pct(value?: number | null) {
 
 // Status is a word in a state colour (DESIGN.md, the Label-With-Colour Rule), never colour alone.
 function statusTone(status: string) {
-  if (status === 'Completed' || status === 'Rolled Back') return 'text-emerald-300';
-  if (status === 'Running' || status === 'Approved') return 'text-sky-300';
-  if (status === 'Preview' || status === 'Pending' || status === 'Partially Rolled Back') return 'text-amber-300';
-  if (status === 'Failed' || status === 'Cancelled' || status === 'Recovery Required') return 'text-red-300';
+  if (status === 'Completed' || status === 'Rolled Back') return 'text-success';
+  if (status === 'Running' || status === 'Approved') return 'text-info';
+  if (status === 'Preview' || status === 'Pending' || status === 'Partially Rolled Back') return 'text-warning';
+  if (status === 'Failed' || status === 'Cancelled' || status === 'Recovery Required') return 'text-danger-text';
   return 'text-zinc-300';
 }
 

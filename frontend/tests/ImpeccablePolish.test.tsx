@@ -70,10 +70,10 @@ const stateFor = async (name: string) => {
 describe('System integration status', () => {
   it('marks a failing required integration amber and an unset optional one neutral', async () => {
     render(<MemoryRouter><System /></MemoryRouter>);
-    expect((await stateFor('MusicBrainz')).className).toContain('text-amber-300');
+    expect((await stateFor('MusicBrainz')).className).toContain('text-warning');
     expect((await stateFor('lidarr')).className).toContain('text-zinc-300');
     expect((await stateFor('lidarr')).textContent).toContain('Not configured');
-    expect((await stateFor('plex')).className).toContain('text-emerald-300');
+    expect((await stateFor('plex')).className).toContain('text-success');
   });
 
   it('reads a plugin row as name then state, before its note (e2e 09 and screen readers)', async () => {

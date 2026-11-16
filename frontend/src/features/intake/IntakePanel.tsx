@@ -54,10 +54,10 @@ function StatCard({
 }) {
   const toneClass = {
     slate: 'text-zinc-200',
-    amber: 'text-amber-300',
-    emerald: 'text-emerald-300',
-    sky: 'text-sky-300',
-    red: 'text-red-300',
+    amber: 'text-warning',
+    emerald: 'text-success',
+    sky: 'text-info',
+    red: 'text-danger-text',
   }[tone];
 
   return (
@@ -236,8 +236,8 @@ export function SourceReportSummary({ report, missing, folders = [] }: { report:
       <div className="text-xs font-semibold text-muted">qBittorrent source</div>
       <div className="mt-1 text-xs text-zinc-400">{sourceFilterText(report.filter)}</div>
       <div className="mt-2 grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <BatchMetric label="Ownership verified" value={`${report.ownership_verified_pct ?? 0}%`} tone="text-sky-200" />
-        <BatchMetric label="Eligible files" value={report.eligible_files ?? 0} tone="text-emerald-200" />
+        <BatchMetric label="Ownership verified" value={`${report.ownership_verified_pct ?? 0}%`} tone="text-info" />
+        <BatchMetric label="Eligible files" value={report.eligible_files ?? 0} tone="text-success" />
         <BatchMetric label="Completed torrents" value={`${report.torrents_complete ?? 0} / ${report.torrents ?? 0}`} tone="text-zinc-200" />
         <BatchMetric label="Source missing or changed" value={missing} tone="text-zinc-300" />
       </div>
@@ -569,7 +569,7 @@ function JobLog({
   const attentionCount = batchState?.folders_attention ?? (reviewCount + warningCount + failedCount);
   const runningMetricLabel = staleWorker ? 'Stale active' : 'AI running';
   const runningMetricValue = staleWorker ? activeFolders.length : batchState?.folders_running ?? 0;
-  const runningMetricTone = staleWorker ? 'text-amber-200' : 'text-brass-200';
+  const runningMetricTone = staleWorker ? 'text-warning' : 'text-brass-200';
   const lastUpdateText = staleWorker ? 'stale' : formatAgeSeconds(lastUpdateAge ?? heartbeatAge);
   const heartbeatText = staleWorker ? 'stale' : formatAgeSeconds(heartbeatAge);
   const lastCompleted = batchState?.last_completed_folder ? folderName(batchState.last_completed_folder) : '';
@@ -814,14 +814,14 @@ function JobLog({
         ) : null}
 
         <div className="grid grid-cols-2 gap-2 lg:grid-cols-4 xl:grid-cols-7">
-          <BatchMetric label="Processed" value={total > 0 ? `${processed} / ${total}` : processed} tone="text-sky-200" />
+          <BatchMetric label="Processed" value={total > 0 ? `${processed} / ${total}` : processed} tone="text-info" />
           {done ? (
             <>
-              <BatchMetric label="Imported" value={importedCount} tone="text-emerald-200" />
-              <BatchMetric label="Review" value={reviewCount} tone="text-amber-200" />
+              <BatchMetric label="Imported" value={importedCount} tone="text-success" />
+              <BatchMetric label="Review" value={reviewCount} tone="text-warning" />
               <BatchMetric label="Warnings" value={warningCount} tone="text-orange-200" />
               <BatchMetric label="Replacements" value={replacementQueuedCount} tone="text-violet-200" />
-              <BatchMetric label="Failed" value={failedCount} tone="text-rose-200" />
+              <BatchMetric label="Failed" value={failedCount} tone="text-danger-text" />
               <BatchMetric label="Skipped" value={skippedCount} tone="text-zinc-300" />
               {batchState?.folders_source_missing ? (
                 <BatchMetric label="Source missing or changed" value={batchState.folders_source_missing} tone="text-zinc-300" />
@@ -831,9 +831,9 @@ function JobLog({
             <>
               <BatchMetric label={runningMetricLabel} value={runningMetricValue} tone={runningMetricTone} />
               <BatchMetric label="Queued" value={batchState?.folders_queued ?? 0} tone="text-zinc-200" />
-              <BatchMetric label="Review" value={reviewCount} tone="text-amber-200" />
-              <BatchMetric label="Failed" value={failedCount} tone="text-rose-200" />
-              <BatchMetric label="Last update" value={lastUpdateText} tone={staleWorker ? 'text-amber-200' : 'text-emerald-200'} />
+              <BatchMetric label="Review" value={reviewCount} tone="text-warning" />
+              <BatchMetric label="Failed" value={failedCount} tone="text-danger-text" />
+              <BatchMetric label="Last update" value={lastUpdateText} tone={staleWorker ? 'text-warning' : 'text-success'} />
             </>
           )}
         </div>
@@ -865,7 +865,7 @@ function JobLog({
                     <div className="min-w-0">
                       <div className="truncate text-zinc-200">{folderName(folder.source_folder)}</div>
                       {folder.retry_exhausted ? (
-                        <div className="truncate text-xs text-amber-400">
+                        <div className="truncate text-xs text-warning">
                           Retry limit reached ({folder.retry_count ?? folder.max_retries ?? '?'}/{folder.max_retries ?? '?'}) — manual review required
                         </div>
                       ) : null}
@@ -963,7 +963,7 @@ function JobLog({
                 <div className="min-w-0">
                   <div className="text-muted">Last failed</div>
                   <div className="truncate text-zinc-200">{lastFailed || 'None yet'}</div>
-                  {batchState?.last_failed_reason ? <div className="mt-0.5 text-xs text-rose-300">{batchState.last_failed_reason}</div> : null}
+                  {batchState?.last_failed_reason ? <div className="mt-0.5 text-xs text-danger-text">{batchState.last_failed_reason}</div> : null}
                 </div>
                 <div className="text-xs text-muted">Heartbeat {heartbeatText}</div>
               </div>
