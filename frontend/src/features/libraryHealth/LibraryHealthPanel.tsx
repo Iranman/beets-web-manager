@@ -471,6 +471,7 @@ function RgidDetailPanel({
           <div className="flex flex-wrap items-center gap-1.5">
             <input
               type="text"
+              aria-label="Reason for keeping editions separate"
               placeholder="Optional reason (e.g. deluxe vs. standard edition)"
               value={reasonInput}
               onChange={(e) => setReasonInput(e.target.value)}
@@ -505,6 +506,7 @@ function RgidDetailPanel({
                 {(detail?.candidate_releases?.length ?? 0) > 0 && (
                   <>
                     <select
+                      aria-label="Representative release for this album group"
                       value={releaseChoice[al.album_id] ?? ''}
                       onChange={(e) => setReleaseChoice((prev) => ({ ...prev, [al.album_id]: e.target.value }))}
                       className="rounded border border-field-border bg-zinc-900 px-1 py-0.5 text-xs text-zinc-200"
@@ -529,6 +531,7 @@ function RgidDetailPanel({
                 )}
                 <input
                   type="text"
+                  aria-label="MusicBrainz release URL or UUID to relink"
                   placeholder="Relink: paste MB release URL/UUID (blank = search)"
                   value={relinkInput[al.album_id] ?? ''}
                   onChange={(e) => setRelinkInput((prev) => ({ ...prev, [al.album_id]: e.target.value }))}
