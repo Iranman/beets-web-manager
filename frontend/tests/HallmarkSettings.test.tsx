@@ -65,7 +65,7 @@ describe('Settings page', () => {
 
     const nav = screen.getByRole('navigation', { name: 'Settings sections' });
     const links = within(nav).getAllByRole('link');
-    expect(links.map((link) => link.getAttribute('href'))).toEqual(['#musicbrainz', '#music-format', '#plugins', '#config-yaml', '#security']);
+    expect(links.map((link) => link.getAttribute('href'))).toEqual(['#musicbrainz', '#music-format', '#plugins', '#config-yaml', '#config-overview', '#security']);
     for (const link of links) {
       const id = link.getAttribute('href')!.slice(1);
       const section = document.getElementById(id)!;

@@ -1896,6 +1896,22 @@ class RoutesSetupConfigOverviewTests(unittest.TestCase):
         # The host-side default (./music) must not leak through any field.
         self.assertNotIn("./music", json.dumps(body))
 
+    def test_config_overview_never_echoes_a_host_path_in_dual_config_override(self):
+        # Divergent dual-config: a host key present in BOTH the persisted .env
+        # and the process environment with DIFFERENT values drives the
+        # "Docker environment overrides saved <noun> (<saved_val>)" branch,
+        # which embeds the saved value in status_message. For a host key that
+        # value is a host path -- it must not leak through any field.
+        host_path = "/srv/host-only/music-library"
+        self.env_file.write_text(f"MUSIC_PATH={host_path}\n", encoding="utf-8")
+        os.environ["MUSIC_PATH"] = "/other/host/path"
+        body, rows = self._rows()
+        self.assertNotIn(host_path, json.dumps(body))
+        music = rows["MUSIC_PATH"]
+        self.assertEqual(music["layer"], "host")
+        self.assertIsNone(music["value"])
+        self.assertIsNone(music["status_message"])
+
     def test_config_overview_is_auth_gated_like_other_setup_routes(self):
         from backend import auth_service
         self.assertNotIn(("GET", "setup_config_overview"), auth_service._AUTH_PUBLIC_ENDPOINTS)

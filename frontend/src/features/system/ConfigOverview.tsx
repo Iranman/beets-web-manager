@@ -95,12 +95,12 @@ export function ConfigOverview() {
     <div className="crate min-w-0 overflow-x-auto rounded-sm">
       <table className="w-full min-w-[40rem] border-collapse text-sm" aria-label="Configuration overview">
         <thead>
-          <tr className="border-b border-graphite-800 text-left text-xs uppercase tracking-wide text-muted">
-            <th scope="col" className="px-3 py-2 font-semibold">Setting</th>
-            <th scope="col" className="px-3 py-2 font-semibold">Source</th>
-            <th scope="col" className="px-3 py-2 font-semibold">Layer</th>
-            <th scope="col" className="px-3 py-2 font-semibold">Value</th>
-            <th scope="col" className="px-3 py-2 font-semibold">Change</th>
+          <tr className="border-b border-graphite-800 text-left">
+            <th scope="col" className="liner-label px-3 py-2">Setting</th>
+            <th scope="col" className="liner-label px-3 py-2">Source</th>
+            <th scope="col" className="liner-label px-3 py-2">Layer</th>
+            <th scope="col" className="liner-label px-3 py-2">Value</th>
+            <th scope="col" className="liner-label px-3 py-2">Change</th>
           </tr>
         </thead>
         <tbody>

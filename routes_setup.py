@@ -1748,10 +1748,15 @@ def _config_overview_payload() -> Dict[str, Any]:
         layer = meta.get("layer") or config_layers.reported_layer(name)
         configured = bool(item.get("configured"))
         value = item.get("value")
+        status_message = item.get("status_message")
         # Defence in depth: a host/deployment/container value can be a host
-        # bind-mount source or a container path -- report presence only.
+        # bind-mount source or a container path -- report presence only, and
+        # drop status_message too (the "Docker environment overrides saved
+        # <noun> (<saved_val>)" override branch embeds that value verbatim, so
+        # for a host key like MUSIC_PATH it would otherwise echo a host path).
         if layer in (config_layers.LAYER_HOST, config_layers.LAYER_DEPLOYMENT, config_layers.LAYER_CONTAINER):
             value = None
+            status_message = None
         rows.append({
             "name": name,
             "section": item.get("section") or meta.get("section") or "Other",
@@ -1764,7 +1769,7 @@ def _config_overview_payload() -> Dict[str, Any]:
             "configured": configured,
             "missing": not configured,
             "value": value,
-            "status_message": item.get("status_message"),
+            "status_message": status_message,
         })
     return {"ok": True, "settings": rows}
 
