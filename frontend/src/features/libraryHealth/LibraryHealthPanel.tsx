@@ -420,7 +420,7 @@ function RgidDetailPanel({
   };
 
   return (
-    <div className="mt-2 space-y-3 rounded border border-blue-900/40 bg-blue-950/10 p-2">
+    <div className="mt-2 space-y-3 rounded border border-graphite-700 bg-graphite-900/40 p-2">
       {loading && <div className="text-xs text-muted">Loading cluster details…</div>}
       {loadError && <Alert severity="error" sx={{ fontSize: '0.72rem' }}>{loadError}</Alert>}
       {actionMsg && <p className="text-xs text-zinc-400">{actionMsg}</p>}
@@ -444,7 +444,7 @@ function RgidDetailPanel({
 
       {/* Merge duplicate rows */}
       <div className="space-y-1">
-        <div className="text-xs font-semibold text-blue-400">Merge duplicate rows</div>
+        <div className="text-xs font-semibold text-zinc-200">Merge duplicate rows</div>
         {detail?.merge_safe ? (
           <Button
             color="warning"
@@ -467,7 +467,7 @@ function RgidDetailPanel({
       {/* Keep separate / mark valid editions */}
       {!detail?.resolution && (
         <div className="space-y-1">
-          <div className="text-xs font-semibold text-blue-400">Keep separate / valid editions</div>
+          <div className="text-xs font-semibold text-zinc-200">Keep separate / valid editions</div>
           <div className="flex flex-wrap items-center gap-1.5">
             <input
               type="text"
@@ -475,7 +475,7 @@ function RgidDetailPanel({
               placeholder="Optional reason (e.g. deluxe vs. standard edition)"
               value={reasonInput}
               onChange={(e) => setReasonInput(e.target.value)}
-              className="min-w-[220px] flex-1 rounded border border-field-border bg-zinc-900 px-2 py-1 text-xs text-zinc-200"
+              className="min-w-[220px] flex-1 rounded border border-field-border bg-graphite-900 px-2 py-1 text-xs text-zinc-200"
             />
             <Button
               size="small"
@@ -492,11 +492,11 @@ function RgidDetailPanel({
 
       {/* Choose representative release / Relink / Repair partial import, per album row */}
       <div className="space-y-2">
-        <div className="text-xs font-semibold text-blue-400">Per-row actions</div>
+        <div className="text-xs font-semibold text-zinc-200">Per-row actions</div>
         {albums.map((al) => {
           const isPartial = al.track_count > 0 && al.track_count <= 2 && !al.mb_albumid;
           return (
-            <div key={al.album_id} className="rounded border border-zinc-800 bg-zinc-900/40 p-1.5 text-xs">
+            <div key={al.album_id} className="rounded border border-graphite-700 bg-graphite-900/40 p-1.5 text-xs">
               <div className="text-zinc-300">
                 id={al.album_id} · {al.albumartist} — {al.album}
                 {al.year ? ` (${al.year})` : ''} · {al.track_count} track(s)
@@ -509,7 +509,7 @@ function RgidDetailPanel({
                       aria-label="Representative release for this album group"
                       value={releaseChoice[al.album_id] ?? ''}
                       onChange={(e) => setReleaseChoice((prev) => ({ ...prev, [al.album_id]: e.target.value }))}
-                      className="rounded border border-field-border bg-zinc-900 px-1 py-0.5 text-xs text-zinc-200"
+                      className="rounded border border-field-border bg-graphite-900 px-1 py-0.5 text-xs text-zinc-200"
                     >
                       <option value="">Choose representative release…</option>
                       {detail!.candidate_releases.map((c) => (
@@ -535,7 +535,7 @@ function RgidDetailPanel({
                   placeholder="Relink: paste MB release URL/UUID (blank = search)"
                   value={relinkInput[al.album_id] ?? ''}
                   onChange={(e) => setRelinkInput((prev) => ({ ...prev, [al.album_id]: e.target.value }))}
-                  className="min-w-[220px] flex-1 rounded border border-field-border bg-zinc-900 px-2 py-0.5 text-xs text-zinc-200"
+                  className="min-w-[220px] flex-1 rounded border border-field-border bg-graphite-900 px-2 py-0.5 text-xs text-zinc-200"
                 />
                 <Button
                   size="small"
@@ -579,11 +579,11 @@ function RgidDupGroupRow({
   const [expanded, setExpanded] = useState(false);
   const mbUrl = `https://musicbrainz.org/release-group/${group.mb_releasegroupid}`;
   return (
-    <div className="rounded border border-blue-800/40 bg-blue-950/20 p-2 text-sm">
+    <div className="rounded border border-graphite-700 bg-graphite-900/40 p-2 text-sm">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-xs text-blue-300">{group.mb_releasegroupid}</span>
+            <span className="font-mono text-xs text-zinc-200">{group.mb_releasegroupid}</span>
             <Chip color="info" label={`${group.count} rows`} size="small" />
           </div>
           <div className="flex flex-col gap-y-0.5">
@@ -615,7 +615,7 @@ function RgidDupGroupRow({
             href={mbUrl}
             target="_blank"
             rel="noreferrer"
-            className="text-xs text-blue-400 underline decoration-blue-800 hover:text-blue-300"
+            className="text-xs text-brass-300 underline underline-offset-2"
           >
             MusicBrainz
           </a>
