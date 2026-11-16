@@ -901,7 +901,7 @@ export default function FirstRunSetup() {
                           ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                           : 'bg-amber-950/80 text-amber-400 border border-amber-800'
                       }`}>
-                        {plugin.healthy ? '✓ Ready' : <><WarningIcon /> Action required</>}
+                        {plugin.healthy ? <><span aria-hidden="true">✓</span> Ready</> : <><WarningIcon /> Action required</>}
                       </span>
                     </div>
                   ))}
@@ -956,7 +956,7 @@ export default function FirstRunSetup() {
                           ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
                           : 'bg-zinc-800 text-zinc-400'
                       }`}>
-                        {plugin.enabled ? '✓ Enabled' : '○ Available'}
+                        {plugin.enabled ? <><span aria-hidden="true">✓</span> Enabled</> : <><span aria-hidden="true">○</span> Available</>}
                       </span>
                     </div>
                   ))}

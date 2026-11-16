@@ -378,7 +378,7 @@ export default function System() {
                     </h3>
                     <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
                       {pluginsReport.categories.required.map((plugin) => (
-                        <Row key={plugin.name} name={plugin.display_name || plugin.name} tone={plugin.healthy ? 'ok' : 'warn'} state={plugin.healthy ? '✓ Ready' : <><WarningIcon /> Issue</>}>
+                        <Row key={plugin.name} name={plugin.display_name || plugin.name} tone={plugin.healthy ? 'ok' : 'warn'} state={plugin.healthy ? <><span aria-hidden="true">✓</span> Ready</> : <><WarningIcon /> Issue</>}>
                           {plugin.description}
                         </Row>
                       ))}
@@ -388,7 +388,7 @@ export default function System() {
                     <h3 className="liner-label m-0 mb-1">Optional & integration plugins</h3>
                     <ul className="crate m-0 list-none divide-y divide-walnut-950 rounded-sm p-0">
                       {[...pluginsReport.categories.optional, ...pluginsReport.categories.integration].map((plugin) => (
-                        <Row key={plugin.name} name={plugin.display_name || plugin.name} tone={plugin.enabled ? 'ok' : 'neutral'} state={plugin.enabled ? '✓ Enabled' : '○ Available'}>
+                        <Row key={plugin.name} name={plugin.display_name || plugin.name} tone={plugin.enabled ? 'ok' : 'neutral'} state={plugin.enabled ? <><span aria-hidden="true">✓</span> Enabled</> : <><span aria-hidden="true">○</span> Available</>}>
                           {plugin.description}
                         </Row>
                       ))}
