@@ -46,7 +46,7 @@ describe('Playlists MusicBrainz outage notice (#252 NF-4, QA-3/QA-4)', () => {
 
     render(<MemoryRouter><Playlists /></MemoryRouter>);
     const view = async () => {
-      fireEvent.click(await screen.findByRole('button', { name: 'Actions' }));
+      fireEvent.click(await screen.findByRole('button', { name: /^Actions/ }));
       fireEvent.click(await screen.findByRole('menuitem', { name: 'View Tracks' }));
       await waitFor(() => expect(getPlaylistDetails).toHaveBeenCalled());
     };
@@ -69,7 +69,7 @@ describe('Playlists MusicBrainz outage notice (#252 NF-4, QA-3/QA-4)', () => {
       ok: true, name: 'P1', total_missing: 1, safe_count: 0, rows: [], musicbrainz_unavailable: true, acoustid_status: 'not_attempted',
     });
     render(<MemoryRouter><Playlists /></MemoryRouter>);
-    fireEvent.click(await screen.findByRole('button', { name: 'Actions' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Actions/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'View Tracks' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Review Fixes' }));
     await screen.findByText(MUSICBRAINZ_UNAVAILABLE_TEXT);
@@ -85,7 +85,7 @@ describe('Playlists MusicBrainz outage notice (#252 NF-4, QA-3/QA-4)', () => {
       ok: true, name: 'P1', total_missing: 1, safe_count: 0, rows: [], musicbrainz_unavailable: false, acoustid_status: 'auth_failed',
     });
     render(<MemoryRouter><Playlists /></MemoryRouter>);
-    fireEvent.click(await screen.findByRole('button', { name: 'Actions' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Actions/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'View Tracks' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Review Fixes' }));
     expect(await screen.findByText(/AcoustID rejected the API key/)).toBeTruthy();
