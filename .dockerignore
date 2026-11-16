@@ -35,6 +35,6 @@ docs
 !README.md
 security
 scripts/__pycache__
-tests/__pycache__
+tests/
 output
 library-*.png
