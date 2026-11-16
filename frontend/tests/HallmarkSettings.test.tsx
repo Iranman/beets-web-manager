@@ -19,6 +19,7 @@ vi.mock('../src/api/client', () => ({
 }));
 vi.mock('../src/features/plugins/PluginsPanel', () => ({ PluginsPanel: () => null }));
 vi.mock('../src/features/system/ConfigYamlEditor', () => ({ ConfigYamlEditor: () => null }));
+vi.mock('../src/features/system/AccountSection', () => ({ AccountSection: () => null }));
 vi.mock('../src/features/system/SecuritySection', () => ({ SecuritySection: () => null }));
 
 const mocked = vi.mocked(client);
@@ -65,7 +66,7 @@ describe('Settings page', () => {
 
     const nav = screen.getByRole('navigation', { name: 'Settings sections' });
     const links = within(nav).getAllByRole('link');
-    expect(links.map((link) => link.getAttribute('href'))).toEqual(['#musicbrainz', '#music-format', '#plugins', '#config-yaml', '#config-overview', '#security']);
+    expect(links.map((link) => link.getAttribute('href'))).toEqual(['#musicbrainz', '#music-format', '#plugins', '#config-yaml', '#config-overview', '#account', '#security']);
     for (const link of links) {
       const id = link.getAttribute('href')!.slice(1);
       const section = document.getElementById(id)!;

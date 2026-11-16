@@ -20,6 +20,7 @@ import { PluginsPanel } from '../features/plugins/PluginsPanel';
 import { RecordRing } from '../components/RecordRing';
 import { ConfigYamlEditor } from '../features/system/ConfigYamlEditor';
 import { ConfigOverview } from '../features/system/ConfigOverview';
+import { AccountSection } from '../features/system/AccountSection';
 import { SecuritySection } from '../features/system/SecuritySection';
 import type {
   MbidStatusResponse,
@@ -67,6 +68,7 @@ const SECTIONS = [
   { id: 'plugins', label: 'Plugins' },
   { id: 'config-yaml', label: 'config.yaml' },
   { id: 'config-overview', label: 'Configuration Overview' },
+  { id: 'account', label: 'Account' },
   { id: 'security', label: 'Security' },
 ] as const;
 
@@ -615,6 +617,15 @@ export default function Config() {
             hint="Read-only. Where each setting comes from (environment, saved settings, or built-in default), and whether a change needs a restart. Secrets and host paths are never shown."
           >
             <ConfigOverview />
+          </SettingsSection>
+
+          {/* Change the admin sign-in username/password in-app (#753 D2) */}
+          <SettingsSection
+            id="account"
+            title="Account"
+            hint="Change the browser sign-in username and password. The current password is required."
+          >
+            <AccountSection />
           </SettingsSection>
 
           {/* Sign-in, API token and outbound policy (moved from System) */}

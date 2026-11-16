@@ -704,6 +704,22 @@ export interface SetupFirstRunResponse {
   unmet_requirements?: string[];
 }
 
+export interface SetupAccountRequest {
+  current_password: string;
+  username?: string;
+  password?: string;
+}
+
+export interface SetupAccountResponse {
+  ok: boolean;
+  message?: string;
+  error?: string;
+  unmet_requirements?: string[];
+  username?: string;
+  username_changed?: boolean;
+  password_changed?: boolean;
+}
+
 export interface AuthMeResponse {
   ok: boolean;
   authenticated: boolean;

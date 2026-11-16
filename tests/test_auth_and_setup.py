@@ -413,5 +413,172 @@ class AuthAndSetupTests(unittest.TestCase):
             app_module.app.config["TESTING"] = True
 
 
+class AccountCredentialChangeTests(AuthAndSetupTests):
+    """#753 D2: authenticated in-app change of browser username/password via
+    POST /api/setup/account. Inherits the real-app fixture (tmp data dir,
+    patched credential files) from AuthAndSetupTests."""
+
+    HEADERS = {"X-Beets-CSRF": "1", "Origin": "http://localhost"}
+
+    def _bootstrap_authenticated(self, password="correct horse battery staple", username="admin"):
+        """First-run creates the credential and an authenticated session; mark
+        setup complete so the endpoint runs under the post-setup auth boundary."""
+        self.client.post("/api/setup/first-run", json={"username": username, "password": password}, headers=self.HEADERS)
+        with mock.patch.object(routes_setup, "_beets_plugin_diagnostics", return_value={"remote_reachable": True}):
+            self.client.post("/api/setup/complete", headers=self.HEADERS)
+        self.assertFalse(app_module._first_run_setup_required())
+
+    def test_change_password_rehashes_and_rotates_effective_credential(self):
+        old = "correct horse battery staple"
+        new = "a-totally-different-passphrase-9x"
+        self._bootstrap_authenticated(password=old)
+
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": old, "password": new},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        body = resp.get_json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["password_changed"])
+        self.assertFalse(body["username_changed"])
+        # The new password must never be echoed anywhere in the response.
+        self.assertNotIn(new, resp.get_data(as_text=True))
+
+        # Stored as a werkzeug hash, not plaintext.
+        stored = self.persisted_pwd_file.read_text(encoding="utf-8").strip()
+        self.assertNotEqual(stored, new)
+        self.assertTrue(stored.startswith(("scrypt:", "pbkdf2:", "argon2:")))
+
+        # Old password no longer authenticates; the new one does.
+        self.client.post("/api/logout", headers=self.HEADERS)
+        app_module._AUTH_RATE_LIMITS.clear()
+        bad = self.client.post("/api/login", json={"username": "admin", "password": old}, headers=self.HEADERS)
+        self.assertEqual(bad.status_code, 401)
+        good = self.client.post("/api/login", json={"username": "admin", "password": new}, headers=self.HEADERS)
+        self.assertEqual(good.status_code, 200, good.get_json())
+
+    def test_wrong_current_password_rejected_and_nothing_changes(self):
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        before = self.persisted_pwd_file.read_text(encoding="utf-8")
+
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": "not-the-current-password-xyz", "password": "brand-new-passphrase-123456"},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn("Current password is incorrect", resp.get_json()["error"])
+        # Untouched.
+        self.assertEqual(self.persisted_pwd_file.read_text(encoding="utf-8"), before)
+
+    def test_weak_new_password_rejected_with_requirements(self):
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        before = self.persisted_pwd_file.read_text(encoding="utf-8")
+
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": old, "password": "short"},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.get_json().get("unmet_requirements"))
+        self.assertEqual(self.persisted_pwd_file.read_text(encoding="utf-8"), before)
+
+    def test_change_username_only_leaves_password_intact(self):
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        pwd_before = self.persisted_pwd_file.read_text(encoding="utf-8")
+
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": old, "username": "curator"},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertTrue(resp.get_json()["username_changed"])
+        self.assertFalse(resp.get_json()["password_changed"])
+        self.assertEqual(self.persisted_user_file.read_text(encoding="utf-8").strip(), "curator")
+        self.assertEqual(self.persisted_pwd_file.read_text(encoding="utf-8"), pwd_before)
+
+    def test_requires_authenticated_session(self):
+        self._bootstrap_authenticated()
+        self.client.post("/api/logout", headers=self.HEADERS)
+        app_module._AUTH_RATE_LIMITS.clear()
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": "correct horse battery staple", "password": "new-passphrase-abcdefgh"},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 401)
+
+    def test_empty_payload_is_rejected(self):
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": old},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Provide a new username", resp.get_json()["error"])
+
+    def test_rate_limited_current_password_check_returns_429(self):
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        app_module._AUTH_RATE_LIMITS.clear()
+        with mock.patch.dict(os.environ, {"BEETS_AUTH_RATE_LIMIT": "5", "BEETS_AUTH_RATE_WINDOW": "10"}, clear=False):
+            # The IP auth bucket trips once attempts EXCEED the limit (min 5).
+            for _ in range(5):
+                r = self.client.post(
+                    "/api/setup/account",
+                    json={"current_password": "wrong-current", "password": "new-passphrase-abcdefgh"},
+                    headers=self.HEADERS,
+                )
+                self.assertEqual(r.status_code, 401)
+            over = self.client.post(
+                "/api/setup/account",
+                json={"current_password": "wrong-current", "password": "new-passphrase-abcdefgh"},
+                headers=self.HEADERS,
+            )
+            self.assertEqual(over.status_code, 429)
+            self.assertIn("Retry-After", over.headers)
+            # SEC-3: while limited, even the CORRECT current password is refused.
+            still_limited = self.client.post(
+                "/api/setup/account",
+                json={"current_password": old, "password": "new-passphrase-abcdefgh"},
+                headers=self.HEADERS,
+            )
+            self.assertEqual(still_limited.status_code, 429)
+
+    def test_plaintext_env_password_is_cleared_so_new_hash_takes_effect(self):
+        """A non-blank BEETS_WEB_PASSWORD in the process env shadows the
+        persisted hash; the endpoint must clear it so the change is real."""
+        env_pwd = "env-set-admin-password-32chars!!"
+        # Establish a completed, non-first-run install whose effective
+        # password comes from the env var.
+        self.setup_complete_file.write_text("done", encoding="utf-8")
+        self.setup_state_file.write_text("claimed", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"BEETS_WEB_PASSWORD": env_pwd}, clear=False):
+            self.assertTrue(app_module._check_password_value(env_pwd))
+            with self.client.session_transaction() as sess:
+                sess["authenticated"] = True
+                sess["user"] = "admin"
+            new = "fresh-in-app-managed-passphrase-7"
+            resp = self.client.post(
+                "/api/setup/account",
+                json={"current_password": env_pwd, "password": new},
+                headers=self.HEADERS,
+            )
+            self.assertEqual(resp.status_code, 200, resp.get_json())
+            # Env var cleared in-process and the new hash is now effective.
+            self.assertEqual(os.environ.get("BEETS_WEB_PASSWORD"), "")
+            self.assertTrue(app_module._check_password_value(new))
+            self.assertFalse(app_module._check_password_value(env_pwd))
+
+
 if __name__ == "__main__":
     unittest.main()
