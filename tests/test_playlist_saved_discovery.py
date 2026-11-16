@@ -82,7 +82,7 @@ class PlaylistSavedDiscoveryTests(unittest.TestCase):
         self.assertIn('savedPlaylistMetrics', PAGE_SOURCE)
         self.assertIn('filteredSavedPlaylistRows', PAGE_SOURCE)
         self.assertIn('Find playlist', PAGE_SOURCE)
-        self.assertIn('No saved playlists match the current filters.', PAGE_SOURCE)
+        self.assertIn('No saved playlists match the current filters', PAGE_SOURCE)
 
     def test_saved_playlist_rows_show_next_step_and_activity_context(self):
         self.assertIn('function SavedPlaylistRowContext', PAGE_SOURCE)
