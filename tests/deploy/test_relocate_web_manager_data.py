@@ -88,5 +88,134 @@ class RelocateWebManagerDataTests(unittest.TestCase):
         self.assertEqual(self._run("--apply", "--resume").returncode, 0)
 
 
+@unittest.skipUnless(BASH, "needs a POSIX bash (Linux/macOS)")
+class RelocateHardcodedComposeTests(unittest.TestCase):
+    """The mount source is a HARDCODED host path in the Compose file (no
+    ${VAR}), so there is no env key to set. --rewrite-compose rewrites that one
+    line in place; without it the script refuses and points at --rewrite-compose.
+    """
+
+    MOUNT_LINE = "      - /opt/placeholder/web-manager-data:/web-manager-data\n"
+    COMPOSE = (
+        "services:\n"
+        "  beets-web-manager:\n"
+        "    image: ghcr.io/iranman/beets-web-manager:latest\n"
+        "    volumes:\n"
+        + MOUNT_LINE +
+        "      - /opt/placeholder/music:/music:ro\n"
+        "      - beets-config:/config\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bwm-relocate-hc-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.old = os.path.join(self.tmp, "old-data")
+        self.new = os.path.join(self.tmp, "new-data")
+        self.compose = os.path.join(self.tmp, "docker-compose.yml")
+        os.makedirs(os.path.join(self.old, "jobs"))
+        Path(self.old, "sentinel.txt").write_text("keep-me\n", encoding="utf-8")
+        Path(self.old, "jobs", "job_1.json").write_text('{"id": "job_1"}', encoding="utf-8")
+        Path(self.compose).write_text(self.COMPOSE, encoding="utf-8")
+
+    def _run(self, *args):
+        return subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", self.compose, "--no-recreate", *args],
+            capture_output=True, text=True,
+        )
+
+    def test_rewrite_compose_edits_one_line_and_writes_bak(self):
+        res = self._run("--rewrite-compose", "--apply")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+
+        # The one mount-source line was rewritten to the new path.
+        new_text = Path(self.compose).read_text(encoding="utf-8")
+        self.assertIn("      - %s:/web-manager-data\n" % new_dest, new_text)
+        self.assertNotIn("/opt/placeholder/web-manager-data", new_text)
+
+        # A .bak of the original compose was written first, byte-identical.
+        bak = Path(self.compose + ".bak")
+        self.assertTrue(bak.is_file(), "expected a <compose>.bak")
+        self.assertEqual(bak.read_text(encoding="utf-8"), self.COMPOSE)
+
+        # Every OTHER line is byte-identical to the original (only one changed).
+        orig_lines = self.COMPOSE.splitlines(keepends=True)
+        new_lines = new_text.splitlines(keepends=True)
+        self.assertEqual(len(orig_lines), len(new_lines))
+        diffs = [i for i in range(len(orig_lines)) if orig_lines[i] != new_lines[i]]
+        self.assertEqual(diffs, [orig_lines.index(self.MOUNT_LINE)],
+                         "exactly one line (the mount line) must change")
+        # Sibling lines explicitly intact (image tag colon, other mounts).
+        self.assertIn("    image: ghcr.io/iranman/beets-web-manager:latest\n", new_text)
+        self.assertIn("      - /opt/placeholder/music:/music:ro\n", new_text)
+        self.assertIn("      - beets-config:/config\n", new_text)
+
+        # Data was still copied and a data backup archive written.
+        self.assertEqual(Path(self.new, "sentinel.txt").read_text(encoding="utf-8"), "keep-me\n")
+        backups = list(Path(self.tmp).glob("_web-manager-relocate-backups/*.tar.gz"))
+        self.assertEqual(len(backups), 1)
+
+    def test_hardcoded_without_flag_errors_pointing_at_rewrite_compose(self):
+        res = self._run("--apply")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("--rewrite-compose", res.stderr)
+        self.assertIn("HARDCODED", res.stderr)
+        # Nothing was touched: no compose rewrite, no .bak.
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), self.COMPOSE)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_dry_run_hardcoded_with_flag_plans_rewrite_and_changes_nothing(self):
+        res = self._run("--rewrite-compose")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("REWRITE", res.stderr)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), self.COMPOSE)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+
+@unittest.skipUnless(BASH, "needs a POSIX bash (Linux/macOS)")
+class RelocateEnvVarComposeTests(unittest.TestCase):
+    """The default env-var form: the Compose mount interpolates ${VAR}. The
+    script detects that key from the Compose file and sets it in the env file;
+    the Compose YAML is left untouched (no .bak)."""
+
+    COMPOSE = (
+        "services:\n"
+        "  beets-web-manager:\n"
+        "    volumes:\n"
+        "      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
+        "      - beets-config:/config\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bwm-relocate-env-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.old = os.path.join(self.tmp, "old-data")
+        self.new = os.path.join(self.tmp, "new-data")
+        self.compose = os.path.join(self.tmp, "docker-compose.yml")
+        self.env = os.path.join(self.tmp, ".env")
+        os.makedirs(self.old)
+        Path(self.old, "sentinel.txt").write_text("keep-me\n", encoding="utf-8")
+        Path(self.compose).write_text(self.COMPOSE, encoding="utf-8")
+        Path(self.env).write_text("TZ=UTC\n", encoding="utf-8")
+
+    def test_env_key_detected_from_compose_and_compose_untouched(self):
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", self.compose, "--env-file", self.env,
+             "--no-recreate", "--apply"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        # The detected key was set in the env file.
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertIn("BEETS_WEB_MANAGER_DATA_PATH=" + new_dest, env_text)
+        self.assertIn("TZ=UTC", env_text)
+        # The Compose YAML was NOT edited and no .bak was written.
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), self.COMPOSE)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
