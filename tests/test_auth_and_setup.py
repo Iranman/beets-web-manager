@@ -37,6 +37,7 @@ class AuthAndSetupTests(unittest.TestCase):
         self.setup_state_file = self.data_dir / ".browser_setup_state"
         self.auth_token_file = self.data_dir / ".auth_token"
         self.setup_complete_file = self.data_dir / ".setup_complete"
+        self.session_epoch_file = self.data_dir / ".session_epoch"
 
         self.env_patch = mock.patch.dict(
             os.environ,
@@ -56,6 +57,7 @@ class AuthAndSetupTests(unittest.TestCase):
             patch_app_family(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
             patch_app_family(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
             patch_app_family(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
+            patch_app_family(app_module, "_SESSION_EPOCH_FILE", self.session_epoch_file),
             patch_app_family(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
             patch_app_family(app_module, "_GENERATED_AUTH_TOKEN_FILE", self.auth_token_file),
             mock.patch.object(routes_setup, "_SETUP_COMPLETE_MARKER", self.setup_complete_file),
@@ -553,6 +555,214 @@ class AccountCredentialChangeTests(AuthAndSetupTests):
                 headers=self.HEADERS,
             )
             self.assertEqual(still_limited.status_code, 429)
+
+    def test_username_with_unicode_line_separator_is_rejected(self):
+        """#759 item 1: the username is read back via .splitlines()[0], so a
+        value containing a Unicode line break (U+0085/U+2028/U+2029) would be
+        silently truncated on read -- stored != login-effective. Validation
+        must reject every such character so the two can never diverge."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        user_before = self.persisted_user_file.read_text(encoding="utf-8")
+
+        for sep in ("\u0085", " ", " "):
+            bad = f"cur{sep}ator"
+            # Sanity: this is exactly the truncation the read path would cause.
+            self.assertNotEqual(bad.splitlines()[0], bad, sep)
+            resp = self.client.post(
+                "/api/setup/account",
+                json={"current_password": old, "username": bad},
+                headers=self.HEADERS,
+            )
+            self.assertEqual(resp.status_code, 400, (repr(sep), resp.get_json()))
+            self.assertIn("Invalid username format", resp.get_json()["error"])
+
+        # No truncated username was ever persisted; the stored value is intact.
+        self.assertEqual(self.persisted_user_file.read_text(encoding="utf-8"), user_before)
+
+    def test_password_change_invalidates_other_sessions(self):
+        """#759 item 2: rotating the password must force re-auth on every
+        OTHER already-authenticated session, while the actor who rotated stays
+        signed in and the new credential authenticates."""
+        old = "correct horse battery staple"
+        new = "a-brand-new-rotation-passphrase-2"
+        self._bootstrap_authenticated(password=old)  # self.client authenticated
+
+        # A second, independently authenticated session (another device).
+        other = app_module.app.test_client()
+        app_module._AUTH_RATE_LIMITS.clear()
+        login = other.post("/api/login", json={"username": "admin", "password": old}, headers=self.HEADERS)
+        self.assertEqual(login.status_code, 200, login.get_json())
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+
+        # Rotate the password from the FIRST session.
+        app_module._AUTH_RATE_LIMITS.clear()
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": old, "password": new},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+
+        # The OTHER session is now forced to re-auth (stale epoch -> rejected).
+        self.assertFalse(other.get("/api/auth/me").get_json()["authenticated"])
+        self.assertEqual(other.get("/api/library").status_code, 401)
+
+        # The actor who rotated stays signed in (re-stamped to the new epoch).
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+
+        # The new credential authenticates a fresh login.
+        app_module._AUTH_RATE_LIMITS.clear()
+        good = other.post("/api/login", json={"username": "admin", "password": new}, headers=self.HEADERS)
+        self.assertEqual(good.status_code, 200, good.get_json())
+
+    def test_username_only_change_does_not_invalidate_other_sessions(self):
+        """#759 item 2 is scoped to the PASSWORD change: a username-only
+        change must not rotate the epoch, so other sessions stay valid."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+
+        other = app_module.app.test_client()
+        app_module._AUTH_RATE_LIMITS.clear()
+        self.assertEqual(
+            other.post("/api/login", json={"username": "admin", "password": old}, headers=self.HEADERS).status_code,
+            200,
+        )
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+
+        app_module._AUTH_RATE_LIMITS.clear()
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": old, "username": "curator"},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        # Other session remains authorized (no password rotation occurred).
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+
+    def test_unreadable_epoch_file_fails_closed(self):
+        """#759 item 2 (fail-closed): a present-but-unparseable epoch file must
+        reject every session rather than collapse to the baseline epoch 0 and
+        silently re-admit an already-revoked cookie."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)  # actor authenticated at epoch 0
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+        # Corrupt the epoch state (file exists but is not an integer).
+        self.session_epoch_file.write_text("not-an-integer", encoding="utf-8")
+        self.assertFalse(self.client.get("/api/auth/me").get_json()["authenticated"])
+        self.assertEqual(self.client.get("/api/library").status_code, 401)
+
+    def test_blank_or_garbage_epoch_file_fails_closed(self):
+        """#759 Finding B: a PRESENT epoch file whose first line is blank,
+        whitespace-only, or otherwise not a clean integer must fail closed
+        (-1 -> reject), never collapse to baseline epoch 0 and re-admit a
+        revoked cookie. Only a cleanly ABSENT file is the no-rotation baseline."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)  # actor authenticated at epoch 0
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+
+        # Includes valid-first-line-then-trailing-garbage ("0\ngarbage"): the
+        # reader must validate the whole file, not just the first line, or a
+        # revoked epoch-0 cookie is re-admitted.
+        for bad in ("\n5", "\n", "   ", "\nxyz", "", "0\ngarbage", "5\ngarbage"):
+            with self.subTest(contents=bad):
+                self.session_epoch_file.write_text(bad, encoding="utf-8")
+                self.assertFalse(
+                    self.client.get("/api/auth/me").get_json()["authenticated"]
+                )
+                self.assertEqual(self.client.get("/api/library").status_code, 401)
+
+        # A cleanly ABSENT file is the legitimate baseline and still authorizes.
+        self.session_epoch_file.unlink()
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+        self.assertEqual(self.client.get("/api/library").status_code, 200)
+
+    def test_epoch_file_canonical_validation(self):
+        """#759 Finding C (close the whole fail-open class): the reader must
+        accept ONLY an exact canonical positive integer (optionally one trailing
+        "\\n") and fail closed (-1) on every noncanonical form -- present "0" in
+        any spelling, multiple newlines, signed/leading-zero/unicode digits, and
+        CR/CRLF forms. It reads bytes + strict ASCII so universal-newline
+        translation can't launder CR into "\\n" before validation. Bytes are
+        written directly to defeat any OS newline translation on write."""
+        from backend import auth_service
+
+        self._bootstrap_authenticated(password="correct horse battery staple")
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+
+        # Every one of these PRESENT files must fail closed (epoch -1): a
+        # present file is never the baseline, and the writer only emits "1"+.
+        reject = [
+            b"0", b"0\n", b"0\n\n", b"00", b"0000", b"+0", b"-0",
+            b"+5", b"05", b"5\r\nx", b"0\ngarbage", b"5\ngarbage",
+            b"0\r\rz", b"5\r\n", b" 5", b"5 ", b"\x00",
+            "٥".encode("utf-8"),        # Arabic-Indic 5
+            "٠٠".encode("utf-8"),  # Arabic-Indic 00
+        ]
+        for raw in reject:
+            with self.subTest(reject=raw):
+                self.session_epoch_file.write_bytes(raw)
+                self.assertEqual(
+                    auth_service._current_session_epoch(), -1,
+                    f"present {raw!r} must fail closed (-1)",
+                )
+                # End-to-end: the epoch-0 bootstrapped session is rejected.
+                self.assertEqual(self.client.get("/api/library").status_code, 401)
+
+        # Canonical positive integers parse to their value (writer-friendly
+        # single trailing newline tolerated).
+        for raw, expected in ((b"1", 1), (b"5", 5), (b"5\n", 5), (b"42", 42)):
+            with self.subTest(accept=raw):
+                self.session_epoch_file.write_bytes(raw)
+                self.assertEqual(auth_service._current_session_epoch(), expected)
+
+        # A cleanly ABSENT file is the ONLY baseline-0 state.
+        self.session_epoch_file.unlink()
+        self.assertEqual(auth_service._current_session_epoch(), 0)
+
+        # A DANGLING symlink is a PRESENT directory entry, not a clean absence:
+        # it must fail closed, never collapse to baseline 0 (independent review).
+        try:
+            os.symlink(
+                str(self.session_epoch_file.parent / "no-such-epoch-target"),
+                str(self.session_epoch_file),
+            )
+        except (OSError, NotImplementedError):
+            pass  # symlink creation not permitted on this platform
+        else:
+            self.assertEqual(auth_service._current_session_epoch(), -1)
+            self.assertEqual(self.client.get("/api/library").status_code, 401)
+
+    def test_epoch_bump_failure_aborts_password_change(self):
+        """#759 item 2 (fail-closed): if the session epoch cannot be advanced,
+        the password rotation must abort with nothing changed -- never rotate
+        the password while other sessions stay authorized."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        pwd_before = self.persisted_pwd_file.read_text(encoding="utf-8")
+
+        other = app_module.app.test_client()
+        app_module._AUTH_RATE_LIMITS.clear()
+        self.assertEqual(
+            other.post("/api/login", json={"username": "admin", "password": old}, headers=self.HEADERS).status_code,
+            200,
+        )
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+
+        with mock.patch.object(app_module, "_bump_session_epoch", return_value=False):
+            resp = self.client.post(
+                "/api/setup/account",
+                json={"current_password": old, "password": "a-fresh-rotation-passphrase-9"},
+                headers=self.HEADERS,
+            )
+        self.assertEqual(resp.status_code, 500, resp.get_json())
+        # Password untouched, other session still valid, old password still works.
+        self.assertEqual(self.persisted_pwd_file.read_text(encoding="utf-8"), pwd_before)
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+        app_module._AUTH_RATE_LIMITS.clear()
+        self.assertEqual(
+            self.client.get("/api/auth/me").get_json()["authenticated"], True
+        )
 
     def test_plaintext_env_password_is_cleared_so_new_hash_takes_effect(self):
         """A non-blank BEETS_WEB_PASSWORD in the process env shadows the

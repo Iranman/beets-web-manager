@@ -162,6 +162,97 @@ _PERSISTED_BROWSER_USERNAME_FILE = Path(
 )
 
 
+_SESSION_EPOCH_FILE = WEB_MANAGER_DATA_DIR / ".session_epoch"
+
+
+_SESSION_EPOCH_LOCK = threading.Lock()
+
+
+def _current_session_epoch() -> int:
+    """Monotonic counter advanced whenever the admin password is rotated
+    (#759). Every signed session records the epoch it was issued under, and
+    _session_authorized() rejects a session whose epoch does not match the
+    current one, so a password change forces re-auth on all OTHER sessions.
+
+    Return values:
+      * 0  -- the epoch file is ABSENT (fresh install / baseline, before any
+              rotation). Legacy sessions with no epoch key also read as 0, so
+              deploying the feature does not log anyone out until the first
+              rotation.
+      * N  -- the stored canonical positive integer (the writer only ever
+              emits str(current+1) with current>=0, so a present file is "1"
+              or higher), optionally followed by one trailing newline.
+      * -1 -- the file EXISTS but is not an exact canonical positive integer
+              (including a present "0" in any form -- absent is the ONLY
+              legitimate baseline-0 state). This is a fail-closed sentinel:
+              _session_authorized() rejects every session while it is in
+              effect, so a corrupt/noncanonical epoch can never silently
+              collapse back to the baseline and re-admit an already-revoked
+              (epoch-0 / legacy) cookie."""
+    try:
+        raw = _SESSION_EPOCH_FILE.read_bytes()
+    except FileNotFoundError:
+        # Only a cleanly ABSENT file is the baseline. A dangling symlink is a
+        # PRESENT directory entry whose target is missing (read_bytes follows
+        # the link, raising FileNotFoundError); is_symlink() uses lstat and is
+        # True for it. Treat it as present and fail closed, so a planted
+        # dangling link cannot collapse to baseline 0 and re-admit a revoked
+        # cookie. A symlink to a real file reads normally and never lands here.
+        try:
+            return -1 if _SESSION_EPOCH_FILE.is_symlink() else 0
+        except OSError:
+            return -1
+    except Exception:
+        return -1
+    try:
+        # Read as BYTES and decode STRICT ASCII so universal-newline
+        # translation cannot rewrite CR/CRLF into "\n" before validation and
+        # so non-ASCII digit forms (e.g. Arabic-Indic zeros) are rejected at
+        # decode. Tolerate AT MOST ONE trailing "\n" (writer-friendly), then
+        # require an EXACT canonical positive integer. re.fullmatch rejects
+        # "0", "00", "+0", "-0", "05", "+5", unicode digits, multiple newlines
+        # ("0\n\n"), CR/CRLF forms and valid-line-then-garbage ("0\ngarbage").
+        # Any deviation fails closed, so a present file never collapses to the
+        # baseline (0); only a cleanly ABSENT file (FileNotFoundError) is 0.
+        text = raw.decode("ascii")
+        if text.endswith("\n"):
+            text = text[:-1]
+        if not re.fullmatch(r"[1-9][0-9]*", text):
+            return -1
+        return int(text)
+    except Exception:
+        return -1
+
+
+def _bump_session_epoch() -> bool:
+    """Atomically advance and persist the session epoch so every session
+    issued under the old epoch stops validating (#759: a password rotation
+    revokes other sessions). The read-increment-write runs under a lock so two
+    concurrent rotations cannot both land the same N+1 (a lost update would
+    leave the first rotation's sessions valid). Returns True only when the new
+    epoch was durably written; callers treat False as a HARD failure and must
+    not report the rotation as successful -- the revocation did not take
+    effect. Refuses to advance from an indeterminate (-1) epoch rather than
+    resetting the counter toward 0."""
+    with _SESSION_EPOCH_LOCK:
+        current = _current_session_epoch()
+        if current < 0:
+            return False
+        return bool(_persist_file_atomically(_SESSION_EPOCH_FILE, str(current + 1)))
+
+
+def _stamp_session_epoch() -> None:
+    """Record the current epoch on the active Flask session so it keeps
+    validating until the next password rotation (#759). Called wherever a
+    session is established (sign-in, first-run, setup completion) or kept
+    after a credential change."""
+    try:
+        from flask import session
+        session["epoch"] = _current_session_epoch()
+    except Exception:
+        pass
+
+
 def _security_auth_password() -> str:
     value = _first_config_secret("BEETS_WEB_PASSWORD")
     if value:
@@ -408,7 +499,22 @@ def _basic_authorized(header: str) -> bool:
 def _session_authorized() -> bool:
     try:
         from flask import session
-        return bool(session.get("authenticated") is True and session.get("user"))
+        if not (session.get("authenticated") is True and session.get("user")):
+            return False
+        # #759: a session is valid only while its epoch matches the current
+        # one. A password rotation bumps the epoch (_bump_session_epoch), so
+        # sessions issued before it stop validating -> forced re-auth
+        # everywhere. A legacy session with no epoch key counts as the
+        # baseline epoch 0, so deploying this change does not log anyone out
+        # until the first rotation. A negative current epoch means the epoch
+        # state is unreadable -> fail closed (reject every session) rather than
+        # collapse to the baseline and re-admit a revoked cookie. Session
+        # contents are integrity-protected by the Flask SECRET_KEY, so the
+        # stamp cannot be forged.
+        current = _current_session_epoch()
+        if current < 0:
+            return False
+        return int(session.get("epoch") or 0) == current
     except Exception:
         return False
 
