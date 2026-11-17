@@ -179,27 +179,36 @@ def _current_session_epoch() -> int:
               rotation). Legacy sessions with no epoch key also read as 0, so
               deploying the feature does not log anyone out until the first
               rotation.
-      * N  -- the stored integer, when the file is present and parseable.
-      * -1 -- the file EXISTS but cannot be read or parsed. This is a
-              fail-closed sentinel: _session_authorized() rejects every
-              session while it is in effect, so a corrupt/unreadable epoch can
-              never silently collapse back to the baseline and re-admit an
-              already-revoked (epoch-0 / legacy) cookie."""
+      * N  -- the stored canonical positive integer (the writer only ever
+              emits str(current+1) with current>=0, so a present file is "1"
+              or higher), optionally followed by one trailing newline.
+      * -1 -- the file EXISTS but is not an exact canonical positive integer
+              (including a present "0" in any form -- absent is the ONLY
+              legitimate baseline-0 state). This is a fail-closed sentinel:
+              _session_authorized() rejects every session while it is in
+              effect, so a corrupt/noncanonical epoch can never silently
+              collapse back to the baseline and re-admit an already-revoked
+              (epoch-0 / legacy) cookie."""
     try:
-        raw = _SESSION_EPOCH_FILE.read_text(encoding="utf-8")
+        raw = _SESSION_EPOCH_FILE.read_bytes()
     except FileNotFoundError:
         return 0
     except Exception:
         return -1
     try:
-        # Fail closed (-1) unless the present file is EXACTLY a canonical
-        # integer (a trailing newline from the writer is tolerated). Any
-        # leading/internal whitespace, extra lines, or trailing garbage (e.g.
-        # "0\ngarbage") means the file is malformed, so a corrupt epoch can
-        # never collapse to the baseline (0) and re-admit a revoked cookie.
-        # Only a cleanly ABSENT file (FileNotFoundError above) returns 0.
-        text = raw.rstrip("\n")
-        if text != text.strip() or "\n" in text:
+        # Read as BYTES and decode STRICT ASCII so universal-newline
+        # translation cannot rewrite CR/CRLF into "\n" before validation and
+        # so non-ASCII digit forms (e.g. Arabic-Indic zeros) are rejected at
+        # decode. Tolerate AT MOST ONE trailing "\n" (writer-friendly), then
+        # require an EXACT canonical positive integer. re.fullmatch rejects
+        # "0", "00", "+0", "-0", "05", "+5", unicode digits, multiple newlines
+        # ("0\n\n"), CR/CRLF forms and valid-line-then-garbage ("0\ngarbage").
+        # Any deviation fails closed, so a present file never collapses to the
+        # baseline (0); only a cleanly ABSENT file (FileNotFoundError) is 0.
+        text = raw.decode("ascii")
+        if text.endswith("\n"):
+            text = text[:-1]
+        if not re.fullmatch(r"[1-9][0-9]*", text):
             return -1
         return int(text)
     except Exception:

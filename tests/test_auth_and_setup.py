@@ -677,6 +677,49 @@ class AccountCredentialChangeTests(AuthAndSetupTests):
         self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
         self.assertEqual(self.client.get("/api/library").status_code, 200)
 
+    def test_epoch_file_canonical_validation(self):
+        """#759 Finding C (close the whole fail-open class): the reader must
+        accept ONLY an exact canonical positive integer (optionally one trailing
+        "\\n") and fail closed (-1) on every noncanonical form -- present "0" in
+        any spelling, multiple newlines, signed/leading-zero/unicode digits, and
+        CR/CRLF forms. It reads bytes + strict ASCII so universal-newline
+        translation can't launder CR into "\\n" before validation. Bytes are
+        written directly to defeat any OS newline translation on write."""
+        from backend import auth_service
+
+        self._bootstrap_authenticated(password="correct horse battery staple")
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+
+        # Every one of these PRESENT files must fail closed (epoch -1): a
+        # present file is never the baseline, and the writer only emits "1"+.
+        reject = [
+            b"0", b"0\n", b"0\n\n", b"00", b"0000", b"+0", b"-0",
+            b"+5", b"05", b"5\r\nx", b"0\ngarbage", b"5\ngarbage",
+            b"0\r\rz", b"5\r\n", b" 5", b"5 ", b"\x00",
+            "٥".encode("utf-8"),        # Arabic-Indic 5
+            "٠٠".encode("utf-8"),  # Arabic-Indic 00
+        ]
+        for raw in reject:
+            with self.subTest(reject=raw):
+                self.session_epoch_file.write_bytes(raw)
+                self.assertEqual(
+                    auth_service._current_session_epoch(), -1,
+                    f"present {raw!r} must fail closed (-1)",
+                )
+                # End-to-end: the epoch-0 bootstrapped session is rejected.
+                self.assertEqual(self.client.get("/api/library").status_code, 401)
+
+        # Canonical positive integers parse to their value (writer-friendly
+        # single trailing newline tolerated).
+        for raw, expected in ((b"1", 1), (b"5", 5), (b"5\n", 5), (b"42", 42)):
+            with self.subTest(accept=raw):
+                self.session_epoch_file.write_bytes(raw)
+                self.assertEqual(auth_service._current_session_epoch(), expected)
+
+        # A cleanly ABSENT file is the ONLY baseline-0 state.
+        self.session_epoch_file.unlink()
+        self.assertEqual(auth_service._current_session_epoch(), 0)
+
     def test_epoch_bump_failure_aborts_password_change(self):
         """#759 item 2 (fail-closed): if the session epoch cannot be advanced,
         the password rotation must abort with nothing changed -- never rotate
