@@ -4226,6 +4226,14 @@ def setup_account():
         hashed_password = generate_password_hash(new_password)
 
     if change_password:
+        # #759: advance the session epoch FIRST, before the new password takes
+        # effect, so the revocation of every OTHER session is durable before
+        # the credential changes. If the epoch cannot be advanced, abort with
+        # NOTHING changed -- never rotate the password while other sessions
+        # stay authorized (fail closed). This also revokes THIS session until
+        # it is re-stamped on the success path below.
+        if not _bump_session_epoch():
+            return jsonify({"ok": False, "error": "Failed to update session state; password unchanged."}), 500
         if not _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, hashed_password):
             return jsonify({"ok": False, "error": "Failed to persist new password to storage"}), 500
         # A non-blank BEETS_WEB_PASSWORD already in this process environment
@@ -4254,15 +4262,13 @@ def setup_account():
                      "BEETS_WEB_PASSWORD configuration. Remove it to manage credentials in the app.",
         }), 409
 
-    # #759: a password rotation must force re-auth on every OTHER already
-    # authenticated session. Bump the persisted session epoch so sessions
-    # issued under the old epoch stop validating (_session_authorized), then
-    # re-stamp THIS session to the new epoch so the actor who just rotated
-    # stays signed in. Username-only changes do NOT rotate the epoch (#759
-    # scopes session invalidation to the password change).
+    # #759: re-stamp THIS session to the (now current) epoch so the actor who
+    # just rotated the password stays signed in, while every OTHER session
+    # carries the pre-rotation epoch and must re-authenticate. A password
+    # change already advanced the epoch above (before the hash was written);
+    # a username-only change left it unchanged, so this stamp is a no-op for
+    # that case and session invalidation stays scoped to the password change.
     try:
-        if change_password:
-            _bump_session_epoch()
         if change_username:
             session["user"] = new_username
         _stamp_session_epoch()
@@ -4365,6 +4371,7 @@ def setup_mark_complete():
             _security_auth_password,
             _security_auth_username,
             _set_browser_setup_state,
+            _stamp_session_epoch,
         )
     except ImportError:
         if not stub_mode:
@@ -4381,6 +4388,9 @@ def setup_mark_complete():
 
         def _set_browser_setup_state(state: str) -> bool:
             return True
+
+        def _stamp_session_epoch() -> None:
+            return None
 
     with _FIRST_RUN_LOCK:
         if _SETUP_COMPLETE_MARKER.exists():
@@ -4429,7 +4439,6 @@ def setup_mark_complete():
             return jsonify({"ok": False, "error": "Setup already completed"}), 409
 
         try:
-            from app import _stamp_session_epoch
             session.clear()
             session.permanent = True
             session["authenticated"] = True

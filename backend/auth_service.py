@@ -162,38 +162,56 @@ _PERSISTED_BROWSER_USERNAME_FILE = Path(
 )
 
 
-_SESSION_EPOCH_FILE = Path(
-    os.environ.get("BEETS_WEB_SESSION_EPOCH_FILE", str(WEB_MANAGER_DATA_DIR / ".session_epoch"))
-)
+_SESSION_EPOCH_FILE = WEB_MANAGER_DATA_DIR / ".session_epoch"
+
+
+_SESSION_EPOCH_LOCK = threading.Lock()
 
 
 def _current_session_epoch() -> int:
     """Monotonic counter advanced whenever the admin password is rotated
     (#759). Every signed session records the epoch it was issued under, and
-    _session_authorized() rejects a session whose epoch is behind the current
-    one, so a password change forces re-auth on all OTHER sessions. A
-    missing or unreadable epoch file reads as 0: the baseline, pre-rotation
-    epoch. Note the fail-closed direction -- if the file was bumped to N and
-    then becomes unreadable, this returns 0, so sessions stamped N (incl. the
-    current actor) stop validating rather than being wrongly admitted."""
+    _session_authorized() rejects a session whose epoch does not match the
+    current one, so a password change forces re-auth on all OTHER sessions.
+
+    Return values:
+      * 0  -- the epoch file is ABSENT (fresh install / baseline, before any
+              rotation). Legacy sessions with no epoch key also read as 0, so
+              deploying the feature does not log anyone out until the first
+              rotation.
+      * N  -- the stored integer, when the file is present and parseable.
+      * -1 -- the file EXISTS but cannot be read or parsed. This is a
+              fail-closed sentinel: _session_authorized() rejects every
+              session while it is in effect, so a corrupt/unreadable epoch can
+              never silently collapse back to the baseline and re-admit an
+              already-revoked (epoch-0 / legacy) cookie."""
     try:
-        return int(_SESSION_EPOCH_FILE.read_text(encoding="utf-8").splitlines()[0].strip() or "0")
-    except Exception:
+        raw = _SESSION_EPOCH_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return 0
+    except Exception:
+        return -1
+    try:
+        return int(raw.splitlines()[0].strip() or "0")
+    except Exception:
+        return -1
 
 
-def _bump_session_epoch() -> int:
-    """Advance and persist the session epoch so every session issued under
-    the old epoch stops validating (#759: password rotation revokes other
-    sessions). Returns the epoch now in effect; callers re-stamp the current
-    session to this value to keep the actor who just rotated signed in. On a
-    persistence failure the epoch is unchanged and the current value is
-    returned, so the caller never stamps the active session to an epoch that
-    was not durably recorded."""
-    new_epoch = _current_session_epoch() + 1
-    if _persist_file_atomically(_SESSION_EPOCH_FILE, str(new_epoch)):
-        return new_epoch
-    return _current_session_epoch()
+def _bump_session_epoch() -> bool:
+    """Atomically advance and persist the session epoch so every session
+    issued under the old epoch stops validating (#759: a password rotation
+    revokes other sessions). The read-increment-write runs under a lock so two
+    concurrent rotations cannot both land the same N+1 (a lost update would
+    leave the first rotation's sessions valid). Returns True only when the new
+    epoch was durably written; callers treat False as a HARD failure and must
+    not report the rotation as successful -- the revocation did not take
+    effect. Refuses to advance from an indeterminate (-1) epoch rather than
+    resetting the counter toward 0."""
+    with _SESSION_EPOCH_LOCK:
+        current = _current_session_epoch()
+        if current < 0:
+            return False
+        return bool(_persist_file_atomically(_SESSION_EPOCH_FILE, str(current + 1)))
 
 
 def _stamp_session_epoch() -> None:
@@ -461,9 +479,15 @@ def _session_authorized() -> bool:
         # sessions issued before it stop validating -> forced re-auth
         # everywhere. A legacy session with no epoch key counts as the
         # baseline epoch 0, so deploying this change does not log anyone out
-        # until the first rotation. Session contents are integrity-protected
-        # by the Flask SECRET_KEY, so this stamp cannot be forged.
-        return int(session.get("epoch") or 0) == _current_session_epoch()
+        # until the first rotation. A negative current epoch means the epoch
+        # state is unreadable -> fail closed (reject every session) rather than
+        # collapse to the baseline and re-admit a revoked cookie. Session
+        # contents are integrity-protected by the Flask SECRET_KEY, so the
+        # stamp cannot be forged.
+        current = _current_session_epoch()
+        if current < 0:
+            return False
+        return int(session.get("epoch") or 0) == current
     except Exception:
         return False
 

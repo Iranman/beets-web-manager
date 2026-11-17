@@ -640,6 +640,49 @@ class AccountCredentialChangeTests(AuthAndSetupTests):
         # Other session remains authorized (no password rotation occurred).
         self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
 
+    def test_unreadable_epoch_file_fails_closed(self):
+        """#759 item 2 (fail-closed): a present-but-unparseable epoch file must
+        reject every session rather than collapse to the baseline epoch 0 and
+        silently re-admit an already-revoked cookie."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)  # actor authenticated at epoch 0
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+        # Corrupt the epoch state (file exists but is not an integer).
+        self.session_epoch_file.write_text("not-an-integer", encoding="utf-8")
+        self.assertFalse(self.client.get("/api/auth/me").get_json()["authenticated"])
+        self.assertEqual(self.client.get("/api/library").status_code, 401)
+
+    def test_epoch_bump_failure_aborts_password_change(self):
+        """#759 item 2 (fail-closed): if the session epoch cannot be advanced,
+        the password rotation must abort with nothing changed -- never rotate
+        the password while other sessions stay authorized."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        pwd_before = self.persisted_pwd_file.read_text(encoding="utf-8")
+
+        other = app_module.app.test_client()
+        app_module._AUTH_RATE_LIMITS.clear()
+        self.assertEqual(
+            other.post("/api/login", json={"username": "admin", "password": old}, headers=self.HEADERS).status_code,
+            200,
+        )
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+
+        with mock.patch.object(app_module, "_bump_session_epoch", return_value=False):
+            resp = self.client.post(
+                "/api/setup/account",
+                json={"current_password": old, "password": "a-fresh-rotation-passphrase-9"},
+                headers=self.HEADERS,
+            )
+        self.assertEqual(resp.status_code, 500, resp.get_json())
+        # Password untouched, other session still valid, old password still works.
+        self.assertEqual(self.persisted_pwd_file.read_text(encoding="utf-8"), pwd_before)
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+        app_module._AUTH_RATE_LIMITS.clear()
+        self.assertEqual(
+            self.client.get("/api/auth/me").get_json()["authenticated"], True
+        )
+
     def test_plaintext_env_password_is_cleared_so_new_hash_takes_effect(self):
         """A non-blank BEETS_WEB_PASSWORD in the process env shadows the
         persisted hash; the endpoint must clear it so the change is real."""
