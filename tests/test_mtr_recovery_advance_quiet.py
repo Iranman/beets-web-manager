@@ -30,6 +30,7 @@ import backend.recovery_carrier as rc
 import backend.recovery_service as recovery_service
 import backend.import_service as import_service
 import backend.matching_service as matching_service
+import backend.resource_locks as resource_locks
 from backend.app_runtime import jobs
 from job_engine import DuplicateJobError
 from tests._app_family import patch_app_family
@@ -46,6 +47,18 @@ class _Mixin(unittest.TestCase):
         os.environ["RECOVERY_CARRIER_STATE_DIR"] = self.tmp
         os.environ["RECOVERY_ADVANCE_CACHE_DIR"] = self.tmp
         rc._store_registry.clear()
+        # The advancer's staging_reservation takes a DURABLE job_contract lock
+        # (backend/resource_locks) keyed by the carrier's recovery identity --
+        # and that registry lives in a HOST-GLOBAL dir, not self.tmp. Every
+        # carrier here shares one synthetic identity, so they all map to one
+        # ``staging-rec-<hex>`` key. Under the parallel runner
+        # (scripts/run_tests.py spreads this module's classes across worker
+        # processes) a sibling unit holding that shared key made this test's
+        # sweep skip its carrier with StagingFolderBusy -- the preflight never
+        # ran, an intermittent "re-verified 0 times" failure. Isolate the lock
+        # registry per test (same fix as test_issue556_staging_reservation).
+        resource_locks.set_locks(resource_locks.ResourceLocks(os.path.join(self.tmp, "locks")))
+        self.addCleanup(resource_locks.set_locks, None)
 
     def tearDown(self):
         rc._store_registry.clear()
