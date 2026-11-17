@@ -192,10 +192,16 @@ def _current_session_epoch() -> int:
     except Exception:
         return -1
     try:
-        # A present file whose first line is blank/whitespace-only or not a
-        # clean integer must fail closed (-1), never collapse to the baseline
-        # (0). Only a cleanly ABSENT file (FileNotFoundError above) returns 0.
-        return int(raw.splitlines()[0].strip())
+        # Fail closed (-1) unless the present file is EXACTLY a canonical
+        # integer (a trailing newline from the writer is tolerated). Any
+        # leading/internal whitespace, extra lines, or trailing garbage (e.g.
+        # "0\ngarbage") means the file is malformed, so a corrupt epoch can
+        # never collapse to the baseline (0) and re-admit a revoked cookie.
+        # Only a cleanly ABSENT file (FileNotFoundError above) returns 0.
+        text = raw.rstrip("\n")
+        if text != text.strip() or "\n" in text:
+            return -1
+        return int(text)
     except Exception:
         return -1
 

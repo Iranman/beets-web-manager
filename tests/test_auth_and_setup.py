@@ -661,7 +661,10 @@ class AccountCredentialChangeTests(AuthAndSetupTests):
         self._bootstrap_authenticated(password=old)  # actor authenticated at epoch 0
         self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
 
-        for bad in ("\n5", "\n", "   ", "\nxyz", ""):
+        # Includes valid-first-line-then-trailing-garbage ("0\ngarbage"): the
+        # reader must validate the whole file, not just the first line, or a
+        # revoked epoch-0 cookie is re-admitted.
+        for bad in ("\n5", "\n", "   ", "\nxyz", "", "0\ngarbage", "5\ngarbage"):
             with self.subTest(contents=bad):
                 self.session_epoch_file.write_text(bad, encoding="utf-8")
                 self.assertFalse(
