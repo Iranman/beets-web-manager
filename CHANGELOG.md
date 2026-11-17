@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Security
+
+- **Frontend `npm audit` high/critical gate now allows one documented, unfixable, dev-only advisory.** A freshly-reviewed advisory (picomatch ReDoS, GHSA-fc5q-39xc-vjpf / CVE-2026-112366) with **no patched version** (affects all published picomatch `<= 4.0.7`) began failing `npm audit --audit-level=high` on every branch. picomatch is pulled only by frontend dev/build tooling (vitest -> vite/tinyglobby/fdir, typescript-eslint) and is absent from the production runtime tree, so there is no shipped exposure, but `npm audit` cannot accept a single advisory. The "Frontend dependency audit" CI step now runs `frontend/scripts/audit-allowlist.mjs`, which fails on **any** high/critical advisory except the one GHSA id on a tiny documented allowlist (and fails safe on any high/critical with no resolvable advisory id) -- keeping the full gate armed for every other package. The exception is recorded in `docs/TECHNICAL_DEBT.md` (SEC-NPM-AUDIT-001) and must be removed when picomatch publishes a release `> 4.0.7`.
+
 ### Added
 
 - **Read-only recovery sweep status (`GET /api/import/recovery/status`, #762).** The missing-track recovery advancer now writes a rolling status sidecar every scheduled sweep (last run, next scheduled check, whether anything changed, and structured counts: examined, recovery attempted, recovered, still unresolved, newly in review, skipped). The new authenticated read-only endpoint returns the latest status so the UI can show passive sweep progress without reading the Job History. Two new tuning knobs: `RECOVERY_ADVANCE_RECHECK_FLOOR_SECONDS` (default `3600`, `0` disables) and `RECOVERY_ADVANCE_CACHE_DIR`.
