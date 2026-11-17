@@ -60,6 +60,7 @@ import { LibraryHealthPanel } from '../features/libraryHealth/LibraryHealthPanel
 import { LeakedPathsPanel } from '../features/leakedPaths/LeakedPathsPanel';
 import { FolderPlaceholdersPanel } from '../features/leakedPaths/FolderPlaceholdersPanel';
 import { PlaylistQualityPanel } from '../features/playlists/PlaylistQualityPanel';
+import { RecoveryStatusPanel } from '../features/recovery/RecoveryStatusPanel';
 import { SleeveArt, albumArtSources } from '../components/SleeveArt';
 import { RecordRing } from '../components/RecordRing';
 
@@ -2934,6 +2935,8 @@ export default function Jobs() {
         <CommonActionsSection jobs={jobs} failedCount={failedJobs.length} onReviewFailed={handleReviewFailed} onSelectJob={(job, options) => void handleSelectJob(job, options)} onStarted={refreshAll} linked={linkedPanel === 'library-db'} linkedPlaylistRepair={linkedPanel === 'playlist-repair'} linkedPlaylist={searchParams.get('playlist') ?? ''} />
 
         <AdvancedMaintenanceSection linked={linkedPanel === 'album-tracks'} />
+
+        <RecoveryStatusPanel />
 
         {listFailed && !jobs.length ? null : (
           <JobHistorySection
