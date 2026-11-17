@@ -291,5 +291,45 @@ class StatusEndpointTests(_Mixin):
         self.assertFalse(data["has_run"])
 
 
+class StatusShapeTests(_Mixin):
+    """QA regression (#762): the orphan-reconcile branch of _build_advance_status
+    gates a visible job just like a hand-off. Covered at the unit level because
+    the integration ticks above only exercise the hand-off / newly-review paths,
+    leaving adopted/removed/orphan-error untested."""
+
+    def test_orphan_adopt_counts_as_a_change(self):
+        report = recovery_service._build_advance_status(
+            {"scanned": 3, "handed_off": 0, "kept_review": 0, "newly_review": 0,
+             "skipped": 3, "orphan_reconcile": {"adopted": 1, "removed": 0}},
+            trigger="scheduled")
+        self.assertTrue(report["changes_made"], "an adopted orphan is a change")
+        self.assertFalse(report["needs_attention"])
+        self.assertEqual(report["counts"]["adopted"], 1)
+
+    def test_orphan_remove_counts_as_a_change(self):
+        report = recovery_service._build_advance_status(
+            {"scanned": 1, "handed_off": 0, "kept_review": 0, "newly_review": 0,
+             "skipped": 1, "orphan_reconcile": {"adopted": 0, "removed": 2}},
+            trigger="scheduled")
+        self.assertTrue(report["changes_made"], "a removed orphan is a change")
+        self.assertEqual(report["counts"]["removed"], 2)
+
+    def test_orphan_error_needs_attention(self):
+        report = recovery_service._build_advance_status(
+            {"scanned": 1, "handed_off": 0, "kept_review": 1, "newly_review": 0,
+             "skipped": 0, "orphan_reconcile": {"error": "OSError disk full"}},
+            trigger="scheduled")
+        self.assertTrue(report["needs_attention"], "an orphan-reconcile error needs attention")
+        self.assertIn("OSError", report["error"])
+
+    def test_pure_quiet_sweep_is_neither_change_nor_attention(self):
+        report = recovery_service._build_advance_status(
+            {"scanned": 2, "handed_off": 0, "kept_review": 2, "newly_review": 0,
+             "skipped": 0},
+            trigger="scheduled")
+        self.assertFalse(report["changes_made"])
+        self.assertFalse(report["needs_attention"])
+
+
 if __name__ == "__main__":
     unittest.main()
