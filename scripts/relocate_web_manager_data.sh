@@ -210,30 +210,19 @@ PY
 detect_env_key() {
   [[ -n "$COMPOSE_FILE" ]] || return 0
   # Honor an operator-supplied --env-key: detection must not overwrite it
-  # (mirrors detect_literal_source's guard). Without this, the C6 whole-file
-  # fallback below silently replaces the override it tells the user to pass.
+  # (mirrors detect_literal_source's guard). This is the documented workaround
+  # for layouts the scoper below can't read.
   [[ -z "$ENV_KEY" ]] || return 0
-  local scoped_mounts line
-  # All /web-manager-data mount lines in the TARGET service's volumes block
-  # (interpolated or literal). Empty means the block itself couldn't be scoped.
-  scoped_mounts="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" || true)"
-  line="$(printf '%s' "$scoped_mounts" | grep -E '\$\{' | head -n 1 || true)"
-  # C6 fallback (env-key DETECTION ONLY): the service-scoped line scoper misses
-  # two valid-but-uncommon layouts -- an indentless `volumes:` sequence (items
-  # at the same indent as the key) and a service header with a trailing comment.
-  # Fall back to a whole-file grep ONLY when the target block yielded NO
-  # /web-manager-data mount line AT ALL (the block couldn't be located). If the
-  # block DOES contain a line but it's a hardcoded literal, do NOT fall back:
-  # matching another service's ${VAR} would repoint the wrong service and leave
-  # the target on the old path (a false success). Leave ENV_KEY empty so
-  # detect_literal_source catches the literal and refuses / routes to
-  # --rewrite-compose. This only chooses which env KEY to set -- a safe,
-  # reversible env-file edit -- and NEVER widens the service-scoped
-  # --rewrite-compose path (the F1 data-loss fix stays strictly scoped).
-  if [[ -z "$scoped_mounts" ]]; then
-    line="$(grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" "$COMPOSE_FILE" | grep -E '\$\{' | head -n 1 || true)"
-    [[ -n "$line" ]] && warn "env-key detection: no ${MOUNT_DEST} mount found inside service '$SERVICE' (indentless volumes or commented header?); using a whole-file match. Pass --env-key NAME to override."
-  fi
+  local line
+  # The interpolated ${VAR} /web-manager-data mount line in the TARGET service's
+  # volumes block, if any. This is ONLY ever scoped to --service -- NEVER a
+  # whole-file grep: a key picked from another service's ${VAR}:/web-manager-data
+  # mount would repoint the wrong service and leave the target on its old path,
+  # reporting SUCCESS (a data-loss false success). Layouts the scoper can't read
+  # (indentless `volumes:` sequence, trailing-comment service header, quoted
+  # short-form mount) yield nothing here and fall through to the helpful refusal,
+  # which directs the operator to --env-key NAME or --rewrite-compose.
+  line="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" | grep -E '\$\{' | head -n 1 || true)"
   [[ -n "$line" ]] || return 0
   ENV_KEY="$(printf '%s' "$line" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | head -n 1 | sed 's/^\${//')"
 }
@@ -465,7 +454,7 @@ if [[ "$APPLY" -eq 1 ]]; then
       if [[ "$REWRITE_COMPOSE" -eq 1 ]]; then
         die "--rewrite-compose: could not find a hardcoded $MOUNT_DEST mount line in ${COMPOSE_FILE:-<no compose file>} -- pass --compose-file/--stack-dir pointing at the stack's Compose file"
       fi
-      die "could not determine which env key repoints $MOUNT_DEST -- pass --compose-file to detect it, --env-key NAME, or --rewrite-compose for a hardcoded mount source" ;;
+      die "could not determine how the $MOUNT_DEST mount is repointed. Auto-detection reads the standard indented volumes block only; an indentless volumes sequence, a trailing-comment service header, or a quoted mount can't be scoped. Pass --env-key NAME if the mount uses an env var (e.g. \${BEETS_WEB_MANAGER_DATA_PATH}), or --rewrite-compose if it is a hardcoded literal path. Also pass --compose-file/--stack-dir pointing at the stack's Compose file." ;;
   esac
 fi
 

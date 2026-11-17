@@ -40,12 +40,22 @@ one.
 > `docker-compose.full.yml` reads `BEETS_WEB_MANAGER_DATA_PATH`. Let the script
 > detect it from your live Compose file rather than assuming.
 
-> Detection first scans only the target service's `volumes:` block. For a few
-> valid-but-uncommon layouts it can't scope (an *indentless* `volumes:`
-> sequence, or a service header with a trailing comment) it falls back to a
-> whole-file scan and prints a warning. If that picks the wrong key, pass
-> `--env-key NAME` to set it explicitly. (The fallback is env-key detection
-> only; the `--rewrite-compose` path stays strictly service-scoped.)
+> Auto-detection scans **only** the target service's `volumes:` block — it
+> never falls back to a whole-file scan, because a key picked from another
+> service's `${VAR}:/web-manager-data` mount would repoint the wrong service and
+> leave your target on the old path while reporting success. It therefore covers
+> the **standard indented** layout only. A few valid-but-uncommon layouts it
+> can't scope — an *indentless* `volumes:` sequence (items at the same indent as
+> `volumes:`), a service header with a *trailing comment*
+> (`beets-web-manager:  # app`), or a *quoted* short-form mount
+> (`- "…:/web-manager-data"`) — are refused with a message that tells you what to
+> pass. On those layouts:
+>
+> - if the mount uses an env var, pass **`--env-key NAME`** (the key the mount
+>   interpolates, e.g. `BEETS_WEB_MANAGER_DATA_PATH`) to repoint via the env file;
+> - if the mount is a **hardcoded literal** host path, pass **`--rewrite-compose`**
+>   (see below) — or, if the layout is unusual enough that even the scoped rewrite
+>   can't find the one line, edit that Compose line by hand.
 
 ### Hardcoded mount source (no `${VAR}`)
 

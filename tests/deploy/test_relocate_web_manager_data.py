@@ -232,20 +232,23 @@ class RelocateEnvVarComposeTests(unittest.TestCase):
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), self.COMPOSE)
         self.assertFalse(Path(self.compose + ".bak").exists())
 
-    def _apply_with_compose(self, compose_text):
+    def _apply_with_compose(self, compose_text, *extra):
         Path(self.compose).write_text(compose_text, encoding="utf-8")
         Path(self.env).write_text("TZ=UTC\n", encoding="utf-8")
         return subprocess.run(
             [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
              "--compose-file", self.compose, "--env-file", self.env,
-             "--no-recreate", "--apply"],
+             "--no-recreate", "--apply", *extra],
             capture_output=True, text=True,
         )
 
-    def test_c6_env_key_detected_for_indentless_volumes_sequence(self):
-        """C6(a): an indentless `volumes:` sequence (items at the same indent as
-        the key) is valid YAML but the service-scoped line scoper misses it; the
-        whole-file fallback still detects the env key."""
+    def test_c6_indentless_volumes_refuses_then_repoints_with_env_key(self):
+        """C6(a) is now a SAFE REFUSAL, not auto-detection. An indentless
+        `volumes:` sequence (items at the same indent as the key) can't be
+        service-scoped, so the whole-file key grab (which could repoint the
+        wrong service) is gone. Without --env-key the script refuses with a
+        message pointing at --env-key / --rewrite-compose; passing --env-key
+        completes the relocation (compose untouched)."""
         compose = (
             "services:\n"
             "  beets-web-manager:\n"
@@ -253,18 +256,27 @@ class RelocateEnvVarComposeTests(unittest.TestCase):
             "    - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
             "    - beets-config:/config\n"
         )
+        # Without --env-key: refuse, helpful message, nothing written.
         res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("--env-key", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        self.assertNotIn("BEETS_WEB_MANAGER_DATA_PATH=",
+                         Path(self.env).read_text(encoding="utf-8"))
+        self.assertFalse(Path(self.compose + ".bak").exists())
+        # With --env-key: repoints correctly, compose untouched.
+        res = self._apply_with_compose(compose, "--env-key", "BEETS_WEB_MANAGER_DATA_PATH")
         self.assertEqual(res.returncode, 0, res.stderr)
         new_dest = os.path.abspath(self.new).replace("\\", "/")
         self.assertIn("BEETS_WEB_MANAGER_DATA_PATH=" + new_dest,
                       Path(self.env).read_text(encoding="utf-8"))
-        # Compose untouched (env repoint, not a rewrite).
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
 
-    def test_c6_env_key_detected_for_trailing_comment_service_header(self):
-        """C6(b): a service header with a trailing comment
-        (`beets-web-manager:  # app`) is missed by the scoped scoper; the
-        whole-file fallback still detects the env key."""
+    def test_c6_trailing_comment_header_refuses_then_repoints_with_env_key(self):
+        """C6(b) is now a SAFE REFUSAL. A service header with a trailing comment
+        (`beets-web-manager:  # app`) can't be service-scoped, so without
+        --env-key the script refuses (pointing at --env-key / --rewrite-compose)
+        rather than grabbing a foreign service's key; --env-key completes it."""
         compose = (
             "services:\n"
             "  beets-web-manager:  # the app\n"
@@ -272,12 +284,76 @@ class RelocateEnvVarComposeTests(unittest.TestCase):
             "      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
             "      - beets-config:/config\n"
         )
+        # Without --env-key: refuse, helpful message, nothing written.
         res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("--env-key", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        self.assertNotIn("BEETS_WEB_MANAGER_DATA_PATH=",
+                         Path(self.env).read_text(encoding="utf-8"))
+        self.assertFalse(Path(self.compose + ".bak").exists())
+        # With --env-key: repoints correctly, compose untouched.
+        res = self._apply_with_compose(compose, "--env-key", "BEETS_WEB_MANAGER_DATA_PATH")
         self.assertEqual(res.returncode, 0, res.stderr)
         new_dest = os.path.abspath(self.new).replace("\\", "/")
         self.assertIn("BEETS_WEB_MANAGER_DATA_PATH=" + new_dest,
                       Path(self.env).read_text(encoding="utf-8"))
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+
+    def test_no_false_success_literal_target_with_foreign_env_sidecar(self):
+        """Data-safety regression (the C6 fallback's FIVE false-success
+        variants): the TARGET service has a HARDCODED literal /web-manager-data
+        mount in a layout the scoper can't read (indentless volumes, trailing-
+        comment header, or quoted short-form), while an unrelated `sidecar`
+        interpolates ${SIDECAR_DATA} at the same container path. The old
+        whole-file fallback grabbed SIDECAR_DATA, repointed the sidecar, and
+        reported SUCCESS while the target stayed on the old path. With the
+        fallback removed, every variant must REFUSE: nonzero, no SIDECAR_DATA=
+        written, compose untouched, no .bak."""
+        layouts = {
+            "indentless_volumes": (
+                "services:\n"
+                "  beets-web-manager:\n"
+                "    volumes:\n"
+                "    - /opt/target/web-manager-data:/web-manager-data\n"
+                "    - beets-config:/config\n"
+                "  sidecar:\n"
+                "    volumes:\n"
+                "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+            ),
+            "comment_header": (
+                "services:\n"
+                "  beets-web-manager:  # the app\n"
+                "    volumes:\n"
+                "      - /opt/target/web-manager-data:/web-manager-data\n"
+                "      - beets-config:/config\n"
+                "  sidecar:\n"
+                "    volumes:\n"
+                "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+            ),
+            "quoted_literal": (
+                "services:\n"
+                "  beets-web-manager:\n"
+                "    volumes:\n"
+                '      - "/opt/target/web-manager-data:/web-manager-data"\n'
+                "      - beets-config:/config\n"
+                "  sidecar:\n"
+                "    volumes:\n"
+                "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+            ),
+        }
+        for name, compose in layouts.items():
+            with self.subTest(layout=name):
+                res = self._apply_with_compose(compose)
+                self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+                # The helpful refusal routes the operator, not a false success.
+                self.assertIn("--rewrite-compose", res.stderr)
+                env_text = Path(self.env).read_text(encoding="utf-8")
+                self.assertNotIn("SIDECAR_DATA=", env_text)
+                self.assertNotIn("/web-manager-data", env_text)
+                # Target compose untouched, no backup written.
+                self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+                self.assertFalse(Path(self.compose + ".bak").exists())
 
     def test_c6b_multi_service_literal_target_refuses_not_foreign_env_key(self):
         """BLOCKING #1 (false-success regression): the TARGET service has a
@@ -310,9 +386,9 @@ class RelocateEnvVarComposeTests(unittest.TestCase):
 
     def test_env_key_override_is_honored_in_fallback_path(self):
         """BLOCKING #2 (--env-key non-functional): with an indentless `volumes:`
-        sequence (the C6 fallback path), an operator --env-key must be honored,
-        not overwritten by detection -- the fallback itself advertises passing
-        --env-key, so it must actually take effect."""
+        sequence (an unscopable layout the refusal now points operators at), an
+        operator --env-key must be honored, not overwritten by detection -- the
+        refusal advertises passing --env-key, so it must actually take effect."""
         compose = (
             "services:\n"
             "  beets-web-manager:\n"
