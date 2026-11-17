@@ -104,10 +104,32 @@ def _bind_app_globals_to_this_test_module(app_module, tmp_root: Path) -> str:
 try:
     APP = _import_app()
     _APP_IMPORT_ERROR = None
+    # Snapshot the process-wide app-family globals BEFORE rebinding them to this
+    # module's isolated temp library, so tearDownModule() can restore them.
+    # Without this, the raw beets Library bound below leaks into the shared
+    # `lib` global for every later-sorted module under `unittest discover`:
+    # stock beets Library.items() rejects the fields= kwarg the production
+    # StockBeetsLibrary facade accepts, so the next module to hit GET /api/library
+    # 500s instead of serving the fast tree (surfaced the #759 security-job FAIL
+    # in test_auth_and_setup.test_blank_or_garbage_epoch_file_fails_closed).
+    _ORIGINAL_APP_GLOBALS = {
+        name: getattr(APP, name, None)
+        for name in ("lib", "LIB_PATH", "_AI_BATCH_STATE_DIR")
+    }
     _bind_app_globals_to_this_test_module(APP, _TMP_ROOT)
 except Exception as exc:  # pragma: no cover - environment-dependent
     APP = None
     _APP_IMPORT_ERROR = exc
+    _ORIGINAL_APP_GLOBALS = {}
+
+
+def tearDownModule():
+    """Restore the app-family globals this module rebound to its isolated temp
+    library, keeping `unittest discover` order-independent. See
+    _bind_app_globals_to_this_test_module for why the rebind exists."""
+    if APP is not None:
+        for name, value in _ORIGINAL_APP_GLOBALS.items():
+            rebind_app_family(APP, name, value)
 
 
 @unittest.skipIf(APP is None, f"app.py could not be imported: {_APP_IMPORT_ERROR}")
