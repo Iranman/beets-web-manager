@@ -105,18 +105,25 @@ def _carrier_input_fingerprint(carrier: Dict[str, Any]) -> str:
     new download lands, a new attempt folder appears, or a file is rewritten --
     so a freshly downloaded album invalidates the checkpoint and is re-evaluated
     at once (requirement 8). "" when no staged audio folder is present."""
-    folder = _first_staged_folder_with_audio(carrier)
-    if not folder:
+    try:
+        folder = _first_staged_folder_with_audio(carrier)
+        if not folder:
+            return ""
+        from backend.ytdlp_service import _audio_files_in_dir
+        parts: List[str] = []
+        for f in sorted(_audio_files_in_dir(folder)):
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            parts.append(f"{os.path.basename(f)}:{st.st_size}:{st.st_mtime_ns}")
+        return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
+    except Exception:
+        # Best-effort skip optimization only: it must NEVER abort the sweep. On
+        # any error (e.g. the carrier store dir not yet provisioned, or a
+        # transient FS error) return "" so the checkpoint can't match and the
+        # carrier is re-verified -- never wrongly skipped.
         return ""
-    from backend.ytdlp_service import _audio_files_in_dir
-    parts: List[str] = []
-    for f in sorted(_audio_files_in_dir(folder)):
-        try:
-            st = os.stat(f)
-        except OSError:
-            continue
-        parts.append(f"{os.path.basename(f)}:{st.st_size}:{st.st_mtime_ns}")
-    return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _checkpoint_allows_skip(carrier: Dict[str, Any], fingerprint: str,

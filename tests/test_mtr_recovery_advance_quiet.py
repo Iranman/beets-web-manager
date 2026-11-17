@@ -332,6 +332,31 @@ class StatusShapeTests(_Mixin):
         self.assertFalse(report["needs_attention"])
 
 
+class FingerprintResilienceTests(_Mixin):
+    """#762 regression: the checkpoint fingerprint is a best-effort skip
+    optimization and must NEVER abort the sweep. When the carrier store is
+    unreadable (e.g. its dir is not yet provisioned, as in the #556
+    staging-reservation test that CI caught), the fingerprint degrades to "" so
+    the checkpoint can't match and the carrier is re-verified -- not a crash."""
+
+    def test_fingerprint_empty_when_staged_folder_lookup_raises(self):
+        carrier = {"carrier_id": "abc123def456", "revision": 1}
+        with mock.patch.object(recovery_service.recovery_carrier, "staged_folders_for",
+                               side_effect=FileNotFoundError("carrier store dir missing")):
+            self.assertEqual(recovery_service._carrier_input_fingerprint(carrier), "")
+
+    def test_unreadable_store_forces_reverify_not_skip(self):
+        # "" fingerprint can never equal a stored checkpoint fp, so the carrier
+        # is re-verified (the safe default), never wrongly skipped.
+        carrier = {"carrier_id": "abc123def456", "revision": 1}
+        checkpoints = {"abc123def456": {"rev": 1, "fp": "deadbeef", "ts": time.time()}}
+        with mock.patch.object(recovery_service.recovery_carrier, "staged_folders_for",
+                               side_effect=OSError("store I/O error")):
+            fp = recovery_service._carrier_input_fingerprint(carrier)
+        self.assertFalse(recovery_service._checkpoint_allows_skip(
+            carrier, fp, checkpoints, time.time()))
+
+
 class StatusSidecarRedactionTests(_Mixin):
     """#762 F1 (security hardening): the status sidecar is a second persistence
     path served back by the read-only status endpoint, so it must apply the same
