@@ -48,5 +48,9 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
-          npm audit --audit-level=high
+          # High/critical npm-audit gate with a documented exception list for
+          # advisories that are unfixable (no patched release) AND dev-only.
+          # Keeps the full high/critical audit armed for every other package.
+          # See frontend/scripts/audit-allowlist.mjs + docs/TECHNICAL_DEBT.md.
+          node scripts/audit-allowlist.mjs
           npm run typecheck
