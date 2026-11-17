@@ -232,6 +232,53 @@ class RelocateEnvVarComposeTests(unittest.TestCase):
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), self.COMPOSE)
         self.assertFalse(Path(self.compose + ".bak").exists())
 
+    def _apply_with_compose(self, compose_text):
+        Path(self.compose).write_text(compose_text, encoding="utf-8")
+        Path(self.env).write_text("TZ=UTC\n", encoding="utf-8")
+        return subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", self.compose, "--env-file", self.env,
+             "--no-recreate", "--apply"],
+            capture_output=True, text=True,
+        )
+
+    def test_c6_env_key_detected_for_indentless_volumes_sequence(self):
+        """C6(a): an indentless `volumes:` sequence (items at the same indent as
+        the key) is valid YAML but the service-scoped line scoper misses it; the
+        whole-file fallback still detects the env key."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "    - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
+            "    - beets-config:/config\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        self.assertIn("BEETS_WEB_MANAGER_DATA_PATH=" + new_dest,
+                      Path(self.env).read_text(encoding="utf-8"))
+        # Compose untouched (env repoint, not a rewrite).
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+
+    def test_c6_env_key_detected_for_trailing_comment_service_header(self):
+        """C6(b): a service header with a trailing comment
+        (`beets-web-manager:  # app`) is missed by the scoped scoper; the
+        whole-file fallback still detects the env key."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:  # the app\n"
+            "    volumes:\n"
+            "      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
+            "      - beets-config:/config\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        self.assertIn("BEETS_WEB_MANAGER_DATA_PATH=" + new_dest,
+                      Path(self.env).read_text(encoding="utf-8"))
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+
 
 @unittest.skipUnless(BASH, "needs a POSIX bash (Linux/macOS)")
 class RelocateComposeHardeningTests(unittest.TestCase):
@@ -349,6 +396,116 @@ class RelocateComposeHardeningTests(unittest.TestCase):
         )
         self.assertNotEqual(res.returncode, 0)
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+
+
+@unittest.skipUnless(BASH, "needs a POSIX bash (Linux/macOS)")
+class RelocateRemoveOldGuardTests(unittest.TestCase):
+    """C1 + C7: --remove-old safety. C1 rejects --no-recreate --remove-old up
+    front (the removal's live-mount cross-check is gated on the recreate). C7
+    covers the F1 second-defense cross-check with a mocked docker/curl on PATH:
+    removal proceeds only when the live container mounts the NEW path."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bwm-relocate-rm-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.old = os.path.join(self.tmp, "old-data")
+        self.new = os.path.join(self.tmp, "new-data")
+        self.env = os.path.join(self.tmp, ".env")
+        os.makedirs(os.path.join(self.old, "jobs"))
+        Path(self.old, "sentinel.txt").write_text("keep-me\n", encoding="utf-8")
+        Path(self.old, "jobs", "job_1.json").write_text('{"id":"job_1"}', encoding="utf-8")
+        Path(self.env).write_text("TZ=UTC\n", encoding="utf-8")
+
+    def test_c1_no_recreate_with_remove_old_is_rejected(self):
+        """C1: the combination is refused before any copy/removal happens."""
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--env-file", self.env, "--env-key", "BEETS_WEB_MANAGER_DATA_PATH",
+             "--no-recreate", "--remove-old", "--apply"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("--no-recreate", res.stderr)
+        # Old dir untouched, dest never created.
+        self.assertTrue(os.path.isfile(os.path.join(self.old, "sentinel.txt")))
+        self.assertFalse(os.path.exists(self.new))
+
+    def _mock_bin(self, mounts_json):
+        """A PATH dir with fake `docker` (JSON mounts configurable) + `curl`."""
+        binp = os.path.join(self.tmp, "bin")
+        os.makedirs(binp, exist_ok=True)
+        docker = os.path.join(binp, "docker")
+        Path(docker).write_text(
+            "#!/usr/bin/env bash\n"
+            'if [[ "$1" == "compose" ]]; then\n'
+            '  shift\n'
+            '  [[ "$1" == "-f" ]] && shift 2\n'
+            '  case "$1" in\n'
+            '    up) exit 0 ;;\n'
+            '    ps) echo fakecid123; exit 0 ;;\n'
+            '  esac\n'
+            '  exit 0\n'
+            'fi\n'
+            'if [[ "$1" == "inspect" ]]; then\n'
+            '  fmt="$3"\n'
+            '  case "$fmt" in\n'
+            '    *State.Health*) echo healthy ;;\n'
+            '    *json*) echo "$MOCK_MOUNTS_JSON" ;;\n'
+            '    *) echo "" ;;\n'
+            '  esac\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 0\n',
+            encoding="utf-8",
+        )
+        os.chmod(docker, 0o755)
+        curl = os.path.join(binp, "curl")
+        Path(curl).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        os.chmod(curl, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = binp + os.pathsep + env["PATH"]
+        env["MOCK_MOUNTS_JSON"] = mounts_json
+        # A real Compose file is needed for the recreate branch.
+        compose = os.path.join(self.tmp, "docker-compose.yml")
+        Path(compose).write_text(
+            "services:\n  beets-web-manager:\n    volumes:\n"
+            "      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n",
+            encoding="utf-8",
+        )
+        return env, compose
+
+    def test_c7_remove_old_proceeds_when_live_mount_is_new_path(self):
+        new_abs = os.path.abspath(self.new).replace("\\", "/")
+        env, compose = self._mock_bin(
+            '[{"Destination":"/web-manager-data","Source":"%s"}]' % new_abs)
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", compose, "--env-file", self.env,
+             "--remove-old", "--apply"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("live container mounts", res.stderr)
+        # Cross-check passed -> old dir removed, new dir has the data.
+        self.assertFalse(os.path.exists(self.old))
+        self.assertEqual(Path(self.new, "sentinel.txt").read_text(encoding="utf-8"), "keep-me\n")
+
+    def test_c7_remove_old_refuses_when_live_mount_is_old_path(self):
+        """F1 second defense: if the live mount is NOT the new path (repoint did
+        not take effect), the old dir must be left intact."""
+        old_abs = os.path.abspath(self.old).replace("\\", "/")
+        env, compose = self._mock_bin(
+            '[{"Destination":"/web-manager-data","Source":"%s"}]' % old_abs)
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", compose, "--env-file", self.env,
+             "--remove-old", "--apply"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("did not take effect", res.stderr)
+        # Old dir intact (not removed).
+        self.assertTrue(os.path.isfile(os.path.join(self.old, "sentinel.txt")))
 
 
 if __name__ == "__main__":

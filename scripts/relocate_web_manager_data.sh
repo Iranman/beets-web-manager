@@ -118,6 +118,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# C1: --remove-old deletes the OLD dir only after proving (via docker inspect)
+# that the LIVE container actually mounts the NEW path at MOUNT_DEST. That F1
+# cross-check is gated on the recreate, so with --no-recreate it is skipped and
+# the rm -rf would run with no live verification. Reject the combination up
+# front (the only safe choice): recreate it yourself, confirm it, then remove
+# the old dir by hand (the SUCCESS output prints the exact command).
+if [[ "$RECREATE" -eq 0 && "$REMOVE_OLD" -eq 1 ]]; then
+  die "--remove-old cannot be combined with --no-recreate: removal is gated on the post-recreate live-mount verification. Recreate the service yourself, confirm it runs on the new path, then remove the old dir by hand (the printed 'rm -rf' command)."
+fi
+
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found on PATH: $1"; }
 require_cmd python3
 
@@ -201,6 +211,17 @@ detect_env_key() {
   [[ -n "$COMPOSE_FILE" ]] || return 0
   local line
   line="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" | grep -E '\$\{' | head -n 1 || true)"
+  # C6 fallback (env-key DETECTION ONLY): the service-scoped line scoper misses
+  # two valid-but-uncommon layouts -- an indentless `volumes:` sequence (items
+  # at the same indent as the key) and a service header with a trailing comment.
+  # When scoped detection finds no interpolated mount, fall back to a whole-file
+  # grep (pre-#767 behavior). This only chooses which env KEY to set -- a safe,
+  # reversible env-file edit -- and NEVER widens the service-scoped
+  # --rewrite-compose path (the F1 data-loss fix stays strictly scoped).
+  if [[ -z "$line" ]]; then
+    line="$(grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" "$COMPOSE_FILE" | grep -E '\$\{' | head -n 1 || true)"
+    [[ -n "$line" ]] && warn "env-key detection: no ${MOUNT_DEST} mount found inside service '$SERVICE' (indentless volumes or commented header?); using a whole-file match. Pass --env-key NAME to override."
+  fi
   [[ -n "$line" ]] || return 0
   ENV_KEY="$(printf '%s' "$line" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | head -n 1 | sed 's/^\${//')"
 }
@@ -558,7 +579,16 @@ if [[ "$REMOVE_OLD" -eq 1 ]]; then
   # mounts the NEW path at MOUNT_DEST. If the repoint hit the wrong service/line
   # the app is still running on the old dir -- deleting it would be data loss.
   if [[ "$RECREATE" -eq 1 ]]; then
-    live_src="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$MOUNT_DEST\"}}{{.Source}}{{end}}{{end}}" "$CID" 2>/dev/null || true)"
+    # C4: emit the mount list as JSON and match in Python rather than
+    # interpolating the operator-supplied $MOUNT_DEST into the Go template
+    # (same pattern as resolve_source_from_docker above).
+    live_src="$(docker inspect --format '{{json .Mounts}}' "$CID" 2>/dev/null | python3 -I -c '
+import json, sys
+dest = sys.argv[1]
+for m in json.load(sys.stdin):
+    if m.get("Destination") == dest:
+        print(m.get("Source", "")); break
+' "$MOUNT_DEST" 2>/dev/null || true)"
     [[ -n "$live_src" ]] || die "refusing --remove-old: could not read the live $MOUNT_DEST mount from the recreated container -- old data left intact at $SRC_CANON"
     [[ "$(canon_path "$live_src")" == "$DST_CANON" ]] \
       || die "refusing --remove-old: live container mounts $MOUNT_DEST from '$live_src', not the new path '$DST_CANON' -- the repoint did not take effect; old data left intact at $SRC_CANON"

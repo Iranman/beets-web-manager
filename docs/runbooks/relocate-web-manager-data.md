@@ -40,6 +40,13 @@ one.
 > `docker-compose.full.yml` reads `BEETS_WEB_MANAGER_DATA_PATH`. Let the script
 > detect it from your live Compose file rather than assuming.
 
+> Detection first scans only the target service's `volumes:` block. For a few
+> valid-but-uncommon layouts it can't scope (an *indentless* `volumes:`
+> sequence, or a service header with a trailing comment) it falls back to a
+> whole-file scan and prints a warning. If that picks the wrong key, pass
+> `--env-key NAME` to set it explicitly. (The fallback is env-key detection
+> only; the `--rewrite-compose` path stays strictly service-scoped.)
+
 ### Hardcoded mount source (no `${VAR}`)
 
 Some real deployments pin the mount source as a **hardcoded host path** instead
@@ -85,7 +92,9 @@ options:
     `source:` / `target:`) or an interpolated source (`${VAR}` **or** bare
     `$VAR`) is not rewritten — the script refuses with a helpful message rather
     than editing the wrong thing. For `${VAR}` the default env-file repoint
-    applies; a long-form or bare-`$` source must be edited by hand.
+    applies; a long-form or bare-`$` source must be edited by hand. A **quoted**
+    short-form literal (`- "/x:/web-manager-data"`) is also refused at detection
+    (no change, no `.bak`); unquote it or edit it by hand.
   - **`--remove-old` is cross-checked.** When the service is recreated, the
     script verifies via `docker inspect` that the live container actually
     mounts the new path at `/web-manager-data` before it will delete the old
@@ -172,6 +181,11 @@ back and recreating:
    - env-file mode: set the env key back to the old path;
    - `--rewrite-compose` mode: restore the one mount line from the
      `<compose>.bak` the apply wrote (or set it back to the old path).
+     Note: the `.bak` is the Compose file as it was at the *first* relocation.
+     If a genuine rewrite failure forces an automatic `.bak` restore, any
+     unrelated manual Compose edits made since then are reverted too (this
+     affects only the Compose YAML, never library data); re-apply those edits
+     by hand afterward.
 2. Recreate only the service:
 
    ```bash
@@ -194,6 +208,13 @@ rm -rf -- '/path/to/old/web-manager-data'
 Or let the script do it in the same run (only after health passes) with
 `--remove-old`. The backup still remains.
 
+> `--remove-old` **cannot be combined with `--no-recreate`.** Before deleting
+> the old dir the script verifies (via `docker inspect`) that the live
+> container actually mounts the *new* path at `/web-manager-data`; that
+> cross-check needs the recreate. With `--no-recreate` the removal would run
+> with no live verification, so the combination is refused up front. Recreate
+> the service yourself, confirm it, then remove the old dir by hand.
+
 ## Idempotency / re-running
 
 - Re-running a completed move refuses because the destination is now
@@ -213,7 +234,7 @@ Or let the script do it in the same run (only after health passes) with
 | `--service NAME` | Compose service (default `beets-web-manager`). |
 | `--resume` | Allow a non-empty destination (re-sync). |
 | `--no-recreate` | Do everything except the docker recreate/health check. |
-| `--remove-old` | Delete the old dir after health passes. |
+| `--remove-old` | Delete the old dir after health passes (and after verifying the live container mounts the new path). Cannot be combined with `--no-recreate`. |
 | `--rewrite-compose` | Hardcoded mount source: rewrite the one Compose line in place (writes `<compose>.bak` first). Opt-in. |
 
 Run `bash scripts/relocate_web_manager_data.sh --help` for the full list.
