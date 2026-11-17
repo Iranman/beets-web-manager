@@ -4075,7 +4075,12 @@ def setup_first_run():
             return jsonify({"ok": False, "error": "Username and password must be strings"}), 400
 
         username = raw_user.strip() or "admin"
-        if len(username) > 64 or re.search(r"[\r\n\x00-\x1f]", username):
+        # #759: reject every char str.splitlines() treats as a line break
+        # (incl. U+0085/U+2028/U+2029) plus the other C0 controls, so the
+        # value persisted here is read back verbatim via .splitlines()[0] and
+        # can never be silently truncated (stored username == login-effective
+        # username). Same rule as setup_account below.
+        if len(username) > 64 or re.search(r"[\r\n\x00-\x1f\x85\u2028\u2029]", username):
             return jsonify({"ok": False, "error": "Invalid username format"}), 400
 
         password = raw_pass.strip()
@@ -4112,10 +4117,12 @@ def setup_first_run():
             }), 500
 
         _cleanup_initial_browser_password_if_replaced()
+        from app import _stamp_session_epoch
         session.clear()
         session.permanent = True
         session["authenticated"] = True
         session["user"] = username
+        _stamp_session_epoch()  # #759: bind this session to the current epoch
         _invalidate_setup_status_cache()
 
         return jsonify({"ok": True, "message": "First-run setup complete"})
@@ -4154,6 +4161,8 @@ def setup_account():
         _PERSISTED_BROWSER_PASSWORD_FILE,
         _csrf_request_allowed,
         _json_security_error,
+        _bump_session_epoch,
+        _stamp_session_epoch,
     )
 
     if not _csrf_request_allowed():
@@ -4197,7 +4206,12 @@ def setup_account():
     new_username = None
     if change_username:
         new_username = raw_user.strip()
-        if len(new_username) > 64 or re.search(r"[\r\n\x00-\x1f]", new_username):
+        # #759: reject every char str.splitlines() treats as a line break
+        # (incl. U+0085/U+2028/U+2029) plus the other C0 controls, so the
+        # value persisted here is read back verbatim via .splitlines()[0] and
+        # can never be silently truncated (stored username == login-effective
+        # username). Same rule as setup_first_run above.
+        if len(new_username) > 64 or re.search(r"[\r\n\x00-\x1f\x85\u2028\u2029]", new_username):
             return jsonify({"ok": False, "error": "Invalid username format"}), 400
 
     hashed_password = None
@@ -4240,10 +4254,18 @@ def setup_account():
                      "BEETS_WEB_PASSWORD configuration. Remove it to manage credentials in the app.",
         }), 409
 
-    # Keep this session signed in and reflect a changed username on it.
+    # #759: a password rotation must force re-auth on every OTHER already
+    # authenticated session. Bump the persisted session epoch so sessions
+    # issued under the old epoch stop validating (_session_authorized), then
+    # re-stamp THIS session to the new epoch so the actor who just rotated
+    # stays signed in. Username-only changes do NOT rotate the epoch (#759
+    # scopes session invalidation to the password change).
     try:
+        if change_password:
+            _bump_session_epoch()
         if change_username:
             session["user"] = new_username
+        _stamp_session_epoch()
     except Exception:
         pass
 
@@ -4407,10 +4429,12 @@ def setup_mark_complete():
             return jsonify({"ok": False, "error": "Setup already completed"}), 409
 
         try:
+            from app import _stamp_session_epoch
             session.clear()
             session.permanent = True
             session["authenticated"] = True
             session["user"] = _security_auth_username()
+            _stamp_session_epoch()  # #759: bind this session to the current epoch
         except RuntimeError:
             if not stub_mode:
                 raise

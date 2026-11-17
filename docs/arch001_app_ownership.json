@@ -1463,10 +1463,11 @@
    "desired_owner": "UNCLASSIFIED",
    "migration_status": "EXTRACTED_SHARED",
    "callers": [
+    "_bump_session_epoch",
     "_persist_generated_auth_token",
     "_set_browser_setup_state"
    ],
-   "caller_count": 2,
+   "caller_count": 3,
    "dependencies": [
     "_persist_app_config_text"
    ]
@@ -1517,11 +1518,76 @@
    "dependencies": []
   },
   {
+   "name": "_current_session_epoch",
+   "module": "backend/auth_service.py",
+   "lines": [
+    170,
+    182
+   ],
+   "size": 13,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AUTH",
+   "desired_owner": "backend/auth_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_bump_session_epoch",
+    "_session_authorized",
+    "_stamp_session_epoch"
+   ],
+   "caller_count": 3,
+   "dependencies": []
+  },
+  {
+   "name": "_bump_session_epoch",
+   "module": "backend/auth_service.py",
+   "lines": [
+    185,
+    196
+   ],
+   "size": 12,
+   "body_lines": 4,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AUTH",
+   "desired_owner": "backend/auth_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [],
+   "caller_count": 0,
+   "dependencies": [
+    "_current_session_epoch",
+    "_persist_file_atomically"
+   ]
+  },
+  {
+   "name": "_stamp_session_epoch",
+   "module": "backend/auth_service.py",
+   "lines": [
+    199,
+    208
+   ],
+   "size": 10,
+   "body_lines": 5,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "AUTH",
+   "desired_owner": "backend/auth_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "api_login"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_current_session_epoch"
+   ]
+  },
+  {
    "name": "_security_auth_password",
    "module": "backend/auth_service.py",
    "lines": [
-    165,
-    191
+    211,
+    237
    ],
    "size": 27,
    "body_lines": 26,
@@ -1545,8 +1611,8 @@
    "name": "_security_auth_username",
    "module": "backend/auth_service.py",
    "lines": [
-    194,
-    205
+    240,
+    251
    ],
    "size": 12,
    "body_lines": 11,
@@ -1567,8 +1633,8 @@
    "name": "_browser_password_min_length",
    "module": "backend/auth_service.py",
    "lines": [
-    211,
-    212
+    257,
+    258
    ],
    "size": 2,
    "body_lines": 1,
@@ -1590,8 +1656,8 @@
    "name": "_password_looks_placeholder",
    "module": "backend/auth_service.py",
    "lines": [
-    215,
-    225
+    261,
+    271
    ],
    "size": 11,
    "body_lines": 10,
@@ -1611,8 +1677,8 @@
    "name": "_browser_password_is_usable",
    "module": "backend/auth_service.py",
    "lines": [
-    228,
-    236
+    274,
+    282
    ],
    "size": 9,
    "body_lines": 8,
@@ -1641,8 +1707,8 @@
    "name": "_password_requirements_unmet",
    "module": "backend/auth_service.py",
    "lines": [
-    239,
-    247
+    285,
+    293
    ],
    "size": 9,
    "body_lines": 7,
@@ -1664,8 +1730,8 @@
    "name": "generate_secure_browser_password",
    "module": "backend/auth_service.py",
    "lines": [
-    250,
-    263
+    296,
+    309
    ],
    "size": 14,
    "body_lines": 12,
@@ -1685,8 +1751,8 @@
    "name": "_auth_secret_is_usable",
    "module": "backend/auth_service.py",
    "lines": [
-    266,
-    278
+    312,
+    324
    ],
    "size": 13,
    "body_lines": 12,
@@ -1707,8 +1773,8 @@
    "name": "_has_explicit_browser_password",
    "module": "backend/auth_service.py",
    "lines": [
-    281,
-    300
+    327,
+    346
    ],
    "size": 20,
    "body_lines": 19,
@@ -1730,8 +1796,8 @@
    "name": "_security_auth_disabled",
    "module": "backend/auth_service.py",
    "lines": [
-    303,
-    304
+    349,
+    350
    ],
    "size": 2,
    "body_lines": 1,
@@ -1757,8 +1823,8 @@
    "name": "generate_secure_auth_token",
    "module": "backend/auth_service.py",
    "lines": [
-    307,
-    310
+    353,
+    356
    ],
    "size": 4,
    "body_lines": 1,
@@ -1777,8 +1843,8 @@
    "name": "_persist_generated_auth_token",
    "module": "backend/auth_service.py",
    "lines": [
-    313,
-    315
+    359,
+    361
    ],
    "size": 3,
    "body_lines": 1,
@@ -1799,8 +1865,8 @@
    "name": "_constant_time_equal",
    "module": "backend/auth_service.py",
    "lines": [
-    318,
-    319
+    364,
+    365
    ],
    "size": 2,
    "body_lines": 1,
@@ -1822,8 +1888,8 @@
    "name": "_verify_password",
    "module": "backend/auth_service.py",
    "lines": [
-    322,
-    337
+    368,
+    383
    ],
    "size": 16,
    "body_lines": 9,
@@ -1847,8 +1913,8 @@
    "name": "_check_password_value",
    "module": "backend/auth_service.py",
    "lines": [
-    340,
-    350
+    386,
+    396
    ],
    "size": 11,
    "body_lines": 10,
@@ -1871,8 +1937,8 @@
    "name": "_auth_ip_limit",
    "module": "backend/auth_service.py",
    "lines": [
-    353,
-    357
+    399,
+    403
    ],
    "size": 5,
    "body_lines": 4,
@@ -1894,8 +1960,8 @@
    "name": "_auth_account_limit",
    "module": "backend/auth_service.py",
    "lines": [
-    360,
-    364
+    406,
+    410
    ],
    "size": 5,
    "body_lines": 4,
@@ -1918,8 +1984,8 @@
    "name": "_password_attempts_limited",
    "module": "backend/auth_service.py",
    "lines": [
-    370,
-    375
+    416,
+    421
    ],
    "size": 6,
    "body_lines": 5,
@@ -1943,8 +2009,8 @@
    "name": "_record_account_auth_failure",
    "module": "backend/auth_service.py",
    "lines": [
-    378,
-    380
+    424,
+    426
    ],
    "size": 3,
    "body_lines": 2,
@@ -1966,8 +2032,8 @@
    "name": "_bearer_authorized",
    "module": "backend/auth_service.py",
    "lines": [
-    383,
-    387
+    429,
+    433
    ],
    "size": 5,
    "body_lines": 4,
@@ -1990,8 +2056,8 @@
    "name": "_basic_authorized",
    "module": "backend/auth_service.py",
    "lines": [
-    390,
-    405
+    436,
+    451
    ],
    "size": 16,
    "body_lines": 15,
@@ -2017,11 +2083,11 @@
    "name": "_session_authorized",
    "module": "backend/auth_service.py",
    "lines": [
-    408,
-    413
+    454,
+    468
    ],
-   "size": 6,
-   "body_lines": 5,
+   "size": 15,
+   "body_lines": 14,
    "route": null,
    "mutation_capable": false,
    "domain": "AUTH",
@@ -2032,14 +2098,16 @@
     "_transaction_user_label"
    ],
    "caller_count": 2,
-   "dependencies": []
+   "dependencies": [
+    "_current_session_epoch"
+   ]
   },
   {
    "name": "_request_authorized",
    "module": "backend/auth_service.py",
    "lines": [
-    416,
-    418
+    471,
+    473
    ],
    "size": 3,
    "body_lines": 2,
@@ -2064,8 +2132,8 @@
    "name": "probe_may_use_stored_secret",
    "module": "backend/auth_service.py",
    "lines": [
-    421,
-    439
+    476,
+    494
    ],
    "size": 19,
    "body_lines": 11,
@@ -2085,8 +2153,8 @@
    "name": "_trusted_proxy_cidrs",
    "module": "backend/auth_service.py",
    "lines": [
-    442,
-    444
+    497,
+    499
    ],
    "size": 3,
    "body_lines": 2,
@@ -2105,8 +2173,8 @@
    "name": "_valid_client_ip",
    "module": "backend/auth_service.py",
    "lines": [
-    447,
-    453
+    502,
+    508
    ],
    "size": 7,
    "body_lines": 6,
@@ -2125,8 +2193,8 @@
    "name": "_request_client_identity",
    "module": "backend/auth_service.py",
    "lines": [
-    456,
-    483
+    511,
+    538
    ],
    "size": 28,
    "body_lines": 19,
@@ -2149,8 +2217,8 @@
    "name": "_rate_limit_subject",
    "module": "backend/auth_service.py",
    "lines": [
-    486,
-    492
+    541,
+    547
    ],
    "size": 7,
    "body_lines": 6,
@@ -2173,8 +2241,8 @@
    "name": "_rate_limit_profile_for_request",
    "module": "backend/auth_service.py",
    "lines": [
-    495,
-    518
+    550,
+    573
    ],
    "size": 24,
    "body_lines": 23,
@@ -2193,8 +2261,8 @@
    "name": "_rate_limit_peek",
    "module": "backend/auth_service.py",
    "lines": [
-    521,
-    530
+    576,
+    585
    ],
    "size": 10,
    "body_lines": 8,
@@ -2214,8 +2282,8 @@
    "name": "_rate_limited",
    "module": "backend/auth_service.py",
    "lines": [
-    533,
-    547
+    588,
+    602
    ],
    "size": 15,
    "body_lines": 14,
@@ -2236,8 +2304,8 @@
    "name": "_rate_limit_response",
    "module": "backend/auth_service.py",
    "lines": [
-    550,
-    554
+    605,
+    609
    ],
    "size": 5,
    "body_lines": 4,
@@ -2257,8 +2325,8 @@
    "name": "_same_origin_url",
    "module": "backend/auth_service.py",
    "lines": [
-    557,
-    565
+    612,
+    620
    ],
    "size": 9,
    "body_lines": 8,
@@ -2277,8 +2345,8 @@
    "name": "_explicit_authorization_header_present",
    "module": "backend/auth_service.py",
    "lines": [
-    568,
-    570
+    623,
+    625
    ],
    "size": 3,
    "body_lines": 2,
@@ -2297,8 +2365,8 @@
    "name": "_csrf_request_allowed",
    "module": "backend/auth_service.py",
    "lines": [
-    573,
-    599
+    628,
+    654
    ],
    "size": 27,
    "body_lines": 26,
@@ -2322,8 +2390,8 @@
    "name": "_json_security_error",
    "module": "backend/auth_service.py",
    "lines": [
-    602,
-    607
+    657,
+    662
    ],
    "size": 6,
    "body_lines": 5,
@@ -2344,8 +2412,8 @@
    "name": "_sanitize_confirmation_reason",
    "module": "backend/auth_service.py",
    "lines": [
-    613,
-    631
+    668,
+    686
    ],
    "size": 19,
    "body_lines": 10,
@@ -2367,8 +2435,8 @@
    "name": "_is_public_endpoint",
    "module": "backend/auth_service.py",
    "lines": [
-    634,
-    637
+    689,
+    692
    ],
    "size": 4,
    "body_lines": 3,
@@ -2387,8 +2455,8 @@
    "name": "_auth_failure_rate_limit_response",
    "module": "backend/auth_service.py",
    "lines": [
-    640,
-    658
+    695,
+    713
    ],
    "size": 19,
    "body_lines": 18,
@@ -2415,8 +2483,8 @@
    "name": "_inline_script_csp_hashes",
    "module": "backend/auth_service.py",
    "lines": [
-    664,
-    674
+    719,
+    729
    ],
    "size": 11,
    "body_lines": 10,
@@ -2435,8 +2503,8 @@
    "name": "_content_security_policy",
    "module": "backend/auth_service.py",
    "lines": [
-    677,
-    690
+    732,
+    745
    ],
    "size": 14,
    "body_lines": 13,
@@ -2457,8 +2525,8 @@
    "name": "_client_ip_is_lan",
    "module": "backend/auth_service.py",
    "lines": [
-    693,
-    699
+    748,
+    754
    ],
    "size": 7,
    "body_lines": 6,
@@ -2479,8 +2547,8 @@
    "name": "_transaction_user_label",
    "module": "backend/auth_service.py",
    "lines": [
-    702,
-    716
+    757,
+    771
    ],
    "size": 15,
    "body_lines": 11,
@@ -42551,10 +42619,10 @@
    "module": "routes_system.py",
    "lines": [
     27,
-    58
+    60
    ],
-   "size": 32,
-   "body_lines": 31,
+   "size": 34,
+   "body_lines": 33,
    "route": {
     "method": "POST",
     "path": "/api/login"
@@ -42572,6 +42640,7 @@
     "_json_security_error",
     "_security_auth_disabled",
     "_security_auth_username",
+    "_stamp_session_epoch",
     "_verify_password"
    ]
   },
@@ -42579,8 +42648,8 @@
    "name": "api_logout",
    "module": "routes_system.py",
    "lines": [
-    63,
-    71
+    65,
+    73
    ],
    "size": 9,
    "body_lines": 8,
@@ -42603,8 +42672,8 @@
    "name": "api_auth_me",
    "module": "routes_system.py",
    "lines": [
-    75,
-    96
+    77,
+    98
    ],
    "size": 22,
    "body_lines": 21,
@@ -42629,8 +42698,8 @@
    "name": "api_ai_matching_regressions",
    "module": "routes_system.py",
    "lines": [
-    100,
-    101
+    102,
+    103
    ],
    "size": 2,
    "body_lines": 1,
@@ -42652,8 +42721,8 @@
    "name": "get_music_format_preferences",
    "module": "routes_system.py",
    "lines": [
-    107,
-    109
+    109,
+    111
    ],
    "size": 3,
    "body_lines": 2,
@@ -42675,8 +42744,8 @@
    "name": "save_music_format_preferences_route",
    "module": "routes_system.py",
    "lines": [
-    113,
-    133
+    115,
+    135
    ],
    "size": 21,
    "body_lines": 17,
@@ -42698,8 +42767,8 @@
    "name": "get_config",
    "module": "routes_system.py",
    "lines": [
-    145,
-    167
+    147,
+    169
    ],
    "size": 23,
    "body_lines": 22,
@@ -42722,8 +42791,8 @@
    "name": "save_config",
    "module": "routes_system.py",
    "lines": [
-    171,
-    207
+    173,
+    209
    ],
    "size": 37,
    "body_lines": 36,
@@ -42747,8 +42816,8 @@
    "name": "revert_config",
    "module": "routes_system.py",
    "lines": [
-    211,
-    232
+    213,
+    234
    ],
    "size": 22,
    "body_lines": 21,
@@ -42771,8 +42840,8 @@
    "name": "api_plugins_install_log",
    "module": "routes_system.py",
    "lines": [
-    236,
-    238
+    238,
+    240
    ],
    "size": 3,
    "body_lines": 1,
@@ -42792,8 +42861,8 @@
    "name": "api_plugins_installed",
    "module": "routes_system.py",
    "lines": [
-    242,
-    244
+    244,
+    246
    ],
    "size": 3,
    "body_lines": 1,

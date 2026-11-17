@@ -162,6 +162,52 @@ _PERSISTED_BROWSER_USERNAME_FILE = Path(
 )
 
 
+_SESSION_EPOCH_FILE = Path(
+    os.environ.get("BEETS_WEB_SESSION_EPOCH_FILE", str(WEB_MANAGER_DATA_DIR / ".session_epoch"))
+)
+
+
+def _current_session_epoch() -> int:
+    """Monotonic counter advanced whenever the admin password is rotated
+    (#759). Every signed session records the epoch it was issued under, and
+    _session_authorized() rejects a session whose epoch is behind the current
+    one, so a password change forces re-auth on all OTHER sessions. A
+    missing or unreadable epoch file reads as 0: the baseline, pre-rotation
+    epoch. Note the fail-closed direction -- if the file was bumped to N and
+    then becomes unreadable, this returns 0, so sessions stamped N (incl. the
+    current actor) stop validating rather than being wrongly admitted."""
+    try:
+        return int(_SESSION_EPOCH_FILE.read_text(encoding="utf-8").splitlines()[0].strip() or "0")
+    except Exception:
+        return 0
+
+
+def _bump_session_epoch() -> int:
+    """Advance and persist the session epoch so every session issued under
+    the old epoch stops validating (#759: password rotation revokes other
+    sessions). Returns the epoch now in effect; callers re-stamp the current
+    session to this value to keep the actor who just rotated signed in. On a
+    persistence failure the epoch is unchanged and the current value is
+    returned, so the caller never stamps the active session to an epoch that
+    was not durably recorded."""
+    new_epoch = _current_session_epoch() + 1
+    if _persist_file_atomically(_SESSION_EPOCH_FILE, str(new_epoch)):
+        return new_epoch
+    return _current_session_epoch()
+
+
+def _stamp_session_epoch() -> None:
+    """Record the current epoch on the active Flask session so it keeps
+    validating until the next password rotation (#759). Called wherever a
+    session is established (sign-in, first-run, setup completion) or kept
+    after a credential change."""
+    try:
+        from flask import session
+        session["epoch"] = _current_session_epoch()
+    except Exception:
+        pass
+
+
 def _security_auth_password() -> str:
     value = _first_config_secret("BEETS_WEB_PASSWORD")
     if value:
@@ -408,7 +454,16 @@ def _basic_authorized(header: str) -> bool:
 def _session_authorized() -> bool:
     try:
         from flask import session
-        return bool(session.get("authenticated") is True and session.get("user"))
+        if not (session.get("authenticated") is True and session.get("user")):
+            return False
+        # #759: a session is valid only while its epoch matches the current
+        # one. A password rotation bumps the epoch (_bump_session_epoch), so
+        # sessions issued before it stop validating -> forced re-auth
+        # everywhere. A legacy session with no epoch key counts as the
+        # baseline epoch 0, so deploying this change does not log anyone out
+        # until the first rotation. Session contents are integrity-protected
+        # by the Flask SECRET_KEY, so this stamp cannot be forged.
+        return int(session.get("epoch") or 0) == _current_session_epoch()
     except Exception:
         return False
 

@@ -37,6 +37,7 @@ class AuthAndSetupTests(unittest.TestCase):
         self.setup_state_file = self.data_dir / ".browser_setup_state"
         self.auth_token_file = self.data_dir / ".auth_token"
         self.setup_complete_file = self.data_dir / ".setup_complete"
+        self.session_epoch_file = self.data_dir / ".session_epoch"
 
         self.env_patch = mock.patch.dict(
             os.environ,
@@ -56,6 +57,7 @@ class AuthAndSetupTests(unittest.TestCase):
             patch_app_family(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
             patch_app_family(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
             patch_app_family(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
+            patch_app_family(app_module, "_SESSION_EPOCH_FILE", self.session_epoch_file),
             patch_app_family(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
             patch_app_family(app_module, "_GENERATED_AUTH_TOKEN_FILE", self.auth_token_file),
             mock.patch.object(routes_setup, "_SETUP_COMPLETE_MARKER", self.setup_complete_file),
@@ -553,6 +555,90 @@ class AccountCredentialChangeTests(AuthAndSetupTests):
                 headers=self.HEADERS,
             )
             self.assertEqual(still_limited.status_code, 429)
+
+    def test_username_with_unicode_line_separator_is_rejected(self):
+        """#759 item 1: the username is read back via .splitlines()[0], so a
+        value containing a Unicode line break (U+0085/U+2028/U+2029) would be
+        silently truncated on read -- stored != login-effective. Validation
+        must reject every such character so the two can never diverge."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+        user_before = self.persisted_user_file.read_text(encoding="utf-8")
+
+        for sep in ("\u0085", " ", " "):
+            bad = f"cur{sep}ator"
+            # Sanity: this is exactly the truncation the read path would cause.
+            self.assertNotEqual(bad.splitlines()[0], bad, sep)
+            resp = self.client.post(
+                "/api/setup/account",
+                json={"current_password": old, "username": bad},
+                headers=self.HEADERS,
+            )
+            self.assertEqual(resp.status_code, 400, (repr(sep), resp.get_json()))
+            self.assertIn("Invalid username format", resp.get_json()["error"])
+
+        # No truncated username was ever persisted; the stored value is intact.
+        self.assertEqual(self.persisted_user_file.read_text(encoding="utf-8"), user_before)
+
+    def test_password_change_invalidates_other_sessions(self):
+        """#759 item 2: rotating the password must force re-auth on every
+        OTHER already-authenticated session, while the actor who rotated stays
+        signed in and the new credential authenticates."""
+        old = "correct horse battery staple"
+        new = "a-brand-new-rotation-passphrase-2"
+        self._bootstrap_authenticated(password=old)  # self.client authenticated
+
+        # A second, independently authenticated session (another device).
+        other = app_module.app.test_client()
+        app_module._AUTH_RATE_LIMITS.clear()
+        login = other.post("/api/login", json={"username": "admin", "password": old}, headers=self.HEADERS)
+        self.assertEqual(login.status_code, 200, login.get_json())
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+
+        # Rotate the password from the FIRST session.
+        app_module._AUTH_RATE_LIMITS.clear()
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": old, "password": new},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+
+        # The OTHER session is now forced to re-auth (stale epoch -> rejected).
+        self.assertFalse(other.get("/api/auth/me").get_json()["authenticated"])
+        self.assertEqual(other.get("/api/library").status_code, 401)
+
+        # The actor who rotated stays signed in (re-stamped to the new epoch).
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+
+        # The new credential authenticates a fresh login.
+        app_module._AUTH_RATE_LIMITS.clear()
+        good = other.post("/api/login", json={"username": "admin", "password": new}, headers=self.HEADERS)
+        self.assertEqual(good.status_code, 200, good.get_json())
+
+    def test_username_only_change_does_not_invalidate_other_sessions(self):
+        """#759 item 2 is scoped to the PASSWORD change: a username-only
+        change must not rotate the epoch, so other sessions stay valid."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)
+
+        other = app_module.app.test_client()
+        app_module._AUTH_RATE_LIMITS.clear()
+        self.assertEqual(
+            other.post("/api/login", json={"username": "admin", "password": old}, headers=self.HEADERS).status_code,
+            200,
+        )
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
+
+        app_module._AUTH_RATE_LIMITS.clear()
+        resp = self.client.post(
+            "/api/setup/account",
+            json={"current_password": old, "username": "curator"},
+            headers=self.HEADERS,
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        # Other session remains authorized (no password rotation occurred).
+        self.assertTrue(other.get("/api/auth/me").get_json()["authenticated"])
 
     def test_plaintext_env_password_is_cleared_so_new_hash_takes_effect(self):
         """A non-blank BEETS_WEB_PASSWORD in the process env shadows the

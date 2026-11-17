@@ -50,10 +50,12 @@ def api_login():
         return jsonify({"ok": False, "error": "Incorrect username or password."}), 401
 
     from flask import session
+    from app import _stamp_session_epoch
     session.clear()
     session.permanent = remember
     session["authenticated"] = True
     session["user"] = expected_user
+    _stamp_session_epoch()  # #759: bind this session to the current epoch
 
     return jsonify({"ok": True, "username": expected_user, "message": "Sign-in successful"})
 
