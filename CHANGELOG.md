@@ -6,6 +6,10 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+### Security
+
+- **Frontend `npm audit` high/critical gate now allows one documented, unfixable, dev-only advisory.** A freshly-reviewed advisory (picomatch ReDoS, GHSA-fc5q-39xc-vjpf / CVE-2026-112366) with **no patched version** (affects all published picomatch `<= 4.0.7`) began failing `npm audit --audit-level=high` on every branch. picomatch is pulled only by frontend dev/build tooling (vitest -> vite/tinyglobby/fdir, typescript-eslint) and is absent from the production runtime tree, so there is no shipped exposure, but `npm audit` cannot accept a single advisory. The "Frontend dependency audit" CI step now runs `frontend/scripts/audit-allowlist.mjs`, which fails on **any** high/critical advisory except the one GHSA id on a tiny documented allowlist (and fails safe on any high/critical with no resolvable advisory id) -- keeping the full gate armed for every other package. The exception is recorded in `docs/TECHNICAL_DEBT.md` (SEC-NPM-AUDIT-001) and must be removed when picomatch publishes a release `> 4.0.7`.
+
 ### Added
 
 - **`relocate_web_manager_data.sh` can repoint a hardcoded `/web-manager-data` mount (`--rewrite-compose`, #760).** The relocate script previously assumed the mount source was an `${VAR}` interpolation it could repoint by setting one env key; a Compose that pins the source as a literal host path (`<host>/web-manager-data:/web-manager-data`) made `--apply` die with "could not determine which env key repoints /web-manager-data". The script now detects a literal mount source and, with the opt-in `--rewrite-compose` flag, rewrites **only that one mount-source line** in the Compose YAML — writing a `<compose>.bak` first and verifying every other line stays byte-identical — keeping all existing safety (backup-first, copy-verify, health-gated recreate, printed rollback) and dry-run-first discipline (the PLAN shows a `REWRITE` line before anything is touched). The env-file path remains the default; a hardcoded source without the flag still refuses, now pointing the operator at `--rewrite-compose`. Runbook updated to cover both mount forms with the by-hand equivalent.
