@@ -279,6 +279,61 @@ class RelocateEnvVarComposeTests(unittest.TestCase):
                       Path(self.env).read_text(encoding="utf-8"))
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
 
+    def test_c6b_multi_service_literal_target_refuses_not_foreign_env_key(self):
+        """BLOCKING #1 (false-success regression): the TARGET service has a
+        HARDCODED literal /web-manager-data mount while an unrelated `sidecar`
+        service interpolates ${SIDECAR_DATA} at the same container path. The
+        whole-file env-key fallback must NOT fire (the target's own block has a
+        mount line -- it's just a literal), so the script must REFUSE exactly
+        like a single-service hardcoded mount, not repoint the foreign key and
+        leave the target on the old path."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - /opt/target/web-manager-data:/web-manager-data\n"
+            "      - beets-config:/config\n"
+            "  sidecar:\n"
+            "    volumes:\n"
+            "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+        )
+        res = self._apply_with_compose(compose)
+        # Must refuse and route to --rewrite-compose, like `main` does.
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("HARDCODED", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        # The foreign key must NOT have been set, and the Compose is untouched.
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("SIDECAR_DATA=", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_env_key_override_is_honored_in_fallback_path(self):
+        """BLOCKING #2 (--env-key non-functional): with an indentless `volumes:`
+        sequence (the C6 fallback path), an operator --env-key must be honored,
+        not overwritten by detection -- the fallback itself advertises passing
+        --env-key, so it must actually take effect."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "    - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
+            "    - beets-config:/config\n"
+        )
+        Path(self.compose).write_text(compose, encoding="utf-8")
+        Path(self.env).write_text("TZ=UTC\n", encoding="utf-8")
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", self.compose, "--env-file", self.env,
+             "--env-key", "MY_CUSTOM_KEY", "--no-recreate", "--apply"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertIn("MY_CUSTOM_KEY=" + new_dest, env_text)
+        self.assertNotIn("BEETS_WEB_MANAGER_DATA_PATH=", env_text)
+
 
 @unittest.skipUnless(BASH, "needs a POSIX bash (Linux/macOS)")
 class RelocateComposeHardeningTests(unittest.TestCase):

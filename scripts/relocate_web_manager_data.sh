@@ -209,16 +209,28 @@ PY
 # target service's volumes block.
 detect_env_key() {
   [[ -n "$COMPOSE_FILE" ]] || return 0
-  local line
-  line="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" | grep -E '\$\{' | head -n 1 || true)"
+  # Honor an operator-supplied --env-key: detection must not overwrite it
+  # (mirrors detect_literal_source's guard). Without this, the C6 whole-file
+  # fallback below silently replaces the override it tells the user to pass.
+  [[ -z "$ENV_KEY" ]] || return 0
+  local scoped_mounts line
+  # All /web-manager-data mount lines in the TARGET service's volumes block
+  # (interpolated or literal). Empty means the block itself couldn't be scoped.
+  scoped_mounts="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" || true)"
+  line="$(printf '%s' "$scoped_mounts" | grep -E '\$\{' | head -n 1 || true)"
   # C6 fallback (env-key DETECTION ONLY): the service-scoped line scoper misses
   # two valid-but-uncommon layouts -- an indentless `volumes:` sequence (items
   # at the same indent as the key) and a service header with a trailing comment.
-  # When scoped detection finds no interpolated mount, fall back to a whole-file
-  # grep (pre-#767 behavior). This only chooses which env KEY to set -- a safe,
+  # Fall back to a whole-file grep ONLY when the target block yielded NO
+  # /web-manager-data mount line AT ALL (the block couldn't be located). If the
+  # block DOES contain a line but it's a hardcoded literal, do NOT fall back:
+  # matching another service's ${VAR} would repoint the wrong service and leave
+  # the target on the old path (a false success). Leave ENV_KEY empty so
+  # detect_literal_source catches the literal and refuses / routes to
+  # --rewrite-compose. This only chooses which env KEY to set -- a safe,
   # reversible env-file edit -- and NEVER widens the service-scoped
   # --rewrite-compose path (the F1 data-loss fix stays strictly scoped).
-  if [[ -z "$line" ]]; then
+  if [[ -z "$scoped_mounts" ]]; then
     line="$(grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" "$COMPOSE_FILE" | grep -E '\$\{' | head -n 1 || true)"
     [[ -n "$line" ]] && warn "env-key detection: no ${MOUNT_DEST} mount found inside service '$SERVICE' (indentless volumes or commented header?); using a whole-file match. Pass --env-key NAME to override."
   fi
