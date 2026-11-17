@@ -31,15 +31,69 @@ variable with a default, e.g.:
 - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
 ```
 
-So the mount is repointed by setting **one key** in the stack env file — the
-Compose YAML is never edited. The script detects which key your Compose file
-actually interpolates (the outermost `${VAR}` wins) and sets that one.
+So, **by default**, the mount is repointed by setting **one key** in the stack
+env file — the Compose YAML is never edited. The script detects which key your
+Compose file actually interpolates (the outermost `${VAR}` wins) and sets that
+one.
 
 > Which key? `docker-compose.yml` reads `WEB_MANAGER_DATA_PATH` first;
 > `docker-compose.full.yml` reads `BEETS_WEB_MANAGER_DATA_PATH`. Let the script
-> detect it from your live Compose file rather than assuming. If the mount line
-> uses a hardcoded path (no variable), the script refuses and you must edit the
-> Compose file yourself — that is out of scope here.
+> detect it from your live Compose file rather than assuming.
+
+### Hardcoded mount source (no `${VAR}`)
+
+Some real deployments pin the mount source as a **hardcoded host path** instead
+of an interpolated variable:
+
+```yaml
+# docker-compose.yml  (no ${VAR} -- a literal host path)
+- /srv/apps/beets/web-manager-data:/web-manager-data
+```
+
+There is no env key to set here, so the env-file repoint cannot work. Two
+options:
+
+- **Let the script do it (recommended):** pass `--rewrite-compose`. The script
+  rewrites **only that one mount-source line** in the Compose YAML, after
+  writing a `<compose>.bak` of the file first and verifying every other line is
+  byte-identical. It is **opt-in** — without the flag the script refuses a
+  hardcoded source and tells you to add `--rewrite-compose`. The dry-run shows a
+  `REWRITE` plan line before anything is touched, exactly like the env-file
+  flow.
+- **By-hand fallback (the documented equivalent):** back up, move the data,
+  edit the one Compose line, recreate, health-check:
+
+  ```bash
+  cp -p docker-compose.yml docker-compose.yml.bak           # backup first
+  rsync -aHAX /old/web-manager-data/ /new/web-manager-data/  # move (copy) data
+  sed -i 's#^\(\s*- \)/old/web-manager-data:/web-manager-data#\1/new/web-manager-data:/web-manager-data#' docker-compose.yml
+  docker compose -f docker-compose.yml up -d beets-web-manager   # recreate
+  curl -fsS http://127.0.0.1:8337/api/health                     # health-check
+  ```
+
+  `--rewrite-compose` performs exactly this rewrite, but with the full
+  backup-first / copy-verify / health-gated recreate / printed-rollback safety
+  of the script around it.
+
+  Notes on the rewrite:
+
+  - **Scoped to `--service`.** Detection and rewrite look only inside the
+    target service's `volumes:` block, so a short-form literal bind at
+    `/web-manager-data` under a *different* service is never mistaken for this
+    one.
+  - **Only short-form literal sources.** A long-form mount (`type: bind` /
+    `source:` / `target:`) or an interpolated source (`${VAR}` **or** bare
+    `$VAR`) is not rewritten — the script refuses with a helpful message rather
+    than editing the wrong thing. For `${VAR}` the default env-file repoint
+    applies; a long-form or bare-`$` source must be edited by hand.
+  - **`--remove-old` is cross-checked.** When the service is recreated, the
+    script verifies via `docker inspect` that the live container actually
+    mounts the new path at `/web-manager-data` before it will delete the old
+    dir; if the repoint did not take effect the old data is left intact.
+  - **`--dest` restriction.** The new path must be an absolute path with no
+    whitespace and no `:`, `$`, quote, or backtick characters (these would
+    re-delimit a bind mount or interpolate in the env file). Linux data-dir
+    paths never contain them.
 
 ## Prerequisites
 
@@ -87,8 +141,10 @@ What `--apply` does, in order, stopping on any failure:
    place**.
 3. **Verify** — file count and total bytes must match between old and new,
    or the script aborts (and leaves both directories intact).
-4. **Repoint** — sets exactly one key in the stack env file (other keys
-   untouched; no values printed).
+4. **Repoint** — by default sets exactly one key in the stack env file (other
+   keys untouched; no values printed). With `--rewrite-compose` (hardcoded
+   source), instead rewrites the single mount-source line in the Compose YAML
+   after saving `<compose>.bak` and verifying all other lines are byte-identical.
 5. **Recreate + verify** — `docker compose up -d <service>` (only that
    service), waits for the container healthcheck, and checks
    `GET /api/health`. On failure it **stops and prints rollback commands**.
@@ -111,8 +167,11 @@ docker inspect --format '{{json .Mounts}}' <container> | grep /web-manager-data
 The old data dir is never modified, so rollback is just repointing the mount
 back and recreating:
 
-1. Set the env key back to the **old** source path in the stack env file
-   (the SUCCESS/rollback output prints the exact `KEY=OLD_PATH`).
+1. Point the mount back to the **old** source (the SUCCESS/rollback output
+   prints the exact instruction):
+   - env-file mode: set the env key back to the old path;
+   - `--rewrite-compose` mode: restore the one mount line from the
+     `<compose>.bak` the apply wrote (or set it back to the old path).
 2. Recreate only the service:
 
    ```bash
@@ -155,5 +214,6 @@ Or let the script do it in the same run (only after health passes) with
 | `--resume` | Allow a non-empty destination (re-sync). |
 | `--no-recreate` | Do everything except the docker recreate/health check. |
 | `--remove-old` | Delete the old dir after health passes. |
+| `--rewrite-compose` | Hardcoded mount source: rewrite the one Compose line in place (writes `<compose>.bak` first). Opt-in. |
 
 Run `bash scripts/relocate_web_manager_data.sh --help` for the full list.

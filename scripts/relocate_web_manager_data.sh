@@ -12,7 +12,9 @@
 # nested inside some other checkout/folder, this moves it to a clean path
 # OUTSIDE that folder and repoints the mount by setting ONE key in the stack
 # env file -- so the old location can later be archived without touching live
-# data. The Compose YAML is never edited.
+# data. By DEFAULT the Compose YAML is never edited. If your Compose pins the
+# mount source as a HARDCODED host path (no ${VAR}), pass --rewrite-compose to
+# surgically rewrite only that ONE mount line in place (a .bak is saved first).
 #
 # SAFETY MODEL:
 #   - Dry-run by default. Nothing changes without --apply.
@@ -21,7 +23,9 @@
 #   - Copy, never cut: data is copied (rsync -aHAX / cp -a) and byte/count
 #     verified; the OLD directory is left in place. Removal is manual, or
 #     gated behind a separate --remove-old (only after health passes).
-#   - Repoint via the env file (one key), never by editing Compose YAML.
+#   - Repoint via the env file (one key) by default; with --rewrite-compose,
+#     rewrite only the one hardcoded mount-source line, after saving a .bak and
+#     verifying every other Compose line is byte-identical.
 #   - Recreate only SERVICE and verify health + /api/health before success.
 #     If health fails the script STOPS and prints the exact rollback commands.
 #   - Idempotent/reversible: safe to re-run (--resume); rollback = point the
@@ -60,6 +64,10 @@
 #   --resume           allow --dest to already exist and be non-empty (re-sync)
 #   --no-recreate      skip the docker recreate + health check (operator does it)
 #   --remove-old       after success, delete the OLD source dir (off by default)
+#   --rewrite-compose  when the mount source is a HARDCODED host path (no
+#                      ${VAR} to set in the env file), rewrite that ONE Compose
+#                      mount line in place (writes <compose>.bak first and keeps
+#                      every other line byte-identical); opt-in, off by default
 #   --apply            actually perform the move (otherwise dry-run)
 #   -h, --help         this help
 #
@@ -80,6 +88,8 @@ APPLY=0
 RESUME=0
 RECREATE=1
 REMOVE_OLD=0
+REWRITE_COMPOSE=0
+COMPOSE_MOUNT_IS_LITERAL=0
 ENDPOINT_BASE_URL="${ENDPOINT_BASE_URL:-http://127.0.0.1:8337}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-120}"
 
@@ -101,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --resume)      RESUME=1; shift ;;
     --no-recreate) RECREATE=0; shift ;;
     --remove-old)  REMOVE_OLD=1; shift ;;
+    --rewrite-compose) REWRITE_COMPOSE=1; shift ;;
     --apply)       APPLY=1; shift ;;
     -h|--help)     awk 'NR>1 && /^#/{sub(/^# ?/,"");print;next} NR>1{exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *)             die "unrecognized argument: $1 (see --help)" ;;
@@ -144,16 +155,68 @@ resolve_compose_file() {
   warn "no Compose file found under $STACK_DIR -- pass --compose-file to enable env-key detection and recreate"
 }
 
+# Print the volume-entry lines of the TARGET service's `volumes:` block ONLY.
+# Detection and rewrite must be scoped to --service: another service using a
+# short-form literal bind at the same container path must never be mistaken for
+# this service's mount (that would repoint/rewrite the wrong line -- data loss).
+compose_service_volume_lines() {
+  [[ -n "$COMPOSE_FILE" ]] || return 0
+  python3 -I - "$COMPOSE_FILE" "$SERVICE" <<'PY'
+import sys
+path, service = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8", newline="") as f:
+    lines = f.readlines()
+def indent(s):
+    return len(s) - len(s.lstrip(" "))
+svc_i = svc_ind = None
+for idx, ln in enumerate(lines):
+    s = ln.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.endswith(":") and s[:-1].strip().strip("\"'") == service:
+        svc_i, svc_ind = idx, indent(ln); break
+if svc_i is None:
+    sys.exit(0)
+vol_ind = None
+for ln in lines[svc_i + 1:]:
+    s = ln.strip()
+    if s and not s.startswith("#") and indent(ln) <= svc_ind:
+        break  # left the service block
+    if vol_ind is None:
+        if s == "volumes:":
+            vol_ind = indent(ln)
+        continue
+    if s and not s.startswith("#") and indent(ln) <= vol_ind:
+        break  # left the volumes block
+    print(ln.rstrip("\n"))
+PY
+}
+
 # The env var that the Compose /web-manager-data mount line interpolates. The
 # OUTERMOST ${VAR...} wins (Compose resolves it first); that is the key whose
 # value actually selects the mount source. Left empty if the line has no
-# variable (a hardcoded path -- cannot be repointed via env).
+# variable (a hardcoded path -- cannot be repointed via env). Scoped to the
+# target service's volumes block.
 detect_env_key() {
   [[ -n "$COMPOSE_FILE" ]] || return 0
   local line
-  line="$(grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" "$COMPOSE_FILE" | grep -E '\$\{' | head -n 1 || true)"
+  line="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" | grep -E '\$\{' | head -n 1 || true)"
   [[ -n "$line" ]] || return 0
   ENV_KEY="$(printf '%s' "$line" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | head -n 1 | sed 's/^\${//')"
+}
+
+# If the /web-manager-data mount SOURCE is a literal host path (no ${VAR} AND no
+# bare $VAR -- both are Compose interpolation, not a literal), there is no env
+# key to set; repointing it means rewriting the Compose line (opt-in
+# --rewrite-compose). Only relevant when env-key detection found none. Scoped to
+# the target service's volumes block.
+detect_literal_source() {
+  [[ -n "$COMPOSE_FILE" ]] || return 0
+  [[ -z "$ENV_KEY" ]] || return 0
+  local line
+  line="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" | grep -vE '\$' | head -n 1 || true)"
+  [[ -n "$line" ]] && COMPOSE_MOUNT_IS_LITERAL=1
+  return 0  # never let an empty match fail under `set -e` (falls to helpful error)
 }
 
 resolve_env_file() {
@@ -206,15 +269,105 @@ with open(path, "w", encoding="utf-8") as f:
 PY
 }
 
+# ---- Rewrite ONLY the one hardcoded /web-manager-data mount-source line ------
+# Saves <file>.bak first, replaces just the source token on the single matching
+# short-form bind line, and verifies every other line is byte-identical.
+rewrite_compose_source() {
+  local file="$1" dest="$2" val="$3"
+  local bak="${file}.bak"
+  # Keep the FIRST backup: a re-run (--resume) must not clobber the original
+  # with an already-rewritten copy, or rollback becomes impossible.
+  if [[ ! -e "$bak" ]]; then
+    cp -p -- "$file" "$bak" || die "could not write compose backup: $bak"
+  fi
+  python3 -I - "$file" "$dest" "$val" "$SERVICE" <<'PY' || { cp -p -- "$bak" "$file" 2>/dev/null || true; die "compose rewrite failed -- original restored from $bak"; }
+import re, sys
+path, dest, val, service = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(path, "r", encoding="utf-8", newline="") as f:
+    lines = f.readlines()
+def indent(s):
+    return len(s) - len(s.lstrip(" "))
+# Restrict the rewrite to the TARGET service's volumes block [lo, hi): a literal
+# bind at the same container path under a DIFFERENT service must never be hit.
+svc_i = svc_ind = None
+for idx, ln in enumerate(lines):
+    s = ln.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.endswith(":") and s[:-1].strip().strip("\"'") == service:
+        svc_i, svc_ind = idx, indent(ln); break
+if svc_i is None:
+    sys.exit("service %r not found in compose file" % service)
+lo = hi = vol_ind = None
+j = svc_i + 1
+while j < len(lines):
+    ln = lines[j]; s = ln.strip()
+    if s and not s.startswith("#") and indent(ln) <= svc_ind:
+        break
+    if vol_ind is None:
+        if s == "volumes:":
+            vol_ind = indent(ln); lo = j + 1
+    elif s and not s.startswith("#") and indent(ln) <= vol_ind:
+        break
+    j += 1
+if lo is None:
+    sys.exit("service %r has no volumes: block" % service)
+hi = j
+# A short-form bind whose target is exactly `dest` and whose source is a literal
+# host path (no $ interpolation; Linux paths contain no ':'). head=indent+'- '
+# (the '- ' separator space is REQUIRED and captured so it can't be absorbed
+# into src); src=the literal source (no leading space, no ':' or '$');
+# rest=':<dest>'+optional mode/comment/closing-quote.
+pat = re.compile(
+    r'^(?P<head>\s*-\s+["\']?)(?P<src>[^:$\s][^:$]*)'
+    r'(?P<rest>:' + re.escape(dest) + r'(?:[:\s].*)?["\']?\s*)$'
+)
+hits = [i for i in range(lo, hi)
+        if '$' not in lines[i] and pat.match(lines[i].rstrip('\n'))]
+if len(hits) != 1:
+    sys.exit("expected exactly one hardcoded %s mount line in service %r, found %d"
+             % (dest, service, len(hits)))
+i = hits[0]
+m = pat.match(lines[i].rstrip('\n'))
+if m.group('src') == val:
+    sys.exit(0)  # idempotent: already points at the new path -- nothing to do
+nl = '\n' if lines[i].endswith('\n') else ''
+newline = m.group('head') + val + m.group('rest') + nl
+# Re-validate the edited line is still a well-formed `  - <val>:<dest>` entry
+# (separator space intact); abort WITHOUT writing if the edit malformed it.
+if not re.match(r'^\s*-\s+' + re.escape(val) + ':' + re.escape(dest) + r'(?:[:\s].*)?["\']?\s*$',
+                newline.rstrip('\n')):
+    sys.exit("post-edit validation failed: edited mount line is malformed")
+lines[i] = newline
+with open(path, "w", encoding="utf-8", newline="") as f:
+    f.writelines(lines)
+PY
+  # Verify only the single mount line changed (siblings byte-identical). 2 =
+  # the one mount line differs from the backup; 0 = idempotent re-run (source
+  # already at the new path, nothing rewritten).
+  if command -v diff >/dev/null 2>&1; then
+    local changed
+    changed="$(diff -- "$bak" "$file" | grep -cE '^[<>]' || true)"
+    [[ "$changed" -eq 2 || "$changed" -eq 0 ]] \
+      || die "compose rewrite touched more than the single mount line ($changed changed lines) -- restore from $bak"
+  fi
+  log "Compose mount line rewritten (pre-change copy saved at $bak)."
+}
+
 # =============================================================================
 # Validate inputs
 # =============================================================================
 [[ -n "$DEST" ]] || die "--dest is required (the new absolute host path)"
 case "$DEST" in /*|[A-Za-z]:[\\/]*) : ;; *) die "--dest must be an absolute path: $DEST" ;; esac
 case "$DEST" in *[$' \t\n']*) die "--dest must not contain whitespace (env-file safety): $DEST" ;; esac
+# A bind-mount source ending up in Compose/YAML or an env value must not carry
+# characters that re-delimit it: ':' splits a short-form bind, '$' interpolates,
+# quotes/backtick break quoting. Linux data-dir paths never contain these.
+case "$DEST" in *[:'$'\"\'\`]*) die "--dest must not contain ':' '\$' quotes or backtick (compose/env safety): $DEST" ;; esac
 
 resolve_compose_file
 detect_env_key
+detect_literal_source
 resolve_env_file
 
 [[ -n "$SOURCE" ]] || resolve_source_from_docker
@@ -233,15 +386,54 @@ if [[ -e "$DST_CANON" ]]; then
   fi
 fi
 
-# Repointing the mount needs a key + file. --no-recreate operators can still
-# want it set; only refuse when we truly have nowhere to write it.
+# How the mount is repointed:
+#   env            -> set one key in the env file (DEFAULT; mount uses ${VAR})
+#   compose        -> rewrite the one hardcoded mount line (opt-in)
+#   compose-needed -> mount is hardcoded but --rewrite-compose was not passed
+#   "" (empty)     -> could not determine either
+REPOINT_MODE=""
+if [[ -n "$ENV_KEY" ]]; then
+  REPOINT_MODE="env"
+  if [[ "$REWRITE_COMPOSE" -eq 1 ]]; then
+    warn "--rewrite-compose ignored: the $MOUNT_DEST mount uses \${$ENV_KEY}; repointing via the env file instead."
+  fi
+elif [[ "$COMPOSE_MOUNT_IS_LITERAL" -eq 1 && "$REWRITE_COMPOSE" -eq 1 ]]; then
+  REPOINT_MODE="compose"
+elif [[ "$COMPOSE_MOUNT_IS_LITERAL" -eq 1 ]]; then
+  REPOINT_MODE="compose-needed"
+fi
+
+case "$REPOINT_MODE" in
+  env)
+    REPOINT_DESC="set ${ENV_KEY}=$DST_CANON in ${ENV_FILE:-<none>} (other keys untouched)"
+    ROLLBACK_HINT="set $ENV_KEY=$SRC_CANON in $ENV_FILE" ;;
+  compose)
+    REPOINT_DESC="REWRITE the $MOUNT_DEST mount source in $COMPOSE_FILE (<compose>.bak saved first)  ->  $DST_CANON"
+    ROLLBACK_HINT="restore the $MOUNT_DEST mount source in $COMPOSE_FILE to $SRC_CANON (pre-change copy at ${COMPOSE_FILE}.bak)" ;;
+  compose-needed)
+    REPOINT_DESC="HARDCODED source in ${COMPOSE_FILE:-<compose file>} -- pass --rewrite-compose to rewrite it in place (or edit by hand)"
+    ROLLBACK_HINT="restore the $MOUNT_DEST mount source in ${COMPOSE_FILE:-the Compose file} to $SRC_CANON" ;;
+  *)
+    REPOINT_DESC="<none detected>"
+    ROLLBACK_HINT="restore the previous $MOUNT_DEST mount source" ;;
+esac
+
+# Repointing the mount needs a writable target. --no-recreate operators can
+# still want it set; only refuse when we truly have nowhere to write it.
 if [[ "$APPLY" -eq 1 ]]; then
-  if [[ -z "$ENV_KEY" ]]; then
-    die "could not determine which env key repoints $MOUNT_DEST -- pass --compose-file to detect it, or --env-key NAME"
-  fi
-  if [[ -z "$ENV_FILE" ]]; then
-    die "no env file to edit -- pass --env-file, or --stack-dir/--compose-file so <compose dir>/.env is used"
-  fi
+  case "$REPOINT_MODE" in
+    env)
+      [[ -n "$ENV_FILE" ]] || die "no env file to edit -- pass --env-file, or --stack-dir/--compose-file so <compose dir>/.env is used" ;;
+    compose)
+      [[ -n "$COMPOSE_FILE" ]] || die "cannot rewrite Compose without a Compose file -- pass --compose-file or --stack-dir" ;;
+    compose-needed)
+      die "the $MOUNT_DEST mount source in ${COMPOSE_FILE:-the Compose file} is a HARDCODED host path (no \${VAR} to set in the env file). Re-run with --rewrite-compose to rewrite that one Compose line in place (a <compose>.bak is saved first), or edit the Compose file by hand." ;;
+    *)
+      if [[ "$REWRITE_COMPOSE" -eq 1 ]]; then
+        die "--rewrite-compose: could not find a hardcoded $MOUNT_DEST mount line in ${COMPOSE_FILE:-<no compose file>} -- pass --compose-file/--stack-dir pointing at the stack's Compose file"
+      fi
+      die "could not determine which env key repoints $MOUNT_DEST -- pass --compose-file to detect it, --env-key NAME, or --rewrite-compose for a hardcoded mount source" ;;
+  esac
 fi
 
 [[ -z "$BACKUP_DIR" ]] && BACKUP_DIR="$(dirname "$DST_CANON")/_web-manager-relocate-backups"
@@ -257,12 +449,12 @@ Source (old):     $SRC_CANON
 Dest (new):       $DST_CANON
 Compose file:     ${COMPOSE_FILE:-<none: source given explicitly>}
 Env file:         ${ENV_FILE:-<none>}
-Env key to set:   ${ENV_KEY:-<none detected>}  ->  $DST_CANON
+Repoint:          $REPOINT_DESC
 Backup .tar.gz:   under $BACKUP_DIR
 Copy:             $(command -v rsync >/dev/null 2>&1 && echo 'rsync -aHAX --numeric-ids' || echo 'cp -a') (old dir is kept)
 Recreate:         $([[ "$RECREATE" -eq 1 ]] && echo "docker compose -f <file> up -d $SERVICE, then verify health + /api/health" || echo "SKIPPED (--no-recreate)")
 Remove old dir:   $([[ "$REMOVE_OLD" -eq 1 ]] && echo "yes, after health passes (--remove-old)" || echo "no (left for operator; removal command printed on success)")
-ROLLBACK:         set $ENV_KEY=$SRC_CANON in $ENV_FILE and recreate $SERVICE
+ROLLBACK:         $ROLLBACK_HINT and recreate $SERVICE
 ==============================================================================
 PLAN
 
@@ -309,9 +501,15 @@ log "Source: ${SRC_STATS[0]} files / ${SRC_STATS[1]} bytes   Dest: ${DST_STATS[0
   || die "copy verification FAILED (file count or byte total differ) -- source left intact; delete $DST_CANON and retry"
 log "Copy verified."
 
-# 4) Repoint the mount via the env file (one key only).
-log "Setting $ENV_KEY=$DST_CANON in $ENV_FILE (other keys untouched) ..."
-set_env_key "$ENV_FILE" "$ENV_KEY" "$DST_CANON"
+# 4) Repoint the mount -- env file (one key) by default, or the one Compose
+#    mount line when --rewrite-compose was used for a hardcoded source.
+if [[ "$REPOINT_MODE" == compose ]]; then
+  log "Rewriting the $MOUNT_DEST mount source in $COMPOSE_FILE (<compose>.bak saved first) -> $DST_CANON ..."
+  rewrite_compose_source "$COMPOSE_FILE" "$MOUNT_DEST" "$DST_CANON"
+else
+  log "Setting $ENV_KEY=$DST_CANON in $ENV_FILE (other keys untouched) ..."
+  set_env_key "$ENV_FILE" "$ENV_KEY" "$DST_CANON"
+fi
 
 # 5) Recreate SERVICE and verify health.
 if [[ "$RECREATE" -eq 1 ]]; then
@@ -324,7 +522,7 @@ if [[ "$RECREATE" -eq 1 ]]; then
 The old data dir is intact at: $SRC_CANON
 ROLL BACK with:
   # 1. point the mount back to the old source
-  <edit $ENV_FILE so $ENV_KEY=$SRC_CANON>   (or re-run this script with --source/--dest swapped)
+  $ROLLBACK_HINT   (or re-run this script with --source/--dest swapped)
   # 2. recreate the service on the old path
   docker compose -f $COMPOSE_FILE up -d $SERVICE
 RB
@@ -350,12 +548,22 @@ RB
   fi
   log "Health OK: $SERVICE is running on the new path and /api/health responds."
 else
-  warn "--no-recreate: env repointed but the service was NOT recreated. Recreate it yourself:"
+  warn "--no-recreate: mount repointed but the service was NOT recreated. Recreate it yourself:"
   warn "  docker compose -f ${COMPOSE_FILE:-<compose file>} up -d $SERVICE   # then verify /api/health"
 fi
 
 # 6) Remove old dir only if asked and only after everything above passed.
 if [[ "$REMOVE_OLD" -eq 1 ]]; then
+  # F1 safety net: before deleting the OLD dir, prove the LIVE container really
+  # mounts the NEW path at MOUNT_DEST. If the repoint hit the wrong service/line
+  # the app is still running on the old dir -- deleting it would be data loss.
+  if [[ "$RECREATE" -eq 1 ]]; then
+    live_src="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$MOUNT_DEST\"}}{{.Source}}{{end}}{{end}}" "$CID" 2>/dev/null || true)"
+    [[ -n "$live_src" ]] || die "refusing --remove-old: could not read the live $MOUNT_DEST mount from the recreated container -- old data left intact at $SRC_CANON"
+    [[ "$(canon_path "$live_src")" == "$DST_CANON" ]] \
+      || die "refusing --remove-old: live container mounts $MOUNT_DEST from '$live_src', not the new path '$DST_CANON' -- the repoint did not take effect; old data left intact at $SRC_CANON"
+    log "Verified: live container mounts $MOUNT_DEST from the new path."
+  fi
   # Defense-in-depth: refuse to rm -rf a suspiciously shallow path (root or a
   # single top-level component), even though SRC_CANON is a verified data dir
   # and a backup exists. Requires at least two path segments (e.g. /a/b).
@@ -374,7 +582,7 @@ The OLD dir is untouched at:    $SRC_CANON
 Once you have confirmed the app works on the new path, remove the old dir:
   rm -rf -- '$SRC_CANON'
 Backup (keep private -- contains secrets): $BACKUP_FILE
-ROLLBACK (if ever needed): set $ENV_KEY=$SRC_CANON in $ENV_FILE and
+ROLLBACK (if ever needed): $ROLLBACK_HINT and
   docker compose -f ${COMPOSE_FILE:-<compose file>} up -d $SERVICE
 DONE
 fi
