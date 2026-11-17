@@ -3,6 +3,24 @@
  "entries": [
   {
    "method": "POST",
+   "endpoint": "setup_account",
+   "security_classification": "ADMIN_ONLY",
+   "purpose": "Authenticated in-app change of the administrator browser username and/or password. Requires re-entry of the CURRENT password (rate-limited via _verify_password) before any change; persists the new password as a werkzeug hash to .browser_password and the username to .browser_username via the first-run wizard's atomic-write path. Not public; reachable only with an authenticated session.",
+   "required_role_or_privilege": "owner/admin (authenticated session + current-password re-auth)",
+   "handles_secrets": true,
+   "accesses_files": true,
+   "creates_background_job": false,
+   "invokes_external_services_or_subprocesses": false,
+   "destructive_or_high_impact": true,
+   "rate_limit_required": true,
+   "rate_limit_implemented": true,
+   "existing_security_tests": [
+    "tests/test_routes_setup.py",
+    "tests/test_auth_and_setup.py"
+   ]
+  },
+  {
+   "method": "POST",
    "endpoint": "album_fetch_embed_artwork",
    "security_classification": "ADMIN_ONLY",
    "purpose": "Fetch and embed cover art for an album through the controlled album_artwork_fetch_v1 engine transaction (Plan/Apply/Verify).",

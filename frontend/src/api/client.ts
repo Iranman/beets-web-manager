@@ -96,6 +96,8 @@ import type {
   SetupEnvResponse,
   SetupEnvRevealAuthResponse,
   SetupEnvRevealResponse,
+  SetupAccountRequest,
+  SetupAccountResponse,
   SetupEnvSavePayload,
   SetupFirstRunRequest,
   SetupFirstRunResponse,
@@ -434,6 +436,13 @@ export function submitFirstRunSetup(payload: SetupFirstRunRequest): Promise<Setu
 
 export function getSetupEnv(): Promise<SetupEnvResponse> {
   return apiJson<SetupEnvResponse>('/api/setup/env');
+}
+
+/** Authenticated change of the admin browser username and/or password.
+ * Requires the current password; the server re-verifies it (rate-limited)
+ * before persisting the new credential as a hash. */
+export function changeAccountCredentials(payload: SetupAccountRequest): Promise<SetupAccountResponse> {
+  return apiJson<SetupAccountResponse>('/api/setup/account', jsonRequest('POST', payload));
 }
 
 /** Read-only Configuration Overview: where each setting comes from and whether

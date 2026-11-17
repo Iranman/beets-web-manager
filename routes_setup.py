@@ -4121,6 +4121,146 @@ def setup_first_run():
         return jsonify({"ok": True, "message": "First-run setup complete"})
 
 
+@app.post("/api/setup/account")
+def setup_account():
+    """Authenticated change of the administrator browser credentials
+    (username and/or password) from inside the app, so the owner never has
+    to edit env and recreate the container to rotate them (#753 D2).
+
+    Security: unlike the first-run bootstrap and the env editor, this
+    endpoint REQUIRES the caller to re-enter the CURRENT password before any
+    change is persisted -- an already-authenticated session alone is not
+    sufficient. The current-password check reuses _verify_password, so it is
+    rate-limited (a correct password while the IP/account bucket is
+    exhausted is still refused -> 429) and every failure is recorded. CSRF is
+    enforced both globally (app.py before_request) and here. This endpoint is
+    deliberately NOT in _AUTH_PUBLIC_ENDPOINTS / the first-run allowlist, so
+    the global boundary already requires an authenticated session to reach it.
+
+    Persistence reuses the EXACT hash-at-rest + atomic-write path the
+    first-run wizard uses: werkzeug generate_password_hash into
+    .browser_password and the raw username into .browser_username via
+    _persist_file_atomically. No password is ever logged or echoed."""
+    from app import (
+        _verify_password,
+        _check_password_value,
+        _auth_failure_rate_limit_response,
+        _password_requirements_unmet,
+        _browser_password_is_usable,
+        _persist_file_atomically,
+        _cleanup_initial_browser_password_if_replaced,
+        _security_auth_username,
+        _PERSISTED_BROWSER_USERNAME_FILE,
+        _PERSISTED_BROWSER_PASSWORD_FILE,
+        _csrf_request_allowed,
+        _json_security_error,
+    )
+
+    if not _csrf_request_allowed():
+        return _json_security_error(403, "CSRF check failed")
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Invalid request body"}), 400
+
+    allowed_keys = {"current_password", "username", "password"}
+    if any(k not in allowed_keys for k in payload.keys()):
+        return jsonify({"ok": False, "error": "Only current_password, username and password may be provided"}), 400
+
+    current = payload.get("current_password", "")
+    raw_user = payload.get("username", None)
+    raw_pass = payload.get("password", None)
+
+    if not isinstance(current, str):
+        return jsonify({"ok": False, "error": "current_password must be a string"}), 400
+    if raw_user is not None and not isinstance(raw_user, str):
+        return jsonify({"ok": False, "error": "username must be a string"}), 400
+    if raw_pass is not None and not isinstance(raw_pass, str):
+        return jsonify({"ok": False, "error": "password must be a string"}), 400
+
+    change_username = raw_user is not None and raw_user.strip() != ""
+    change_password = raw_pass is not None and raw_pass.strip() != ""
+    if not change_username and not change_password:
+        return jsonify({"ok": False, "error": "Provide a new username, a new password, or both."}), 400
+
+    # Re-authenticate with the CURRENT password BEFORE validating or writing
+    # anything. _verify_password rate-limits and records the attempt.
+    if not _verify_password(current):
+        try:
+            limited = _auth_failure_rate_limit_response()
+            if limited is not None:
+                return limited
+        except Exception:
+            pass
+        return jsonify({"ok": False, "error": "Current password is incorrect."}), 401
+
+    new_username = None
+    if change_username:
+        new_username = raw_user.strip()
+        if len(new_username) > 64 or re.search(r"[\r\n\x00-\x1f]", new_username):
+            return jsonify({"ok": False, "error": "Invalid username format"}), 400
+
+    hashed_password = None
+    new_password = None
+    if change_password:
+        new_password = raw_pass.strip()
+        unmet = _password_requirements_unmet(new_password)
+        if unmet or not _browser_password_is_usable(new_password):
+            msg = "Password does not meet requirements: " + ", ".join(unmet) if unmet else "Password is not usable"
+            return jsonify({"ok": False, "error": msg, "unmet_requirements": unmet}), 400
+        from werkzeug.security import generate_password_hash
+        hashed_password = generate_password_hash(new_password)
+
+    if change_password:
+        if not _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, hashed_password):
+            return jsonify({"ok": False, "error": "Failed to persist new password to storage"}), 500
+        # A non-blank BEETS_WEB_PASSWORD already in this process environment
+        # wins over the persisted .browser_password hash (see
+        # _security_auth_password priority + app_runtime boot-env note), so
+        # clear it in-process -- otherwise the newly stored hash is silently
+        # shadowed and the change would be a no-op. Mirrors the env-editor
+        # save path, which blanks BEETS_WEB_PASSWORD for the same reason.
+        os.environ["BEETS_WEB_PASSWORD"] = ""
+    if change_username:
+        if not _persist_file_atomically(_PERSISTED_BROWSER_USERNAME_FILE, new_username):
+            return jsonify({"ok": False, "error": "Failed to persist new username to storage"}), 500
+
+    try:
+        _cleanup_initial_browser_password_if_replaced()
+    except Exception:
+        pass
+
+    # Honesty check: confirm the new password is actually the effective one
+    # now. If an external BEETS_WEB_PASSWORD_FILE (or similar) still shadows
+    # the stored hash, report that instead of a false success.
+    if change_password and not _check_password_value(new_password):
+        return jsonify({
+            "ok": False,
+            "error": "The new password was saved but is being overridden by an external "
+                     "BEETS_WEB_PASSWORD configuration. Remove it to manage credentials in the app.",
+        }), 409
+
+    # Keep this session signed in and reflect a changed username on it.
+    try:
+        if change_username:
+            session["user"] = new_username
+    except Exception:
+        pass
+
+    try:
+        _invalidate_setup_status_cache()
+    except Exception:
+        pass
+
+    return jsonify({
+        "ok": True,
+        "message": "Account credentials updated.",
+        "username": new_username if change_username else _security_auth_username(),
+        "username_changed": change_username,
+        "password_changed": change_password,
+    })
+
+
 @app.post("/api/setup/test/beets")
 def setup_test_beets():
     """Live connectivity test against Stock Beets Web & Integration plugin.
