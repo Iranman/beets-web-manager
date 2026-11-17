@@ -44,15 +44,20 @@ class _CarrierStateMixin(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self._prev = os.environ.get("RECOVERY_CARRIER_STATE_DIR")
+        self._prev_cache = os.environ.get("RECOVERY_ADVANCE_CACHE_DIR")
         os.environ["RECOVERY_CARRIER_STATE_DIR"] = self.tmp
+        # #762: isolate the rolling-status + re-check-checkpoint sidecars per test.
+        os.environ["RECOVERY_ADVANCE_CACHE_DIR"] = self.tmp
         rc._store_registry.clear()
 
     def tearDown(self):
         rc._store_registry.clear()
-        if self._prev is None:
-            os.environ.pop("RECOVERY_CARRIER_STATE_DIR", None)
-        else:
-            os.environ["RECOVERY_CARRIER_STATE_DIR"] = self._prev
+        for name, prev in (("RECOVERY_CARRIER_STATE_DIR", self._prev),
+                           ("RECOVERY_ADVANCE_CACHE_DIR", self._prev_cache)):
+            if prev is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = prev
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _staged_dir(self, name):
@@ -72,12 +77,11 @@ def _sync_start_python(fn, label="", metadata=None):
 
 class ScheduledAdvanceTests(_CarrierStateMixin):
     def _drive_tick(self, preflight, insert):
-        """Drive one scheduler tick with the advancer guard bypassed and
-        start_python run synchronously; returns nothing (asserts on side effects
-        happen via the mocks the caller passes)."""
-        with mock.patch.object(recovery_service.job_contract, "guarded",
-                               side_effect=lambda fn, **kw: fn), \
-             mock.patch.object(recovery_service.jobs, "start_python", _sync_start_python), \
+        """Drive one scheduler tick (#762: the tick runs the sweep directly under
+        the workflow lock and only records a visible job on change/attention).
+        ``jobs.start_python`` is run synchronously so any recorded job is
+        deterministic; assertions are on side effects via the caller's mocks."""
+        with mock.patch.object(recovery_service.jobs, "start_python", _sync_start_python), \
              mock.patch.object(matching_service, "_folder_release_preflight", preflight), \
              mock.patch.object(matching_service, "_carrier_expected_as_wanted",
                                side_effect=lambda c: list(c.get("expected_tracks") or [])), \
@@ -170,12 +174,15 @@ class ScheduledAdvanceTests(_CarrierStateMixin):
             self.assertIsNone(recovery_service.start_recovery_advance_schedule())
             mjobs.every.assert_not_called()
 
-        # A sweep already running: the tick swallows DuplicateJobError, no storm.
-        from job_engine import DuplicateJobError
-        busy = mock.MagicMock(label="x", job_id="j", status="running")
-        with mock.patch.object(recovery_service, "start_recovery_advance_job",
-                               side_effect=DuplicateJobError(busy)):
+        # A sweep already running: the tick's workflow lock is busy, so the tick
+        # is a quiet no-op (#762: same single-flight the manual job uses). No job
+        # is recorded for the skipped tick.
+        import backend.job_contract as job_contract
+        with mock.patch.object(recovery_service.job_contract, "held",
+                               side_effect=job_contract.WorkflowBusyError("busy")), \
+             mock.patch.object(recovery_service.jobs, "start_python") as mstart:
             self.assertIsNone(recovery_service._advance_schedule_tick())
+            mstart.assert_not_called()
 
 
 class FallbackCasRaceTests(_CarrierStateMixin):

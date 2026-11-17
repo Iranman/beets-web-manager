@@ -298,6 +298,7 @@ class ApiContractTests(unittest.TestCase):
             ("/api/plex/sync/audit", "plex_sync_audit"),
             ("/api/plex/sync/heal", "plex_sync_heal"),
             ("/api/import/recovery/advance", "import_recovery_advance_job"),
+            ("/api/import/recovery/status", "import_recovery_advance_status"),
         }
         self.assertEqual(base - live, set())
         self.assertEqual({(rule, endpoint) for rule, endpoint, _m in live - base}, added_since)
