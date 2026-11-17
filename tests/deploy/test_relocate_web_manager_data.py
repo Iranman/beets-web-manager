@@ -384,6 +384,113 @@ class RelocateEnvVarComposeTests(unittest.TestCase):
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
         self.assertFalse(Path(self.compose + ".bak").exists())
 
+    def test_layout_a_trailing_comment_var_on_literal_target_refuses(self):
+        """Layout A (comment-sourced key): the TARGET service's literal
+        /web-manager-data mount carries a TRAILING COMMENT containing a ${VAR}
+        (`# override via ${SIDECAR_DATA}`), and an unrelated `sidecar` service
+        interpolates ${SIDECAR_DATA} at the same container path. detect_env_key
+        must NOT harvest the commented ${SIDECAR_DATA}: the trailing comment is
+        stripped, the target reads as a literal, and the script REFUSES (routes
+        to --rewrite-compose) rather than repointing the sidecar and reporting
+        SUCCESS while the target stays on the old path (data-loss false
+        success)."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - /opt/target/web-manager-data:/web-manager-data  # override via ${SIDECAR_DATA}\n"
+            "      - beets-config:/config\n"
+            "  sidecar:\n"
+            "    volumes:\n"
+            "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("HARDCODED", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("SIDECAR_DATA=", env_text)
+        self.assertNotIn("/web-manager-data", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_layout_a_commented_out_entry_in_target_block_refuses(self):
+        """Layout A (comment-sourced key, second variant): a commented-out
+        `# - ${SIDECAR_DATA}:/web-manager-data` entry sits in the TARGET
+        service's own volumes block alongside its real literal mount, and a
+        `sidecar` interpolates the same ${SIDECAR_DATA}. The commented-out entry
+        must NOT be emitted to detect_env_key, so the target reads as a literal
+        and the script REFUSES instead of repointing the sidecar."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - /opt/target/web-manager-data:/web-manager-data\n"
+            "      # - ${SIDECAR_DATA}:/web-manager-data\n"
+            "      - beets-config:/config\n"
+            "  sidecar:\n"
+            "    volumes:\n"
+            "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("SIDECAR_DATA=", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_layout_b_extension_shadow_before_services_refuses(self):
+        """Layout B (service not anchored to top-level services:): a
+        `beets-web-manager:` key nested under an `x-templates:` extension
+        BEFORE the real `services:` block carries a ${SIDECAR_DATA} mount, while
+        the REAL `services: beets-web-manager:` has a literal /web-manager-data
+        mount. The scoper must anchor to the DIRECT CHILD of the top-level
+        `services:` map, not the first same-named key anywhere -- so the
+        extension's ${SIDECAR_DATA} must NOT be picked; the target reads as a
+        literal and the script REFUSES."""
+        compose = (
+            "x-templates:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - /opt/target/web-manager-data:/web-manager-data\n"
+            "      - beets-config:/config\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("HARDCODED", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("SIDECAR_DATA=", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_finding3_partial_path_env_source_is_not_repointed(self):
+        """Finding 3 (partial-path source): a mount whose source is
+        `${DATA_ROOT}/manager:/web-manager-data` is NOT a repointable env key --
+        setting DATA_ROOT=<dest> would yield `<dest>/manager`, not <dest>. The
+        source must be EXACTLY a bare `${VAR}`/`${VAR:-default}` to be selected;
+        a partial-path source falls through to literal/refuse, never a
+        false success that silently corrupts the path."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - ${DATA_ROOT:-/srv/data}/manager:/web-manager-data\n"
+            "      - beets-config:/config\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("DATA_ROOT=", env_text)
+        self.assertNotIn("/web-manager-data", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
     def test_env_key_override_is_honored_in_fallback_path(self):
         """BLOCKING #2 (--env-key non-functional): with an indentless `volumes:`
         sequence (an unscopable layout the refusal now points operators at), an
@@ -507,6 +614,39 @@ class RelocateComposeHardeningTests(unittest.TestCase):
         # The compose must be untouched (no corrupt, separator-less line).
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
         self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_f6_rewrite_anchors_to_top_level_service_not_extension_shadow(self):
+        """Layout B for --rewrite-compose (data-loss false success): a
+        `beets-web-manager:` key under an `x-templates:` extension BEFORE the
+        real `services:` block carries a literal /web-manager-data mount, and
+        the REAL service has its own literal mount. rewrite_compose_source must
+        anchor to the DIRECT CHILD of the top-level `services:` map and rewrite
+        the REAL service's line -- never the extension's (rewriting the shadow
+        left the real service on the old path while reporting SUCCESS)."""
+        ext_literal = "      - /opt/ext/web-manager-data:/web-manager-data\n"
+        real_literal = "      - /opt/target/web-manager-data:/web-manager-data\n"
+        compose = (
+            "x-templates:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            + ext_literal +
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            + real_literal +
+            "      - beets-config:/config\n"
+        )
+        self._write(compose)
+        res = self._run("--rewrite-compose", "--apply")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        text = Path(self.compose).read_text(encoding="utf-8")
+        # The REAL service's mount line was rewritten to the new path.
+        self.assertIn("      - %s:/web-manager-data\n" % new_dest, text)
+        self.assertNotIn("/opt/target/web-manager-data", text)
+        # The x-templates shadow mount must be left byte-identical.
+        self.assertIn(ext_literal, text,
+                      "the x-templates shadow mount must be untouched")
 
     def test_f4_dest_with_colon_is_rejected(self):
         """F4 (unvalidated insertion): a --dest containing ':' (or '$'/quotes)

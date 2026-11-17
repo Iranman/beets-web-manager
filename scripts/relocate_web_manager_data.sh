@@ -178,13 +178,56 @@ with open(path, "r", encoding="utf-8", newline="") as f:
     lines = f.readlines()
 def indent(s):
     return len(s) - len(s.lstrip(" "))
-svc_i = svc_ind = None
+
+def strip_comment(line):
+    # Drop an unquoted trailing `# ...` YAML comment. A '#' begins a comment
+    # only at line start or after whitespace AND outside quotes; a '#' inside a
+    # quoted value (or mid-token) is kept. Returns the entry with the comment
+    # (and trailing whitespace) removed.
+    out = []
+    quote = None
+    prev_ws = True  # start of line counts as "preceded by whitespace"
+    for ch in line:
+        if quote is not None:
+            out.append(ch)
+            if ch == quote:
+                quote = None
+            prev_ws = False
+            continue
+        if ch in ("'", '"'):
+            quote = ch; out.append(ch); prev_ws = False; continue
+        if ch == "#" and prev_ws:
+            break
+        out.append(ch)
+        prev_ws = ch in (" ", "\t")
+    return "".join(out).rstrip()
+
+# Anchor to the TOP-LEVEL `services:` mapping and require the target to be a
+# DIRECT CHILD of it. A same-named key under an `x-...` extension/anchor or any
+# other top-level map (appearing before or after `services:`) must NEVER shadow
+# the real service -- picking its ${VAR} would repoint the wrong mount and leave
+# the target on its old path (a data-loss false success).
+services_i = None
 for idx, ln in enumerate(lines):
     s = ln.strip()
     if not s or s.startswith("#"):
         continue
-    if s.endswith(":") and s[:-1].strip().strip("\"'") == service:
-        svc_i, svc_ind = idx, indent(ln); break
+    if indent(ln) == 0 and s == "services:":
+        services_i = idx; break
+if services_i is None:
+    sys.exit(0)
+svc_i = svc_ind = child_ind = None
+for idx in range(services_i + 1, len(lines)):
+    ln = lines[idx]; s = ln.strip()
+    if not s or s.startswith("#"):
+        continue
+    ind = indent(ln)
+    if ind == 0:
+        break  # next top-level key -- left the services block
+    if child_ind is None:
+        child_ind = ind  # indent of the services map's direct children
+    if ind == child_ind and s.endswith(":") and s[:-1].strip().strip("\"'") == service:
+        svc_i, svc_ind = idx, ind; break
 if svc_i is None:
     sys.exit(0)
 vol_ind = None
@@ -198,7 +241,16 @@ for ln in lines[svc_i + 1:]:
         continue
     if s and not s.startswith("#") and indent(ln) <= vol_ind:
         break  # left the volumes block
-    print(ln.rstrip("\n"))
+    # Emit real volume entries only. Skip comment-only / blank lines, and strip
+    # a trailing `# ...` comment from each entry: a commented-out
+    # `# - ${VAR}:...` entry, or a ${VAR} buried in a trailing comment on a
+    # literal mount, must never reach detect_env_key (it would harvest that
+    # ${VAR} and repoint the wrong mount -- a data-loss false success).
+    if not s or s.startswith("#"):
+        continue
+    entry = strip_comment(ln)
+    if entry.strip():
+        print(entry)
 PY
 }
 
@@ -213,7 +265,6 @@ detect_env_key() {
   # (mirrors detect_literal_source's guard). This is the documented workaround
   # for layouts the scoper below can't read.
   [[ -z "$ENV_KEY" ]] || return 0
-  local line
   # The interpolated ${VAR} /web-manager-data mount line in the TARGET service's
   # volumes block, if any. This is ONLY ever scoped to --service -- NEVER a
   # whole-file grep: a key picked from another service's ${VAR}:/web-manager-data
@@ -222,9 +273,40 @@ detect_env_key() {
   # (indentless `volumes:` sequence, trailing-comment service header, quoted
   # short-form mount) yield nothing here and fall through to the helpful refusal,
   # which directs the operator to --env-key NAME or --rewrite-compose.
-  line="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" | grep -E '\$\{' | head -n 1 || true)"
-  [[ -n "$line" ]] || return 0
-  ENV_KEY="$(printf '%s' "$line" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | head -n 1 | sed 's/^\${//')"
+  #
+  # Finding 3: the mount SOURCE must be EXACTLY a bare `${VAR}` or
+  # `${VAR:-default}` to be treated as a repointable env key. A partial-path
+  # source like `${DATA_ROOT}/manager:/web-manager-data` is NOT repointable
+  # (setting DATA_ROOT=<dest> would yield `<dest>/manager`), so it is rejected
+  # here and falls through to literal/refuse -- never a false success that
+  # silently corrupts the path.
+  # NB: the program is passed via -c (NOT a `<<heredoc`), so python's stdin stays
+  # connected to the pipe from compose_service_volume_lines. A heredoc would
+  # occupy stdin, starving the read and SIGPIPE-ing the upstream scoper.
+  # shellcheck disable=SC2016  # $ inside the single-quoted program is Python regex, not shell expansion
+  ENV_KEY="$(compose_service_volume_lines | python3 -I -c '
+import re, sys
+dest = sys.argv[1]
+# Short-form bind whose TARGET is exactly `dest`; capture its SOURCE. A quoted
+# WHOLE-mount short form (- "${VAR}:/web-manager-data") does not match here
+# (the quote wraps source+target) and is left to the refusal, as before.
+entry_re = re.compile(r"^\s*-\s+(?P<src>[^#\s][^#]*?):" + re.escape(dest) + r"(?:[:\s].*)?$")
+# A clean, fully-repointable env source: nothing but ${VAR} or ${VAR:-default}.
+bare_var_re = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}$")
+# Consume ALL input (do not break early) so the upstream scoper never gets a
+# SIGPIPE/BrokenPipeError that would trip set -o pipefail; keep the FIRST key.
+key = ""
+for raw in sys.stdin:
+    m = entry_re.match(raw.rstrip("\n"))
+    if not m:
+        continue
+    vm = bare_var_re.match(m.group("src").strip())
+    if vm and not key:
+        key = vm.group(1)
+if key:
+    print(key)
+' "$MOUNT_DEST")"
+  return 0
 }
 
 # If the /web-manager-data mount SOURCE is a literal host path (no ${VAR} AND no
@@ -311,15 +393,33 @@ def indent(s):
     return len(s) - len(s.lstrip(" "))
 # Restrict the rewrite to the TARGET service's volumes block [lo, hi): a literal
 # bind at the same container path under a DIFFERENT service must never be hit.
-svc_i = svc_ind = None
+# The target is matched as a DIRECT CHILD of the TOP-LEVEL `services:` map -- a
+# same-named key under an `x-...` extension/anchor (or any other top-level map)
+# must never shadow it, or the rewrite would edit the wrong service's line and
+# leave the real service on its old path while reporting SUCCESS (data loss).
+services_i = None
 for idx, ln in enumerate(lines):
     s = ln.strip()
     if not s or s.startswith("#"):
         continue
-    if s.endswith(":") and s[:-1].strip().strip("\"'") == service:
-        svc_i, svc_ind = idx, indent(ln); break
+    if indent(ln) == 0 and s == "services:":
+        services_i = idx; break
+if services_i is None:
+    sys.exit("top-level services: mapping not found in compose file")
+svc_i = svc_ind = child_ind = None
+for idx in range(services_i + 1, len(lines)):
+    ln = lines[idx]; s = ln.strip()
+    if not s or s.startswith("#"):
+        continue
+    ind = indent(ln)
+    if ind == 0:
+        break  # next top-level key -- left the services block
+    if child_ind is None:
+        child_ind = ind
+    if ind == child_ind and s.endswith(":") and s[:-1].strip().strip("\"'") == service:
+        svc_i, svc_ind = idx, ind; break
 if svc_i is None:
-    sys.exit("service %r not found in compose file" % service)
+    sys.exit("service %r not found under top-level services:" % service)
 lo = hi = vol_ind = None
 j = svc_i + 1
 while j < len(lines):
