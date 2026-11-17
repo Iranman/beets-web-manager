@@ -6,6 +6,15 @@ Status stages (never collapsed): IMPLEMENTED (code merged-ready with tests) -> C
 
 Each entry: affected area, evidence, current risk, desired state, safe migration approach, priority, status.
 
+## SEC-NPM-AUDIT-001 npm-audit exception: picomatch ReDoS (dev/build-tooling only, unfixable)
+
+- Affected area: `.github/workflows/security.yml` "Frontend dependency audit" step; `frontend/scripts/audit-allowlist.mjs`.
+- Evidence: GHSA-fc5q-39xc-vjpf / CVE-2026-112366, "picomatch vulnerable to ReDoS through single-branch repeated extglobs" (CVSS 8.7 high, availability-only, CWE-1333). Affected range `<= 4.0.7`, which includes the latest published picomatch (4.0.7); **no patched version exists** as of 2026-11-17 (advisory reviewed/updated that day, which is why the gate flipped red repo-wide with no dependency change). Pulled only by frontend devDeps (vitest -> vite / tinyglobby / fdir, and typescript-eslint); `npm ls picomatch --omit=dev` is empty, so it is absent from the production runtime tree. `npm audit --audit-level=high` has no native way to accept a single advisory.
+- Current risk: None to the shipped product -- the ReDoS is reachable only via attacker-controlled glob patterns, which build/test tooling never receives, and picomatch is not in the production dependency tree. Residual process risk: the allowlist must not mask a real future advisory. Mitigated: `audit-allowlist.mjs` still fails on every other high/critical advisory and fails safe (treats as offending) on any high/critical with no resolvable advisory id; the allowlist holds exactly one GHSA id.
+- Desired state: Remove the `GHSA-fc5q-39xc-vjpf` entry from `frontend/scripts/audit-allowlist.mjs` (and this record) the moment picomatch publishes a release `> 4.0.7` or a backported fix, restoring the plain high/critical behavior for this chain.
+- Safe migration approach: Watch for a picomatch patch; when available, bump/override to it, drop the allowlist entry, and delete this record. The allowlist script keeps the full high/critical gate armed for everything else meanwhile.
+- Priority: P3 (revisit when upstream patches). Status: Accepted Risk.
+
 ## ARCH-001 Route Handlers Still Orchestrate Workflows
 
 - Affected area: route modules `routes_library.py`, `routes_cleanup.py`, `routes_import.py`, `routes_maintenance.py`, `routes_playlist.py`, `routes_acquisition.py`.
