@@ -192,7 +192,10 @@ def _current_session_epoch() -> int:
     except Exception:
         return -1
     try:
-        return int(raw.splitlines()[0].strip() or "0")
+        # A present file whose first line is blank/whitespace-only or not a
+        # clean integer must fail closed (-1), never collapse to the baseline
+        # (0). Only a cleanly ABSENT file (FileNotFoundError above) returns 0.
+        return int(raw.splitlines()[0].strip())
     except Exception:
         return -1
 

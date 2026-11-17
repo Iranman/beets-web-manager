@@ -652,6 +652,28 @@ class AccountCredentialChangeTests(AuthAndSetupTests):
         self.assertFalse(self.client.get("/api/auth/me").get_json()["authenticated"])
         self.assertEqual(self.client.get("/api/library").status_code, 401)
 
+    def test_blank_or_garbage_epoch_file_fails_closed(self):
+        """#759 Finding B: a PRESENT epoch file whose first line is blank,
+        whitespace-only, or otherwise not a clean integer must fail closed
+        (-1 -> reject), never collapse to baseline epoch 0 and re-admit a
+        revoked cookie. Only a cleanly ABSENT file is the no-rotation baseline."""
+        old = "correct horse battery staple"
+        self._bootstrap_authenticated(password=old)  # actor authenticated at epoch 0
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+
+        for bad in ("\n5", "\n", "   ", "\nxyz", ""):
+            with self.subTest(contents=bad):
+                self.session_epoch_file.write_text(bad, encoding="utf-8")
+                self.assertFalse(
+                    self.client.get("/api/auth/me").get_json()["authenticated"]
+                )
+                self.assertEqual(self.client.get("/api/library").status_code, 401)
+
+        # A cleanly ABSENT file is the legitimate baseline and still authorizes.
+        self.session_epoch_file.unlink()
+        self.assertTrue(self.client.get("/api/auth/me").get_json()["authenticated"])
+        self.assertEqual(self.client.get("/api/library").status_code, 200)
+
     def test_epoch_bump_failure_aborts_password_change(self):
         """#759 item 2 (fail-closed): if the session epoch cannot be advanced,
         the password rotation must abort with nothing changed -- never rotate
