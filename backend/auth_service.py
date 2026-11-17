@@ -192,7 +192,16 @@ def _current_session_epoch() -> int:
     try:
         raw = _SESSION_EPOCH_FILE.read_bytes()
     except FileNotFoundError:
-        return 0
+        # Only a cleanly ABSENT file is the baseline. A dangling symlink is a
+        # PRESENT directory entry whose target is missing (read_bytes follows
+        # the link, raising FileNotFoundError); is_symlink() uses lstat and is
+        # True for it. Treat it as present and fail closed, so a planted
+        # dangling link cannot collapse to baseline 0 and re-admit a revoked
+        # cookie. A symlink to a real file reads normally and never lands here.
+        try:
+            return -1 if _SESSION_EPOCH_FILE.is_symlink() else 0
+        except OSError:
+            return -1
     except Exception:
         return -1
     try:

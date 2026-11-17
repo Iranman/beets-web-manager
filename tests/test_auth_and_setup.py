@@ -720,6 +720,19 @@ class AccountCredentialChangeTests(AuthAndSetupTests):
         self.session_epoch_file.unlink()
         self.assertEqual(auth_service._current_session_epoch(), 0)
 
+        # A DANGLING symlink is a PRESENT directory entry, not a clean absence:
+        # it must fail closed, never collapse to baseline 0 (independent review).
+        try:
+            os.symlink(
+                str(self.session_epoch_file.parent / "no-such-epoch-target"),
+                str(self.session_epoch_file),
+            )
+        except (OSError, NotImplementedError):
+            pass  # symlink creation not permitted on this platform
+        else:
+            self.assertEqual(auth_service._current_session_epoch(), -1)
+            self.assertEqual(self.client.get("/api/library").status_code, 401)
+
     def test_epoch_bump_failure_aborts_password_change(self):
         """#759 item 2 (fail-closed): if the session epoch cannot be advanced,
         the password rotation must abort with nothing changed -- never rotate
