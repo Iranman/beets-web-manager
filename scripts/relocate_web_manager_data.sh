@@ -155,27 +155,68 @@ resolve_compose_file() {
   warn "no Compose file found under $STACK_DIR -- pass --compose-file to enable env-key detection and recreate"
 }
 
+# Print the volume-entry lines of the TARGET service's `volumes:` block ONLY.
+# Detection and rewrite must be scoped to --service: another service using a
+# short-form literal bind at the same container path must never be mistaken for
+# this service's mount (that would repoint/rewrite the wrong line -- data loss).
+compose_service_volume_lines() {
+  [[ -n "$COMPOSE_FILE" ]] || return 0
+  python3 -I - "$COMPOSE_FILE" "$SERVICE" <<'PY'
+import sys
+path, service = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8", newline="") as f:
+    lines = f.readlines()
+def indent(s):
+    return len(s) - len(s.lstrip(" "))
+svc_i = svc_ind = None
+for idx, ln in enumerate(lines):
+    s = ln.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.endswith(":") and s[:-1].strip().strip("\"'") == service:
+        svc_i, svc_ind = idx, indent(ln); break
+if svc_i is None:
+    sys.exit(0)
+vol_ind = None
+for ln in lines[svc_i + 1:]:
+    s = ln.strip()
+    if s and not s.startswith("#") and indent(ln) <= svc_ind:
+        break  # left the service block
+    if vol_ind is None:
+        if s == "volumes:":
+            vol_ind = indent(ln)
+        continue
+    if s and not s.startswith("#") and indent(ln) <= vol_ind:
+        break  # left the volumes block
+    print(ln.rstrip("\n"))
+PY
+}
+
 # The env var that the Compose /web-manager-data mount line interpolates. The
 # OUTERMOST ${VAR...} wins (Compose resolves it first); that is the key whose
 # value actually selects the mount source. Left empty if the line has no
-# variable (a hardcoded path -- cannot be repointed via env).
+# variable (a hardcoded path -- cannot be repointed via env). Scoped to the
+# target service's volumes block.
 detect_env_key() {
   [[ -n "$COMPOSE_FILE" ]] || return 0
   local line
-  line="$(grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" "$COMPOSE_FILE" | grep -E '\$\{' | head -n 1 || true)"
+  line="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" | grep -E '\$\{' | head -n 1 || true)"
   [[ -n "$line" ]] || return 0
   ENV_KEY="$(printf '%s' "$line" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | head -n 1 | sed 's/^\${//')"
 }
 
-# If the /web-manager-data mount SOURCE is a literal host path (no ${VAR}),
-# there is no env key to set -- repointing it means rewriting the Compose line
-# (opt-in --rewrite-compose). Only relevant when env-key detection found none.
+# If the /web-manager-data mount SOURCE is a literal host path (no ${VAR} AND no
+# bare $VAR -- both are Compose interpolation, not a literal), there is no env
+# key to set; repointing it means rewriting the Compose line (opt-in
+# --rewrite-compose). Only relevant when env-key detection found none. Scoped to
+# the target service's volumes block.
 detect_literal_source() {
   [[ -n "$COMPOSE_FILE" ]] || return 0
   [[ -z "$ENV_KEY" ]] || return 0
   local line
-  line="$(grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" "$COMPOSE_FILE" | grep -vE '\$\{' | head -n 1 || true)"
+  line="$(compose_service_volume_lines | grep -E ":${MOUNT_DEST}(\$|:|[[:space:]])" | grep -vE '\$' | head -n 1 || true)"
   [[ -n "$line" ]] && COMPOSE_MOUNT_IS_LITERAL=1
+  return 0  # never let an empty match fail under `set -e` (falls to helpful error)
 }
 
 resolve_env_file() {
@@ -234,35 +275,80 @@ PY
 rewrite_compose_source() {
   local file="$1" dest="$2" val="$3"
   local bak="${file}.bak"
-  cp -p -- "$file" "$bak" || die "could not write compose backup: $bak"
-  python3 -I - "$file" "$dest" "$val" <<'PY' || die "compose rewrite failed -- original preserved at ${file}.bak"
+  # Keep the FIRST backup: a re-run (--resume) must not clobber the original
+  # with an already-rewritten copy, or rollback becomes impossible.
+  if [[ ! -e "$bak" ]]; then
+    cp -p -- "$file" "$bak" || die "could not write compose backup: $bak"
+  fi
+  python3 -I - "$file" "$dest" "$val" "$SERVICE" <<'PY' || { cp -p -- "$bak" "$file" 2>/dev/null || true; die "compose rewrite failed -- original restored from $bak"; }
 import re, sys
-path, dest, val = sys.argv[1], sys.argv[2], sys.argv[3]
+path, dest, val, service = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 with open(path, "r", encoding="utf-8", newline="") as f:
     lines = f.readlines()
+def indent(s):
+    return len(s) - len(s.lstrip(" "))
+# Restrict the rewrite to the TARGET service's volumes block [lo, hi): a literal
+# bind at the same container path under a DIFFERENT service must never be hit.
+svc_i = svc_ind = None
+for idx, ln in enumerate(lines):
+    s = ln.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.endswith(":") and s[:-1].strip().strip("\"'") == service:
+        svc_i, svc_ind = idx, indent(ln); break
+if svc_i is None:
+    sys.exit("service %r not found in compose file" % service)
+lo = hi = vol_ind = None
+j = svc_i + 1
+while j < len(lines):
+    ln = lines[j]; s = ln.strip()
+    if s and not s.startswith("#") and indent(ln) <= svc_ind:
+        break
+    if vol_ind is None:
+        if s == "volumes:":
+            vol_ind = indent(ln); lo = j + 1
+    elif s and not s.startswith("#") and indent(ln) <= vol_ind:
+        break
+    j += 1
+if lo is None:
+    sys.exit("service %r has no volumes: block" % service)
+hi = j
 # A short-form bind whose target is exactly `dest` and whose source is a literal
-# host path (no ${...}; Linux paths contain no ':'). head=indent+'- '+optquote,
-# src=the literal source, rest=':<dest>'+optional mode/comment/closing-quote.
+# host path (no $ interpolation; Linux paths contain no ':'). head=indent+'- '
+# (the '- ' separator space is REQUIRED and captured so it can't be absorbed
+# into src); src=the literal source (no leading space, no ':' or '$');
+# rest=':<dest>'+optional mode/comment/closing-quote.
 pat = re.compile(
-    r'^(?P<head>\s*-\s*["\']?)(?P<src>[^:$][^:]*)'
+    r'^(?P<head>\s*-\s+["\']?)(?P<src>[^:$\s][^:$]*)'
     r'(?P<rest>:' + re.escape(dest) + r'(?:[:\s].*)?["\']?\s*)$'
 )
-hits = [i for i, ln in enumerate(lines)
-        if '${' not in ln and pat.match(ln.rstrip('\n'))]
+hits = [i for i in range(lo, hi)
+        if '$' not in lines[i] and pat.match(lines[i].rstrip('\n'))]
 if len(hits) != 1:
-    sys.exit("expected exactly one hardcoded %s mount line, found %d" % (dest, len(hits)))
+    sys.exit("expected exactly one hardcoded %s mount line in service %r, found %d"
+             % (dest, service, len(hits)))
 i = hits[0]
-nl = '\n' if lines[i].endswith('\n') else ''
 m = pat.match(lines[i].rstrip('\n'))
-lines[i] = m.group('head') + val + m.group('rest') + nl
+if m.group('src') == val:
+    sys.exit(0)  # idempotent: already points at the new path -- nothing to do
+nl = '\n' if lines[i].endswith('\n') else ''
+newline = m.group('head') + val + m.group('rest') + nl
+# Re-validate the edited line is still a well-formed `  - <val>:<dest>` entry
+# (separator space intact); abort WITHOUT writing if the edit malformed it.
+if not re.match(r'^\s*-\s+' + re.escape(val) + ':' + re.escape(dest) + r'(?:[:\s].*)?["\']?\s*$',
+                newline.rstrip('\n')):
+    sys.exit("post-edit validation failed: edited mount line is malformed")
+lines[i] = newline
 with open(path, "w", encoding="utf-8", newline="") as f:
     f.writelines(lines)
 PY
-  # Verify only the single mount line changed (siblings byte-identical).
+  # Verify only the single mount line changed (siblings byte-identical). 2 =
+  # the one mount line differs from the backup; 0 = idempotent re-run (source
+  # already at the new path, nothing rewritten).
   if command -v diff >/dev/null 2>&1; then
     local changed
     changed="$(diff -- "$bak" "$file" | grep -cE '^[<>]' || true)"
-    [[ "$changed" -eq 2 ]] \
+    [[ "$changed" -eq 2 || "$changed" -eq 0 ]] \
       || die "compose rewrite touched more than the single mount line ($changed changed lines) -- restore from $bak"
   fi
   log "Compose mount line rewritten (pre-change copy saved at $bak)."
@@ -274,6 +360,10 @@ PY
 [[ -n "$DEST" ]] || die "--dest is required (the new absolute host path)"
 case "$DEST" in /*|[A-Za-z]:[\\/]*) : ;; *) die "--dest must be an absolute path: $DEST" ;; esac
 case "$DEST" in *[$' \t\n']*) die "--dest must not contain whitespace (env-file safety): $DEST" ;; esac
+# A bind-mount source ending up in Compose/YAML or an env value must not carry
+# characters that re-delimit it: ':' splits a short-form bind, '$' interpolates,
+# quotes/backtick break quoting. Linux data-dir paths never contain these.
+case "$DEST" in *[:'$'\"\'\`]*) die "--dest must not contain ':' '\$' quotes or backtick (compose/env safety): $DEST" ;; esac
 
 resolve_compose_file
 detect_env_key
@@ -464,6 +554,16 @@ fi
 
 # 6) Remove old dir only if asked and only after everything above passed.
 if [[ "$REMOVE_OLD" -eq 1 ]]; then
+  # F1 safety net: before deleting the OLD dir, prove the LIVE container really
+  # mounts the NEW path at MOUNT_DEST. If the repoint hit the wrong service/line
+  # the app is still running on the old dir -- deleting it would be data loss.
+  if [[ "$RECREATE" -eq 1 ]]; then
+    live_src="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$MOUNT_DEST\"}}{{.Source}}{{end}}{{end}}" "$CID" 2>/dev/null || true)"
+    [[ -n "$live_src" ]] || die "refusing --remove-old: could not read the live $MOUNT_DEST mount from the recreated container -- old data left intact at $SRC_CANON"
+    [[ "$(canon_path "$live_src")" == "$DST_CANON" ]] \
+      || die "refusing --remove-old: live container mounts $MOUNT_DEST from '$live_src', not the new path '$DST_CANON' -- the repoint did not take effect; old data left intact at $SRC_CANON"
+    log "Verified: live container mounts $MOUNT_DEST from the new path."
+  fi
   # Defense-in-depth: refuse to rm -rf a suspiciously shallow path (root or a
   # single top-level component), even though SRC_CANON is a verified data dir
   # and a backup exists. Requires at least two path segments (e.g. /a/b).

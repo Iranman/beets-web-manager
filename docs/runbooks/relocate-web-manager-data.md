@@ -75,6 +75,26 @@ options:
   backup-first / copy-verify / health-gated recreate / printed-rollback safety
   of the script around it.
 
+  Notes on the rewrite:
+
+  - **Scoped to `--service`.** Detection and rewrite look only inside the
+    target service's `volumes:` block, so a short-form literal bind at
+    `/web-manager-data` under a *different* service is never mistaken for this
+    one.
+  - **Only short-form literal sources.** A long-form mount (`type: bind` /
+    `source:` / `target:`) or an interpolated source (`${VAR}` **or** bare
+    `$VAR`) is not rewritten — the script refuses with a helpful message rather
+    than editing the wrong thing. For `${VAR}` the default env-file repoint
+    applies; a long-form or bare-`$` source must be edited by hand.
+  - **`--remove-old` is cross-checked.** When the service is recreated, the
+    script verifies via `docker inspect` that the live container actually
+    mounts the new path at `/web-manager-data` before it will delete the old
+    dir; if the repoint did not take effect the old data is left intact.
+  - **`--dest` restriction.** The new path must be an absolute path with no
+    whitespace and no `:`, `$`, quote, or backtick characters (these would
+    re-delimit a bind mount or interpolate in the env file). Linux data-dir
+    paths never contain them.
+
 ## Prerequisites
 
 - Run on the Docker host, from (or pointing at) the stack directory.
