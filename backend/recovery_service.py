@@ -37,7 +37,7 @@ import backend.job_contract as job_contract
 import backend.recovery_carrier as recovery_carrier
 from backend.app_runtime import METADATA_CACHE_ROOT, jobs, _s
 from backend.json_state import atomic_write_json, load_json_object
-from job_engine import DuplicateJobError
+from job_engine import DuplicateJobError, redact_for_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -811,7 +811,13 @@ def _build_advance_status(summary: Dict[str, Any], *, trigger: str) -> Dict[str,
 
 def _write_advance_status(report: Dict[str, Any], log: Optional[List[str]] = None) -> None:
     try:
-        atomic_write_json(_advance_status_file(), report,
+        # Defense-in-depth: the status sidecar is a second persistence path for
+        # the sweep report, and the read-only status endpoint serves it back to
+        # the client. Apply the same secret-scrubbing backstop the job snapshot
+        # uses (job_engine #272/#351) so a future producer that gains a
+        # secret-bearing field can't leak via this path. No secret-bearing text
+        # reaches the advancer's log/summary today; this keeps it that way.
+        atomic_write_json(_advance_status_file(), redact_for_persistence(report),
                           ensure_ascii=False, indent=2, sort_keys=True, default=str)
     except Exception as ex:
         if log is not None:

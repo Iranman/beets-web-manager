@@ -15,6 +15,7 @@ production music/library is touched and no real sweep job thread is started
 (start_python is mocked / driven synchronously).
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -329,6 +330,27 @@ class StatusShapeTests(_Mixin):
             trigger="scheduled")
         self.assertFalse(report["changes_made"])
         self.assertFalse(report["needs_attention"])
+
+
+class StatusSidecarRedactionTests(_Mixin):
+    """#762 F1 (security hardening): the status sidecar is a second persistence
+    path served back by the read-only status endpoint, so it must apply the same
+    secret-scrubbing backstop the job snapshot uses. No secret-bearing text
+    reaches the advancer's log today; this guards against a future producer that
+    gains one leaking via the sidecar/endpoint."""
+
+    def test_write_advance_status_redacts_url_userinfo_in_sidecar(self):
+        report = recovery_service._build_advance_status(
+            {"scanned": 1, "handed_off": 0, "kept_review": 1, "newly_review": 0,
+             "skipped": 0},
+            trigger="scheduled")
+        report["log"] = ["[recovery-advance] fetched https://user:p4ssw0rd@example.com/x"]
+        recovery_service._write_advance_status(report)
+        persisted = recovery_service.read_advance_status()
+        blob = json.dumps(persisted)
+        self.assertNotIn("p4ssw0rd", blob, "URL password must be scrubbed from the sidecar")
+        self.assertTrue(persisted, "status is still persisted (redaction does not drop it)")
+        self.assertEqual(persisted["counts"]["still_unresolved"], 1, "counts survive redaction")
 
 
 if __name__ == "__main__":
