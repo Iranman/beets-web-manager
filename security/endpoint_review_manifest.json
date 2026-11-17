@@ -5220,6 +5220,24 @@
     "tests/test_mtr_step2_identity_redesign.py::AdvancerTests::test_advancer_hands_off_gatepass_and_keeps_manual_in_review"
    ],
    "step6_security_review_pending": true
+  },
+  {
+   "method": "GET",
+   "endpoint": "import_recovery_advance_status",
+   "security_classification": "ADMIN_ONLY",
+   "purpose": "read-only latest missing-track recovery sweep status (#762): structured counts, last_run, next_scheduled_check, changes_made; served from a metadata-cache rolling-status sidecar, no mutation and no background job",
+   "required_role_or_privilege": "owner/admin shared application secret",
+   "handles_secrets": false,
+   "accesses_files": true,
+   "creates_background_job": false,
+   "invokes_external_services_or_subprocesses": false,
+   "destructive_or_high_impact": false,
+   "rate_limit_required": true,
+   "rate_limit_implemented": false,
+   "existing_security_tests": [
+    "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+    "tests/test_mtr_recovery_advance_quiet.py::StatusEndpointTests::test_status_endpoint_returns_structured_counts"
+   ]
   }
  ]
 }

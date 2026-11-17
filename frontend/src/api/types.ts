@@ -540,6 +540,45 @@ export interface ApiOkResponse {
   ok: boolean;
   error?: string | null;
 }
+
+/** Missing-track recovery sweep counts (#762). Canonical names are duplicated
+ * with the raw advancer names (examined=scanned, recovered=handed_off,
+ * still_unresolved=kept_review); bind either. All optional: the status is `{}`
+ * before the first sweep, and the UI treats a missing count as 0. */
+export interface RecoveryAdvanceCounts {
+  examined?: number;
+  scanned?: number;
+  missing_found?: number;
+  recovery_attempted?: number;
+  recovered?: number;
+  handed_off?: number;
+  still_unresolved?: number;
+  kept_review?: number;
+  newly_review?: number;
+  skipped?: number;
+  skipped_unchanged?: number;
+  adopted?: number;
+  removed?: number;
+}
+
+/** Rolling status of the missing-track recovery advancer (#762), also carried
+ * as a recovery-advance Job's result. `{}` before the first run. */
+export interface RecoveryAdvanceStatus {
+  last_run?: number;
+  trigger?: 'scheduled' | 'manual';
+  changes_made?: boolean;
+  needs_attention?: boolean;
+  error?: string;
+  next_scheduled_check?: number | null;
+  counts?: RecoveryAdvanceCounts;
+  summary?: Record<string, unknown>;
+  log?: string[];
+}
+
+export interface RecoveryAdvanceStatusResponse extends ApiOkResponse {
+  has_run: boolean;
+  status: RecoveryAdvanceStatus;
+}
 export type TransactionStatus =
   | 'Pending'
   | 'Preview'

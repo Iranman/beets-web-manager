@@ -884,6 +884,19 @@ def import_recovery_advance_job():
     return jsonify({"ok": True, "job_id": job.job_id, "limit": limit})
 
 
+@app.get("/api/import/recovery/status")
+def import_recovery_advance_status():
+    """Latest rolling missing-track-recovery sweep status (#762): the structured
+    counts, when it last ran, whether it changed anything, and the next scheduled
+    check. Read-only -- the scheduled tick writes this sidecar every ~120s even
+    when it records no job, so the UI shows passive progress without the Job
+    History flood. Auth-gated by the global before_request boundary like every
+    other setup/import read route."""
+    import backend.recovery_service as recovery_service
+    status = recovery_service.read_advance_status()
+    return jsonify({"ok": True, "status": status, "has_run": bool(status)})
+
+
 @app.get("/api/import-reconciliation/reviews")
 def import_reconciliation_reviews():
     """Reconciliation decisions held for review (both files kept)."""

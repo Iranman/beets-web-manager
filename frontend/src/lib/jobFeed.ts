@@ -513,10 +513,47 @@ function progressFromState(job: Job) {
   return '';
 }
 
+interface RecoveryAdvanceJobResult {
+  changes_made?: boolean;
+  needs_attention?: boolean;
+  error?: string;
+  trigger?: string;
+  counts?: Record<string, unknown>;
+}
+
+/** A recovery-advance Job carries the rolling missing-track-recovery status as
+ * its result (#762). Recognise it so the detail view explains what the sweep
+ * did instead of a bare "completed". */
+function recoveryAdvanceResult(job: Job | null | undefined): RecoveryAdvanceJobResult | null {
+  if (!job || String(job.metadata?.type ?? '') !== 'recovery-advance') return null;
+  const result = job.result;
+  return result && typeof result === 'object' ? result as RecoveryAdvanceJobResult : null;
+}
+
+function recoveryCount(result: RecoveryAdvanceJobResult, ...keys: string[]): number {
+  const counts = result.counts && typeof result.counts === 'object' ? result.counts as Record<string, unknown> : {};
+  for (const key of keys) {
+    const value = counts[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
 function resultTitleForJob(job: Job, attention: boolean) {
   const playlist = String(job.metadata?.name ?? '').trim();
   const action = String(job.metadata?.action ?? '').trim();
   if (job.status === 'running') return 'Still working. No new update yet.';
+  const recovery = recoveryAdvanceResult(job);
+  if (recovery && (job.status === 'success' || job.status === 'failed')) {
+    const recovered = recoveryCount(recovery, 'recovered', 'handed_off');
+    const review = recoveryCount(recovery, 'newly_review');
+    const errored = Boolean(String(recovery.error ?? '').trim()) || job.status === 'failed';
+    if (errored) return 'Recovery sweep finished with an error.';
+    if (review > 0) return `Recovery sweep finished. ${numberFmt.format(review)} newly need review.`;
+    if (recovered > 0) return `Recovered ${numberFmt.format(recovered)} missing track${recovered === 1 ? '' : 's'}.`;
+    if (recovery.changes_made) return 'Recovery sweep made changes.';
+    return 'Recovery sweep ran. No changes made.';
+  }
   if (attention) return playlist ? `Playlist sync finished, but ${playlist} needs attention.` : 'Job finished, but some items need attention.';
   if (job.status === 'success' && action === 'sync_plex') return playlist ? `${playlist} playlist synced to Plex.` : 'Playlist synced to Plex.';
   if (job.status === 'success') return `${friendlyDoneSubject(job)} completed.`;
@@ -527,6 +564,18 @@ function resultTitleForJob(job: Job, attention: boolean) {
 }
 
 function resultBulletsForJob(job: Job, rawLines: string[]) {
+  const recovery = recoveryAdvanceResult(job);
+  if (recovery) {
+    const bullets: string[] = [];
+    if (String(recovery.trigger) === 'scheduled') bullets.push('Background sweep');
+    bullets.push(`${numberFmt.format(recoveryCount(recovery, 'examined', 'scanned'))} examined`);
+    bullets.push(`${numberFmt.format(recoveryCount(recovery, 'recovered', 'handed_off'))} recovered`);
+    bullets.push(`${numberFmt.format(recoveryCount(recovery, 'still_unresolved', 'kept_review'))} still unresolved`);
+    bullets.push(`Changed: ${recovery.changes_made ? 'yes' : 'no'}`);
+    const review = recoveryCount(recovery, 'newly_review');
+    if (review > 0) bullets.push(`${numberFmt.format(review)} newly need review`);
+    return bullets.slice(0, 6);
+  }
   const counts = collectJobCounts(rawLines, job.result);
   const bullets: string[] = [];
   for (const key of Object.keys(RESULT_LABELS)) {
@@ -555,6 +604,8 @@ function friendlyFailureReason(job: Job, rawLines: string[]) {
 
 function jobNeedsAttention(job: Job, rawLines: string[]) {
   if (job.status === 'failed') return false;
+  const recovery = recoveryAdvanceResult(job);
+  if (recovery) return Boolean(recovery.needs_attention) || recoveryCount(recovery, 'newly_review') > 0;
   if (reviewQueueText(job)) return true;
   const counts = collectJobCounts(rawLines, job.result);
   const attentionKeys = ['tracks not found in Plex', 'missing tracks', 'failed tracks', 'items needing review'];

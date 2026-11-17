@@ -23,18 +23,21 @@ Step 4 (library-transaction) makes that entrypoint honor the gate directly.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 import stat
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import backend.job_contract as job_contract
 import backend.recovery_carrier as recovery_carrier
-from backend.app_runtime import jobs, _s
-from job_engine import DuplicateJobError
+from backend.app_runtime import METADATA_CACHE_ROOT, jobs, _s
+from backend.json_state import atomic_write_json, load_json_object
+from job_engine import DuplicateJobError, redact_for_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,98 @@ DEFAULT_ADVANCE_LIMIT = 25
 
 
 _REC_STAGE_RE = re.compile(r"rec-[0-9a-f]{16}")
+
+
+# ── #762: progress-aware re-check + quiet sweeps ────────────────────────────
+# Default re-check floor: a carrier whose inputs are unchanged is re-verified at
+# most this often (a stuck Review carrier re-runs its ~35-40s preflight hourly,
+# not every 120s tick). <= 0 disables the floor -> always re-verify (old
+# behavior). Override via env; empty env also disables (matches the interval
+# knob's own `or 0` parsing).
+ADVANCER_RECHECK_FLOOR_SECONDS = float(
+    os.environ.get("RECOVERY_ADVANCE_RECHECK_FLOOR_SECONDS", "3600") or 0)
+
+# Rolling status + per-carrier re-check checkpoints live beside the other
+# metadata-cache sidecars (mirrors maintenance_service's MAINTENANCE_RUNNER_LAST_FILE).
+# RECOVERY_ADVANCE_CACHE_DIR overrides the directory (used for test isolation and
+# deployments that split the cache volume); default is the metadata-cache root.
+# Resolved at call time so a test override and a deployment env both take effect.
+def _advance_cache_dir() -> Path:
+    override = os.environ.get("RECOVERY_ADVANCE_CACHE_DIR", "").strip()
+    return Path(override) if override else METADATA_CACHE_ROOT
+
+
+def _advance_status_file() -> Path:
+    return _advance_cache_dir() / "recovery-advance-last.json"
+
+
+def _advance_checkpoints_file() -> Path:
+    return _advance_cache_dir() / "recovery-advance-checkpoints.json"
+
+
+# A checkpoint entry older than this (carrier gone terminal, so its ts stopped
+# refreshing) is dropped on save so the file stays bounded by the live set.
+_CHECKPOINT_TTL_SECONDS = 30 * 24 * 3600
+
+
+def _load_checkpoints() -> Dict[str, Any]:
+    data = load_json_object(_advance_checkpoints_file())
+    return data if isinstance(data, dict) else {}
+
+
+def _save_checkpoints(checkpoints: Dict[str, Any], now: float) -> None:
+    pruned = {cid: cp for cid, cp in checkpoints.items()
+              if isinstance(cp, dict) and (now - float(cp.get("ts") or 0)) < _CHECKPOINT_TTL_SECONDS}
+    try:
+        atomic_write_json(_advance_checkpoints_file(), pruned,
+                          ensure_ascii=False, indent=2, sort_keys=True)
+    except Exception:
+        pass  # best-effort: a lost checkpoint only costs one extra re-verify
+
+
+def _carrier_input_fingerprint(carrier: Dict[str, Any]) -> str:
+    """Cheap signature of exactly what ``_reevaluate_carrier`` consumes: the
+    newest staged audio folder's (basename, size, mtime_ns) set. Changes when a
+    new download lands, a new attempt folder appears, or a file is rewritten --
+    so a freshly downloaded album invalidates the checkpoint and is re-evaluated
+    at once (requirement 8). "" when no staged audio folder is present."""
+    try:
+        folder = _first_staged_folder_with_audio(carrier)
+        if not folder:
+            return ""
+        from backend.ytdlp_service import _audio_files_in_dir
+        parts: List[str] = []
+        for f in sorted(_audio_files_in_dir(folder)):
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            parts.append(f"{os.path.basename(f)}:{st.st_size}:{st.st_mtime_ns}")
+        return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
+    except Exception:
+        # Best-effort skip optimization only: it must NEVER abort the sweep. On
+        # any error (e.g. the carrier store dir not yet provisioned, or a
+        # transient FS error) return "" so the checkpoint can't match and the
+        # carrier is re-verified -- never wrongly skipped.
+        return ""
+
+
+def _checkpoint_allows_skip(carrier: Dict[str, Any], fingerprint: str,
+                            checkpoints: Dict[str, Any], now: float) -> bool:
+    """True when this carrier's inputs are unchanged since its last full
+    re-evaluation AND that evaluation is newer than the re-check floor, so the
+    expensive preflight can be skipped this tick. A changed carrier
+    revision (external contract/identity write) or a changed staged-file
+    fingerprint (new download) both invalidate the checkpoint."""
+    floor = ADVANCER_RECHECK_FLOOR_SECONDS
+    if floor <= 0:
+        return False  # floor disabled -> always re-verify (old behavior)
+    cp = checkpoints.get(_s(carrier.get("carrier_id")))
+    if not isinstance(cp, dict):
+        return False
+    return (_s(cp.get("fp")) == fingerprint
+            and int(cp.get("rev", -1)) == int(carrier.get("revision") or 0)
+            and (now - float(cp.get("ts") or 0)) < floor)
 
 
 class StagingFolderBusy(RuntimeError):
@@ -203,8 +298,20 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
     accurate, contract-derived reason. Terminal / mid-import carriers are owned
     by their own job and skipped. Returns a summary."""
     log = log if log is not None else []
-    summary: Dict[str, Any] = {"scanned": 0, "handed_off": 0, "kept_review": 0, "skipped": 0,
-                               "carriers": []}
+    summary: Dict[str, Any] = {"scanned": 0, "evaluated": 0, "handed_off": 0,
+                               "kept_review": 0, "newly_review": 0,
+                               "skipped": 0, "skipped_unchanged": 0, "carriers": []}
+    now = time.time()
+    checkpoints = _load_checkpoints()
+
+    def _record_cp(carrier_id: str, fingerprint: str) -> None:
+        # Capture the carrier's revision AFTER all this run's writes to it
+        # (`_attach_decision` and any state transition both bump it), so the
+        # NEXT tick sees an unchanged revision and can skip -- a pre-write
+        # revision would always look stale and defeat the skip.
+        rev = int((recovery_carrier.get_carrier(carrier_id) or {}).get("revision") or 0)
+        checkpoints[carrier_id] = {"rev": rev, "fp": fingerprint, "ts": now}
+
     try:
         carriers = recovery_carrier.list_carriers_by_state(
             recovery_carrier.ADVANCER_STATES, limit=int(max(1, limit)))
@@ -221,6 +328,16 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
             summary["skipped"] += 1
             summary["carriers"].append({"carrier_id": cid, "outcome": "skipped_not_advanceable"})
             continue
+        # #762: skip the ~35-40s re-verify of a carrier whose inputs are
+        # unchanged since its last full re-check and still within the re-check
+        # floor. A new download / revision change invalidates the checkpoint
+        # (fingerprint/rev differ) so a freshly staged album re-evaluates at once.
+        fingerprint = _carrier_input_fingerprint(fresh)
+        if _checkpoint_allows_skip(fresh, fingerprint, checkpoints, now):
+            summary["skipped"] += 1
+            summary["skipped_unchanged"] += 1
+            summary["carriers"].append({"carrier_id": cid, "outcome": "skipped_unchanged"})
+            continue
         # #556: the staged folder is the one an acquisition retry restages;
         # re-verify only while no retry or import holds it, else defer.
         key = _s(fresh.get("recovery_identity_key")).strip().lower()
@@ -233,12 +350,14 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
             summary["skipped"] += 1
             summary["carriers"].append({"carrier_id": cid, "outcome": "skipped_staging_busy"})
             continue
+        summary["evaluated"] += 1
         decision = evaluation["decision"]
         _attach_decision(cid, decision, evaluation["reason"])
         if evaluation["ok"]:
             if _hand_off_to_insertion(fresh, evaluation["folder"], log):
                 summary["handed_off"] += 1
                 summary["carriers"].append({"carrier_id": cid, "outcome": "handed_off"})
+                _record_cp(cid, fingerprint)
                 continue
             # Hand-off refused/raced: fall through and keep it in review.
         # Keep (or place) the carrier in MANUAL review with an accurate reason.
@@ -255,6 +374,10 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
                 recovery_carrier.advance_state(
                     cid, "review_required",
                     expected_revision=int(current.get("revision") or 0))
+                # A carrier that FIRST entered review this run needs attention
+                # (the operator has a new stuck recovery to look at); one that
+                # was already in review and stayed is steady-state, not news.
+                summary["newly_review"] += 1
             except recovery_carrier.RecoveryCarrierConflictError:
                 # A concurrent transition landed since the re-read; skip rather
                 # than overwrite -- the next sweep re-evaluates it fresh.
@@ -264,14 +387,17 @@ def advance_stuck_carriers(limit: int = DEFAULT_ADVANCE_LIMIT,
         summary["kept_review"] += 1
         summary["carriers"].append({"carrier_id": cid, "outcome": "kept_review",
                                     "reason": evaluation["reason"]})
+        _record_cp(cid, fingerprint)
         # Steady-state "kept in review" carriers are NOT re-logged per carrier on
         # every tick (that flooded the job log each sweep for a Review backlog).
         # The per-carrier reason stays on summary["carriers"] and is attached to
         # the carrier by _attach_decision above; the per-run "done" line below
         # reports the aggregate kept_review count.
+    _save_checkpoints(checkpoints, now)
     log.append(f"[recovery-advance] done: scanned {summary['scanned']}, "
-               f"handed_off {summary['handed_off']}, kept_review {summary['kept_review']}, "
-               f"skipped {summary['skipped']}.")
+               f"evaluated {summary['evaluated']}, handed_off {summary['handed_off']}, "
+               f"kept_review {summary['kept_review']}, skipped {summary['skipped']} "
+               f"(unchanged {summary['skipped_unchanged']}).")
     return summary
 
 
@@ -641,15 +767,100 @@ def reconcile_orphan_staging_folders(limit: int = DEFAULT_ADVANCE_LIMIT,
     return summary
 
 
+def _next_scheduled_check() -> Optional[float]:
+    """Wall-clock time of the next automatic sweep, or None when the schedule is
+    disabled (interval <= 0)."""
+    return (time.time() + ADVANCER_INTERVAL_SECONDS) if ADVANCER_INTERVAL_SECONDS > 0 else None
+
+
+def _build_advance_status(summary: Dict[str, Any], *, trigger: str) -> Dict[str, Any]:
+    """Shape one sweep's summary into the durable rolling-status report the UI
+    reads (GET /api/import/recovery/status) and that gates a visible job. The
+    field names are the structured contract the frontend binds to; the raw
+    ``summary`` (incl. per-carrier outcomes) is kept for audit."""
+    orphan = summary.get("orphan_reconcile") if isinstance(summary.get("orphan_reconcile"), dict) else {}
+    handed_off = int(summary.get("handed_off") or 0)
+    adopted = int(orphan.get("adopted") or 0)
+    removed = int(orphan.get("removed") or 0)
+    newly_review = int(summary.get("newly_review") or 0)
+    error = _s(summary.get("error") or orphan.get("error"))
+    changes_made = bool(handed_off or adopted or removed)
+    # Attention = a newly-stuck recovery to look at, or a sweep that errored.
+    needs_attention = bool(newly_review or error)
+    counts = {
+        # Canonical names in requirement D, plus the raw advancer names they map
+        # from so a reader never has to guess the correspondence.
+        "examined": int(summary.get("scanned") or 0),
+        "scanned": int(summary.get("scanned") or 0),
+        "missing_found": int(summary.get("scanned") or 0),
+        "recovery_attempted": int(summary.get("evaluated") or 0),
+        "recovered": handed_off,
+        "handed_off": handed_off,
+        "still_unresolved": int(summary.get("kept_review") or 0),
+        "kept_review": int(summary.get("kept_review") or 0),
+        "newly_review": newly_review,
+        "skipped": int(summary.get("skipped") or 0),
+        "skipped_unchanged": int(summary.get("skipped_unchanged") or 0),
+        "adopted": adopted,
+        "removed": removed,
+    }
+    return {
+        "last_run": time.time(),
+        "trigger": trigger,                 # "scheduled" | "manual"
+        "changes_made": changes_made,
+        "needs_attention": needs_attention,
+        "error": error,
+        "next_scheduled_check": _next_scheduled_check(),
+        "counts": counts,
+        "summary": summary,
+    }
+
+
+def _write_advance_status(report: Dict[str, Any], log: Optional[List[str]] = None) -> None:
+    try:
+        # Defense-in-depth: the status sidecar is a second persistence path for
+        # the sweep report, and the read-only status endpoint serves it back to
+        # the client. Apply the same secret-scrubbing backstop the job snapshot
+        # uses (job_engine #272/#351) so a future producer that gains a
+        # secret-bearing field can't leak via this path. No secret-bearing text
+        # reaches the advancer's log/summary today; this keeps it that way.
+        atomic_write_json(_advance_status_file(), redact_for_persistence(report),
+                          ensure_ascii=False, indent=2, sort_keys=True, default=str)
+    except Exception as ex:
+        if log is not None:
+            log.append(f"[recovery-advance] WARN: could not save status ({type(ex).__name__}).")
+
+
+def read_advance_status() -> Dict[str, Any]:
+    """The latest rolling sweep status for the read-only status endpoint; {} when
+    no sweep has run yet."""
+    return load_json_object(_advance_status_file())
+
+
+def run_advance_sweep(limit: int = DEFAULT_ADVANCE_LIMIT, log: Optional[List[str]] = None,
+                      *, trigger: str = "manual") -> Dict[str, Any]:
+    """Run the bounded advancer + orphan reconcile once, refresh the rolling
+    status sidecar, and return the structured status report. Shared by the manual
+    POST job and the scheduled tick so both update the same status and counts."""
+    log = log if log is not None else []
+    summary = advance_stuck_carriers(limit=limit, log=log)
+    summary["orphan_reconcile"] = reconcile_orphan_staging_folders(limit=limit, log=log)
+    report = _build_advance_status(summary, trigger=trigger)
+    # Preserve the sweep's diagnostic log on the rolling status too, so a quiet
+    # (no-job) sweep still leaves an audit trail (requirement A). Bounded.
+    report["log"] = list(log)[-200:]
+    _write_advance_status(report, log)
+    return report
+
+
 def start_recovery_advance_job(limit: int = DEFAULT_ADVANCE_LIMIT):
     """Start the bounded advancer as ONE guarded, de-duplicated ``job_engine``
-    job (the replacement advancer the AI-batch exclusion assumes exists). A
-    second start while one runs is refused by the workflow lock / dedupe_key,
-    so the sweep is never run concurrently with itself."""
+    job. This is the MANUAL path (POST /api/import/recovery/advance): the
+    operator asked for it, so it always produces a visible tracked job. A second
+    start while one runs is refused by the workflow lock / dedupe_key, so the
+    sweep is never run concurrently with itself."""
     def _job(log: List[str]) -> Dict[str, Any]:
-        summary = advance_stuck_carriers(limit=limit, log=log)
-        summary["orphan_reconcile"] = reconcile_orphan_staging_folders(limit=limit, log=log)
-        return summary
+        return run_advance_sweep(limit=limit, log=log, trigger="manual")
 
     guarded = job_contract.guarded(_job, workflow=ADVANCER_WORKFLOW, fail_fast_in_process=True)
     return jobs.start_python(
@@ -659,18 +870,22 @@ def start_recovery_advance_job(limit: int = DEFAULT_ADVANCE_LIMIT):
                                 "dedupe_key": ADVANCER_JOB_TYPE}))
 
 
-# ── automatic scheduling (F6) ───────────────────────────────────────────────
+# ── automatic scheduling (F6 + #762) ────────────────────────────────────────
 # The advancer used to run ONLY when something POSTed /api/import/recovery/advance,
-# so a carrier that a download left stuck in DOWNLOADED/verifying/review_required
-# never advanced on its own (requirement 8 was not met end-to-end). It now runs
-# on the canonical job scheduler (`jobs.every`, the same hook maintenance's auto-
-# scan uses) -- NOT an ad-hoc thread. Each tick starts the SAME bounded, guarded
-# advancer job; `jobs.every` skips a tick while the one it returned still runs,
-# and the job is workflow-locked + dedupe-keyed on ADVANCER_JOB_TYPE, so the sweep
-# never overlaps itself across threads, processes or restarts. The trigger only
-# RE-EVALUATES carriers against the matching contract; the `action_allowed` gate
-# in `start_folder_import_with_id` is still the one and only auto-insert
-# authority, and a carrier the contract does not authorize stays in review.
+# so a carrier a download left stuck never advanced on its own (requirement 8).
+# It now runs on the canonical job scheduler (`jobs.every`, the same hook
+# maintenance's auto-scan uses) -- NOT an ad-hoc thread.
+#
+# #762: a no-change tick no longer records a user-facing job (that flooded Job
+# History ~720x/day). Each tick runs the now-cheap sweep (the per-carrier
+# re-check checkpoint makes a no-work tick near-instant) DIRECTLY under the
+# advancer's own workflow lock, refreshes the rolling status sidecar, and starts
+# a VISIBLE tracked job ONLY when the sweep changed something (a hand-off /
+# adopt / cleanup) or needs attention (an error, or a carrier that newly entered
+# review this run). Single-flight is the SAME workflow lock the manual job
+# uses -- a tick is a quiet no-op while a manual POST (or the previous tick)
+# holds it -- not a second mechanism. The `action_allowed` gate in
+# `start_folder_import_with_id` is still the one and only auto-insert authority.
 ADVANCER_SCHEDULE_NAME = ADVANCER_WORKFLOW
 # Default cadence; override via env. <= 0 disables the automatic schedule
 # (the manual POST endpoint still works).
@@ -680,16 +895,46 @@ ADVANCER_INTERVAL_SECONDS = float(
 ADVANCER_STARTUP_DELAY = 45.0
 
 
-def _advance_schedule_tick():
-    """One scheduler tick: start the bounded advancer as a tracked job and
-    return it so ``jobs.every`` does not overlap the next tick with it. A sweep
-    already running (a manual POST, or a prior tick that is still going) is
-    refused at start with ``DuplicateJobError`` -- that is the dedupe doing its
-    job, so the tick is a quiet no-op rather than a retry storm."""
+def _record_advance_sweep_job(report: Dict[str, Any], log: List[str]):
+    """Surface a sweep that changed something / needs attention as a tracked job
+    (Job History + audit). The sweep already ran in the tick under the workflow
+    lock, so this job only RECORDS it -- it replays the sweep's log and returns
+    its structured report, doing no work and taking no lock. No dedupe_key: the
+    scheduler is single-threaded, this completes instantly, and it must never
+    collide with a real guarded sweep's key."""
+    captured = list(log)
+
+    def _record(job_log: List[str]) -> Dict[str, Any]:
+        job_log.extend(captured)
+        return report
+
     try:
-        return start_recovery_advance_job()
+        return jobs.start_python(
+            _record, label="Advance missing-track recovery",
+            metadata=job_contract.contract_metadata(
+                ADVANCER_WORKFLOW,
+                {"type": ADVANCER_JOB_TYPE, "category": "import", "mutating": True,
+                 "recovery_advance_counts": report.get("counts")}))
     except DuplicateJobError:
+        # A real guarded sweep grabbed the key in the gap after we released the
+        # lock; it will produce its own record, so dropping this one is fine.
         return None
+
+
+def _advance_schedule_tick():
+    """One scheduler tick (F6 + #762): run the sweep directly under the advancer
+    workflow lock, refresh the rolling status, and record a visible job ONLY on
+    change/attention. A sweep already running (manual POST or the prior tick)
+    holds the lock, so this tick is a quiet no-op (single-flight)."""
+    log: List[str] = []
+    try:
+        with job_contract.held(ADVANCER_WORKFLOW, wait_seconds=0, fail_fast_in_process=True):
+            report = run_advance_sweep(limit=DEFAULT_ADVANCE_LIMIT, log=log, trigger="scheduled")
+    except job_contract.WorkflowBusyError:
+        return None
+    if not (report.get("changes_made") or report.get("needs_attention")):
+        return None  # quiet sweep: rolling status updated, no Job History row
+    return _record_advance_sweep_job(report, log)
 
 
 def start_recovery_advance_schedule():

@@ -29,6 +29,7 @@ import type {
   AiBatchStatusResponse,
   ApiOkResponse,
   ArtistIdGroupsResponse,
+  RecoveryAdvanceStatusResponse,
   ConfigFileResponse,
   ConfigSaveResponse,
   DedupCleanupResponse,
@@ -664,6 +665,13 @@ export function clearRecentImports(): Promise<ApiOkResponse> {
 
 export function getAiMatchHistory(limit = 50): Promise<AiMatchHistoryResponse> {
   return apiJson<AiMatchHistoryResponse>(`/api/ai-match-history?limit=${limit}`);
+}
+
+// Read-only rolling status of the missing-track recovery advancer (#762): the
+// scheduled sweep no longer records a Job on a no-change run, so this sidecar is
+// how the UI surfaces passive progress.
+export function getRecoveryAdvanceStatus(): Promise<RecoveryAdvanceStatusResponse> {
+  return apiJson<RecoveryAdvanceStatusResponse>('/api/import/recovery/status');
 }
 
 // ── Dedup ─────────────────────────────────────────────────────────────────────
