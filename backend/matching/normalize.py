@@ -129,8 +129,12 @@ def _strip_leading_track_number(tokens: Iterable[str]) -> List[str]:
 
 def _strip_feature_suffix(tokens: Iterable[str]) -> List[str]:
     values = list(tokens)
+    # #784: a credit token separates an artist from a guest only when a guest
+    # actually follows. As the LAST token it is part of the name ("Little Feat",
+    # "Great Feat"), not a credit, so require both a preceding and a following
+    # token before stripping.
     for index, token in enumerate(values):
-        if token in _FEATURE_TOKENS and index > 0:
+        if token in _FEATURE_TOKENS and 0 < index < len(values) - 1:
             return values[:index]
     return values
 

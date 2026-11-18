@@ -55,7 +55,12 @@ class _ReDoSCase(unittest.TestCase):
 # #780: the credit token must be a standalone word that introduces a guest, so
 # it needs leading whitespace (``\s+``, the need_ws=True arm of split_ws_led)
 # and a following space (``(?=\s)``) -- never "ft" inside "Daft"/"Theft".
-_O_FEAT = re.compile(r"\s+[\(\[]?(?:feat(?:uring)?|ft|with)\.?(?=\s).*", re.I)
+# #784: bare "with" strips only when lowercase (``(?-i:with)``); a capitalised
+# bare "With" is part of a name; bracketed "(with X)" strips in any case. The
+# oracle mirrors _FEAT_RE's alternation exactly so equivalence is by construction.
+_O_FEAT = re.compile(
+    r"\s+(?:[\(\[]?(?:feat(?:uring)?|ft)|[\(\[]with|(?-i:with))\.?(?=\s).*", re.I
+)
 _O_SPLIT = re.compile(r"\s*(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+", re.I)
 _O_MONO = re.compile(r"\s+\bin\s+mono\b$", re.I)
 _O_SCENE = re.compile(r"\s*-\s*")
