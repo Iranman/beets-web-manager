@@ -469,6 +469,10 @@
       "CANONICAL_FINAL_DECISION",
       "Canonical similarity."
     ],
+    "backend/matching/normalize.py::artist_pair_similarity": [
+      "CANONICAL_FINAL_DECISION",
+      "Canonical artist-name textual similarity (#468 F6)."
+    ],
     "backend/matching/recording.py::<module>": [
       "CANONICAL_FINAL_DECISION",
       "NEW canonical recording evaluator constants."
