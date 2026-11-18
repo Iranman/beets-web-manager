@@ -81,13 +81,16 @@ def dedup_ai_review():
     Returns: { ok, job_id } — poll /api/dedup/scan/<job_id> for results.
     """
     payload  = request.get_json(silent=True) or {}
+    # #533 item 6: a malformed body (non-object, or a non-string scan_jid/path)
+    # must fail validation cleanly (4xx), never crash with a 500 AttributeError
+    # from .get()/.strip() on the wrong type.
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "request body must be a JSON object"}), 400
     raw_jid  = payload.get("scan_jid", "")
     if not isinstance(raw_jid, str):
-        # #533 item 6: scan_jid null / non-string is a malformed request, not a
-        # 500. Guard before .strip() so it fails validation cleanly (4xx).
         return jsonify({"ok": False, "error": "scan_jid must be a string"}), 400
     scan_jid = raw_jid.strip()
-    scan_path_hint = (payload.get("scan_path") or payload.get("path") or "").strip()
+    scan_path_hint = _s(payload.get("scan_path") or payload.get("path") or "").strip()
     scan_jid, scan_state, resolve_error = _dedup_resolve_source_scan(scan_jid, scan_path_hint)
     if not scan_state:
         return jsonify({"ok": False, "error": resolve_error, "needs_scan": True})

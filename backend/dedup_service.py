@@ -679,7 +679,9 @@ def _dedup_confidence_and_reason(match_type: str, evidence: Dict[str, Any], rele
     reason_map = {
         "MB Track ID":         "Embedded MusicBrainz track ID matches the library copy exactly.",
         "identical file size": "File size matches the library copy exactly (bytes not yet compared).",
-        "AcoustID fingerprint": f"AcoustID audio fingerprint matches library recording {fingerprint_mbid}.",
+        # #533 item 1: be explicit that only the SOURCE was fingerprinted here; the
+        # library copy is matched by its embedded recording ID, not re-fingerprinted.
+        "AcoustID fingerprint": f"AcoustID identifies the source as recording {fingerprint_mbid}; the library copy carries that embedded recording ID (its audio was not fingerprinted here).",
     }
     reason = reason_map.get(match_type, f"Matched by {match_type}.")
     if fingerprint_verified and match_type not in reason_map:

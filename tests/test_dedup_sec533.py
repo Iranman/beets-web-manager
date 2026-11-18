@@ -119,6 +119,17 @@ class Item6AiReviewNullScanJid(unittest.TestCase):
         resp = self._post({"scan_jid": 123})
         self.assertEqual(resp.status_code, 400)
 
+    def test_non_object_body_is_400_not_500(self):
+        # A JSON array/string/number body must not 500 via payload.get().
+        for body in ([1, 2], "hello", 7):
+            resp = app_module.app.test_client().post("/api/dedup/ai-review", json=body, headers=_CSRF)
+            self.assertEqual(resp.status_code, 400, f"body={body!r}")
+
+    def test_non_string_scan_path_is_not_500(self):
+        # A truthy non-string scan_path must not crash at .strip().
+        resp = self._post({"scan_jid": "", "scan_path": 123})
+        self.assertLess(resp.status_code, 500, resp.status_code)
+
 
 class Item3AiLibIdConstrained(unittest.TestCase):
     """The AI may only point at a candidate it was shown, and its self-asserted
