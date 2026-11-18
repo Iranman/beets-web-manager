@@ -52,7 +52,10 @@ class _ReDoSCase(unittest.TestCase):
 
 
 # ── oracles: the original deb4ec3 patterns ──────────────────────────────────
-_O_FEAT = re.compile(r"\s*[\(\[]?(?:feat(?:uring)?\.?|ft\.?|with)\b.*", re.I)
+# #780: the credit token must be a standalone word that introduces a guest, so
+# it needs leading whitespace (``\s+``, the need_ws=True arm of split_ws_led)
+# and a following space (``(?=\s)``) -- never "ft" inside "Daft"/"Theft".
+_O_FEAT = re.compile(r"\s+[\(\[]?(?:feat(?:uring)?|ft|with)\.?(?=\s).*", re.I)
 _O_SPLIT = re.compile(r"\s*(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+", re.I)
 _O_MONO = re.compile(r"\s+\bin\s+mono\b$", re.I)
 _O_SCENE = re.compile(r"\s*-\s*")
@@ -97,7 +100,7 @@ def _stripped_parts(parts):
 
 # (name, oracle(s), helper(s))
 _PAIRS = [
-    ("feat", lambda s: _O_FEAT.sub("", s), lambda s: "".join(split_ws_led(s, acoustid_service._FEAT_RE, to_eol=True))),
+    ("feat", lambda s: _O_FEAT.sub("", s), lambda s: "".join(split_ws_led(s, acoustid_service._FEAT_RE, need_ws=True, to_eol=True))),
     ("artist_split", _O_SPLIT.split, lambda s: split_ws_led(s, acoustid_service._ARTIST_SPLIT_CORE_RE)),
     ("in_mono", lambda s: _O_MONO.sub("", s).strip(), strip_in_mono_suffix),
     ("scene_split", lambda s: _stripped_parts(_O_SCENE.split(s)), lambda s: _stripped_parts(s.split("-"))),
