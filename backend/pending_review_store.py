@@ -428,6 +428,11 @@ def _review_resolution_sig(item: Dict[str, Any]) -> tuple:
         bool(suggestion.get("allow_existing_review")),
         tuple(suggestion.get("existing_album_ids") or []),
         _s(evidence.get("conflict")),
+        # #442/#446: the resolved decision now depends on the terminal
+        # import-failure flag, so it must be part of the N3 concurrency
+        # signature or a row converted to terminal under the lock (identical
+        # other fields) could still be pruned on a stale snapshot.
+        _review_is_terminal_import_failure(item or {}),
     )
 
 
@@ -601,8 +606,12 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
                 if suggestion:
                     item["suggestion"] = suggestion
                 item["added_at"] = int(time.time())
-                if evidence:
-                    item["evidence"] = evidence
+                # #442/#446: a same-path re-queue REPLACES the evidence packet
+                # with the new review's (even when empty) instead of inheriting
+                # the old one. Otherwise a stale terminal ``import_failure_code``
+                # from a prior failed import would grant a now-ordinary review
+                # permanent immunity from pruning and it would never resolve.
+                item["evidence"] = evidence if evidence else {}
                 _apply_review_origin(item, chosen_origin)
                 updated = True
                 break

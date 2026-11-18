@@ -127,6 +127,35 @@ class KeepFailedImportReviewTests(unittest.TestCase):
             self.assertFalse(prs._review_is_terminal_import_failure({"evidence": {"import_failure_code": bad}}))
         self.assertFalse(prs._review_is_terminal_import_failure({}))
 
+    # Finding B: a same-path re-queue must REPLACE the evidence packet --------
+    def test_requeue_as_non_terminal_clears_terminal_immunity(self):
+        # Re-queuing the SAME path as an ordinary review with no evidence must
+        # drop the stale terminal code (not inherit it), so the row loses its
+        # immunity and prunes normally. Before the fix, _add_to_pending only
+        # replaced evidence when the new packet was truthy, so the old code
+        # stayed and the now-ordinary row gained permanent immunity.
+        path = self._folder("requeue")  # empty folder => no-audio resolving condition
+        self._write([_row(path, code="existing_album_merge_failed")])
+        self.assertIn(path, self._paths())  # terminal: immune to the no-audio prune
+        prs._add_to_pending(path, {"origin_type": "x"}, allow_existing=True, evidence=None)
+        stored = json.loads(self.store.read_text())
+        self.assertEqual(len(stored), 1, "re-queue must update in place, not append")
+        self.assertFalse(prs._review_is_terminal_import_failure(stored[0]),
+                         "re-queue must clear the stale terminal import_failure_code")
+        self.assertNotIn(path, self._paths(),
+                         "the now-ordinary re-queued row must prune normally")
+
+    # Finding C: the N3 concurrency signature must track the terminal flag ----
+    def test_resolution_sig_distinguishes_terminal_from_ordinary(self):
+        base = {"path": "/d/x",
+                "suggestion": {"allow_existing_review": True, "existing_album_ids": [7]},
+                "evidence": {"conflict": "c"}}
+        terminal = {**base, "evidence": {"conflict": "c",
+                                         "import_failure_code": "release_group_mismatch"}}
+        self.assertNotEqual(prs._review_resolution_sig(base),
+                            prs._review_resolution_sig(terminal),
+                            "a row converted to terminal under the lock must change its signature")
+
 
 class ReimportStampsFailureCodeTests(unittest.TestCase):
     """The import flow stamps the terminal code onto the Review evidence."""
@@ -156,6 +185,51 @@ class ReimportStampsFailureCodeTests(unittest.TestCase):
 
     def test_no_code_leaves_evidence_unset(self):
         self.assertIsNone(self._run(""))
+
+
+class CleanupStaleKeepsTerminalTests(unittest.TestCase):
+    """Finding A: the 'Clean up stale' button (POST /api/import/cleanup-stale)
+    must NOT remove a terminal import-failure row whose staged folder was
+    deleted, while it must still remove an ordinary row whose folder is gone.
+    Before the fix the folder-gone branch had no terminal guard, so the user's
+    own #1 scenario (deleted staged folder) silently pruned the terminal row."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.downloads = self.root / "downloads"
+        self.downloads.mkdir(parents=True)
+        self.store = self.root / "pending.json"
+        # Both folders are GONE on disk (never created), so the folder-gone
+        # branch fires for both rows.
+        self.term = str(self.downloads / "terminal")
+        self.plain = str(self.downloads / "plain")
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(prs, "_AI_PENDING_FILE", self.store))
+        stack.enter_context(mock.patch.object(prs, "DOWNLOADS_ROOT", self.downloads))
+        stack.enter_context(mock.patch.object(prs, "_record_ai_review_decision"))
+        stack.enter_context(mock.patch.object(prs, "_library_album_ids_for_folder", return_value=[]))
+        stack.enter_context(mock.patch.object(
+            prs, "_reconcile_pending_review_enqueue_item", side_effect=lambda i: (i, False)))
+        self.store.write_text(json.dumps([
+            _row(self.term, code="existing_album_merge_failed"),
+            _row(self.plain, code=None),
+        ]))
+
+    def test_cleanup_stale_keeps_terminal_but_removes_plain(self):
+        import app  # noqa: F401  (registers routes)
+        import routes_import
+        with routes_import.app.test_request_context("/api/import/cleanup-stale", method="POST"):
+            resp = routes_import.import_cleanup_stale()
+        body = resp.get_json()
+        self.assertTrue(body["ok"])
+        remaining = [i["path"] for i in prs._load_pending_reviews()]
+        self.assertIn(self.term, remaining,
+                      "terminal row was removed by cleanup-stale when its folder was gone (bug A)")
+        self.assertNotIn(self.plain, remaining,
+                         "ordinary gone-folder row must still be removed by cleanup-stale")
 
 
 if __name__ == "__main__":
