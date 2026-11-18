@@ -84,14 +84,19 @@ class Item5ProviderExceptionRedaction(unittest.TestCase):
     """A non-ProviderError from the AI provider must not leak detail/credentials
     into the job log."""
 
+    # Non-key sentinel: a generic Exception's message is dropped entirely by
+    # classify_exception (only the classified category/type survives), so any
+    # provider detail disappears. (Avoids tripping the repo's secret scanner.)
+    SENTINEL = "SENSITIVE-PROVIDER-DETAIL-SENTINEL-DO-NOT-LOG"
+
     def test_classify_exception_strips_detail(self):
-        leak = "api_key=sk-THIS_SHOULD_NOT_APPEAR_1234567890 at https://provider/internal"
+        leak = f"connect failed {self.SENTINEL} at https://provider/internal"
         msg = str(provider_boundary.classify_exception(Exception(leak)))
-        self.assertNotIn("sk-THIS_SHOULD_NOT_APPEAR_1234567890", msg)
+        self.assertNotIn(self.SENTINEL, msg)
         self.assertNotIn("provider/internal", msg)
 
     def test_batch_logs_redacted_message(self):
-        leak = "boom api_key=sk-LEAK_ME_9999999999 https://host/path"
+        leak = f"boom {self.SENTINEL} https://host/path"
         state = {"log": [], "found": 0}
         with mock.patch.object(routes_cleanup, "_ai_review_file_meta", return_value=[]), \
              mock.patch.object(routes_cleanup, "_ai_review_relevant_tracks", return_value=[]), \
@@ -100,7 +105,7 @@ class Item5ProviderExceptionRedaction(unittest.TestCase):
              mock.patch.object(routes_cleanup, "_ai_review_call_provider", side_effect=Exception(leak)):
             routes_cleanup._ai_review_batch(0, [Path("/tmp/a.flac")], [], "key", [], None, state, None)
         joined = "\n".join(state["log"])
-        self.assertNotIn("sk-LEAK_ME_9999999999", joined)
+        self.assertNotIn(self.SENTINEL, joined)
         self.assertTrue(any("error:" in line for line in state["log"]))
 
 
