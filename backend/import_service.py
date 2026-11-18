@@ -35,7 +35,7 @@ from backend.acoustid_service import (ACOUSTID_FAILURE_MESSAGES, _acoustid_hits_
                                       acoustid_failure_status)
 from backend.artwork_service import _ART_EXTS, _move_artwork_to_target
 from backend.slskd_service import _normalise_wanted_tracks, _slskd_title_norm, _strip_track_filename_id_suffix, _wanted_track_label
-from backend.matching_service import BEETS_SKIP_REASON_CODES, EXISTING_ALBUM_MERGE_FAILED_MESSAGE, _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
+from backend.matching_service import BEETS_SKIP_REASON_CODES, EXISTING_ALBUM_MERGE_FAILED, EXISTING_ALBUM_MERGE_FAILED_MESSAGE, _album_mb_completeness, _album_track_score, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _folder_release_preflight, _invalidate_lib_cache, _match_tracks_from_mb, _preflight_review_reason, _repair_album_mbid_sticking_once
 from backend.app_runtime import jobs
 from backend.job_service import _wait_for_child_job
 from backend.musicbrainz_service import _mb_release_track_count
@@ -1687,16 +1687,21 @@ def _reimport_prepare_existing_rows(log: list, existing_album_id: int, mb_albumi
 
 
 def _reimport_keep_for_review(ctx: _ReimportContext, aldir: str, mb_albumid: str, reason: str,
-                              kept_ids: List[int]) -> None:
+                              kept_ids: List[int], *, failure_code: str = "") -> None:
     log = ctx.log
     # Never removes the rows Beets just imported: a removal goes
     # through the transaction preview/approve flow, not this job.
     ids = ", ".join(str(i) for i in kept_ids)
     reason = f"{reason} Album_id {ids} was left in the library for review."
+    # #442/#446: stamp the terminal import-failure code onto the Review row so
+    # the queue store keeps it until the user explicitly dismisses it, instead
+    # of silently pruning it once the staged folder is deleted / leaves no audio
+    # / the kept album looks healthy.
+    evidence = {"import_failure_code": _s(failure_code)} if _s(failure_code) else None
     if not _queue_folder_for_manual_review(
             aldir, {"mb_albumid": mb_albumid, "mb_valid": True, "confidence": "low",
                     "kept_album_ids": kept_ids, "reason": reason},
-            reason, log, allow_existing=True):
+            reason, log, allow_existing=True, evidence=evidence):
         log.append(f"  No Review entry was written; album_id {ids} was left in the library.")
     raise RuntimeError(reason)
 
@@ -1733,7 +1738,8 @@ def _reimport_refuse_failed_import(ctx: _ReimportContext, atomic_res: Dict[str, 
     if atomic_res.get("album_ids"):
         _reimport_keep_for_review(ctx, aldir, mb_albumid,
                                   atomic_res.get("error") or "Beets import failed verification.",
-                                  atomic_res["album_ids"])
+                                  atomic_res["album_ids"],
+                                  failure_code=_s(atomic_res.get("code")))
     raise RuntimeError(atomic_res.get("error") or "Beets import failed.")
 
 
@@ -1768,7 +1774,8 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
         # code only from it, never from the detail (engine/peer text).
         _reimport_keep_for_review(ctx, aldir, mb_albumid,
                                   f"{EXISTING_ALBUM_MERGE_FAILED_MESSAGE}: existing album_id "
-                                  f"{existing_album_id}, {detail}.", [imported_aid])
+                                  f"{existing_album_id}, {detail}.", [imported_aid],
+                                  failure_code=EXISTING_ALBUM_MERGE_FAILED)
 
     # A missing-track fill must end with the delivered tracks on the
     # existing album; a format replacement stays a separate row
