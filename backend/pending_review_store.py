@@ -215,6 +215,29 @@ def _review_album_is_resolved(album_id: int) -> bool:
 
 _NO_AUDIO_NOT_RESOLVED = frozenset({"symlinked_audio", "unverifiable_folder"})
 
+#: Terminal import-failure reason codes (#442/#446). The import kept the
+#: library album rows (or left a bad/ambiguous match) and sent the folder to
+#: Review so the user learns the album is wrong/unmatched. Unlike an ordinary
+#: Review row these must NOT be auto-resolved by the staged folder being
+#: deleted, the move-import leaving no audio, or the referenced merge-target
+#: album looking healthy -- otherwise the row is silently pruned before the
+#: user ever sees it. They stay queued until an EXPLICIT user dismiss
+#: (DELETE /api/ai-pending-review), a successful re-import, or a repair that
+#: calls _remove_pending_review_for_path. The code is stamped onto the Review
+#: row's evidence as ``import_failure_code`` when the folder is queued.
+_TERMINAL_IMPORT_FAILURE_CODES = frozenset(
+    {"existing_album_merge_failed", "release_group_mismatch", "import_ambiguous"}
+)
+
+
+def _review_is_terminal_import_failure(item: Dict[str, Any]) -> bool:
+    """True when a Review row carries a terminal import-failure code, so no
+    auto-resolution path (folder-gone / no-audio / healthy-album) may prune it;
+    only an explicit user dismiss or a successful re-import/repair clears it."""
+    evidence = (item or {}).get("evidence")
+    code = _s(evidence.get("import_failure_code")) if isinstance(evidence, dict) else ""
+    return code in _TERMINAL_IMPORT_FAILURE_CODES
+
 
 def _review_folder_has_audio(folder_path: str) -> bool:
     raw = _review_path_text(folder_path)
@@ -259,6 +282,10 @@ def _review_path_is_resolved(folder_path: str,
 
 
 def _pending_review_item_is_resolved(item: Dict[str, Any]) -> bool:
+    # A terminal import failure stays until the user dismisses it (#442/#446):
+    # neither "no audio" nor a healthy referenced album resolves it.
+    if _review_is_terminal_import_failure(item):
+        return False
     suggestion = (item or {}).get("suggestion") or {}
     existing_ids = suggestion.get("existing_album_ids") or []
     path = _s((item or {}).get("path", ""))
@@ -401,6 +428,11 @@ def _review_resolution_sig(item: Dict[str, Any]) -> tuple:
         bool(suggestion.get("allow_existing_review")),
         tuple(suggestion.get("existing_album_ids") or []),
         _s(evidence.get("conflict")),
+        # #442/#446: the resolved decision now depends on the terminal
+        # import-failure flag, so it must be part of the N3 concurrency
+        # signature or a row converted to terminal under the lock (identical
+        # other fields) could still be pruned on a stale snapshot.
+        _review_is_terminal_import_failure(item or {}),
     )
 
 
@@ -489,6 +521,7 @@ def _load_pending_reviews_locked(*, resolutions: Dict[str, tuple], prune_resolve
             # An active import may have moved the folder itself; only its
             # reconciliation (above) decides that row.
             if (_review_status_key(item.get("status")) not in {"import_enqueueing", "import_queued"}
+                    and not _review_is_terminal_import_failure(item)
                     and _review_download_folder_is_gone(path)):
                 changed = True
                 resolved_items.append(item)
@@ -573,8 +606,28 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
                 if suggestion:
                     item["suggestion"] = suggestion
                 item["added_at"] = int(time.time())
-                if evidence:
-                    item["evidence"] = evidence
+                # #442/#446 + PR #778 QA: a same-path re-queue MERGES the new
+                # review's evidence OVER the existing packet; it does NOT
+                # wholesale-replace it. The top-level evidence also carries
+                # SAFETY keys read elsewhere -- ``source_mode``/``quality_upgrade``
+                # (torrent-seed file protection via _pending_review_torrent_rows
+                # and the Review-cleanup guard), ``conflict`` (QA401 no-audio
+                # protection) -- and a blind replace on an evidence=None or
+                # terminal-code-only requeue dropped them, letting a Review
+                # cleanup move/delete files qBittorrent was still seeding.
+                # We overlay the new evidence (a truthy new value wins per key)
+                # and drop ONLY a stale terminal ``import_failure_code`` when the
+                # NEW review is non-terminal -- so a re-queue as an ordinary
+                # review loses the old code and prunes normally (round-1 finding
+                # B), while every other existing safety key survives.
+                new_evidence = evidence if isinstance(evidence, dict) else {}
+                existing_evidence = item.get("evidence")
+                merged_evidence = (dict(existing_evidence)
+                                   if isinstance(existing_evidence, dict) else {})
+                merged_evidence.update(new_evidence)
+                if _s(new_evidence.get("import_failure_code")) not in _TERMINAL_IMPORT_FAILURE_CODES:
+                    merged_evidence.pop("import_failure_code", None)
+                item["evidence"] = merged_evidence
                 _apply_review_origin(item, chosen_origin)
                 updated = True
                 break

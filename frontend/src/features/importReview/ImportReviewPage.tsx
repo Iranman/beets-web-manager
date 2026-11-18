@@ -2892,21 +2892,31 @@ export function ReviewCard({
   }, [manualFocusToken]);
 
   return (
-    <Card variant="outlined" sx={{ borderRadius: 2, borderColor: 'rgba(15, 23, 42, 0.12)' }}>
+    <Card
+      variant="outlined"
+      sx={{
+        // Bolder shelf (#611 graphite-only): the review entry reads as a single
+        // walnut plank lifted off the page — a warm defined edge, a top light-catch
+        // hairline and a soft floor shadow, instead of the old near-invisible cold border.
+        borderRadius: 2.5,
+        borderColor: 'var(--color-graphite-700)',
+        boxShadow: 'inset 0 1px 0 rgba(246,240,231,0.05), 0 18px 32px -26px rgba(0,0,0,0.78)',
+      }}
+    >
       <CardContent>
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className={`rounded border px-2 py-1 text-xs font-semibold ${lifecycleTone}`}>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+              <span className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${lifecycleTone}`}>
                 {lifecycleLabel}
               </span>
               {item.missing_reason === 'missing_release_group' && item.current_mb_albumid ? (
                 <MbidLink entity="release" id={item.current_mb_albumid} status="suggested" label="Release ID" />
               ) : null}
-              <span className={`rounded border px-2 py-1 text-xs font-semibold ${matchTones[visibleMatchBucket]}`}>
+              <span className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${matchTones[visibleMatchBucket]}`}>
                 {matchLabels[visibleMatchBucket]}
               </span>
-              <span className="rounded border border-sky-500/30 bg-sky-950/40 px-2 py-1 text-xs font-semibold text-sky-200">
+              <span className="rounded-md border border-sky-500/30 bg-sky-950/40 px-2.5 py-1 text-xs font-semibold text-sky-200">
                 {originDisplay}
               </span>
               {selectedConfidence ? (
@@ -2949,8 +2959,8 @@ export function ReviewCard({
               <SuggestionStaleBadge item={item} selectedMatchActive={selectedMatchActive} />
             </div>
 
-            <h2 className="mt-3 truncate text-lg font-semibold text-graphite-50">{itemTitle(item)}</h2>
-            {meta.length ? <div className="mt-1 text-sm text-muted">{meta.join(' / ')}</div> : null}
+            <h2 className="mt-3.5 truncate text-xl font-semibold tracking-tight text-graphite-50">{itemTitle(item)}</h2>
+            {meta.length ? <div className="mt-1.5 text-sm text-muted">{meta.join(' · ')}</div> : null}
             <QualityUpgradeNotice evidence={item.evidence} />
 
             <RecoveryReviewCard
@@ -3204,7 +3214,7 @@ export function ReviewCard({
             </div>
             {upgradeRow ? <p id={upgradeReasonId} className="text-xs text-muted">{QUALITY_UPGRADE_IMPORT_REASON}</p> : null}
 
-            <Button size="small" variant="text" color="inherit" onClick={onDismiss} disabled={busy}>
+            <Button size="small" variant="text" color="inherit" onClick={onDismiss} disabled={busy} data-testid="review-dismiss-button">
               {item.type === 'pending_ai' || item.type === 'skipped' ? 'Remove from Review' : 'Hide'}
             </Button>
             <Button
@@ -5191,18 +5201,46 @@ export function ImportReviewPage({
       ) : null}
 
       {/* One-at-a-time queue */}
-      {!loading && !error && visibleItems.length === 0 ? (
+      {loading && !error && visibleItems.length === 0 ? (
+        // Initial-load skeleton: the shelf rail and one entry plank in graphite,
+        // so the queue has structure before data arrives instead of a blank gap.
+        // Decorative only — the sr-only live region above announces load state.
+        <div aria-hidden className="space-y-5">
+          <div className="h-12 rounded-lg border border-graphite-700 bg-graphite-850 shadow-[inset_0_1px_0_rgba(246,240,231,0.05)] motion-safe:animate-pulse" />
+          <div className="rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-[inset_0_1px_0_rgba(246,240,231,0.05)]">
+            <div className="flex flex-wrap gap-2">
+              <div className="h-6 w-28 rounded-md bg-graphite-800 motion-safe:animate-pulse" />
+              <div className="h-6 w-24 rounded-md bg-graphite-800 motion-safe:animate-pulse" />
+              <div className="h-6 w-20 rounded-md bg-graphite-800 motion-safe:animate-pulse" />
+            </div>
+            <div className="mt-4 h-7 w-2/3 rounded bg-graphite-800 motion-safe:animate-pulse" />
+            <div className="mt-2 h-4 w-1/3 rounded bg-graphite-800 motion-safe:animate-pulse" />
+            <div className="mt-5 h-24 rounded bg-graphite-850 motion-safe:animate-pulse" />
+          </div>
+        </div>
+      ) : !loading && !error && visibleItems.length === 0 ? (
         hasExtraFilters ? (
           <Alert severity="info">Nothing matches these filters{pageBucketFilter ? ' on this page' : ''}. Clear the filters to see everything.</Alert>
         ) : (
-          <Alert severity="success">
-            {missingIdsMode ? 'No library albums or tracks are missing MusicBrainz IDs.' : 'No more albums need review.'}
-          </Alert>
+          <div
+            role="status"
+            className="rounded-lg border border-graphite-700 bg-graphite-900 px-6 py-10 text-center shadow-[inset_0_1px_0_rgba(246,240,231,0.05)]"
+          >
+            <div
+              aria-hidden
+              className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-graphite-700 bg-graphite-850 text-lg font-semibold text-graphite-100"
+            >
+              ✓
+            </div>
+            <p className="mt-4 text-base font-semibold text-graphite-50">
+              {missingIdsMode ? 'No library albums or tracks are missing MusicBrainz IDs.' : 'No more albums need review.'}
+            </p>
+          </div>
         )
       ) : visibleItems.length > 0 ? (
         <>
-          {/* Queue position navigator */}
-          <div className="flex items-center gap-2 rounded border border-graphite-700 bg-graphite-800/40 px-3 py-2">
+          {/* Queue position navigator — the shelf rail that holds the current entry */}
+          <div className="flex items-center gap-2 rounded-lg border border-graphite-700 bg-graphite-850 px-3 py-2.5 shadow-[inset_0_1px_0_rgba(246,240,231,0.05)]">
             <button
               aria-label="Previous item"
               title="Previous [[]"
@@ -5213,12 +5251,12 @@ export function ImportReviewPage({
               ←
             </button>
             <div className="min-w-0 flex-1 text-center">
-              <div className="text-xs text-graphite-200">
+              <div className="text-xs text-muted">
                 {activeIndex + 1} of {visibleItems.length} shown · items {pageStart}–{pageEnd} of {total}
                 {activeJobHiddenCount ? ` · ${activeJobHiddenCount} hidden by active jobs` : ''}
               </div>
               {activeItem ? (
-                <div className="truncate text-sm font-semibold text-graphite-200" title={itemTitle(activeItem)}>
+                <div className="mt-0.5 truncate text-sm font-semibold text-graphite-50" title={itemTitle(activeItem)}>
                   {itemTitle(activeItem)}
                 </div>
               ) : null}
