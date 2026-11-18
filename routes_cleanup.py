@@ -18,7 +18,7 @@ from backend.identity_contract import verify_album_identity as _verify_album_ide
 from backend.acoustid_service import AUDIO_EXTS, _acoustid_fingerprint_match, _album_track_norm, _read_file_media_tags
 from backend.app_runtime import ALBUM_FOLDER_CLEANUP_LAST_FILE, METADATA_CACHE_ROOT, MUSIC_ROOT, ROOT_FOLDER_REPAIR_LAST_FILE, _LITERAL_PLACEHOLDER_RE, _MB_UUID_RE, _UNRESOLVED_TEMPLATE_TOKEN_RE, _app_logger, _path_under, _s, _ur, jobs
 from backend.cleanup_service import _album_cleanup_apply_issue, _album_cleanup_running_job, _album_cleanup_save_report, _album_folder_cleanup_apply_safe, _album_folder_cleanup_plan, _clean_remove_empty_albums, _clean_remove_orphaned_items, _clear_rgid_resolution, _delete_no_audio_folders, _folder_clean_root, _folder_cleanup_db_items, _folder_cleanup_is_approved_root, _folder_cleanup_merge_preview, _folder_cleanup_path, _folder_cleanup_review_for, _load_rgid_resolutions, _scan_no_audio_folder_candidates, _set_rgid_resolution
-from backend.dedup_service import _dedup_final_summary, _dedup_folder_totals, _dedup_group_by_folder, _dedup_job_result, _dedup_raise_if_cancelled, _dedup_record_listing_failure, _dedup_resolve_source_scan, _dedup_scans, _dedup_state_response, _dedup_structured_state, _library_duplicate_merge_safety, run_dedup_cleanup, start_dedup_scan
+from backend.dedup_service import _dedup_final_summary, _dedup_folder_totals, _dedup_group_by_folder, _dedup_job_result, _dedup_listing_within_roots, _dedup_raise_if_cancelled, _dedup_record_listing_failure, _dedup_resolve_source_scan, _dedup_scans, _dedup_state_response, _dedup_structured_state, _library_duplicate_merge_safety, run_dedup_cleanup, start_dedup_scan
 from backend.job_service import _root_folder_repair_running_job
 from backend.library_service import _album_source_folder, _append_stamp_candidate_log, _append_stamp_skipped_log, _apply_artist_folder_groups, _artist_folder_repair_root, _resolve_album_release_for_import, _rgid_group_albums, _root_folder_repair_apply_safe, _root_folder_repair_save_report, _root_folder_repair_scan, _scan_artist_folder_groups, _scan_folder_name_placeholders, _stamp_artist_folder_scan
 from backend.maintenance_service import _ALBUM_FOLDER_CLEANUP_LOCK, _ROOT_FOLDER_REPAIR_LOCK, _library_health_payload
@@ -81,8 +81,16 @@ def dedup_ai_review():
     Returns: { ok, job_id } — poll /api/dedup/scan/<job_id> for results.
     """
     payload  = request.get_json(silent=True) or {}
-    scan_jid = payload.get("scan_jid", "").strip()
-    scan_path_hint = (payload.get("scan_path") or payload.get("path") or "").strip()
+    # #533 item 6: a malformed body (non-object, or a non-string scan_jid/path)
+    # must fail validation cleanly (4xx), never crash with a 500 AttributeError
+    # from .get()/.strip() on the wrong type.
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "request body must be a JSON object"}), 400
+    raw_jid  = payload.get("scan_jid", "")
+    if not isinstance(raw_jid, str):
+        return jsonify({"ok": False, "error": "scan_jid must be a string"}), 400
+    scan_jid = raw_jid.strip()
+    scan_path_hint = _s(payload.get("scan_path") or payload.get("path") or "").strip()
     scan_jid, scan_state, resolve_error = _dedup_resolve_source_scan(scan_jid, scan_path_hint)
     if not scan_state:
         return jsonify({"ok": False, "error": resolve_error, "needs_scan": True})
@@ -302,8 +310,8 @@ def _ai_review_call_provider(endpoint: str, req_body: bytes, api_key: str) -> Di
     return (resp_data.get("choices") or [{}])[0].get("message") or {}
 
 
-def _ai_review_apply_match(m: Dict[str, Any], file_meta: List[Dict], lib_index: List[Dict], new_dupes: List[Dict],
-                           state: Dict[str, Any], update_state) -> None:
+def _ai_review_apply_match(m: Dict[str, Any], file_meta: List[Dict], lib_index: List[Dict], shown_ids: set,
+                           new_dupes: List[Dict], state: Dict[str, Any], update_state) -> None:
     """Check one AI suggestion. The AI only suggests: the title guard and the
     AcoustID fingerprint decide what is kept and how far it is trusted."""
     fidx    = int(m.get("file_idx", 0)) - 1
@@ -312,6 +320,15 @@ def _ai_review_apply_match(m: Dict[str, Any], file_meta: List[Dict], lib_index: 
     reason  = str(m.get("reason", ""))
     if fidx < 0 or fidx >= len(file_meta): return
     if conf not in ("high", "medium"): return
+    # #533 item 3: the AI may only point at a library candidate it was actually
+    # shown for this batch; a lib_id outside that set is a hallucination.
+    if lib_id not in shown_ids:
+        state["log"].append(f"  REJECT: AI lib_id {lib_id} was not among the candidates shown")
+        return
+    # #533 item 3: the AI's self-asserted "high" is not evidence. Only a confirmed
+    # AcoustID fingerprint (below) earns "high"; otherwise cap display at "medium".
+    if conf == "high":
+        conf = "medium"
 
     # Look up the library item to get its real path
     lib_item_obj = lib.get_item(lib_id)
@@ -404,7 +421,9 @@ def _ai_review_batch(batch_start: int, unmatched: List[Path], lib_index: List[Di
         update_state(_dedup_structured_state(state))
 
     file_meta = _ai_review_file_meta(batch)
-    prompt = _ai_review_prompt(file_meta, _ai_review_relevant_tracks(file_meta, lib_index))
+    relevant = _ai_review_relevant_tracks(file_meta, lib_index)
+    shown_ids = {it["id"] for it in relevant}  # #533 item 3: candidates the AI was shown
+    prompt = _ai_review_prompt(file_meta, relevant)
     _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini", api_key)
     req_body = _ai_review_request_body(prompt, _ai_model)
 
@@ -416,10 +435,13 @@ def _ai_review_batch(batch_start: int, unmatched: List[Path], lib_index: List[Di
         parsed = json.loads(msg["content"])
         matches = parsed.get("matches", []) if isinstance(parsed, dict) else []
         for m in matches:
-            _ai_review_apply_match(m, file_meta, lib_index, new_dupes, state, update_state)
+            _ai_review_apply_match(m, file_meta, lib_index, shown_ids, new_dupes, state, update_state)
     except Exception as exc:
+        # #533 item 5: route provider/parse exceptions through provider_boundary
+        # so a non-ProviderError can't leak provider detail or credentials into
+        # the job log. classify_exception yields a redacted, classified message.
         state["log"].append(
-            f"  ⚠ Batch {batch_start//BATCH + 1} error: {exc}")
+            f"  ⚠ Batch {batch_start//BATCH + 1} error: {provider_boundary.classify_exception(exc)}")
 
     state["log"].append(
         f"  Batch {batch_start//BATCH + 1}/{(len(unmatched)+BATCH-1)//BATCH} done")
@@ -484,6 +506,7 @@ def _ai_review_job(state: Dict[str, Any], scan_path: Path, already_matched: set,
         all_files = sorted(
             p for p in scan_path.rglob("*")
             if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+            and _dedup_listing_within_roots(p)  # #533 item 4: skip out-of-root symlink targets
         )
     except Exception as exc:
         _dedup_record_listing_failure(state, exc, "Listing unmatched files for AI duplicate review", update_state)

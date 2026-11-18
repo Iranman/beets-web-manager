@@ -281,6 +281,16 @@ def _resolve_dedup_scan_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
     return resolved, None
 
 
+def _dedup_listing_within_roots(p: Path) -> bool:
+    """True when a scanned file's REAL target is inside the allowed scan roots.
+
+    SEC (#533 item 4): rglob("*") + is_file() follow file symlinks, so a symlink
+    planted in a scan root could otherwise expose a file OUTSIDE the library/
+    downloads roots -- its tags/size reach the job log and the AI prompt.
+    _path_is_under resolves the symlink target, so an out-of-root target fails."""
+    return any(_path_is_under(p, root) for root in _BROWSE_ALLOWED_ROOTS)
+
+
 # ── YouTube / generic filename parser ──────────────────────────────────────
 _YT_STRIP = re.compile(
     r'\s*[\(\[](?:official\s*(?:video|music\s*video|audio|lyric\s*video|clip)|'
@@ -402,6 +412,7 @@ def _dedup_list_scan_sources(scan_path: Path, tracked_only: bool, cancel, state:
         source_files = sorted(
             p for p in scan_path.rglob("*")
             if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+            and _dedup_listing_within_roots(p)  # #533 item 4: skip out-of-root symlink targets
         )
     return all_items, source_files
 
@@ -632,7 +643,12 @@ def _dedup_verify_candidate(src: Path, lib_path: str, match_type: str, fingerpri
     rejects the candidate (returns None) instead of risking a wrong-file
     deletion."""
     src_fp_ids: List[str] = [fingerprint_mbid] if fingerprint_mbid else []
-    lib_fp_ids: List[str] = [fingerprint_mbid] if fingerprint_mbid else []
+    # #533 item 1: the AcoustID fallback fingerprints only the SOURCE and finds the
+    # library copy by its EMBEDDED recording ID -- the library copy is never
+    # fingerprinted here, so don't present its fingerprint as heard. (The verified
+    # branches below re-derive both lists; plan_reviewed_cleanup re-fingerprints
+    # both copies before any removal.)
+    lib_fp_ids: List[str] = []
     if (match_type == "MB Track ID" or match_type.startswith("fuzzy match")
             or match_type.startswith("album+title")):
         shared_id, src_fp_ids, lib_fp_ids = _acoustid_fingerprint_match(str(src), lib_path)
@@ -651,7 +667,9 @@ def _dedup_verify_candidate(src: Path, lib_path: str, match_type: str, fingerpri
 
 def _dedup_confidence_and_reason(match_type: str, evidence: Dict[str, Any], release_relation: str) -> Tuple[str, str]:
     fingerprint_verified, fingerprint_mbid = evidence["verified"], evidence["mbid"]
-    if match_type in ("MB Track ID", "identical file size", "AcoustID fingerprint"):
+    # #533 item 2: "identical file size" is a size-only match (no hash/bytes
+    # compared pre-plan), so it is NOT high confidence on its own.
+    if match_type in ("MB Track ID", "AcoustID fingerprint"):
         confidence = "high"
     elif fingerprint_verified:
         confidence = "high"
@@ -660,8 +678,10 @@ def _dedup_confidence_and_reason(match_type: str, evidence: Dict[str, Any], rele
 
     reason_map = {
         "MB Track ID":         "Embedded MusicBrainz track ID matches the library copy exactly.",
-        "identical file size": "File size is byte-identical to the library copy.",
-        "AcoustID fingerprint": f"AcoustID audio fingerprint matches library recording {fingerprint_mbid}.",
+        "identical file size": "File size matches the library copy exactly (bytes not yet compared).",
+        # #533 item 1: be explicit that only the SOURCE was fingerprinted here; the
+        # library copy is matched by its embedded recording ID, not re-fingerprinted.
+        "AcoustID fingerprint": f"AcoustID identifies the source as recording {fingerprint_mbid}; the library copy carries that embedded recording ID (its audio was not fingerprinted here).",
     }
     reason = reason_map.get(match_type, f"Matched by {match_type}.")
     if fingerprint_verified and match_type not in reason_map:
@@ -730,8 +750,10 @@ def _dedup_evidence_tag(release_relation: str, fingerprint_verified: bool, match
         return "REVIEW REQUIRED"
     if fingerprint_verified:
         return "FINGERPRINT VERIFIED"
+    # #533 item 2: reserve BYTE VERIFIED for an actual byte/hash check. A size-only
+    # match is just a candidate (the unattended plan re-hashes before any removal).
     if match_type == "identical file size":
-        return "BYTE VERIFIED"
+        return "SIZE MATCH"
     return "CANDIDATE"
 
 
