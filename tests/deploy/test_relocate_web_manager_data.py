@@ -232,6 +232,291 @@ class RelocateEnvVarComposeTests(unittest.TestCase):
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), self.COMPOSE)
         self.assertFalse(Path(self.compose + ".bak").exists())
 
+    def _apply_with_compose(self, compose_text, *extra):
+        Path(self.compose).write_text(compose_text, encoding="utf-8")
+        Path(self.env).write_text("TZ=UTC\n", encoding="utf-8")
+        return subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", self.compose, "--env-file", self.env,
+             "--no-recreate", "--apply", *extra],
+            capture_output=True, text=True,
+        )
+
+    def test_c6_indentless_volumes_refuses_then_repoints_with_env_key(self):
+        """C6(a) is now a SAFE REFUSAL, not auto-detection. An indentless
+        `volumes:` sequence (items at the same indent as the key) can't be
+        service-scoped, so the whole-file key grab (which could repoint the
+        wrong service) is gone. Without --env-key the script refuses with a
+        message pointing at --env-key / --rewrite-compose; passing --env-key
+        completes the relocation (compose untouched)."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "    - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
+            "    - beets-config:/config\n"
+        )
+        # Without --env-key: refuse, helpful message, nothing written.
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("--env-key", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        self.assertNotIn("BEETS_WEB_MANAGER_DATA_PATH=",
+                         Path(self.env).read_text(encoding="utf-8"))
+        self.assertFalse(Path(self.compose + ".bak").exists())
+        # With --env-key: repoints correctly, compose untouched.
+        res = self._apply_with_compose(compose, "--env-key", "BEETS_WEB_MANAGER_DATA_PATH")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        self.assertIn("BEETS_WEB_MANAGER_DATA_PATH=" + new_dest,
+                      Path(self.env).read_text(encoding="utf-8"))
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+
+    def test_c6_trailing_comment_header_refuses_then_repoints_with_env_key(self):
+        """C6(b) is now a SAFE REFUSAL. A service header with a trailing comment
+        (`beets-web-manager:  # app`) can't be service-scoped, so without
+        --env-key the script refuses (pointing at --env-key / --rewrite-compose)
+        rather than grabbing a foreign service's key; --env-key completes it."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:  # the app\n"
+            "    volumes:\n"
+            "      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
+            "      - beets-config:/config\n"
+        )
+        # Without --env-key: refuse, helpful message, nothing written.
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("--env-key", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        self.assertNotIn("BEETS_WEB_MANAGER_DATA_PATH=",
+                         Path(self.env).read_text(encoding="utf-8"))
+        self.assertFalse(Path(self.compose + ".bak").exists())
+        # With --env-key: repoints correctly, compose untouched.
+        res = self._apply_with_compose(compose, "--env-key", "BEETS_WEB_MANAGER_DATA_PATH")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        self.assertIn("BEETS_WEB_MANAGER_DATA_PATH=" + new_dest,
+                      Path(self.env).read_text(encoding="utf-8"))
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+
+    def test_no_false_success_literal_target_with_foreign_env_sidecar(self):
+        """Data-safety regression (the C6 fallback's FIVE false-success
+        variants): the TARGET service has a HARDCODED literal /web-manager-data
+        mount in a layout the scoper can't read (indentless volumes, trailing-
+        comment header, or quoted short-form), while an unrelated `sidecar`
+        interpolates ${SIDECAR_DATA} at the same container path. The old
+        whole-file fallback grabbed SIDECAR_DATA, repointed the sidecar, and
+        reported SUCCESS while the target stayed on the old path. With the
+        fallback removed, every variant must REFUSE: nonzero, no SIDECAR_DATA=
+        written, compose untouched, no .bak."""
+        layouts = {
+            "indentless_volumes": (
+                "services:\n"
+                "  beets-web-manager:\n"
+                "    volumes:\n"
+                "    - /opt/target/web-manager-data:/web-manager-data\n"
+                "    - beets-config:/config\n"
+                "  sidecar:\n"
+                "    volumes:\n"
+                "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+            ),
+            "comment_header": (
+                "services:\n"
+                "  beets-web-manager:  # the app\n"
+                "    volumes:\n"
+                "      - /opt/target/web-manager-data:/web-manager-data\n"
+                "      - beets-config:/config\n"
+                "  sidecar:\n"
+                "    volumes:\n"
+                "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+            ),
+            "quoted_literal": (
+                "services:\n"
+                "  beets-web-manager:\n"
+                "    volumes:\n"
+                '      - "/opt/target/web-manager-data:/web-manager-data"\n'
+                "      - beets-config:/config\n"
+                "  sidecar:\n"
+                "    volumes:\n"
+                "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+            ),
+        }
+        for name, compose in layouts.items():
+            with self.subTest(layout=name):
+                res = self._apply_with_compose(compose)
+                self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+                # The helpful refusal routes the operator, not a false success.
+                self.assertIn("--rewrite-compose", res.stderr)
+                env_text = Path(self.env).read_text(encoding="utf-8")
+                self.assertNotIn("SIDECAR_DATA=", env_text)
+                self.assertNotIn("/web-manager-data", env_text)
+                # Target compose untouched, no backup written.
+                self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+                self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_c6b_multi_service_literal_target_refuses_not_foreign_env_key(self):
+        """BLOCKING #1 (false-success regression): the TARGET service has a
+        HARDCODED literal /web-manager-data mount while an unrelated `sidecar`
+        service interpolates ${SIDECAR_DATA} at the same container path. The
+        whole-file env-key fallback must NOT fire (the target's own block has a
+        mount line -- it's just a literal), so the script must REFUSE exactly
+        like a single-service hardcoded mount, not repoint the foreign key and
+        leave the target on the old path."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - /opt/target/web-manager-data:/web-manager-data\n"
+            "      - beets-config:/config\n"
+            "  sidecar:\n"
+            "    volumes:\n"
+            "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+        )
+        res = self._apply_with_compose(compose)
+        # Must refuse and route to --rewrite-compose, like `main` does.
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("HARDCODED", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        # The foreign key must NOT have been set, and the Compose is untouched.
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("SIDECAR_DATA=", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_layout_a_trailing_comment_var_on_literal_target_refuses(self):
+        """Layout A (comment-sourced key): the TARGET service's literal
+        /web-manager-data mount carries a TRAILING COMMENT containing a ${VAR}
+        (`# override via ${SIDECAR_DATA}`), and an unrelated `sidecar` service
+        interpolates ${SIDECAR_DATA} at the same container path. detect_env_key
+        must NOT harvest the commented ${SIDECAR_DATA}: the trailing comment is
+        stripped, the target reads as a literal, and the script REFUSES (routes
+        to --rewrite-compose) rather than repointing the sidecar and reporting
+        SUCCESS while the target stays on the old path (data-loss false
+        success)."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - /opt/target/web-manager-data:/web-manager-data  # override via ${SIDECAR_DATA}\n"
+            "      - beets-config:/config\n"
+            "  sidecar:\n"
+            "    volumes:\n"
+            "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("HARDCODED", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("SIDECAR_DATA=", env_text)
+        self.assertNotIn("/web-manager-data", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_layout_a_commented_out_entry_in_target_block_refuses(self):
+        """Layout A (comment-sourced key, second variant): a commented-out
+        `# - ${SIDECAR_DATA}:/web-manager-data` entry sits in the TARGET
+        service's own volumes block alongside its real literal mount, and a
+        `sidecar` interpolates the same ${SIDECAR_DATA}. The commented-out entry
+        must NOT be emitted to detect_env_key, so the target reads as a literal
+        and the script REFUSES instead of repointing the sidecar."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - /opt/target/web-manager-data:/web-manager-data\n"
+            "      # - ${SIDECAR_DATA}:/web-manager-data\n"
+            "      - beets-config:/config\n"
+            "  sidecar:\n"
+            "    volumes:\n"
+            "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("SIDECAR_DATA=", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_layout_b_extension_shadow_before_services_refuses(self):
+        """Layout B (service not anchored to top-level services:): a
+        `beets-web-manager:` key nested under an `x-templates:` extension
+        BEFORE the real `services:` block carries a ${SIDECAR_DATA} mount, while
+        the REAL `services: beets-web-manager:` has a literal /web-manager-data
+        mount. The scoper must anchor to the DIRECT CHILD of the top-level
+        `services:` map, not the first same-named key anywhere -- so the
+        extension's ${SIDECAR_DATA} must NOT be picked; the target reads as a
+        literal and the script REFUSES."""
+        compose = (
+            "x-templates:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - ${SIDECAR_DATA:-./sidecar-data}:/web-manager-data\n"
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - /opt/target/web-manager-data:/web-manager-data\n"
+            "      - beets-config:/config\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("HARDCODED", res.stderr)
+        self.assertIn("--rewrite-compose", res.stderr)
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("SIDECAR_DATA=", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_finding3_partial_path_env_source_is_not_repointed(self):
+        """Finding 3 (partial-path source): a mount whose source is
+        `${DATA_ROOT}/manager:/web-manager-data` is NOT a repointable env key --
+        setting DATA_ROOT=<dest> would yield `<dest>/manager`, not <dest>. The
+        source must be EXACTLY a bare `${VAR}`/`${VAR:-default}` to be selected;
+        a partial-path source falls through to literal/refuse, never a
+        false success that silently corrupts the path."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "      - ${DATA_ROOT:-/srv/data}/manager:/web-manager-data\n"
+            "      - beets-config:/config\n"
+        )
+        res = self._apply_with_compose(compose)
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertNotIn("DATA_ROOT=", env_text)
+        self.assertNotIn("/web-manager-data", env_text)
+        self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+        self.assertFalse(Path(self.compose + ".bak").exists())
+
+    def test_env_key_override_is_honored_in_fallback_path(self):
+        """BLOCKING #2 (--env-key non-functional): with an indentless `volumes:`
+        sequence (an unscopable layout the refusal now points operators at), an
+        operator --env-key must be honored, not overwritten by detection -- the
+        refusal advertises passing --env-key, so it must actually take effect."""
+        compose = (
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            "    - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n"
+            "    - beets-config:/config\n"
+        )
+        Path(self.compose).write_text(compose, encoding="utf-8")
+        Path(self.env).write_text("TZ=UTC\n", encoding="utf-8")
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", self.compose, "--env-file", self.env,
+             "--env-key", "MY_CUSTOM_KEY", "--no-recreate", "--apply"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        env_text = Path(self.env).read_text(encoding="utf-8")
+        self.assertIn("MY_CUSTOM_KEY=" + new_dest, env_text)
+        self.assertNotIn("BEETS_WEB_MANAGER_DATA_PATH=", env_text)
+
 
 @unittest.skipUnless(BASH, "needs a POSIX bash (Linux/macOS)")
 class RelocateComposeHardeningTests(unittest.TestCase):
@@ -330,6 +615,39 @@ class RelocateComposeHardeningTests(unittest.TestCase):
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
         self.assertFalse(Path(self.compose + ".bak").exists())
 
+    def test_f6_rewrite_anchors_to_top_level_service_not_extension_shadow(self):
+        """Layout B for --rewrite-compose (data-loss false success): a
+        `beets-web-manager:` key under an `x-templates:` extension BEFORE the
+        real `services:` block carries a literal /web-manager-data mount, and
+        the REAL service has its own literal mount. rewrite_compose_source must
+        anchor to the DIRECT CHILD of the top-level `services:` map and rewrite
+        the REAL service's line -- never the extension's (rewriting the shadow
+        left the real service on the old path while reporting SUCCESS)."""
+        ext_literal = "      - /opt/ext/web-manager-data:/web-manager-data\n"
+        real_literal = "      - /opt/target/web-manager-data:/web-manager-data\n"
+        compose = (
+            "x-templates:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            + ext_literal +
+            "services:\n"
+            "  beets-web-manager:\n"
+            "    volumes:\n"
+            + real_literal +
+            "      - beets-config:/config\n"
+        )
+        self._write(compose)
+        res = self._run("--rewrite-compose", "--apply")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        new_dest = os.path.abspath(self.new).replace("\\", "/")
+        text = Path(self.compose).read_text(encoding="utf-8")
+        # The REAL service's mount line was rewritten to the new path.
+        self.assertIn("      - %s:/web-manager-data\n" % new_dest, text)
+        self.assertNotIn("/opt/target/web-manager-data", text)
+        # The x-templates shadow mount must be left byte-identical.
+        self.assertIn(ext_literal, text,
+                      "the x-templates shadow mount must be untouched")
+
     def test_f4_dest_with_colon_is_rejected(self):
         """F4 (unvalidated insertion): a --dest containing ':' (or '$'/quotes)
         would re-delimit a short-form bind; it must be rejected up front."""
@@ -349,6 +667,116 @@ class RelocateComposeHardeningTests(unittest.TestCase):
         )
         self.assertNotEqual(res.returncode, 0)
         self.assertEqual(Path(self.compose).read_text(encoding="utf-8"), compose)
+
+
+@unittest.skipUnless(BASH, "needs a POSIX bash (Linux/macOS)")
+class RelocateRemoveOldGuardTests(unittest.TestCase):
+    """C1 + C7: --remove-old safety. C1 rejects --no-recreate --remove-old up
+    front (the removal's live-mount cross-check is gated on the recreate). C7
+    covers the F1 second-defense cross-check with a mocked docker/curl on PATH:
+    removal proceeds only when the live container mounts the NEW path."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bwm-relocate-rm-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.old = os.path.join(self.tmp, "old-data")
+        self.new = os.path.join(self.tmp, "new-data")
+        self.env = os.path.join(self.tmp, ".env")
+        os.makedirs(os.path.join(self.old, "jobs"))
+        Path(self.old, "sentinel.txt").write_text("keep-me\n", encoding="utf-8")
+        Path(self.old, "jobs", "job_1.json").write_text('{"id":"job_1"}', encoding="utf-8")
+        Path(self.env).write_text("TZ=UTC\n", encoding="utf-8")
+
+    def test_c1_no_recreate_with_remove_old_is_rejected(self):
+        """C1: the combination is refused before any copy/removal happens."""
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--env-file", self.env, "--env-key", "BEETS_WEB_MANAGER_DATA_PATH",
+             "--no-recreate", "--remove-old", "--apply"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("--no-recreate", res.stderr)
+        # Old dir untouched, dest never created.
+        self.assertTrue(os.path.isfile(os.path.join(self.old, "sentinel.txt")))
+        self.assertFalse(os.path.exists(self.new))
+
+    def _mock_bin(self, mounts_json):
+        """A PATH dir with fake `docker` (JSON mounts configurable) + `curl`."""
+        binp = os.path.join(self.tmp, "bin")
+        os.makedirs(binp, exist_ok=True)
+        docker = os.path.join(binp, "docker")
+        Path(docker).write_text(
+            "#!/usr/bin/env bash\n"
+            'if [[ "$1" == "compose" ]]; then\n'
+            '  shift\n'
+            '  [[ "$1" == "-f" ]] && shift 2\n'
+            '  case "$1" in\n'
+            '    up) exit 0 ;;\n'
+            '    ps) echo fakecid123; exit 0 ;;\n'
+            '  esac\n'
+            '  exit 0\n'
+            'fi\n'
+            'if [[ "$1" == "inspect" ]]; then\n'
+            '  fmt="$3"\n'
+            '  case "$fmt" in\n'
+            '    *State.Health*) echo healthy ;;\n'
+            '    *json*) echo "$MOCK_MOUNTS_JSON" ;;\n'
+            '    *) echo "" ;;\n'
+            '  esac\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 0\n',
+            encoding="utf-8",
+        )
+        os.chmod(docker, 0o755)
+        curl = os.path.join(binp, "curl")
+        Path(curl).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        os.chmod(curl, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = binp + os.pathsep + env["PATH"]
+        env["MOCK_MOUNTS_JSON"] = mounts_json
+        # A real Compose file is needed for the recreate branch.
+        compose = os.path.join(self.tmp, "docker-compose.yml")
+        Path(compose).write_text(
+            "services:\n  beets-web-manager:\n    volumes:\n"
+            "      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data\n",
+            encoding="utf-8",
+        )
+        return env, compose
+
+    def test_c7_remove_old_proceeds_when_live_mount_is_new_path(self):
+        new_abs = os.path.abspath(self.new).replace("\\", "/")
+        env, compose = self._mock_bin(
+            '[{"Destination":"/web-manager-data","Source":"%s"}]' % new_abs)
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", compose, "--env-file", self.env,
+             "--remove-old", "--apply"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("live container mounts", res.stderr)
+        # Cross-check passed -> old dir removed, new dir has the data.
+        self.assertFalse(os.path.exists(self.old))
+        self.assertEqual(Path(self.new, "sentinel.txt").read_text(encoding="utf-8"), "keep-me\n")
+
+    def test_c7_remove_old_refuses_when_live_mount_is_old_path(self):
+        """F1 second defense: if the live mount is NOT the new path (repoint did
+        not take effect), the old dir must be left intact."""
+        old_abs = os.path.abspath(self.old).replace("\\", "/")
+        env, compose = self._mock_bin(
+            '[{"Destination":"/web-manager-data","Source":"%s"}]' % old_abs)
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--source", self.old, "--dest", self.new,
+             "--compose-file", compose, "--env-file", self.env,
+             "--remove-old", "--apply"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("did not take effect", res.stderr)
+        # Old dir intact (not removed).
+        self.assertTrue(os.path.isfile(os.path.join(self.old, "sentinel.txt")))
 
 
 if __name__ == "__main__":
