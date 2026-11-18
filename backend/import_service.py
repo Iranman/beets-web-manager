@@ -1758,6 +1758,10 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
             aid, mb_albumid, wanted_tracks, log, expected_artist=_guess_artist,
             slot_authorized=_recovery_slot_authorized(aldir))
         if not fp_validation.get("ok"):
+            # #442/#446 (PR #778 QA): deliberately left UNSTAMPED. An AcoustID
+            # fill refusal is recoverable (re-fetch / re-fingerprint), not a
+            # terminal import failure, so the Review row stays auto-prunable
+            # once the folder resolves rather than requiring an explicit dismiss.
             _reimport_keep_for_review(
                 ctx, aldir, mb_albumid,
                 fp_validation.get("reason") or "AcoustID did not verify the downloaded "
@@ -1831,9 +1835,15 @@ def _reimport_merge_into_existing(ctx: _ReimportContext, aid: int, aldir: str, m
     merged = composite_workflows.get_album(aid) or {}
     if (_s(merged.get("mb_albumid")).strip().lower() != mb_albumid
             or _s(merged.get("mb_releasegroupid")).strip().lower() != planned_rg):
+        # #442/#446 (PR #778 QA): a post-merge release/RG mismatch is a terminal
+        # import failure -- stamp ``release_group_mismatch`` (already in the
+        # terminal immune set) so the Review row survives folder-gone / no-audio
+        # / cleanup-stale pruning until the user dismisses it, instead of being
+        # silently auto-prunable.
         _reimport_keep_for_review(ctx, aldir, mb_albumid,
                                   f"Album_id {aid} does not carry the selected release and "
-                                  "Release Group after the merge.", [aid])
+                                  "Release Group after the merge.", [aid],
+                                  failure_code="release_group_mismatch")
     return aid, undelivered_tracks
 
 

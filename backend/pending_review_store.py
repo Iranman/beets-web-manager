@@ -606,12 +606,28 @@ def _add_to_pending(folder_path: str, suggestion: dict, allow_existing: bool = F
                 if suggestion:
                     item["suggestion"] = suggestion
                 item["added_at"] = int(time.time())
-                # #442/#446: a same-path re-queue REPLACES the evidence packet
-                # with the new review's (even when empty) instead of inheriting
-                # the old one. Otherwise a stale terminal ``import_failure_code``
-                # from a prior failed import would grant a now-ordinary review
-                # permanent immunity from pruning and it would never resolve.
-                item["evidence"] = evidence if evidence else {}
+                # #442/#446 + PR #778 QA: a same-path re-queue MERGES the new
+                # review's evidence OVER the existing packet; it does NOT
+                # wholesale-replace it. The top-level evidence also carries
+                # SAFETY keys read elsewhere -- ``source_mode``/``quality_upgrade``
+                # (torrent-seed file protection via _pending_review_torrent_rows
+                # and the Review-cleanup guard), ``conflict`` (QA401 no-audio
+                # protection) -- and a blind replace on an evidence=None or
+                # terminal-code-only requeue dropped them, letting a Review
+                # cleanup move/delete files qBittorrent was still seeding.
+                # We overlay the new evidence (a truthy new value wins per key)
+                # and drop ONLY a stale terminal ``import_failure_code`` when the
+                # NEW review is non-terminal -- so a re-queue as an ordinary
+                # review loses the old code and prunes normally (round-1 finding
+                # B), while every other existing safety key survives.
+                new_evidence = evidence if isinstance(evidence, dict) else {}
+                existing_evidence = item.get("evidence")
+                merged_evidence = (dict(existing_evidence)
+                                   if isinstance(existing_evidence, dict) else {})
+                merged_evidence.update(new_evidence)
+                if _s(new_evidence.get("import_failure_code")) not in _TERMINAL_IMPORT_FAILURE_CODES:
+                    merged_evidence.pop("import_failure_code", None)
+                item["evidence"] = merged_evidence
                 _apply_review_origin(item, chosen_origin)
                 updated = True
                 break

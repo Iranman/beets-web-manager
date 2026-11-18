@@ -145,6 +145,60 @@ class KeepFailedImportReviewTests(unittest.TestCase):
         self.assertNotIn(path, self._paths(),
                          "the now-ordinary re-queued row must prune normally")
 
+    # PR #778 QA: a same-path requeue MERGES, it does not wholesale-replace --
+    def test_requeue_preserves_safety_keys_while_clearing_terminal_code(self):
+        # The top-level evidence carries SAFETY keys read by other code:
+        # ``source_mode:qbittorrent`` (torrent-seed file protection) and
+        # ``conflict:symlinked_audio`` (no-audio protection). A same-path
+        # requeue as an ordinary review (evidence=None) must MERGE -- keeping
+        # those keys -- while still dropping the stale terminal
+        # ``import_failure_code`` (round-1 finding B). Fix B's blind replace
+        # dropped the safety keys, letting a Review cleanup move/delete files
+        # qBittorrent was still seeding.
+        path = self._folder("torrent")
+        self._write([{
+            "path": path, "origin_type": "x",
+            "suggestion": {"origin_type": "x", "allow_existing_review": True},
+            "evidence": {"source_mode": "qbittorrent", "conflict": "symlinked_audio",
+                         "import_failure_code": "release_group_mismatch"},
+        }])
+        self.assertTrue(prs._pending_review_is_torrent_source(path))
+        prs._add_to_pending(path, {"origin_type": "x"}, allow_existing=True, evidence=None)
+        stored = json.loads(self.store.read_text())
+        self.assertEqual(len(stored), 1, "re-queue must update in place, not append")
+        ev = stored[0]["evidence"]
+        self.assertEqual(ev.get("source_mode"), "qbittorrent",
+                         "torrent-seed protection key must survive the requeue")
+        self.assertEqual(ev.get("conflict"), "symlinked_audio",
+                         "no-audio protection key must survive the requeue")
+        self.assertNotIn("import_failure_code", ev,
+                         "stale terminal code must be cleared on a non-terminal requeue")
+        # the gate that protects seeding files still fires after the requeue
+        self.assertTrue(prs._pending_review_is_torrent_source(path),
+                        "_pending_review_is_torrent_source must stay True after the merge")
+        self.assertTrue(prs._pending_review_torrent_rows(path),
+                        "_pending_review_torrent_rows must still return the protected row")
+        self.assertFalse(prs._review_is_terminal_import_failure(stored[0]),
+                         "the now-ordinary row must lose terminal immunity")
+
+    def test_requeue_terminal_over_safety_keys_keeps_both(self):
+        # A terminal-code-only requeue (new evidence carries a terminal code,
+        # nothing else) must stamp the new code AND keep the existing safety
+        # keys -- the merge, not a replace.
+        path = self._folder("torrent2")
+        self._write([{
+            "path": path, "origin_type": "x",
+            "suggestion": {"origin_type": "x", "allow_existing_review": True},
+            "evidence": {"source_mode": "qbittorrent"},
+        }])
+        prs._add_to_pending(path, {"origin_type": "x"}, allow_existing=True,
+                            evidence={"import_failure_code": "release_group_mismatch"})
+        ev = json.loads(self.store.read_text())[0]["evidence"]
+        self.assertEqual(ev.get("source_mode"), "qbittorrent",
+                         "a terminal requeue must not drop the existing safety key")
+        self.assertEqual(ev.get("import_failure_code"), "release_group_mismatch",
+                         "the new terminal code must be stamped")
+
     # Finding C: the N3 concurrency signature must track the terminal flag ----
     def test_resolution_sig_distinguishes_terminal_from_ordinary(self):
         base = {"path": "/d/x",
@@ -230,6 +284,42 @@ class CleanupStaleKeepsTerminalTests(unittest.TestCase):
                       "terminal row was removed by cleanup-stale when its folder was gone (bug A)")
         self.assertNotIn(self.plain, remaining,
                          "ordinary gone-folder row must still be removed by cleanup-stale")
+
+
+class PostMergeRgMismatchStampTests(unittest.TestCase):
+    """PR #778 QA: the post-merge release/RG mismatch keep-site
+    (import_service._reimport_merge_into_existing ~:1834) must stamp the
+    terminal ``release_group_mismatch`` code, so the kept Review row survives
+    every auto-prune path (folder-gone / no-audio / cleanup-stale) until the
+    user dismisses it, instead of being silently auto-prunable."""
+
+    def test_post_merge_rg_mismatch_is_stamped_terminal(self):
+        import backend.import_service as isvc
+        captured = {}
+
+        def fake_queue(folder, suggestion, reason, log=None, allow_existing=False,
+                       evidence=None, origin=None, carrier=None):
+            captured["evidence"] = evidence
+            return True
+
+        ctx = mock.Mock()
+        ctx.log = []
+        ctx.guess_artist = "A"
+        ctx.replace_existing_item_ids = []
+        with mock.patch.object(isvc, "_queue_folder_for_manual_review", side_effect=fake_queue), \
+                mock.patch.object(isvc, "_merge_imported_album_into_existing", return_value=11), \
+                mock.patch.object(isvc.composite_workflows, "get_album",
+                                  return_value={"mb_albumid": "WRONG", "mb_releasegroupid": "WRONG"}):
+            # no wanted_tracks => the AcoustID fill path and verify_fill are skipped;
+            # the mismatch keep-site is reached and raises after queueing.
+            with self.assertRaises(RuntimeError):
+                isvc._reimport_merge_into_existing(
+                    ctx, 11, "/dl/a", "mbid-x", "rg-x", 99,
+                    wanted_tracks=[], requested_tracks=[], replace_existing=False)
+        self.assertEqual(captured["evidence"], {"import_failure_code": "release_group_mismatch"},
+                         "post-merge RG mismatch must stamp the terminal release_group_mismatch code")
+        self.assertIn("release_group_mismatch", TERMINAL_CODES,
+                      "stamped code must be in the terminal immune set so the row survives pruning")
 
 
 if __name__ == "__main__":
