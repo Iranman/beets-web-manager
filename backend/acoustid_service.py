@@ -684,7 +684,13 @@ def _acoustid_multi_file(
 # SEC-5 (ReDoS): only the whitespace-free core is a regex; the leading
 # whitespace run and the trailing ``.*`` of the original
 # ``\s*CORE.*`` pattern are applied by split_ws_led in linear time.
-_FEAT_RE = re.compile(r'[\(\[]?(?:feat(?:uring)?\.?|ft\.?|with)\b', re.IGNORECASE)
+# #780: a credit token must be a standalone word that introduces a guest, so
+# it is anchored on BOTH sides -- leading whitespace via split_ws_led(need_ws)
+# and a following space via ``(?=\s)`` -- never an "ft"/"feat" substring inside
+# a word (Daft Punk, Theft, Kraftwerk) or a trailing bare word (Great Feat).
+# The lookahead is a single zero-width ``\s`` (not a quantifier), so it stays
+# linear. ``\.?`` is outside the ``\b``-free alternation so "feat." still works.
+_FEAT_RE = re.compile(r'[\(\[]?(?:feat(?:uring)?|ft|with)\.?(?=\s)', re.IGNORECASE)
 _ARTIST_SPLIT_CORE_RE = re.compile(
     r'(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+',
     re.IGNORECASE,
@@ -703,7 +709,7 @@ def _normalize_albumartist(s: str) -> str:
     # SEC-5 (ReDoS): cap free text before the regexes; real names are far shorter.
     s = _normalize_name(s)[:1024]
     # Strip feat./ft./featuring suffix
-    s = ''.join(split_ws_led(s, _FEAT_RE, to_eol=True)).strip().rstrip(',').strip()
+    s = ''.join(split_ws_led(s, _FEAT_RE, need_ws=True, to_eol=True)).strip().rstrip(',').strip()
     # Strip comma-listed collaborators (only when no '&' present — avoids
     # breaking "Earth, Wind & Fire" or "Crosby, Stills, Nash & Young")
     if ',' in s and '&' not in s:
