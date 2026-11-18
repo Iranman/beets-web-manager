@@ -4137,7 +4137,8 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": null
     }
    ]
   ]
@@ -4380,7 +4381,8 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": null
     }
    ]
   ]
@@ -4635,7 +4637,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "existing_album_merge_failed"
+     }
     }
    ]
   ]
@@ -5242,7 +5247,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "existing_album_merge_failed"
+     }
     }
    ]
   ]
@@ -5519,7 +5527,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "existing_album_merge_failed"
+     }
     }
    ]
   ]
@@ -5796,7 +5807,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "existing_album_merge_failed"
+     }
     }
    ]
   ]
@@ -6051,7 +6065,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "existing_album_merge_failed"
+     }
     }
    ]
   ]
@@ -6328,7 +6345,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "existing_album_merge_failed"
+     }
     }
    ]
   ]
@@ -13541,7 +13561,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "existing_album_merge_failed"
+     }
     }
    ]
   ]
@@ -16314,7 +16337,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "release_group_mismatch"
+     }
     }
    ]
   ]
@@ -16507,7 +16533,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "release_group_mismatch"
+     }
     }
    ]
   ]
@@ -16700,7 +16729,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "release_group_mismatch"
+     }
     }
    ]
   ]
@@ -23888,7 +23920,8 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": null
     }
    ],
    [
@@ -24043,7 +24076,10 @@
      "<log>"
     ],
     {
-     "allow_existing": true
+     "allow_existing": true,
+     "evidence": {
+      "import_failure_code": "release_group_mismatch"
+     }
     }
    ]
   ]
