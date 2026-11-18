@@ -401,6 +401,10 @@
       "DISPLAY_ONLY",
       "Serializes canonical per-side evidence (identity proof, confidence state) into review records."
     ],
+    "backend/import_reconciliation.py::_replacement_review_side": [
+      "DISPLAY_ONLY",
+      "Serializes a library row into a reconciliation-review side; no decision (empty confidence_state)."
+    ],
     "backend/import_reconciliation.py::album_identity": [
       "CANONICAL_FINAL_DECISION",
       "ARCH-009: album identity by Release Group only; never inherited, never from Release ID."
