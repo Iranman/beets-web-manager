@@ -214,8 +214,13 @@ def _title_normalize_helpers() -> Dict[str, Any]:
     """SEC-5 linear normalizers that extracted modules import (imports are not
     part of the family source, so exec'd units need them supplied)."""
     import backend.title_normalize as _tn
-    return {n: getattr(_tn, n) for n in ("split_ws_led", "strip_in_mono_suffix", "trailing_bracket_group",
-                                          "dash_suffix_group", "strip_bracket_credits")}
+    helpers = {n: getattr(_tn, n) for n in ("split_ws_led", "strip_in_mono_suffix", "trailing_bracket_group",
+                                            "dash_suffix_group", "strip_bracket_credits")}
+    # #468 F6: shared containment-aware artist scorer, imported from
+    # backend.matching by the extracted playlist/AcoustID artist-score helpers.
+    from backend.matching import artist_pair_similarity
+    helpers["artist_pair_similarity"] = artist_pair_similarity
+    return helpers
 
 
 def load_app_closure(roots: Iterable[str], namespace: Dict[str, Any]) -> Dict[str, Any]:

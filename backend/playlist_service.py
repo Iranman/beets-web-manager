@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import backend.provider_boundary as provider_boundary
-import base64, copy, dataclasses, difflib, hashlib, json, os, re, shutil, socket, sqlite3, stat, subprocess, threading, time, unicodedata, uuid
+import base64, copy, dataclasses, hashlib, json, os, re, shutil, socket, sqlite3, stat, subprocess, threading, time, unicodedata, uuid
 import urllib.error
 from collections import Counter, defaultdict, deque
 import backend.job_contract as job_contract
-from backend.matching import evaluate_release_group_candidate
+from backend.matching import artist_pair_similarity, evaluate_release_group_candidate
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import PLAYLIST_DOWNLOAD_ALLOWED_ROOTS
@@ -23,7 +23,7 @@ import backend.composite_workflows as composite_workflows
 from backend.slskd import make_app_download_dir
 from backend.title_normalize import dash_suffix_group, split_ws_led, trailing_bracket_group
 from backend.library_cache import library_cache
-from backend.acoustid_service import _acoustid_hits_or_none, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _playlist_token_score, _read_file_media_tags
+from backend.acoustid_service import _acoustid_hits_or_none, _acoustid_verify_match, _album_track_norm, _audio_identity_decision, _normalize_albumartist, _playlist_artist_name_score, _playlist_artist_name_variants, _playlist_title_score, _read_file_media_tags
 from backend.slskd_service import SLSKD_API_KEY, _DASH_SEP_CORE_RE, _download_method_list, _find_slskd_downloaded_files, _slskd_cancel_queued_downloads, _slskd_cleanup_failed_candidate_files, _slskd_search_and_queue, _slskd_title_guess_from_name, _slskd_wait_downloads
 from backend.matching_service import _MB_VARIOUS_ARTISTS_ID, _artist_folder_name_without_mbid, _best_album_track_match, _fetch_mb_release_tracklist, _invalidate_lib_cache, _playlist_artist_credit_info
 from backend.app_runtime import jobs
@@ -104,18 +104,15 @@ def _playlist_artist_score(query_artist, item):
         getattr(item, "artist_credit", ""),
     ]
     best = 0.0
-    query_words = set(query_norm.split())
     for name in candidate_names:
         cand_norm = _norm(_normalize_albumartist(_s(name)))
         if not cand_norm:
             continue
-        cand_words = set(cand_norm.split())
-        seq = difflib.SequenceMatcher(None, query_norm, cand_norm).ratio()
-        tok = _playlist_token_score(query_norm, cand_norm)
-        subset = 0.0
-        if query_words and cand_words and (query_words <= cand_words or cand_words <= query_words):
-            subset = 0.92
-        best = max(best, seq, tok, subset)
+        # #468 F6: containment-aware textual score -- a strict-subset artist
+        # (e.g. "Drake" vs "Drake Bell") no longer flat-scores 0.92 and clears
+        # the 0.55 gate on one shared name part. Shared with the AcoustID path's
+        # _playlist_artist_name_pair_score so both route through one rule.
+        best = max(best, artist_pair_similarity(query_norm, cand_norm))
         try:
             best = max(best, _playlist_artist_name_score(query_artist, _s(name)))
         except Exception:

@@ -38,6 +38,7 @@ from .recording import (
     verify_audio_against_request,
 )
 from .normalize import (
+    artist_pair_similarity,
     normalize_artist,
     normalize_title,
     normalize_track_title_for_matching,
@@ -88,6 +89,7 @@ __all__ = [
     "evaluate_release_group_candidate",
     "GAP_KINDS",
     "library_identity_gaps",
+    "artist_pair_similarity",
     "normalize_artist",
     "normalize_title",
     "normalize_track_title_for_matching",
