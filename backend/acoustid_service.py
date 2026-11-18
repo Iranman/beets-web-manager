@@ -690,7 +690,16 @@ def _acoustid_multi_file(
 # a word (Daft Punk, Theft, Kraftwerk) or a trailing bare word (Great Feat).
 # The lookahead is a single zero-width ``\s`` (not a quantifier), so it stays
 # linear. ``\.?`` is outside the ``\b``-free alternation so "feat." still works.
-_FEAT_RE = re.compile(r'[\(\[]?(?:feat(?:uring)?|ft|with)\.?(?=\s)', re.IGNORECASE)
+# #784: bare "with" is an ordinary English word, not credit jargon like
+# feat/ft. A capitalised bare "With" is part of a name ("Sleeping With Sirens"),
+# so only a *lowercase* bare "with" (``(?-i:with)``) is a credit separator;
+# feat/ft stay case-insensitive, and a *bracketed* "(with X)"/"[with X]" is an
+# explicit credit marker and strips in any case. "with" as the last word never
+# strips (the ``(?=\s)`` already requires a following token/guest).
+_FEAT_RE = re.compile(
+    r'(?:[\(\[]?(?:feat(?:uring)?|ft)|[\(\[]with|(?-i:with))\.?(?=\s)',
+    re.IGNORECASE,
+)
 _ARTIST_SPLIT_CORE_RE = re.compile(
     r'(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+',
     re.IGNORECASE,
