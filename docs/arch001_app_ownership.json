@@ -42909,6 +42909,28 @@
    "dependencies": [
     "_plugin_status_payload"
    ]
+  },
+  {
+   "name": "_queue_replacement_failed_review",
+   "module": "backend/replacement_service.py",
+   "lines": [
+    468,
+    494
+   ],
+   "size": 27,
+   "body_lines": 20,
+   "route": null,
+   "mutation_capable": false,
+   "domain": "REPLACEMENT",
+   "desired_owner": "backend/replacement_service.py",
+   "migration_status": "EXTRACTED",
+   "callers": [
+    "_music_format_remove_original_after_replacement"
+   ],
+   "caller_count": 1,
+   "dependencies": [
+    "_s"
+   ]
   }
  ],
  "overrides": {

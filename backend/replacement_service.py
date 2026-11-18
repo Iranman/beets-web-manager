@@ -15,6 +15,8 @@ from helpers_mb import _fetch_mb_recording_details, _mb_recording_search, _clean
 from backend.beets_adapter import beets_adapter
 import backend.composite_workflows as composite_workflows
 import backend.item_replacement as _item_replacement
+import backend.import_reconciliation as _import_reconciliation
+from backend.import_reconciliation import REPLACEMENT_PLAN_FAILED
 import backend.recording_review as recording_review
 from backend.acoustid_service import _acoustid_fingerprint_ids, _acoustid_fingerprint_match, _acoustid_hits_or_none, _playlist_artist_name_score, _playlist_title_score, _read_file_media_tags
 from backend.job_service import ALBUM_DOWNLOAD_WAIT, CHILD_OUTCOME_UNKNOWN, ChildJobFailed, _wait_for_child_job
@@ -463,6 +465,35 @@ def _music_format_replacement_matching_contract(resolved: Dict[str, Any], replac
     }
 
 
+def _queue_replacement_failed_review(original_item_id: int, source_id: int,
+                                     resolved: Optional[Dict[str, Any]],
+                                     reason: str, refusal_code: str, log: list) -> None:
+    """#434: queue a reconciliation review naming both rows when a verified
+    music-format replacement could not be auto-applied. Fail-closed
+    bookkeeping only; never raises into the job, and logs when the queue
+    write could not be made so the failure is never silent."""
+    try:
+        existing_row = beets_adapter.get_item(int(original_item_id or 0)) or {}
+        imported_row = beets_adapter.get_item(int(source_id or 0)) or {}
+        record = _import_reconciliation.record_replacement_failed_review(
+            existing_item_id=int(original_item_id or 0), imported_item_id=int(source_id or 0),
+            existing_album_id=int(existing_row.get("album_id") or 0),
+            imported_album_id=int(imported_row.get("album_id") or 0),
+            target_recording_id=_s((resolved or {}).get("mb_trackid") or existing_row.get("mb_trackid") or ""),
+            release_group_id=_s((resolved or {}).get("mb_releasegroupid") or existing_row.get("mb_releasegroupid") or ""),
+            release_id=_s(existing_row.get("mb_albumid") or ""),
+            reason=reason, refusal_code=refusal_code,
+            existing_row=existing_row, imported_row=imported_row)
+        if record:
+            log.append(f"Queued reconciliation review {record.get('review_id')} naming library item "
+                       f"{original_item_id} and imported item {source_id} "
+                       f"[reason_code={REPLACEMENT_PLAN_FAILED}].")
+        else:
+            log.append("No reconciliation review queued: the replacement pair is missing a library row.")
+    except Exception as ex:
+        log.append(f"Could not queue a reconciliation review for the refused replacement: {ex}")
+
+
 def _music_format_remove_original_after_replacement(original_path: str, final_path: str, prefs: Dict[str, Any], log: list,
                                                     original_item_id: int = 0,
                                                     resolved: Optional[Dict[str, Any]] = None,
@@ -489,8 +520,16 @@ def _music_format_remove_original_after_replacement(original_path: str, final_pa
             int(original_item_id or 0), source_id,
             reason="Music format quality replacement", expected_recording_id=expected)
         if not plan_res.get("ok"):
+            # #434: a verified replacement was imported but the canonical
+            # item-file replacement refused the plan. Fail closed -- queue a
+            # reconciliation review naming both rows instead of logging only
+            # and letting the job report success with nothing in Preview.
             result["reason"] = plan_res.get("error") or plan_res.get("code") or "track replacement plan failed"
+            result["refusal_code"] = _s(plan_res.get("code"))
+            result["needs_review"] = True
             log.append(f"Track replacement plan refused: {result['reason']}")
+            _queue_replacement_failed_review(int(original_item_id or 0), source_id, resolved,
+                                             result["reason"], result["refusal_code"], log)
             return result
         result["awaiting_approval"] = True
         result["operation_id"] = _s(plan_res.get("operation_id"))
@@ -636,6 +675,22 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
                 resolved=resolved,
                 replacement=replacement,
             )
+            if removal.get("needs_review"):
+                # #434: the verified replacement was refused by the plan and
+                # both rows are queued for reconciliation review. Terminal and
+                # non-retryable -- never loop back to re-download it, and the
+                # job reflects a review item instead of bare success.
+                failed += 1
+                reason = _s(removal.get("reason") or "replacement could not be planned")
+                log.append(f"Needs review: {label}: {reason}; both rows queued for reconciliation "
+                           f"review [reason_code={REPLACEMENT_PLAN_FAILED}]")
+                _mark_music_format_needs_replacement([
+                    _music_format_retry_state(resolved, status="Needs review", stage="replacement_plan",
+                                              reason=reason, retryable=False, attempt_count=attempt_count)
+                ])
+                if update_state:
+                    update_state({"phase": "Replacing", "processed": index, "total": len(pending), "complete": complete, "failed": failed, "skipped": skipped, "deferred": deferred})
+                continue
             if not removal.get("awaiting_approval"):
                 raise RuntimeError(removal.get("reason") or "replacement could not be planned")
             complete += 1
