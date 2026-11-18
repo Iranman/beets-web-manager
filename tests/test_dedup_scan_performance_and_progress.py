@@ -272,7 +272,10 @@ class DedupScanPerformanceAndProgressTests(unittest.TestCase):
         src = dedup_scan_source()
         self.assertIn('"CANDIDATE"', src)
         self.assertIn('"FINGERPRINT VERIFIED"', src)
-        self.assertIn('"BYTE VERIFIED"', src)
+        # #533 item 2: a size-only scan match is "SIZE MATCH", never "BYTE VERIFIED"
+        # (that label is reserved for an actual byte/hash check, done pre-removal).
+        self.assertIn('"SIZE MATCH"', src)
+        self.assertNotIn('"BYTE VERIFIED"', src, "Size-only matches must not be labelled BYTE VERIFIED")
         self.assertIn('"REVIEW REQUIRED"', src)
         self.assertIn("[REJECTED]", src)
         self.assertNotIn("✓ DUPLICATE", src, "Legacy misleading '✓ DUPLICATE' tag must not be used")
