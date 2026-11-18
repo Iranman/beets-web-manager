@@ -467,6 +467,95 @@ def record_reviews(plan: ReconciliationPlan, *, existing_album_id: int, imported
     return records
 
 
+#: A music-format quality replacement imported and AcoustID-verified a better
+#: file, but the canonical item-file replacement plan refused it (destination
+#: occupied, fingerprint re-check, slot-identity mismatch, engine IPC). Fail
+#: closed: both rows are kept and queued for reconciliation review instead of
+#: the job reporting success with nothing in Preview (#434). Stable,
+#: machine-readable; carried on the review record as ``reason_code`` and
+#: mirrors the terminal reason-code taxonomy of #432's
+#: ``existing_album_merge_failed``.
+REPLACEMENT_PLAN_FAILED = "replacement_plan_failed"
+
+
+def _replacement_review_side(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A reconciliation-review side (ReconciliationSide) from a library row."""
+    row = row or {}
+    return {
+        "item_id": _int(row.get("id") or row.get("item_id")),
+        "path": _s(row.get("path")),
+        "recording_id": _id(row.get("mb_trackid")),
+        "release_id": _id(row.get("mb_albumid")),
+        "release_group_id": _id(row.get("mb_releasegroupid")),
+        "identity_proof": "",
+        "confidence_state": "",
+        "acoustid": {},
+        "hard_conflicts": [],
+        "review_reasons": [],
+        "artist": _s(row.get("artist")),
+        "title": _s(row.get("title")),
+        "format": _s(row.get("format")),
+    }
+
+
+def record_replacement_failed_review(*, existing_item_id: int, imported_item_id: int,
+                                     existing_album_id: int = 0, imported_album_id: int = 0,
+                                     target_recording_id: str = "", release_group_id: str = "",
+                                     release_id: str = "", reason: str = "",
+                                     refusal_code: str = "",
+                                     existing_row: Optional[Dict[str, Any]] = None,
+                                     imported_row: Optional[Dict[str, Any]] = None,
+                                     source_folder: str = "",
+                                     path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Queue ONE reconciliation review for a music-format replacement whose
+    verified replacement could not be auto-applied (#434).
+
+    Fail-closed bookkeeping only -- no file or DB mutation. The review is a
+    ``contested_slot`` naming both rows (the existing library slot and the
+    imported replacement) so the user can keep_existing / keep_imported /
+    keep_both from the existing reconciliation review surface. It carries the
+    stable ``REPLACEMENT_PLAN_FAILED`` reason code plus the underlying plan
+    refusal code. Never raises into the job; returns the stored record, or
+    None when either row id is missing (nothing to review)."""
+    existing_item_id, imported_item_id = _int(existing_item_id), _int(imported_item_id)
+    if not existing_item_id or not imported_item_id:
+        return None
+    detail = _s(reason) or "The verified replacement could not be planned."
+    record = {
+        "review_id": uuid.uuid4().hex,
+        "created_at": time.time(),
+        "status": "open",
+        "kind": "contested_slot",
+        "outcome": ReconciliationOutcome.KEEP_BOTH_REVIEW.value,
+        "existing_album_id": _int(existing_album_id),
+        "imported_album_id": _int(imported_album_id),
+        "release_group_id": _id(release_group_id),
+        "release_id": _id(release_id),
+        "source_folder": _s(source_folder),
+        "existing_item_id": existing_item_id,
+        "imported_item_id": imported_item_id,
+        "target_recording_id": _id(target_recording_id),
+        "existing": _replacement_review_side(existing_row),
+        "imported": _replacement_review_side(imported_row),
+        "reason_code": REPLACEMENT_PLAN_FAILED,
+        "refusal_code": _s(refusal_code),
+        "reasons": [f"[reason_code={REPLACEMENT_PLAN_FAILED}] {detail}"],
+        "recommended_action": (
+            "A format-quality replacement was imported and AcoustID-verified, but it could "
+            "not be applied automatically. Keep the existing file, keep the imported "
+            "replacement, or keep both."),
+    }
+    target = path or review_store_path()
+    try:
+        with _REVIEW_LOCK:
+            existing = load_reviews(target)
+            merged = (existing + [record])[-_MAX_REVIEW_RECORDS:]
+            _write_reviews(merged, target)
+    except Exception:
+        return record
+    return record
+
+
 def _write_reviews(records: List[Dict[str, Any]], target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".reconcile-", dir=str(target.parent))
