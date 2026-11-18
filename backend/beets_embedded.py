@@ -45,6 +45,15 @@ _PROBE_TTL = 30.0  # seconds a "separate Beets server" probe result is reused
 _BUNDLED_PLUGIN_DIR = os.path.normcase(os.path.realpath(os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "beetsplug")))
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+#: Opening a fresh/isolated Beets library can fail transiently under heavy I/O
+#: or fd pressure -- a new thread's SQLite connection may not open (the #652
+#: hazard). This open is before the library lock is acquired, so a retry holds
+#: nothing; a genuinely unopenable library still fails every attempt. Retrying
+#: a one-off hiccup keeps it from wedging the engine (``_failed_status`` is
+#: remembered until reset) and failing /health/ready for a healthy fresh
+#: install (#680).
+_LIBRARY_OPEN_ATTEMPTS = 3
+_LIBRARY_OPEN_RETRY_SECONDS = 0.2
 
 
 def _bundled_plugins() -> List[str]:
@@ -205,19 +214,32 @@ class EmbeddedBeets:
                "dependencies needs them in the image.")
 
         existed = os.path.isfile(dbpath)
-        try:
-            lib = Library(dbpath, directory)
-            _release_lock_on_failed_exit(lib)
-            lib.get_item(0)  # opens the connection, as `beet` does
-        except Exception as ex:
-            # Raw exception text can leak internal paths/details into the
-            # /api/health/detail response; log it, return the type only (SEC-007).
-            log.exception("Beets library could not be opened")
-            _check(checks, "library_open_failed", False,
-                   f"Beets library {dbpath} could not be opened: {type(ex).__name__}. "
-                   "Check the /config mount and its permissions for PUID/PGID (see the log for detail).")
-            self.status = _summary(checks, beets_version=version, loaded_plugins=loaded)
-            raise EmbeddedBeetsUnavailable(self.status)
+        lib = None
+        for attempt in range(1, _LIBRARY_OPEN_ATTEMPTS + 1):
+            try:
+                lib = Library(dbpath, directory)
+                _release_lock_on_failed_exit(lib)
+                lib.get_item(0)  # opens the connection, as `beet` does
+                break
+            except Exception as ex:
+                # A transient open (I/O or fd pressure, a new thread's SQLite
+                # connection) is retried before the self-test gives up (#680);
+                # this is before the library lock, so no lock is held across a
+                # retry. The last failure is reported as library_open_failed.
+                lib = None  # drop the half-open handle; its lock is released on
+                #             the failed transaction's exit (_release_lock...).
+                if attempt >= _LIBRARY_OPEN_ATTEMPTS:
+                    # Raw exception text can leak internal paths/details into the
+                    # /api/health/detail response; log it, return the type only (SEC-007).
+                    log.exception("Beets library could not be opened")
+                    _check(checks, "library_open_failed", False,
+                           f"Beets library {dbpath} could not be opened: {type(ex).__name__}. "
+                           "Check the /config mount and its permissions for PUID/PGID (see the log for detail).")
+                    self.status = _summary(checks, beets_version=version, loaded_plugins=loaded)
+                    raise EmbeddedBeetsUnavailable(self.status)
+                log.warning("Beets library open attempt %d/%d failed (%s); retrying",
+                            attempt, _LIBRARY_OPEN_ATTEMPTS, type(ex).__name__)
+                time.sleep(_LIBRARY_OPEN_RETRY_SECONDS)
         _check(checks, "library_open_failed", True, "")
         _check(checks, "library_created", existed,
                f"No library existed at {dbpath}, so an empty one was created. If you expected "

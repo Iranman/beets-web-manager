@@ -42,8 +42,24 @@ beets_embedded._beet_commands = lambda: [4242] if scenario == "writer_beet" else
 
 def no_network(*a, **k):
     raise AssertionError("the embedded engine opened a socket")
-if scenario not in ("readiness", "readiness_broken"):
+if scenario not in ("readiness", "readiness_broken", "readiness_transient_open"):
     socket.socket.connect = socket.socket.connect_ex = no_network
+
+# #680: a one-off transient library open (SQLite connection fails to open
+# under I/O/fd pressure) must not fail readiness -- the self-test retries it.
+# Fail the first get_item() call, then let every later call through.
+if scenario == "readiness_transient_open":
+    from beets.library import Library as _Library
+    _orig_get_item = _Library.get_item
+    _open_state = {"failed": False}
+
+    def _flaky_get_item(self, *a, **k):
+        if not _open_state["failed"]:
+            _open_state["failed"] = True
+            raise OSError("transient SQLite open failure (#680 injection)")
+        return _orig_get_item(self, *a, **k)
+
+    _Library.get_item = _flaky_get_item
 
 a = BeetsAdapter()
 
@@ -67,7 +83,7 @@ if scenario == "poisoned_global_lib":
 # Readiness probe end to end through the real app and the real embedded
 # engine (no mocking of _beets_plugin_diagnostics): a fresh config-less
 # install must be ready; a genuinely broken engine must not.
-if scenario in ("readiness", "readiness_broken"):
+if scenario in ("readiness", "readiness_broken", "readiness_transient_open"):
     from app import app as flask_app
     client = flask_app.test_client()
     r = client.get("/health/ready")
@@ -369,6 +385,19 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         self.assertEqual(out["body"]["blocking_reasons"], [], out["body"])
         self.assertEqual(out["body"]["status"], "ready")
         self.assertTrue(out["body"]["beets"]["plugin_loader_ok"], out["body"])
+
+    def test_fresh_install_recovers_from_a_transient_library_open_failure(self):
+        # #680 regression: the fresh-install readiness flake. A one-off
+        # transient library open (SQLite connection fails under I/O/fd
+        # pressure) must not wedge the engine or fail /health/ready -- the
+        # self-test retries the open. The driver fails the first get_item()
+        # call, then succeeds; before the retry this returned 503 "Beets
+        # engine unavailable".
+        cfg = os.path.join(self.config, "config.yaml")
+        out = self._run("readiness_transient_open", extra_env={"BEETS_CONFIG": cfg})
+        self.assertEqual(out["status_code"], 200, out["body"])
+        self.assertEqual(out["body"]["blocking_reasons"], [], out["body"])
+        self.assertEqual(out["body"]["status"], "ready")
 
     def test_genuinely_broken_engine_is_not_ready(self):
         # D3 intent preserved: a genuinely broken Beets (version mismatch, so
