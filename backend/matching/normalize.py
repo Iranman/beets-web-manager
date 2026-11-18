@@ -689,3 +689,56 @@ def similarity(left: Any, right: Any) -> float:
             ratio = max(ratio, 0.72)
     return max(0.0, min(1.0, ratio))
 
+
+# Calibration knob (#468 F6): the maximum credit an *asymmetric containment*
+# artist match may earn, before it is scaled by how much of the longer name is
+# actually covered. One name's identifying tokens being a strict subset of the
+# other's (e.g. "Drake" vs "Drake Bell") used to score a flat 0.92 regardless of
+# how many identifying tokens differed, so a DISTINCT artist cleared the 0.55
+# playlist gate on a single shared surname. With the base at 1.0 the containment
+# score is simply the covered-token ratio: "Drake" ⊆ "Drake Bell" scores 0.5
+# (1 of 2 tokens → rejected), while near-complete containment like
+# "John Williams" ⊆ "John Williams Orchestra" scores ~0.67 (2 of 3 → accepted).
+# Lower it to tighten, raise it (up to the gate/ratio interplay) to loosen,
+# without touching the gate threshold itself.
+ARTIST_CONTAINMENT_BASE = 1.0
+
+# Non-identifying artist tokens dropped before judging containment, so a name
+# that differs only by one of these stays an exact-identity match rather than a
+# scaled-down subset: "The Beatles" vs "Beatles", "Confunkshun Band" vs
+# "Confunkshun". These are descriptors/articles, NOT identifying surnames -- the
+# point of #468 F6 is that a *distinct* identifying token ("Bell" in "Drake
+# Bell") must NOT be forgiven this way. feat./ft./comma-collaborator noise is
+# already stripped upstream by _normalize_albumartist before names reach here.
+_ARTIST_MATCH_STOPWORDS = frozenset({"the", "band"})
+
+
+def artist_pair_similarity(query_norm: str, cand_norm: str) -> float:
+    """Textual artist similarity for two already-normalized names (#468 F6).
+
+    The weakest identity-evidence tier: fuzzy string overlap only. Exact match
+    scores 1.0. When one name's *identifying* tokens (articles stripped) are a
+    strict subset of the other's, the extra tokens are identifying, so the match
+    is capped at a ratio-scaled containment score (ARTIST_CONTAINMENT_BASE *
+    covered-token fraction) instead of inheriting the inflated sequence/Dice
+    overlap of the shared token -- a different artist must not pass the gate on a
+    single shared name part. Otherwise the ordinary max(sequence, Dice) applies.
+    """
+    if not query_norm or not cand_norm:
+        return 0.0
+    if query_norm == cand_norm:
+        return 1.0
+    q_words = set(query_norm.split())
+    c_words = set(cand_norm.split())
+    seq = SequenceMatcher(None, query_norm, cand_norm).ratio()
+    dice = (2.0 * len(q_words & c_words)) / (len(q_words) + len(c_words)) if q_words and c_words else 0.0
+    q_ident = q_words - _ARTIST_MATCH_STOPWORDS
+    c_ident = c_words - _ARTIST_MATCH_STOPWORDS
+    if q_ident and c_ident:
+        if q_ident == c_ident:
+            return 1.0
+        if q_ident <= c_ident or c_ident <= q_ident:
+            ratio = len(q_ident & c_ident) / max(len(q_ident), len(c_ident))
+            return ARTIST_CONTAINMENT_BASE * ratio
+    return max(seq, dice)
+

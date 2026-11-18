@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import difflib, hashlib, json, os, re, sys
-from backend.matching import AcoustIDStatus, normalize_track_title_for_matching, similarity as _canonical_similarity
+from backend.matching import AcoustIDStatus, artist_pair_similarity, normalize_track_title_for_matching, similarity as _canonical_similarity
 from backend.matching import acoustid_evidence_from_hits
 from backend.matching.recording import ACOUSTID_MIN_SCORE
 from backend.matching.track_alignment import _hit_score
@@ -955,18 +955,12 @@ def _playlist_artist_name_variants(value):
 
 
 def _playlist_artist_name_pair_score(query_artist, candidate_artist):
+    # #468 F6: delegate to the shared containment-aware scorer so a strict-subset
+    # artist ("Drake" vs "Drake Bell") can no longer flat-score 0.92 here and
+    # leak back through _playlist_artist_name_score into the playlist match gate.
     query_norm = _norm(_normalize_albumartist(_s(query_artist)))
     cand_norm = _norm(_normalize_albumartist(_s(candidate_artist)))
-    if not query_norm or not cand_norm:
-        return 0.0
-    query_words = set(query_norm.split())
-    cand_words = set(cand_norm.split())
-    seq = difflib.SequenceMatcher(None, query_norm, cand_norm).ratio()
-    tok = _playlist_token_score(query_norm, cand_norm)
-    subset = 0.0
-    if query_words and cand_words and (query_words <= cand_words or cand_words <= query_words):
-        subset = 0.92
-    return max(seq, tok, subset)
+    return artist_pair_similarity(query_norm, cand_norm)
 
 
 def _playlist_artist_name_score(query_artist, candidate_artist):
