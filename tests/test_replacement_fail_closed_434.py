@@ -103,20 +103,23 @@ class RemoveOriginalFailClosedTests(unittest.TestCase):
                 original_item_id=7, resolved=items[7], replacement={"path": "/music/import/99.flac"})
         return result, log, load_reviews(path)
 
-    def test_plan_failure_fails_closed_and_queues_both_rows(self):
+    def test_plan_failure_fails_closed_and_reports_the_refused_pair(self):
+        # The SEC-002 destructive target function does NOT queue the review
+        # itself (its local call set is locked down); it reports the refused
+        # pair so the loop can queue it. Behaviour end-to-end is covered by
+        # QueueHelperTests + the loop source guard below.
         with tempfile.TemporaryDirectory() as tmp:
             result, log, reviews = self._run(
                 {"ok": False, "code": "fingerprint_disagreement",
                  "error": "Could not verify by AcoustID"}, tmp)
-            # (a) not a bare success: no approval, flagged for review
+            # not a bare success: no approval, flagged for review, both ids reported
             self.assertFalse(result.get("awaiting_approval"))
             self.assertTrue(result.get("needs_review"))
-            # (b) a review naming both rows with the stable code
-            self.assertEqual(len(reviews), 1)
-            self.assertEqual(reviews[0]["existing_item_id"], 7)
-            self.assertEqual(reviews[0]["imported_item_id"], 99)
-            self.assertEqual(reviews[0]["reason_code"], REPLACEMENT_PLAN_FAILED)
-            self.assertTrue(any("Queued reconciliation review" in line for line in log))
+            self.assertEqual(result.get("original_item_id"), 7)
+            self.assertEqual(result.get("source_item_id"), 99)
+            self.assertEqual(result.get("refusal_code"), "fingerprint_disagreement")
+            # the target function itself writes nothing to the review store
+            self.assertEqual(reviews, [])
 
     def test_successful_plan_still_awaits_approval_and_queues_no_review(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,14 +131,41 @@ class RemoveOriginalFailClosedTests(unittest.TestCase):
             self.assertEqual(reviews, [])
 
 
-class JobSurfacesNeedsReviewTests(unittest.TestCase):
-    """The replace-rows loop marks the plan-refusal terminal (not a retry loop)
-    and routes it to Needs review, so the job never reports bare success."""
+class QueueHelperTests(unittest.TestCase):
+    """_queue_replacement_failed_review (called by the loop, not the locked-down
+    target function) writes the review naming both rows with the stable code."""
 
-    def test_loop_handles_needs_review_terminally(self):
+    def test_queue_helper_names_both_rows(self):
+        items = {
+            7: {"id": 7, "album_id": 1, "path": "/music/a/7.flac", "mb_trackid": "REC-7",
+                "mb_releasegroupid": "RG-7", "mb_albumid": "REL-7", "artist": "A", "title": "S"},
+            99: {"id": 99, "album_id": 2, "path": "/music/import/99.flac", "mb_trackid": "REC-7"},
+        }
+        log: list = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reviews.json"
+            with mock.patch.object(rs, "beets_adapter", _FakeAdapter(items)), \
+                 mock.patch.object(recon, "review_store_path", return_value=path):
+                rs._queue_replacement_failed_review(7, 99, items[7], "Could not verify by AcoustID",
+                                                    "fingerprint_disagreement", log)
+            reviews = load_reviews(path)
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["existing_item_id"], 7)
+        self.assertEqual(reviews[0]["imported_item_id"], 99)
+        self.assertEqual(reviews[0]["reason_code"], REPLACEMENT_PLAN_FAILED)
+        self.assertEqual(reviews[0]["refusal_code"], "fingerprint_disagreement")
+        self.assertTrue(any("Queued reconciliation review" in line for line in log))
+
+
+class JobSurfacesNeedsReviewTests(unittest.TestCase):
+    """The replace-rows loop queues the review and marks the plan-refusal
+    terminal (not a retry loop), so the job never reports bare success."""
+
+    def test_loop_queues_and_handles_needs_review_terminally(self):
         import inspect
         body = inspect.getsource(rs._music_format_replace_rows)
         self.assertIn('removal.get("needs_review")', body)
+        self.assertIn("_queue_replacement_failed_review(", body)
         self.assertIn('status="Needs review"', body)
         self.assertIn("retryable=False", body)
         self.assertIn("REPLACEMENT_PLAN_FAILED", body)

@@ -521,15 +521,18 @@ def _music_format_remove_original_after_replacement(original_path: str, final_pa
             reason="Music format quality replacement", expected_recording_id=expected)
         if not plan_res.get("ok"):
             # #434: a verified replacement was imported but the canonical
-            # item-file replacement refused the plan. Fail closed -- queue a
-            # reconciliation review naming both rows instead of logging only
-            # and letting the job report success with nothing in Preview.
+            # item-file replacement refused the plan. Fail closed -- report the
+            # refused pair so the caller (the replace-rows loop) queues a
+            # reconciliation review naming both rows, instead of logging only
+            # and letting the job report success with nothing in Preview. The
+            # review is queued in the loop, not here: this is the SEC-002
+            # destructive target function, whose local call set is locked down.
             result["reason"] = plan_res.get("error") or plan_res.get("code") or "track replacement plan failed"
             result["refusal_code"] = _s(plan_res.get("code"))
             result["needs_review"] = True
+            result["original_item_id"] = int(original_item_id or 0)
+            result["source_item_id"] = int(source_id or 0)
             log.append(f"Track replacement plan refused: {result['reason']}")
-            _queue_replacement_failed_review(int(original_item_id or 0), source_id, resolved,
-                                             result["reason"], result["refusal_code"], log)
             return result
         result["awaiting_approval"] = True
         result["operation_id"] = _s(plan_res.get("operation_id"))
@@ -676,12 +679,17 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
                 replacement=replacement,
             )
             if removal.get("needs_review"):
-                # #434: the verified replacement was refused by the plan and
-                # both rows are queued for reconciliation review. Terminal and
-                # non-retryable -- never loop back to re-download it, and the
-                # job reflects a review item instead of bare success.
+                # #434: the verified replacement was refused by the plan. Queue
+                # a reconciliation review naming both rows (done here, outside
+                # the SEC-002 destructive target function), then mark the track
+                # terminal and non-retryable -- never loop back to re-download
+                # it, and the job reflects a review item instead of bare success.
                 failed += 1
                 reason = _s(removal.get("reason") or "replacement could not be planned")
+                _queue_replacement_failed_review(
+                    int(removal.get("original_item_id") or row.get("item_id") or 0),
+                    int(removal.get("source_item_id") or 0),
+                    resolved, reason, _s(removal.get("refusal_code")), log)
                 log.append(f"Needs review: {label}: {reason}; both rows queued for reconciliation "
                            f"review [reason_code={REPLACEMENT_PLAN_FAILED}]")
                 _mark_music_format_needs_replacement([
