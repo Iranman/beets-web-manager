@@ -131,10 +131,32 @@ def _assert_path_owned_by_test(path, tmp_root: Path) -> None:
 try:
     APP = _import_app()
     _APP_IMPORT_ERROR = None
+    # Snapshot the process-wide app-family globals BEFORE rebinding them to this
+    # module's isolated temp library, so tearDownModule() can restore them.
+    # Without this, the raw beets Library bound below leaks into the shared
+    # `lib` global for every later-sorted module under `unittest discover`:
+    # stock beets Library.items() rejects the fields= kwarg the production
+    # StockBeetsLibrary facade accepts, so the next module to hit GET /api/library
+    # 500s instead of serving the fast tree -- the exact rebind-without-restore
+    # class fixed for test_artwork_retry_reconciliation.py in #768.
+    _ORIGINAL_APP_GLOBALS = {
+        name: getattr(APP, name, None)
+        for name in ("lib", "LIB_PATH", "_AI_BATCH_STATE_DIR")
+    }
     _bind_app_globals_to_this_test_module(APP, _TMP_ROOT)
 except Exception as exc:  # pragma: no cover - environment-dependent
     APP = None
     _APP_IMPORT_ERROR = exc
+    _ORIGINAL_APP_GLOBALS = {}
+
+
+def tearDownModule():
+    """Restore the app-family globals this module rebound to its isolated temp
+    library, keeping `unittest discover` order-independent. See
+    _bind_app_globals_to_this_test_module for why the rebind exists."""
+    if APP is not None:
+        for name, value in _ORIGINAL_APP_GLOBALS.items():
+            rebind_app_family(APP, name, value)
 
 
 MB_ALBUMID = "5d2be019-9a93-4dd2-abfd-acd31b1b1e12"
