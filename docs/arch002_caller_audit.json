@@ -661,6 +661,10 @@
       "DISPLAY_ONLY",
       "Review-row suggestion for a folder Beets skipped: a fixed confidence label of low; the deterministic decision travels in the evidence and gates nothing here."
     ],
+    "backend/import_review_decision.py::pending_ai_auto_import_verdict": [
+      "DISPLAY_ONLY",
+      "ARCH-005: reads the already-computed deterministic auto-import verdict (folder_identity.decide_auto_import, classified CANONICAL_FINAL_DECISION) off the served Review row -- evidence.deterministic_decision.auto_import.eligible, with top-level auto_import and preflight.matching_decision.action_allowed as fallbacks -- and returns it so the Review 'Ready' presentation/bucket/filter never shows a refused folder as Ready. It decides nothing itself; the only pattern hit is the action_allowed fallback read."
+    ],
     "backend/import_review_service.py::_revalidation_has_fresh_acoustid_proof": [
       "SAFE_SPECIALIZED_EVIDENCE",
       "Issue #602: reports whether this revalidation produced fresh, conflict-free acoustid_verified rows (no acoustid_mismatch, no action_allowed=False); evidence predicate only, it never lowers a threshold and acceptance still goes through the canonical matching decision."
