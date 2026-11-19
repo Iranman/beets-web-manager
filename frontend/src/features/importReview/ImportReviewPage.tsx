@@ -2817,11 +2817,14 @@ export function ReviewCard({
   // deterministic verdict, never from mb_valid. Bucket/state plumbing is
   // unchanged (still 'no_candidate'); only the human-facing label differs.
   const refusedUnevaluableCandidate = readyVerdictRefused
-    && (Boolean(item.mb_albumid) || (item.alt_candidates?.candidates?.length ?? 0) > 0);
+    && (Boolean(item.mb_albumid) || Boolean(item.mb_releasegroupid) || (item.alt_candidates?.candidates?.length ?? 0) > 0);
   // Source (folder/original) identity vs the selected edition's release year:
-  // two distinct fields, never conflated. Source year is the folder's own year;
-  // the edition release year comes only from a selected release candidate.
-  const sourceYear = item.year ? String(item.year) : (item.evidence?.folder?.guessed_year || '');
+  // two distinct fields, never conflated. The folder-evidence guessed_year is the
+  // unambiguous source year; item.year can be a suggestion-derived EDITION year
+  // (AI/MB fallback stores the matched candidate's year), so it must never be the
+  // first choice for the "Source year" field. The edition release year comes only
+  // from the selected release candidate (selectedMatch.year).
+  const sourceYear = item.evidence?.folder?.guessed_year || (item.year ? String(item.year) : '');
   const editionYear = selectedMatch?.year ? String(selectedMatch.year) : '';
   const visibleMatchBucket: MatchBucket = audioMismatchActive
     ? 'audio_mismatch'
@@ -2951,10 +2954,24 @@ export function ReviewCard({
                 <span className={`text-xs font-semibold ${confidenceClass(item.confidence)}`}>{item.confidence}</span>
               ) : null}
               {autoFixShown ? (
+                // ARCH-005: when the folder verdict refused (readyVerdictRefused),
+                // the FOLDER is not auto-import ready even though this selected
+                // candidate passed its own preflight. Scope the chip to the
+                // candidate and drop the green "ready" tone so it does not
+                // contradict the amber "Needs decision" folder badge above.
                 <Chip
                   size="small"
-                  color="success"
-                  label={selectedMatch?.is_partial_import ? 'Partial auto-import ready' : 'Auto-import eligible'}
+                  color={readyVerdictRefused ? 'default' : 'success'}
+                  variant={readyVerdictRefused ? 'outlined' : 'filled'}
+                  label={
+                    readyVerdictRefused
+                      ? selectedMatch?.is_partial_import
+                        ? 'Selected candidate: partial import-eligible'
+                        : 'Selected candidate import-eligible'
+                      : selectedMatch?.is_partial_import
+                        ? 'Partial auto-import ready'
+                        : 'Auto-import eligible'
+                  }
                 />
               ) : null}
               {selectedMatchActive && selectedMatch?.identity_validated === null ? (
@@ -3006,7 +3023,9 @@ export function ReviewCard({
             ) : null}
             {visibleMatchBucket === 'no_candidate' && refusedUnevaluableCandidate ? (
               <p className="mt-2 rounded border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
-                Needs decision: the best candidate could not be evaluated, so auto-import was refused. Pick a release below or enter a MusicBrainz ID.
+                {item.alt_candidates?.best_verified_release_group_id
+                  ? 'Needs decision: auto-import was refused. A verified candidate is below — review it before importing.'
+                  : 'Needs decision: the best candidate could not be evaluated, so auto-import was refused. Pick a release below or enter a MusicBrainz ID.'}
               </p>
             ) : null}
             <QualityUpgradeNotice evidence={item.evidence} />
@@ -3082,15 +3101,21 @@ export function ReviewCard({
                 <div className={`rounded border px-2 py-1.5 ${
                   selectedMatch.is_partial_import
                     ? 'border-sky-500/30 bg-sky-950/40 text-sky-200'
-                    : autoFixShown
+                    : autoFixShown && !readyVerdictRefused
                       ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200'
                       : 'border-graphite-700 bg-graphite-850 text-muted'
                 }`}>
+                  {/* ARCH-005: a folder-refused verdict is never a green
+                     "Auto-import eligible" summary, even when this candidate
+                     passed preflight; it reads as candidate-scoped eligibility
+                     so it does not contradict the "Needs decision" badge. */}
                   <div className="font-semibold">
                     {selectedMatch.is_partial_import
                       ? 'Partial import ready'
                       : autoFixShown
-                        ? 'Auto-import eligible'
+                        ? readyVerdictRefused
+                          ? 'Selected candidate import-eligible'
+                          : 'Auto-import eligible'
                         : confidenceLabel(selectedMatch.confidence_level)}
                   </div>
                   <div className="mt-0.5">{selectedMatch.auto_fix_reason}</div>
