@@ -340,6 +340,10 @@ export interface ReviewEvidence {
     mb_releasegroupid?: string;
   };
   preflight?: ReviewPreflight | null;
+  /** Full deterministic FolderIdentity for a beets-skip Review row (ai_service).
+   * ARCH-005: `auto_import.eligible` here is the primary authority for the
+   * Review "ready" bucket; eligible=false is an explicit refusal. */
+  deterministic_decision?: { auto_import?: { eligible: boolean; reasons: string[] } } | null;
   /** Missing-track recovery (ARCH-030): structured identity of the existing
    * album this staged download is being recovered into. Read-only. */
   recovery_carrier?: RecoveryCarrierIdentity;

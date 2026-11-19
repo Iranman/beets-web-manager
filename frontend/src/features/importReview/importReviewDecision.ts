@@ -117,14 +117,20 @@ export function hasAudioMismatchEvidence(item?: Pick<ReviewItem, 'evidence'>): b
 /**
  * The deterministic auto-import verdict for a pending_ai item (ARCH-005):
  * `true` eligible, `false` explicitly refused, `undefined` when the pipeline
- * emitted no verdict (recovery-carrier / quality-upgrade paths). The item's
- * top-level `auto_import` (from backend decide_auto_import, reasons like
- * `release_lookup_failed` / `no_release_group_verified`) is the authority;
- * `evidence.preflight.matching_decision.action_allowed` is the fallback single
- * eligibility authority. Mirror of backend
- * import_review_decision.pending_ai_auto_import_verdict.
+ * emitted no verdict (recovery-carrier / quality-upgrade paths).
+ *
+ * The verdict comes from backend decide_auto_import (reasons like
+ * `release_lookup_failed` / `no_release_group_verified`). On the real served
+ * Review row the beets-skip producer stores it ONLY at
+ * `evidence.deterministic_decision.auto_import.eligible`, so that is the
+ * primary source. A top-level `item.auto_import` and
+ * `evidence.preflight.matching_decision.action_allowed` are defensive
+ * fallbacks for other paths. First present source wins; none present ->
+ * undefined. Mirror of backend import_review_decision.pending_ai_auto_import_verdict.
  */
 export function pendingAiAutoImportVerdict(item: ReviewItem): boolean | undefined {
+  const detAuto = item.evidence?.deterministic_decision?.auto_import;
+  if (detAuto && typeof detAuto === 'object' && 'eligible' in detAuto) return Boolean(detAuto.eligible);
   const auto = item.auto_import;
   if (auto && typeof auto === 'object' && 'eligible' in auto) return Boolean(auto.eligible);
   const decision = item.evidence?.preflight?.matching_decision;
@@ -367,6 +373,10 @@ export function shouldShowReadyBucket(
   targetPreviewState?: TargetPreviewState,
 ): boolean {
   if (item.type === 'skipped' || hasAudioMismatchEvidence(item)) return false;
+  // ARCH-005: a refused deterministic verdict is never Ready, even when the
+  // selected match is importable (decide_auto_import can refuse a folder whose
+  // chosen candidate is itself verified/importable, e.g. release_lookup_failed).
+  if (pendingAiAutoImportVerdict(item) === false) return false;
   if (shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState)) return false;
   if (!selectedMatch) return false;
   if (!selectedMatch.is_importable) return false;
