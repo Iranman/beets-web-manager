@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat as _stat
 import threading
 import time
 import urllib.parse
@@ -190,6 +191,46 @@ _FORBIDDEN_DIAGNOSTIC_KEYS = frozenset({
     "decrypted_keys",
     "clearkeys",
 })
+
+# Finding F: depth + total-node budget for the recursive secret stripper. A
+# deeply nested or very wide report must truncate safely instead of raising
+# RecursionError (a per-request 500 / mild DoS). Both caps sit far above any
+# real diagnostic/provenance report yet well under Python's recursion limit.
+_MAX_STRIP_DEPTH = 48
+_MAX_STRIP_NODES = 50000
+
+# Finding C: only canonical values are ever echoed into the structured
+# diagnostic summary. An attacker-supplied source_platform/protocol never
+# reaches the summary as raw text.
+_CANONICAL_SOURCE_PLATFORMS = frozenset({"youtube", "soundcloud", "other"})
+_CANONICAL_STREAM_PROTOCOLS = frozenset({
+    "http", "https", "m3u8", "m3u8_native", "http_dash_segments", "dash",
+    "rtmp", "rtmpe", "rtmpt", "rtmps", "rtmp_ffmpeg", "rtsp", "mms", "f4m",
+    "ism", "ftp", "ftps", "data", "websocket", "websocket_frag",
+    "niconico_dmc", "sabr", "progressive",
+})
+
+
+def _canonical_source_platform(claimed: Any, host: str) -> str:
+    """Allowlist the echoed ``source_platform`` to a canonical set (Finding C).
+    A non-canonical attacker value is replaced by the platform derived from the
+    already-sanitized host, never echoed raw."""
+    val = _s(claimed).strip().lower()
+    if val in _CANONICAL_SOURCE_PLATFORMS:
+        return val
+    return _platform_for_host(host)
+
+
+def _canonical_protocols(protocols: Any) -> List[str]:
+    """Map stream protocols to a canonical allowlist (Finding C); any unknown or
+    attacker-supplied value collapses to ``other`` so no raw text is echoed."""
+    out = set()
+    for proto in _as_list(protocols):
+        tok = _s(proto).strip().lower()
+        if not tok:
+            continue
+        out.add(tok if tok in _CANONICAL_STREAM_PROTOCOLS else "other")
+    return sorted(out)
 
 
 def _as_list(value):
@@ -742,7 +783,22 @@ def _redaction_category(key_low: str) -> str:
     return "key_material"
 
 
-def _strip_secret_fields_recursive(obj: Any, redacted: set, *, parent_key: str = "") -> Any:
+def _strip_secret_fields_recursive(
+    obj: Any,
+    redacted: set,
+    *,
+    parent_key: str = "",
+    _depth: int = 0,
+    _budget: Optional[List[int]] = None,
+) -> Any:
+    # Finding F: bound recursion DEPTH and total NODE count, not just list
+    # breadth. A deeply nested or very wide report truncates to a sentinel
+    # instead of raising RecursionError or scanning unbounded work.
+    if _budget is None:
+        _budget = [_MAX_STRIP_NODES]
+    if _depth > _MAX_STRIP_DEPTH or _budget[0] <= 0:
+        return "[TRUNCATED]"
+    _budget[0] -= 1
     if isinstance(obj, dict):
         cleaned: Dict[str, Any] = {}
         for k, v in obj.items():
@@ -761,10 +817,19 @@ def _strip_secret_fields_recursive(obj: Any, redacted: set, *, parent_key: str =
             ):
                 redacted.add(_redaction_category(key_low))
                 continue
-            cleaned[key_str] = _strip_secret_fields_recursive(v, redacted, parent_key=key_low)
+            cleaned[key_str] = _strip_secret_fields_recursive(
+                v, redacted, parent_key=key_low, _depth=_depth + 1, _budget=_budget)
+            if _budget[0] <= 0:
+                break
         return cleaned
     if isinstance(obj, list):
-        return [_strip_secret_fields_recursive(item, redacted, parent_key=parent_key) for item in obj[:100]]
+        out: List[Any] = []
+        for item in obj[:100]:
+            out.append(_strip_secret_fields_recursive(
+                item, redacted, parent_key=parent_key, _depth=_depth + 1, _budget=_budget))
+            if _budget[0] <= 0:
+                break
+        return out
     if isinstance(obj, str):
         # Bound the scan length before matching (a secret marker appears at the
         # start of a value); avoids pathological backtracking on huge inputs.
@@ -804,7 +869,8 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
         _s(cleaned.get("source_url") or cleaned.get("webpage_url") or cleaned.get("url") or "").strip()
     )
     host = _host_of(source_url)
-    platform = _s(cleaned.get("source_platform") or cleaned.get("platform") or _platform_for_host(host)).lower()
+    platform = _canonical_source_platform(
+        cleaned.get("source_platform") or cleaned.get("platform"), host)
 
     # Only CANONICAL key-system ids are ever emitted (never the raw string), so
     # an attacker-controlled value in key_systems/keySystem cannot leak out.
@@ -897,7 +963,7 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
         "message_types": sorted(message_types),
         "key_statuses": sorted(key_statuses),
         "manifest_types": stream_diag.get("manifest_types") or [],
-        "protocols": stream_diag.get("protocols") or [],
+        "protocols": _canonical_protocols(stream_diag.get("protocols")),
         "provenance_status": provenance_status,
         "decryption_supported": False,
         "widevine_decryptable": False,
@@ -1579,21 +1645,85 @@ def _write_provenance(staged_file: str, record: Dict[str, Any]) -> str:
         clean_rec["authorization"] = auth_rec
     if isinstance(clean_rec, dict) and clean_rec.get("source_url"):
         clean_rec["source_url"] = _sanitize_persisted_url(clean_rec.get("source_url"))
-    sidecar = str(Path(staged_file).with_suffix(Path(staged_file).suffix + ".recover.json"))
+    staged = Path(staged_file)
+    sidecar = staged.with_suffix(staged.suffix + ".recover.json")
     data = json.dumps(clean_rec, ensure_ascii=False, indent=2).encode("utf-8")
-    # O_NOFOLLOW: refuse to write THROUGH a symlink that may have been swapped in
-    # for the sidecar (TOCTOU), so provenance can never clobber a file outside
-    # staging. (No-op flag on platforms without it; the deploy target is Linux.)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(sidecar, flags, 0o600)
+        return _atomic_write_in_recovered(staged.parent, sidecar.name, data)
+    except OSError:
+        return ""
+
+
+def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
+    """Write ``data`` to ``parent/name`` with the FULL parent chain checked for
+    symlinks and no path component ever followed through a symlink (Finding A).
+
+    The earlier implementation set ``O_NOFOLLOW`` on the final component only, so
+    a parent-dir symlink could redirect the write and ``O_TRUNC`` on a
+    pre-planted hard-linked sidecar could clobber a file outside staging. Here
+    every parent is symlink-checked and the file is produced by creating a fresh
+    ``O_EXCL`` temp in the staged directory and atomically ``os.replace``-ing it
+    over the target. ``os.replace`` swaps the directory entry: it never truncates
+    the old inode (a hard link aliased to a library file keeps its content) and
+    never writes through a symlink target, so the sidecar write can neither be
+    redirected outside its own staged directory nor clobber an aliased file. On
+    Linux the directory is additionally pinned with an ``O_NOFOLLOW`` directory
+    fd so even a parent-dir swap during the write cannot redirect it."""
+    if "/" in name or "\\" in name or "\x00" in name or name in ("", ".", ".."):
+        raise OSError("unsafe sidecar name")
+    if _has_symlink_in_chain(parent):
+        raise OSError("refusing symlinked provenance directory")
+    resolved_parent = parent.resolve(strict=True)
+    final_path = str(resolved_parent / name)
+    tmp_name = f".{name}.{uuid.uuid4().hex}.tmp"
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    # POSIX os.rename atomically replaces the destination and supports dir_fd;
+    # os.replace does not register dir_fd support on CPython, so the Linux path
+    # below uses os.rename for the atomic swap.
+    use_dirfd = (os.open in os.supports_dir_fd) and (os.rename in os.supports_dir_fd)
+    if not use_dirfd:
+        # Fallback (no dir_fd, e.g. Windows dev): still create an O_EXCL temp and
+        # atomically replace, so a symlinked/hard-linked target is not followed
+        # or clobbered. O_NOFOLLOW is a no-op here, but os.replace never follows
+        # the final-component symlink.
+        tmp_path = str(resolved_parent / tmp_name)
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
         try:
             os.write(fd, data)
         finally:
             os.close(fd)
-    except OSError:
-        return ""
-    return sidecar
+        try:
+            os.replace(tmp_path, final_path)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        return final_path
+
+    dir_fd = os.open(str(resolved_parent),
+                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+    try:
+        tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+                      0o600, dir_fd=dir_fd)
+        try:
+            os.write(tfd, data)
+            os.fsync(tfd)
+        finally:
+            os.close(tfd)
+        try:
+            os.rename(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
+    return final_path
 
 
 # ── recovery-job persistence & retries (Phase 2 #7) ──
@@ -2204,18 +2334,29 @@ def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Opt
         resolved = p.resolve(strict=True)
     except OSError:
         return None, None, "staged audio file does not exist"
-    if not resolved.is_file() or resolved.suffix.lower() not in _RECOVER_AUDIO_EXT:
+    if resolved.suffix.lower() not in _RECOVER_AUDIO_EXT:
         return None, None, "staged path is not a supported audio file"
 
+    # Finding B: open the file ONCE with O_NOFOLLOW and decide the regular-file
+    # and hard-link checks on the fstat'd inode, so the inode validated here is
+    # the one the caller later operates on (closes the resolve()->stat() window
+    # where a path swap could change the inode under us).
     # Reject hard links: a freshly staged recovery file has a single link. A
     # hard link under recovered/ could point at a MUSIC_ROOT file (same inode,
     # different path, so resolve()/MUSIC_ROOT checks miss it); stamping tags on
     # it would mutate the library file in place, outside the transaction engine.
     try:
-        if resolved.stat().st_nlink > 1:
-            return None, None, "refusing staged file with multiple hard links"
+        _vfd = os.open(str(resolved), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
-        return None, None, "cannot stat staged audio file"
+        return None, None, "staged path is not a supported audio file"
+    try:
+        _vst = os.fstat(_vfd)
+    finally:
+        os.close(_vfd)
+    if not _stat.S_ISREG(_vst.st_mode):
+        return None, None, "staged path is not a supported audio file"
+    if _vst.st_nlink > 1:
+        return None, None, "refusing staged file with multiple hard links"
 
     try:
         music_root = Path(MUSIC_ROOT).resolve()
@@ -2586,20 +2727,90 @@ def _stamp_staged_identity_tags(
 ) -> None:
     """Stamp verified identity metadata onto the staged audio file prior to
     singleton Beets import so ``operations._refuse_blank_identity`` sees non-blank
-    artist/title tags when ``autotag=False`` and ``quiet_fallback='skip'``."""
+    artist/title tags when ``autotag=False`` and ``quiet_fallback='skip'``.
+
+    Finding B: the tag WRITE is the one in-place mutation of a staged file, so it
+    is performed through a single ``O_NOFOLLOW`` file descriptor (refusing a
+    symlink swapped in after validation) that is additionally confined to
+    ``DOWNLOADS_ROOT/recovered``, kept out of ``MUSIC_ROOT``, and required to be a
+    regular single-hard-link file (refusing a hard link aliased to a library
+    file). mediafile reads and writes through that same descriptor, so a path
+    swap between validation and this write cannot redirect the tag write onto a
+    library file."""
+    fd = _open_recovered_file_for_inplace_write(resolved_file)
+    if fd is None:
+        return
     try:
         from mediafile import MediaFile
 
-        mf = MediaFile(resolved_file)
-        mf.artist = artist
-        mf.albumartist = artist
-        mf.title = title
-        mf.album = album
-        if mb_trackid:
-            mf.mb_trackid = mb_trackid
-        mf.save()
+        with os.fdopen(fd, "rb+", closefd=True) as fh:
+            fd = None  # the file object now owns the descriptor
+            mf = MediaFile(fh)
+            mf.artist = artist
+            mf.albumartist = artist
+            mf.title = title
+            mf.album = album
+            if mb_trackid:
+                mf.mb_trackid = mb_trackid
+            fh.seek(0)
+            mf.save()
     except Exception:
         pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
+    """Open ``path`` for in-place rewrite and return a pinned ``O_NOFOLLOW`` fd,
+    or ``None`` to refuse (Finding B). Refuses a symlink in the chain, anything
+    outside ``DOWNLOADS_ROOT/recovered``, anything inside ``MUSIC_ROOT``, and any
+    non-regular or multi-hard-link file -- so the aliasing (symlink/hard link)
+    that is the only way a staged path can reach a library file is closed, and
+    the fd the caller writes through IS the validated staged inode.
+
+    ponytail: a plain regular-file swap at the path between validation and this
+    open is accepted (it is still confined to staging and cannot be a library
+    file), not caught by inode identity; full inode pinning through the Beets
+    copy-import belongs to the import path, not this best-effort tag stamp."""
+    raw = _s(path).strip()
+    if not raw or "\x00" in raw:
+        return None
+    p = Path(raw)
+    if _has_symlink_in_chain(p):
+        return None
+    try:
+        resolved = p.resolve(strict=True)
+        recovered_root = (Path(validated_downloads_root()) / "recovered").resolve()
+        if resolved != recovered_root and recovered_root not in resolved.parents:
+            return None
+        music_root = Path(MUSIC_ROOT).resolve()
+        if resolved == music_root or music_root in resolved.parents:
+            return None
+    except OSError:
+        return None
+    try:
+        fd = os.open(str(resolved), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+    if not _stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+    return fd
 
 
 def _probe_container_format(path: str) -> str:

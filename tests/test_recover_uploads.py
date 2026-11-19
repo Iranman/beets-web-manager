@@ -2995,5 +2995,179 @@ class RecoverImportRollbackTests(unittest.TestCase):
             self.assertEqual(tx_store._read(tx_id)["status"], "Completed")
 
 
+class RecoverSecurityHardening473(unittest.TestCase):
+    """Issue #473 security findings A/B/C/F in backend/recover_service.py."""
+
+    # ── Finding A: provenance sidecar write cannot be redirected or clobber ──
+    def _recovered_dir(self, tmp):
+        d = Path(tmp) / "recovered" / "yt" / "run"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_A_prehardlinked_sidecar_is_not_clobbered(self):
+        # A pre-planted sidecar that is a HARD LINK to a "library" file must not
+        # have its (shared) inode truncated/overwritten by the provenance write.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._recovered_dir(tmp)
+            staged = d / "track.flac"
+            staged.write_bytes(b"\x00" * 16)
+            library = Path(tmp) / "library_original.flac"
+            library.write_bytes(b"PRECIOUS-LIBRARY-CONTENT")
+            sidecar = Path(str(staged) + ".recover.json")
+            try:
+                os.link(library, sidecar)  # sidecar name aliases the library file
+            except OSError:
+                self.skipTest("hard links not supported on this filesystem")
+            out = recover_service._write_provenance(
+                str(staged), {"source_url": "https://x/y", "title": "t"})
+            self.assertTrue(out, "provenance write should succeed")
+            # The library inode is untouched: its content survives unchanged.
+            self.assertEqual(library.read_bytes(), b"PRECIOUS-LIBRARY-CONTENT")
+            # The sidecar now holds the new JSON (not the library bytes).
+            self.assertIn("source_url", Path(out).read_text(encoding="utf-8"))
+
+    def test_A_symlinked_sidecar_target_is_not_followed(self):
+        # A sidecar name that is a SYMLINK to a library file must not be written
+        # through (the symlink target stays intact).
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._recovered_dir(tmp)
+            staged = d / "track.flac"
+            staged.write_bytes(b"\x00" * 16)
+            library = Path(tmp) / "library_original.flac"
+            library.write_bytes(b"PRECIOUS-LIBRARY-CONTENT")
+            sidecar = Path(str(staged) + ".recover.json")
+            try:
+                os.symlink(library, sidecar)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not supported on this filesystem")
+            recover_service._write_provenance(
+                str(staged), {"source_url": "https://x/y"})
+            self.assertEqual(library.read_bytes(), b"PRECIOUS-LIBRARY-CONTENT")
+
+    def test_A_parent_dir_symlink_is_refused(self):
+        # A symlink anywhere in the sidecar's PARENT chain is refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real_run"
+            real.mkdir()
+            link_dir = Path(tmp) / "linkdir"
+            try:
+                os.symlink(real, link_dir, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not supported on this filesystem")
+            staged = link_dir / "track.flac"  # parent component is a symlink
+            out = recover_service._write_provenance(
+                str(staged), {"source_url": "https://x/y"})
+            self.assertEqual(out, "", "a symlinked parent chain must be refused")
+
+    # ── Finding B: the tag write operates only on a validated staged inode ──
+    def test_B_tag_write_refuses_symlinked_staged_path(self):
+        # _stamp_staged_identity_tags must not write through a symlink to a
+        # library file swapped in at the staged path.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._recovered_dir(tmp)
+            library = Path(tmp) / "library.flac"
+            self._gen_flac(library)
+            before = library.read_bytes()
+            evil = d / "swap.flac"
+            try:
+                os.symlink(library, evil)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not supported on this filesystem")
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                recover_service._stamp_staged_identity_tags(
+                    str(evil), artist="Evil", title="Evil", album="Evil")
+            self.assertEqual(library.read_bytes(), before,
+                             "tag write must not follow a symlink into a library file")
+
+    def test_B_tag_write_refuses_hardlinked_staged_path(self):
+        # A hard link (nlink>1) aliased to a library file is refused before any
+        # in-place tag write.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._recovered_dir(tmp)
+            library = Path(tmp) / "library.flac"
+            self._gen_flac(library)
+            before = library.read_bytes()
+            alias = d / "alias.flac"
+            try:
+                os.link(library, alias)
+            except OSError:
+                self.skipTest("hard links not supported on this filesystem")
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                recover_service._stamp_staged_identity_tags(
+                    str(alias), artist="Evil", title="Evil", album="Evil")
+            self.assertEqual(library.read_bytes(), before,
+                             "tag write must refuse a hard link aliased to a library file")
+
+    def test_B_tag_write_succeeds_on_a_clean_staged_file(self):
+        # Regression guard: the hardened write path still stamps a legitimate
+        # single-link staged file in place.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._recovered_dir(tmp)
+            staged = d / "clean.flac"
+            self._gen_flac(staged)
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                recover_service._stamp_staged_identity_tags(
+                    str(staged), artist="A", title="T", album="Al")
+            from mediafile import MediaFile
+            mf = MediaFile(str(staged))
+            self.assertEqual(mf.artist, "A")
+            self.assertEqual(mf.title, "T")
+
+    def _gen_flac(self, path, duration=1):
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-y", "-f", "lavfi",
+             "-i", f"sine=frequency=440:duration={duration}",
+             "-c:a", "flac", str(path)],
+            check=True, capture_output=True, timeout=60)
+
+    # ── Finding C: only canonical platform/protocol values are echoed ──
+    def test_C_source_platform_is_allowlisted(self):
+        o = recover_service.sanitize_diagnostic_report({
+            "source_url": "https://www.youtube.com/watch?v=x",
+            "source_platform": "<script>alert(1)</script>evilplatform",
+        })
+        self.assertIn(o["source_platform"], {"youtube", "soundcloud", "other"})
+        self.assertNotIn("script", str(o["source_platform"]).lower())
+        self.assertNotIn("evilplatform", str(o))
+
+    def test_C_unknown_protocols_collapse_to_other(self):
+        o = recover_service.sanitize_diagnostic_report({
+            "source_url": "https://x.com/a",
+            "formats": [
+                {"protocol": "m3u8_native", "acodec": "mp3"},
+                {"protocol": "javascript:alert(1)//evilproto", "acodec": "aac"},
+            ],
+        })
+        self.assertIn("m3u8_native", o["protocols"])
+        self.assertIn("other", o["protocols"])
+        self.assertNotIn("evilproto", str(o["protocols"]))
+        self.assertNotIn("javascript", str(o["protocols"]).lower())
+
+    # ── Finding F: deeply nested / very wide reports truncate, never crash ──
+    def test_F_deeply_nested_report_does_not_raise_recursionerror(self):
+        nested: dict = {}
+        cur = nested
+        for _ in range(5000):
+            cur["child"] = {}
+            cur = cur["child"]
+        cur["source_url"] = "https://x/y"
+        # Must not raise RecursionError (previously a per-request 500 / mild DoS).
+        o = recover_service.sanitize_diagnostic_report({"deep": nested})
+        self.assertTrue(o["ok"])
+        # The stripper truncates the over-deep subtree to a sentinel.
+        self.assertIn("[TRUNCATED]", json.dumps(
+            recover_service._strip_secret_fields_recursive({"deep": nested}, set())))
+
+    def test_F_very_wide_report_is_node_capped(self):
+        wide = {f"k{i}": i for i in range(200000)}
+        redacted: set = set()
+        out = recover_service._strip_secret_fields_recursive(wide, redacted)
+        # Node cap keeps the output bounded well below the input size.
+        self.assertLessEqual(len(out), recover_service._MAX_STRIP_NODES)
+
+
 if __name__ == "__main__":
     unittest.main()
