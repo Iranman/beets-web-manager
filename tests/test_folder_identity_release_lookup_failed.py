@@ -65,6 +65,25 @@ class ReleaseLookupFailedTests(unittest.TestCase):
         self.assertNotIn(REL_REISSUE, suggestion.values())
         self.assertIn("could not be evaluated", suggestion["reason"])
 
+    def test_errored_release_carrying_a_release_group_is_still_dropped(self):
+        """Pins the load-bearing ``not release.get("error")`` guard in
+        ``rank_folder_candidates``. The "release has no tracks" preflight path
+        (``_fetch_mb_release_tracklist`` ok, zero tracks) sets ``release_group``
+        and THEN errors, so an errored row CAN carry an rgid -- the guard is not
+        redundant. Such a row must still be dropped (it is counted as a failed
+        lookup and routed to review), never ranked, or a zero-track edition
+        could pose as the folder's identity."""
+        reissue = _resolved(REL_REISSUE, RG_REISSUE, 0.60, allowed=False, verified=0, total=20,
+                            title="lady soul (deluxe)", artist="aretha franklin")
+        errored_with_rgid = {"release_id": REL_1968, "release_group_id": RG_1968,
+                             "track_count": 0, "sources": ["embedded_release_id"],
+                             "preflight": {}, "matching_decision": {},
+                             "error": "MusicBrainz release has no tracks"}
+        candidates = rank_folder_candidates([reissue, errored_with_rgid], folder_track_count=10)
+        groups = {c["release_group_id"] for c in candidates}
+        self.assertNotIn(RG_1968, groups)   # dropped despite carrying an rgid
+        self.assertEqual(groups, {RG_REISSUE})
+
     def test_both_release_groups_present_ranks_full_coverage_first(self):
         """(ii) Both RGs resolve, no fingerprints -> the 10-track/1968 RG ranks
         first (coverage weighting) and the fix is inert: the suggestion still
