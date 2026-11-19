@@ -114,6 +114,26 @@ export function hasAudioMismatchEvidence(item?: Pick<ReviewItem, 'evidence'>): b
   return preflightHasAudioMismatch(item?.evidence?.preflight);
 }
 
+/**
+ * The deterministic auto-import verdict for a pending_ai item (ARCH-005):
+ * `true` eligible, `false` explicitly refused, `undefined` when the pipeline
+ * emitted no verdict (recovery-carrier / quality-upgrade paths). The item's
+ * top-level `auto_import` (from backend decide_auto_import, reasons like
+ * `release_lookup_failed` / `no_release_group_verified`) is the authority;
+ * `evidence.preflight.matching_decision.action_allowed` is the fallback single
+ * eligibility authority. Mirror of backend
+ * import_review_decision.pending_ai_auto_import_verdict.
+ */
+export function pendingAiAutoImportVerdict(item: ReviewItem): boolean | undefined {
+  const auto = item.auto_import;
+  if (auto && typeof auto === 'object' && 'eligible' in auto) return Boolean(auto.eligible);
+  const decision = item.evidence?.preflight?.matching_decision;
+  if (decision && typeof decision === 'object' && 'action_allowed' in decision) {
+    return Boolean(decision.action_allowed);
+  }
+  return undefined;
+}
+
 export function itemMatchBucket(item: ReviewItem): MatchBucket {
   if (hasAudioMismatchEvidence(item)) return 'audio_mismatch';
   const statusKey = (item.status_key || item.status || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
@@ -141,6 +161,11 @@ export function itemMatchBucket(item: ReviewItem): MatchBucket {
   if (!item.mb_valid && !item.mb_albumid) return 'no_candidate';
   const preflight = item.evidence?.preflight;
   if (preflight && preflight.ok === false) return 'failed';
+  // ARCH-005: a "ready" bucket is driven SOLELY by the deterministic verdict,
+  // never by mb_valid/preflight.ok alone. An explicit refusal is never ready
+  // (it goes to the existing no_candidate review bucket). Absent verdict keeps
+  // the current bucket, so only an explicit negative demotes from ready.
+  if (pendingAiAutoImportVerdict(item) === false) return 'no_candidate';
   return 'ready';
 }
 
