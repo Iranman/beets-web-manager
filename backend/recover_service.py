@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat as _stat
 import threading
 import time
 import urllib.parse
@@ -190,6 +191,55 @@ _FORBIDDEN_DIAGNOSTIC_KEYS = frozenset({
     "decrypted_keys",
     "clearkeys",
 })
+
+# Finding F: depth + total-node budget for the recursive secret stripper. A
+# deeply nested or very wide report must truncate safely instead of raising
+# RecursionError (a per-request 500 / mild DoS). Both caps sit far above any
+# real diagnostic/provenance report yet well under Python's recursion limit.
+_MAX_STRIP_DEPTH = 48
+_MAX_STRIP_NODES = 50000
+
+# Finding C: only canonical values are ever echoed into the structured
+# diagnostic summary. An attacker-supplied source_platform/protocol never
+# reaches the summary as raw text.
+_CANONICAL_SOURCE_PLATFORMS = frozenset({"youtube", "soundcloud", "other"})
+_CANONICAL_STREAM_PROTOCOLS = frozenset({
+    "http", "https", "m3u8", "m3u8_native", "http_dash_segments", "dash",
+    "rtmp", "rtmpe", "rtmpt", "rtmps", "rtmp_ffmpeg", "rtsp", "mms", "f4m",
+    "ism", "ftp", "ftps", "data", "websocket", "websocket_frag",
+    "niconico_dmc", "sabr", "progressive",
+})
+
+
+def _canonical_source_platform(claimed: Any, host: str) -> str:
+    """Allowlist the echoed ``source_platform`` to a canonical set (Finding C).
+    A non-canonical attacker value is replaced by the platform derived from the
+    already-sanitized host, never echoed raw."""
+    val = _s(claimed).strip().lower()
+    if val in _CANONICAL_SOURCE_PLATFORMS:
+        return val
+    return _platform_for_host(host)
+
+
+def _canonical_protocols(protocols: Any) -> List[str]:
+    """Map stream protocols to a canonical allowlist (Finding C); any unknown or
+    attacker-supplied value collapses to ``other`` so no raw text is echoed."""
+    out = set()
+    for proto in _as_list(protocols):
+        tok = _s(proto).strip().lower()
+        if not tok:
+            continue
+        out.add(tok if tok in _CANONICAL_STREAM_PROTOCOLS else "other")
+    return sorted(out)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte of ``data`` (os.write may short-write); callers unlink
+    the temp on any failure so a partial write never becomes the final file."""
+    view = memoryview(data)
+    off = 0
+    while off < len(view):
+        off += os.write(fd, view[off:])
 
 
 def _as_list(value):
@@ -742,10 +792,31 @@ def _redaction_category(key_low: str) -> str:
     return "key_material"
 
 
-def _strip_secret_fields_recursive(obj: Any, redacted: set, *, parent_key: str = "") -> Any:
+def _strip_secret_fields_recursive(
+    obj: Any,
+    redacted: set,
+    *,
+    parent_key: str = "",
+    _depth: int = 0,
+    _budget: Optional[List[int]] = None,
+) -> Any:
+    # Finding F: bound recursion DEPTH and total NODE count, not just list
+    # breadth. A deeply nested or very wide report truncates to a sentinel
+    # instead of raising RecursionError or scanning unbounded work.
+    if _budget is None:
+        _budget = [_MAX_STRIP_NODES]
+    if _depth > _MAX_STRIP_DEPTH or _budget[0] <= 0:
+        return "[TRUNCATED]"
+    _budget[0] -= 1
     if isinstance(obj, dict):
         cleaned: Dict[str, Any] = {}
         for k, v in obj.items():
+            # Charge the budget for EVERY entry, including discarded secret-named
+            # keys, so a very wide dict of forbidden keys cannot do unbounded
+            # redaction work (Finding F / Codex review).
+            if _budget[0] <= 0:
+                break
+            _budget[0] -= 1
             key_str = _s(k).strip()
             key_low = key_str.lower()
             if (
@@ -761,10 +832,17 @@ def _strip_secret_fields_recursive(obj: Any, redacted: set, *, parent_key: str =
             ):
                 redacted.add(_redaction_category(key_low))
                 continue
-            cleaned[key_str] = _strip_secret_fields_recursive(v, redacted, parent_key=key_low)
+            cleaned[key_str] = _strip_secret_fields_recursive(
+                v, redacted, parent_key=key_low, _depth=_depth + 1, _budget=_budget)
         return cleaned
     if isinstance(obj, list):
-        return [_strip_secret_fields_recursive(item, redacted, parent_key=parent_key) for item in obj[:100]]
+        out: List[Any] = []
+        for item in obj[:100]:
+            out.append(_strip_secret_fields_recursive(
+                item, redacted, parent_key=parent_key, _depth=_depth + 1, _budget=_budget))
+            if _budget[0] <= 0:
+                break
+        return out
     if isinstance(obj, str):
         # Bound the scan length before matching (a secret marker appears at the
         # start of a value); avoids pathological backtracking on huge inputs.
@@ -804,7 +882,8 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
         _s(cleaned.get("source_url") or cleaned.get("webpage_url") or cleaned.get("url") or "").strip()
     )
     host = _host_of(source_url)
-    platform = _s(cleaned.get("source_platform") or cleaned.get("platform") or _platform_for_host(host)).lower()
+    platform = _canonical_source_platform(
+        cleaned.get("source_platform") or cleaned.get("platform"), host)
 
     # Only CANONICAL key-system ids are ever emitted (never the raw string), so
     # an attacker-controlled value in key_systems/keySystem cannot leak out.
@@ -833,13 +912,17 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
         redacted.add("key_statuses.kid")
         raw_statuses = list(raw_statuses.values())
     if isinstance(raw_statuses, list):
-        for item in raw_statuses:
+        # Only a scalar status is ever read; never _s()/str() a nested structure
+        # (a deeply nested list would blow the stack like Finding F). Bounded.
+        def _scalar_status(v: Any) -> str:
+            return _s(v).strip().lower() if isinstance(v, (str, int, float, bool)) else ""
+        for item in raw_statuses[:500]:
             if isinstance(item, dict):
                 if any(k in item for k in ("kid", "key", "k")):
                     redacted.add("key_statuses.entry_key")
-                status_val = _s(item.get("status") or "").strip().lower()
+                status_val = _scalar_status(item.get("status"))
             else:
-                status_val = _s(item).strip().lower()
+                status_val = _scalar_status(item)
             if status_val in _ALLOWED_EME_KEY_STATUSES:
                 key_statuses.add(status_val)
 
@@ -897,7 +980,7 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
         "message_types": sorted(message_types),
         "key_statuses": sorted(key_statuses),
         "manifest_types": stream_diag.get("manifest_types") or [],
-        "protocols": stream_diag.get("protocols") or [],
+        "protocols": _canonical_protocols(stream_diag.get("protocols")),
         "provenance_status": provenance_status,
         "decryption_supported": False,
         "widevine_decryptable": False,
@@ -1579,21 +1662,105 @@ def _write_provenance(staged_file: str, record: Dict[str, Any]) -> str:
         clean_rec["authorization"] = auth_rec
     if isinstance(clean_rec, dict) and clean_rec.get("source_url"):
         clean_rec["source_url"] = _sanitize_persisted_url(clean_rec.get("source_url"))
-    sidecar = str(Path(staged_file).with_suffix(Path(staged_file).suffix + ".recover.json"))
+    staged = Path(staged_file)
+    sidecar = staged.with_suffix(staged.suffix + ".recover.json")
     data = json.dumps(clean_rec, ensure_ascii=False, indent=2).encode("utf-8")
-    # O_NOFOLLOW: refuse to write THROUGH a symlink that may have been swapped in
-    # for the sidecar (TOCTOU), so provenance can never clobber a file outside
-    # staging. (No-op flag on platforms without it; the deploy target is Linux.)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(sidecar, flags, 0o600)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
+        return _atomic_write_in_recovered(staged.parent, sidecar.name, data)
     except OSError:
         return ""
-    return sidecar
+
+
+def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
+    """Write ``data`` to ``parent/name`` with the FULL parent chain checked for
+    symlinks and no path component ever followed through a symlink (Finding A).
+
+    The earlier implementation set ``O_NOFOLLOW`` on the final component only, so
+    a parent-dir symlink could redirect the write and ``O_TRUNC`` on a
+    pre-planted hard-linked sidecar could clobber a file outside staging. Here
+    every parent is symlink-checked and the file is produced by creating a fresh
+    ``O_EXCL`` temp in the staged directory and atomically ``os.replace``-ing it
+    over the target. ``os.replace`` swaps the directory entry: it never truncates
+    the old inode (a hard link aliased to a library file keeps its content) and
+    never writes through a symlink target, so the sidecar write can neither be
+    redirected outside its own staged directory nor clobber an aliased file.
+
+    Known residual (needs a LIVE racing writer): a parent dir swapped to a
+    symlink between the symlink-chain check and the directory open could place
+    the new sidecar inside the swapped directory (it still cannot clobber an
+    aliased file -- the O_EXCL temp is a new name and os.replace is a dentry
+    swap). Robustly closing it needs a per-component openat(O_NOFOLLOW) walk from
+    a trusted root; low impact (a stray provenance JSON, never audio loss)."""
+    if "/" in name or "\\" in name or "\x00" in name or name in ("", ".", ".."):
+        raise OSError("unsafe sidecar name")
+    if _has_symlink_in_chain(parent):
+        raise OSError("refusing symlinked provenance directory")
+    resolved_parent = parent.resolve(strict=True)
+    final_path = str(resolved_parent / name)
+    tmp_name = f".{name}.{uuid.uuid4().hex}.tmp"
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    # POSIX os.rename atomically replaces the destination and supports dir_fd;
+    # os.replace does not register dir_fd support on CPython, so the Linux path
+    # below uses os.rename for the atomic swap.
+    use_dirfd = (os.open in os.supports_dir_fd) and (os.rename in os.supports_dir_fd)
+    if not use_dirfd:
+        # Fallback (no dir_fd, e.g. Windows dev): still create an O_EXCL temp and
+        # atomically replace, so a symlinked/hard-linked target is not followed
+        # or clobbered. O_NOFOLLOW is a no-op here, but os.replace never follows
+        # the final-component symlink.
+        tmp_path = str(resolved_parent / tmp_name)
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+        wrote = False
+        try:
+            _write_all(fd, data)
+            wrote = True
+        finally:
+            os.close(fd)
+            if not wrote:
+                # A partial/failed write must never become the final file.
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        try:
+            os.replace(tmp_path, final_path)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        return final_path
+
+    dir_fd = os.open(str(resolved_parent),
+                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+    try:
+        tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+                      0o600, dir_fd=dir_fd)
+        wrote = False
+        try:
+            _write_all(tfd, data)
+            os.fsync(tfd)
+            wrote = True
+        finally:
+            os.close(tfd)
+            if not wrote:
+                try:
+                    os.unlink(tmp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+        try:
+            os.rename(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
+    return final_path
 
 
 # ── recovery-job persistence & retries (Phase 2 #7) ──
@@ -2204,19 +2371,12 @@ def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Opt
         resolved = p.resolve(strict=True)
     except OSError:
         return None, None, "staged audio file does not exist"
-    if not resolved.is_file() or resolved.suffix.lower() not in _RECOVER_AUDIO_EXT:
+    if resolved.suffix.lower() not in _RECOVER_AUDIO_EXT:
         return None, None, "staged path is not a supported audio file"
 
-    # Reject hard links: a freshly staged recovery file has a single link. A
-    # hard link under recovered/ could point at a MUSIC_ROOT file (same inode,
-    # different path, so resolve()/MUSIC_ROOT checks miss it); stamping tags on
-    # it would mutate the library file in place, outside the transaction engine.
-    try:
-        if resolved.stat().st_nlink > 1:
-            return None, None, "refusing staged file with multiple hard links"
-    except OSError:
-        return None, None, "cannot stat staged audio file"
-
+    # Confine the user-provided path to DOWNLOADS_ROOT/recovered (and out of
+    # MUSIC_ROOT) BEFORE opening it, so a path derived from request input never
+    # reaches os.open unconfined (py/path-injection).
     try:
         music_root = Path(MUSIC_ROOT).resolve()
         if resolved == music_root or music_root in resolved.parents:
@@ -2231,6 +2391,27 @@ def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Opt
             return None, None, "staged path must reside under DOWNLOADS_ROOT/recovered"
     except Exception as exc:
         return None, None, f"staging root validation failed: {exc}"
+
+    # Require a regular file by metadata only (stat on the symlink-free resolved
+    # path), never by opening the path here: a stat never blocks, so a FIFO
+    # planted with an audio
+    # extension cannot stall the worker (``is_file()`` is False for it), and no
+    # request-derived path reaches ``os.open`` at validation time. The inode the
+    # one in-place mutation operates on is pinned at the write sink itself
+    # (``_open_recovered_file_for_inplace_write``, O_NOFOLLOW), which is where a
+    # post-validation swap must be caught.
+    # Reject hard links: a freshly staged recovery file has a single link. A
+    # hard link under recovered/ could point at a MUSIC_ROOT file (same inode,
+    # different path, so resolve()/MUSIC_ROOT checks miss it); stamping tags on
+    # it would mutate the library file in place, outside the transaction engine.
+    try:
+        _vst = resolved.stat()
+    except OSError:
+        return None, None, "cannot stat staged audio file"
+    if not _stat.S_ISREG(_vst.st_mode):
+        return None, None, "staged path is not a supported audio file"
+    if _vst.st_nlink > 1:
+        return None, None, "refusing staged file with multiple hard links"
 
     sidecar_path = resolved.with_suffix(resolved.suffix + ".recover.json")
     if _has_symlink_in_chain(sidecar_path) or not sidecar_path.is_file():
@@ -2586,20 +2767,107 @@ def _stamp_staged_identity_tags(
 ) -> None:
     """Stamp verified identity metadata onto the staged audio file prior to
     singleton Beets import so ``operations._refuse_blank_identity`` sees non-blank
-    artist/title tags when ``autotag=False`` and ``quiet_fallback='skip'``."""
+    artist/title tags when ``autotag=False`` and ``quiet_fallback='skip'``.
+
+    Finding B: the tag WRITE is the one in-place mutation of a staged file, so it
+    is performed through a single ``O_NOFOLLOW`` file descriptor (refusing a
+    symlink swapped in after validation) that is additionally confined to
+    ``DOWNLOADS_ROOT/recovered``, kept out of ``MUSIC_ROOT``, and required to be a
+    regular single-hard-link file (refusing a hard link aliased to a library
+    file). mediafile reads and writes through that same descriptor, so a path
+    swap between validation and this write cannot redirect the tag write onto a
+    library file."""
+    fd = _open_recovered_file_for_inplace_write(resolved_file)
+    if fd is None:
+        return
     try:
         from mediafile import MediaFile
 
-        mf = MediaFile(resolved_file)
-        mf.artist = artist
-        mf.albumartist = artist
-        mf.title = title
-        mf.album = album
-        if mb_trackid:
-            mf.mb_trackid = mb_trackid
-        mf.save()
+        with os.fdopen(fd, "rb+", closefd=True) as fh:
+            fd = None  # the file object now owns the descriptor
+            mf = MediaFile(fh)
+            mf.artist = artist
+            mf.albumartist = artist
+            mf.title = title
+            mf.album = album
+            if mb_trackid:
+                mf.mb_trackid = mb_trackid
+            fh.seek(0)
+            mf.save()
     except Exception:
         pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
+    """Open ``path`` for in-place rewrite and return a pinned ``O_NOFOLLOW`` fd,
+    or ``None`` to refuse (Finding B). Refuses a symlink in the chain, anything
+    outside ``DOWNLOADS_ROOT/recovered``, anything inside ``MUSIC_ROOT``, and any
+    non-regular or multi-hard-link file -- so the aliasing (symlink/hard link)
+    that is the only way a staged path can reach a library file is closed, and
+    the fd the caller writes through IS the validated staged inode.
+
+    O_NONBLOCK keeps a planted FIFO from blocking the open.
+
+    Known residual (needs a LIVE racing writer in the staging tree, not static
+    planting): os.open(str(resolved)) re-traverses the path and follows
+    parent-directory symlinks, so a parent component swapped to a symlink in the
+    window between resolve() and this open could land the fd outside staging
+    even with O_NOFOLLOW on the final component. Static planting is fully closed
+    (_has_symlink_in_chain + resolve-confinement + nlink==1); robustly closing
+    the race needs a per-component openat(O_NOFOLLOW) walk or openat2
+    RESOLVE_NO_SYMLINKS. Same class as the scoped-out run_import inode-pinning
+    (#473 residual). This is a best-effort metadata stamp, not a destructive op."""
+    raw = _s(path).strip()
+    if not raw or "\x00" in raw:
+        return None
+    p = Path(raw)
+    if _has_symlink_in_chain(p):
+        return None
+    try:
+        resolved = p.resolve(strict=True)
+        recovered_root = (Path(validated_downloads_root()) / "recovered").resolve()
+        if resolved != recovered_root and recovered_root not in resolved.parents:
+            return None
+        music_root = Path(MUSIC_ROOT).resolve()
+        if resolved == music_root or music_root in resolved.parents:
+            return None
+    except OSError:
+        return None
+    try:
+        fd = os.open(str(resolved),
+                     os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+
+    def _refuse(_fd: int) -> None:
+        try:
+            os.close(_fd)
+        except OSError:
+            pass
+
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        _refuse(fd)
+        return None
+    if not _stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        _refuse(fd)
+        return None
+    # Clear O_NONBLOCK now that the inode is confirmed regular, so mediafile's
+    # ordinary blocking reads/writes behave normally.
+    try:
+        import fcntl
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+    except Exception:
+        pass
+    return fd
 
 
 def _probe_container_format(path: str) -> str:
@@ -2919,6 +3187,14 @@ def _recover_import_one(
             source="recover_upload_singleton",
             summary=f"{artist} - {title}",
             metadata={
+                # #473: tag the recovery family at creation, not only after a
+                # successful import. A crash mid-import leaves this record
+                # Running; the restart sweep (transaction_recovery.sweep) keys on
+                # mutation_family to resolve such a record to Recovery Required
+                # (never replayed). Without it the record stayed Running forever.
+                # Literal mirrors transaction_engine.RECOVER_IMPORT_FAMILY (a
+                # persisted wire value, as other family ids are used literally).
+                "mutation_family": "recover_import_v1",
                 "workflow": "recover_upload_singleton",
                 "staged_file": resolved_file,
                 "import_file": import_file,

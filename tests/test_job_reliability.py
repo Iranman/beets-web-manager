@@ -270,6 +270,20 @@ class JobRouteDuplicateStartTests(_RouteEnv):
     def setUp(self):
         super().setUp()
         import routes_cleanup
+        from backend.app_runtime import jobs, transactions
+        # #533 item 11: the shared jobs/transactions stores freeze their
+        # persistence dir at app import. Depending on which module imported app
+        # first (and whether its temp data dir has since been cleaned up) that
+        # dir can be gone or unwritable, which non-deterministically fails the
+        # real mutating job route exercised below. _Env.setUp already points
+        # WEB_MANAGER_DATA_DIR at this test's writable self.data; pin both
+        # shared stores' roots to match it so the end-to-end route is
+        # deterministic regardless of import order.
+        for store, name in ((jobs, "jobs"), (transactions, "transactions")):
+            target = self.data / name
+            target.mkdir(parents=True, exist_ok=True)
+            self.addCleanup(setattr, store, "root", store.root)
+            store.root = target
         self.go = threading.Event()
         self.calls = []
 
@@ -280,7 +294,6 @@ class JobRouteDuplicateStartTests(_RouteEnv):
         p = mock.patch.object(routes_cleanup, "_clean_remove_orphaned_items", fake)
         p.start()
         self.addCleanup(p.stop)
-        from backend.app_runtime import jobs
         self.addCleanup(join_jobs, jobs)  # after go.set: joins the released jobs
         self.addCleanup(self.go.set)
 
