@@ -324,13 +324,13 @@ SCENARIOS = {
     "ai_prompt_shared_candidate_once": ai_case(ai(), sources=[src("New/a.flac", tags={"artist": "Artist", "title": "Song One"}),
                                                               src("New/b.flac", tags={"artist": "Artist", "title": "Song One"})]),
     # ── AI review: replies that fail, and carrying on after each ──
-    "ai_reply_refusal_skips_batch_bookkeeping": ai_case("refusal:" + "n" * 150, ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
+    "ai_reply_refusal_still_logs_batch_done": ai_case("refusal:" + "n" * 150, ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
     "ai_reply_network_error_continues": ai_case("raise:down", ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
     "ai_reply_bad_json_continues": ai_case("content:not json", ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
     "ai_reply_null_matches_is_a_batch_error": ai_case({"matches": None}, ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
     "ai_reply_no_choices": ai_case("empty"),
     "ai_reply_not_an_object": ai_case("content:[1]"),
-    "ai_reply_bad_match_loses_rest_of_batch": ai_case(ai(m(), {"file_idx": "x"}, m(2)), sources=[SRC1, src("New/two.flac", tags={"artist": "Artist", "title": "Song One"})]),
+    "ai_reply_bad_match_skips_only_itself": ai_case(ai(m(), {"file_idx": "x"}, m(2)), sources=[SRC1, src("New/two.flac", tags={"artist": "Artist", "title": "Song One"})]),
     "ai_reply_stat_of_library_error_continues": ai_case(ai(m(1, "x")), ai(m(1)), sources=ai_files(20) + [src("Bulk/z.flac", tags={"artist": "Artist", "title": "Song One"})]),
     # ── AI review: every per-match rejection, with the next match still kept ──
     "ai_match_file_idx_zero": ai_case(ai(m(0), m(1))),

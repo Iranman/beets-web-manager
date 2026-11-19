@@ -464,7 +464,8 @@ def _clean_all_root_folder_repair(run) -> str:
         # #298 N5: one stuck folder no longer stops Clean All. The
         # failure is recorded, the layout-dependent folder merges
         # wait for the next run, every independent task still runs,
-        # and the job ends failed.
+        # and the job ends partial (_clean_all_finish routes a failed
+        # task through finish_partial, status "partial"), not failed.
         if _s(ex).strip().lower() == "cancelled" or (cancel_event and cancel_event.is_set()):
             raise
         root_repair_error = _s(ex) or "root folder repair failed"
@@ -618,9 +619,13 @@ def _clean_all_track_scan(run) -> None:
 
 
 def _clean_all_folder_scan(run) -> list:
-    """7. Placeholder scan stays diagnostic after RGID repair; no blind rename.
-    It has no resume skip: every run repeats it."""
+    """7. Placeholder scan stays diagnostic after RGID repair; no blind rename."""
     set_task = run.set_task
+    if run.skip_completed_task("folder_scan"):
+        # #533 item 8: already scanned on a prior run; don't repeat it. Only the
+        # row count feeds folder_safe_renames, so return a count-accurate stub.
+        saved = run.results.get("folder_scan") if isinstance(run.results.get("folder_scan"), dict) else {}
+        return [None] * int(saved.get("skipped_unsafe") or saved.get("total") or 0)
     set_task("folder_scan", "running", "Scanning remaining folder placeholder names")
     scan_meta: Dict[str, Any] = {}
     rows = _scan_folder_name_placeholders(
@@ -646,6 +651,8 @@ def _clean_all_folder_scan(run) -> list:
 
 
 def _clean_all_folder_safe_renames(run, rows) -> None:
+    if run.skip_completed_task("folder_safe_renames"):  # #533 item 8: don't repeat on resume
+        return
     run.set_task("folder_safe_renames", "skipped", "Placeholder-only renames disabled; Release Group merge handles resolvable IDs", {
         "renamed": 0,
         "skipped_unsafe": len(rows),

@@ -348,6 +348,12 @@ def _path_key(path_value: Any) -> str:
 
 def _dedup_record_listing_failure(state: Dict[str, Any], exc: Exception, current_task: str, update_state) -> None:
     """Finish a scan or AI review whose source files could not be listed."""
+    # #533 item 7a: a cancel surfaces here as RuntimeError("cancelled"); it is
+    # not a listing error. Re-raise so it flows through the normal cancel path
+    # (state is already marked "cancelled") instead of logging it as an ERROR
+    # and recording a failed scan.
+    if str(exc).strip().lower() == "cancelled":
+        raise exc
     state["log"].append(f"ERROR listing files: {exc}")
     state["status"] = "done"
     state["final_summary"] = {"scanned_files": 0, "duplicate_tracks_found": 0, "error": str(exc)}

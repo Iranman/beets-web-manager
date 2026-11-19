@@ -254,6 +254,50 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         stamp_jobs = [job for job in self.store.started if job.metadata.get("type") == "stamp-mbid-folders"]
         self.assertEqual(len(stamp_jobs), 0)
 
+    def test_resume_skips_already_completed_folder_scan_and_safe_renames(self):
+        # #533 item 8: folder_scan and folder_safe_renames gained a resume
+        # skip. A checkpoint that already completed them must not re-run the
+        # placeholder scan (nor re-mark the renames) on resume.
+        results = _task_results()
+        results["artist_folder_merge"] = {"ok": True, "final_summary": {}}
+        results["release_group_merge"] = {"ok": True, "skipped": False, "final_summary": {}}
+        results["duplicates"] = {"ok": True, "skipped": False, "final_summary": {}}
+        results["folder_scan"] = {"total": 0, "safe_rename": 0, "skipped_unsafe": 0,
+                                  "final_summary": {"total": 0}}
+        results["folder_safe_renames"] = {"renamed": 0, "skipped_unsafe": 0,
+                                          "final_summary": {"renamed": 0, "skipped_unsafe": 0}}
+        completed = set(results)
+        tasks = []
+        for task in app_module._maintenance_initial_task_state():
+            item = dict(task)
+            if item["id"] == "folder_safe_renames":
+                item["status"] = "skipped"; item["detail"] = "restored from checkpoint"
+            elif item["id"] in completed:
+                item["status"] = "complete"; item["detail"] = "restored from checkpoint"
+            tasks.append(item)
+        report = dict(results)
+        report["last_run"] = {
+            "status": "partial", "workflow": "clean-all",
+            "started_at": time.time() - 60, "updated_at": time.time() - 30,
+            "completed_task_ids": sorted(completed),
+            "next_task": "artwork", "next_task_label": "Artwork Fetch",
+            "tasks": tasks, "results": results, "result_task_ids": sorted(results),
+        }
+        self.checkpoint.write_text(json.dumps(report), encoding="utf-8")
+        # Earlier phases are complete too; none should re-run. If the skip were
+        # missing, _scan_folder_name_placeholders would re-append "folder_scan".
+        self._patch(patch_app_family(app_module, "_stamp_artist_folder_scan", side_effect=self._artist_scan_success))
+
+        parent, data = self._post_clean_all()
+
+        self.assertEqual(parent.returncode, 0, parent.log)
+        self.assertTrue(data.get("resumed"), data)
+        self.assertNotIn("folder_scan", self.call_order)  # placeholder scan not re-run
+        last = _last_run(self.checkpoint)
+        by_id = {t["id"]: t for t in last["tasks"]}
+        self.assertIn(by_id["folder_scan"]["status"], ("complete", "skipped"))
+        self.assertIn(by_id["folder_safe_renames"]["status"], ("complete", "skipped"))
+
     def test_fresh_clean_all_still_runs_all_phases(self):
         self._patch(patch_app_family(app_module, "_library_health_payload", return_value=_task_results()["library_health"]))
         self._patch(patch_app_family(app_module, "_maintenance_remove_missing_file_rows", return_value=_task_results()["missing_files"]))

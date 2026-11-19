@@ -1,9 +1,11 @@
-"""Regression tests for #533 items 1-6 (dedup evidence honesty, symlink scope,
-provider-exception redaction, and the ai-review null scan_jid 500).
+"""Regression tests for #533 items 1-7 (dedup evidence honesty, symlink scope,
+provider-exception redaction, the ai-review null scan_jid 500, and the dedup
+scan/AI-review logging edge cases).
 
 These lock the honest-label and safety fixes in place; the broader end-to-end
 behavior is also covered by tests/test_dedup_characterization.py's golden.
 """
+import json
 import os
 import tempfile
 import unittest
@@ -167,6 +169,71 @@ class Item3AiLibIdConstrained(unittest.TestCase):
         # AI said "high" but no fingerprint confirmed it -> capped to "medium".
         self.assertEqual(new_dupes[0]["confidence"], "medium")
         self.assertFalse(new_dupes[0]["fingerprint_verified"])
+
+
+class Item7DedupLoggingEdges(unittest.TestCase):
+    """Scan/AI-review logging edge cases: a cancel is not an ERROR, a refusal
+    still finishes the batch, and one malformed match drops only itself."""
+
+    # -- 7a: a cancel during listing is not a listing error --------------------
+    def test_cancel_during_listing_reraises_not_logged_as_error(self):
+        state = {"log": []}
+        # A cancel surfaces here as RuntimeError("cancelled"); it must re-raise
+        # (flow through the normal cancel path), not record a failed listing.
+        with self.assertRaises(RuntimeError):
+            dedup_service._dedup_record_listing_failure(
+                state, RuntimeError("cancelled"), "Listing source audio files", None)
+        self.assertEqual(state["log"], [])
+        self.assertNotIn("status", state)
+
+    def test_real_listing_error_still_recorded(self):
+        state = {"log": []}
+        dedup_service._dedup_record_listing_failure(
+            state, OSError("disk gone"), "Listing source audio files", None)
+        self.assertTrue(any("ERROR listing files" in line for line in state["log"]))
+        self.assertEqual(state["status"], "done")
+
+    def _batch_mocks(self, provider_return):
+        return (
+            mock.patch.object(routes_cleanup, "_ai_review_file_meta", return_value=[]),
+            mock.patch.object(routes_cleanup, "_ai_review_relevant_tracks", return_value=[]),
+            mock.patch.object(routes_cleanup, "_ai_model_and_endpoint", return_value=("m", "http://e")),
+            mock.patch.object(routes_cleanup, "_ai_review_request_body", return_value=b"{}"),
+            mock.patch.object(routes_cleanup, "_ai_review_call_provider", return_value=provider_return),
+        )
+
+    # -- 7b: an AI refusal still emits the batch's "done" log ------------------
+    def test_refusal_still_emits_done_log(self):
+        state, applied = {"log": [], "found": 0}, []
+        mocks = self._batch_mocks({"refusal": "I won't do that"})
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
+             mock.patch.object(routes_cleanup, "_ai_review_apply_match",
+                               side_effect=lambda *a, **k: applied.append(1)):
+            routes_cleanup._ai_review_batch(0, [Path("/tmp/a.flac")], [], "key", [], None, state, None)
+        self.assertEqual(applied, [])  # a refusal processes no matches
+        self.assertTrue(any("refusal" in line.lower() for line in state["log"]))
+        self.assertTrue(any("done" in line for line in state["log"]), state["log"])
+
+    # -- 7c: one malformed match skips only itself ----------------------------
+    def test_one_malformed_match_skips_only_itself(self):
+        applied = []
+
+        def fake_apply(m, *a, **k):
+            if m.get("bad"):
+                raise ValueError("malformed match")
+            applied.append(m)
+
+        content = json.dumps({"matches": [{"file_idx": 1}, {"bad": True}, {"file_idx": 2}]})
+        state = {"log": [], "found": 0}
+        mocks = self._batch_mocks({"content": content})
+        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], \
+             mock.patch.object(routes_cleanup, "_ai_review_apply_match", side_effect=fake_apply):
+            routes_cleanup._ai_review_batch(0, [Path("/tmp/a.flac")], [], "key", [], None, state, None)
+        # Both good matches applied despite the malformed one between them.
+        self.assertEqual(applied, [{"file_idx": 1}, {"file_idx": 2}])
+        joined = "\n".join(state["log"])
+        self.assertIn("skipped a malformed match", joined)
+        self.assertTrue(any("done" in line for line in state["log"]), state["log"])
 
 
 if __name__ == "__main__":

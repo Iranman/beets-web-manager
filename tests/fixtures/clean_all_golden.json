@@ -11818,14 +11818,14 @@
  "raise_then_retry_final_verification": {
   "outcome": {
    "error": null,
-   "events": 211,
+   "events": 200,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "fe1264f002fe7288c10110b0dc2db534cf207ee0cf82ef5cccf67b70dc8e0d13"
+  "sha256": "64b7965798c221014b9035718fa61cb56a3c2aee11356e8e39138ba336958b56"
  },
  "raise_then_retry_folder_scan": {
   "outcome": {
@@ -11866,26 +11866,26 @@
  "raise_then_retry_playlist_refs": {
   "outcome": {
    "error": null,
-   "events": 220,
+   "events": 209,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "6e389e47ce7c46a5f907301afd1713fba64473649d47df75bcb9d30e2ee4c8c8"
+  "sha256": "2b452b48a483bc38e1e236446659a581d788794e092a4ae18fabe77497a677c7"
  },
  "raise_then_retry_prune": {
   "outcome": {
    "error": null,
-   "events": 211,
+   "events": 200,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "66ea160dfcd2f7778da624cdb1518c77eedf47a8774836a595bba25759fdf2b1"
+  "sha256": "1afd189ea10cfd9a4b93191a649c7218b88ca9a49756a62eb499971454a1fe1f"
  },
  "raise_then_retry_release_group_merge": {
   "outcome": {
@@ -11902,62 +11902,62 @@
  "raise_then_retry_root_folder_repair": {
   "outcome": {
    "error": null,
-   "events": 233,
+   "events": 222,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "3b9168e5e6f7f005bffcbca039e403fb02091869c6c5c90b59287e5b747d85cf"
+  "sha256": "c143fce00197b1385f29c60b4f192075b840c3dda4a5b3cffea5701c70bd4a64"
  },
  "raise_then_retry_start_art": {
   "outcome": {
    "error": null,
-   "events": 207,
+   "events": 196,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "6f20bd4b35569fe9608a13c57b539450b6b732865c89d49307043533c14280e6"
+  "sha256": "ce02196e848a07c2c0762a9cdc29be94e2b1136aa8b01e8986e7be55de79a7c0"
  },
  "raise_then_retry_start_genres": {
   "outcome": {
    "error": null,
-   "events": 209,
+   "events": 198,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "4146d5f50a765f9751265fc13f1713a7b54b6f61003405020927a9cfd1fa20de"
+  "sha256": "40838e437cb8d41f6023555943edff33309db0b8f57395d2bbbd7a5b0f369882"
  },
  "raise_then_retry_wait_artwork": {
   "outcome": {
    "error": null,
-   "events": 208,
+   "events": 197,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "d514a89c33f62fd28d4b848e6d1773601b7bbf483c829e053788b899b477bc1f"
+  "sha256": "86bd6c6e76dc6cd4506f71c0d65eeb4e33112fa31e69953b612d1a875270b3f5"
  },
  "raise_then_retry_wait_genres": {
   "outcome": {
    "error": null,
-   "events": 210,
+   "events": 199,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "f1032b41d615d1d7a24652fa6faa2ca965f521e6cff652752513727a93f18b74"
+  "sha256": "32c3cc05dc162dce1b21c6f3bd3dd431718db016296fe9fc0d2cbe9a3c80722c"
  },
  "raise_wait_artwork": {
   "outcome": {
@@ -16021,50 +16021,50 @@
  "resume_prefix_10": {
   "outcome": {
    "error": null,
-   "events": 85,
+   "events": 74,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=complete,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "bfe114b2500ef9ff82ebd405f31c4d8dfc97964bcc933acfd958d2f7734dd6c4"
+  "sha256": "51119970115ce5865bbb817dad3109363f8138d98d88cc79092d3633c77ff2b6"
  },
  "resume_prefix_11": {
   "outcome": {
    "error": null,
-   "events": 76,
+   "events": 65,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=complete,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "dc3f84fa21515b1de6871af8aed48371c0e1e24e23c005001bbabcd8591a518e"
+  "sha256": "598fecc4abdee6a8ce09e996661ce517a018408d02779c5c0b36b4abc44f14cf"
  },
  "resume_prefix_12": {
   "outcome": {
    "error": null,
-   "events": 68,
+   "events": 57,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=complete,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "e45be5543d2c7cc2e317daf0631182bcd58351100ce63658c30487a41ad7d383"
+  "sha256": "f72fd6aeaf07d52a26a18479a14eb0668d9cd99cb43ad11624094ec0c7b32f6d"
  },
  "resume_prefix_13": {
   "outcome": {
    "error": null,
-   "events": 68,
+   "events": 57,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=complete,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "83470edfaa222067c4c735e7bbd2d3bd96151631fb907828bea927dc4f315c26"
+  "sha256": "25015c8c596f987f4665a827bb4b2a2d4e05b106fc92fe76d5a8f84dfd0c9582"
  },
  "resume_prefix_14": {
   "outcome": {
@@ -16153,26 +16153,26 @@
  "resume_prefix_8": {
   "outcome": {
    "error": null,
-   "events": 94,
+   "events": 85,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
    "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "d5eceeb27b2c9584a83e1d750ed3c73002fbd16f7876f718d2eb4d1b6e5f0544"
+  "sha256": "050d8fbbf0860720c5a0371190d0b1b62a52854f75be4aec1f3934ebe8dc867c"
  },
  "resume_prefix_9": {
   "outcome": {
    "error": null,
-   "events": 94,
+   "events": 83,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=complete,missing_files=complete,root_folder_repair=complete,artist_alias=complete,artist_folder_merge=complete,release_group_merge=complete,duplicates=complete,folder_scan=complete,folder_safe_renames=complete,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "083a39cff12d7a47f995237bbd1b6f3477262fa90d335c8011c59db9a0331f95"
+  "sha256": "6ea206ea99d5f6c709917117416b14c97325cc7c7046737b9388f47d8894e1b4"
  },
  "resume_prefix_skipped_0": {
   "outcome": {
@@ -16201,50 +16201,50 @@
  "resume_prefix_skipped_10": {
   "outcome": {
    "error": null,
-   "events": 85,
+   "events": 74,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=complete,folder_safe_renames=skipped,artwork=skipped,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=skipped,folder_safe_renames=skipped,artwork=skipped,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "99d801e77b54f1810a0bd3c561429ed0547e0933ea67209fb70fccf4bc5de830"
+  "sha256": "64abaee6eda36c3aa3a366fdf85d0522465f4e91eaf03ac35bef8b164a06cd2c"
  },
  "resume_prefix_skipped_11": {
   "outcome": {
    "error": null,
-   "events": 76,
+   "events": 65,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=complete,folder_safe_renames=skipped,artwork=skipped,genres=skipped,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=skipped,folder_safe_renames=skipped,artwork=skipped,genres=skipped,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "e19144d99f25e40d317baf8c8eea712296c6d4c87d50501197f7649a6fa9e649"
+  "sha256": "8ac4a72ac1f49ad9e5e125e51f88d3082b9190c851aea6ea4452b8ba7a63a9a2"
  },
  "resume_prefix_skipped_12": {
   "outcome": {
    "error": null,
-   "events": 68,
+   "events": 57,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=complete,folder_safe_renames=skipped,artwork=skipped,genres=skipped,final_verification=skipped,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=skipped,folder_safe_renames=skipped,artwork=skipped,genres=skipped,final_verification=skipped,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "613d3f3c508751fcc35e805e809777d9452e3ff60453a195d856a3ff24f1dd19"
+  "sha256": "57b226639c9167cf124d6fead4a91ec74531ad1fe30d3965746b2f50db905b62"
  },
  "resume_prefix_skipped_13": {
   "outcome": {
    "error": null,
-   "events": 68,
+   "events": 57,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=complete,folder_safe_renames=skipped,artwork=skipped,genres=skipped,final_verification=skipped,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=skipped,folder_safe_renames=skipped,artwork=skipped,genres=skipped,final_verification=skipped,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "f19cfd554c4db4a780a198dcd377cca9058368a948dfd1517242d9d2b6c0f276"
+  "sha256": "0de9bdd06615a663916b8605f2f8adefe68134c5976b54d5bd06fbff67d8268c"
  },
  "resume_prefix_skipped_14": {
   "outcome": {
@@ -16333,26 +16333,26 @@
  "resume_prefix_skipped_8": {
   "outcome": {
    "error": null,
-   "events": 94,
+   "events": 85,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=skipped,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "82506f131d7ed785fd962f3d98bc82c70ce75bb0c552595015f53ec19fdf13da"
+  "sha256": "9840f11ff80e0c5189c08b267c62f7ff7c61aa69341ad2e422f85bdd193c34a6"
  },
  "resume_prefix_skipped_9": {
   "outcome": {
    "error": null,
-   "events": 94,
+   "events": 83,
    "http": 200,
    "last_run_status": "complete",
    "ok": true,
    "status": null,
-   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=complete,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
+   "tasks": "library_health=skipped,missing_files=skipped,root_folder_repair=skipped,artist_alias=skipped,artist_folder_merge=skipped,release_group_merge=skipped,duplicates=skipped,folder_scan=skipped,folder_safe_renames=skipped,artwork=complete,genres=complete,final_verification=complete,stale_jobs=complete,playlist_refs=complete"
   },
-  "sha256": "cbc10fc301be0b5b9fb5b500fe3cd6c6ee2d15c4d9dae6701f583c0de7e53899"
+  "sha256": "472fd454448e5fa49b6a5f89464400e9d797caa8d15d844070c700805ea7ad8b"
  },
  "resume_saved_op": {
   "outcome": {

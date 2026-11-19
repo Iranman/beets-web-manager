@@ -34,6 +34,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 import unittest.mock as mock
 from pathlib import Path
@@ -370,18 +371,31 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
         # A successful inspection response must be accepted and its
         # canonical_path used -- proving the route reaches past the
         # (now engine-side) validation gate for a legitimate source.
+        # #533 item 9: the recovery-advance schedule (or any jobs.every tick)
+        # shares this jobs.start_python; a tick firing on its own thread during
+        # the request would inflate a plain assert_called_once(). Count only the
+        # call made on this request's own thread so the assertion is
+        # deterministic regardless of a leaked schedule thread.
+        this_thread = threading.get_ident()
+        calls_here = []
+
+        def _record_start(*args, **kwargs):
+            if threading.get_ident() == this_thread:
+                calls_here.append(1)
+            return mock.DEFAULT
+
         with mock.patch.object(APP.composite_workflows, "inspect_import_source", return_value={
                     "ok": True, "path": "/data/torrents/music/real_album",
                     "audio_file_count": 3, "audio_files": [],
                 }), \
              patch_app_family(APP, "_library_album_ids_for_folder", return_value=[]), \
-             mock.patch("backend.import_service.jobs.start_python") as start_job:
+             mock.patch("backend.import_service.jobs.start_python", side_effect=_record_start):
             # The job is not run: it would queue a real Review item for this
             # unresolvable folder in the shared pending-review file.
             res = self.client.post("/api/albums/reimport-disk", json={
                 "aldir": "/data/torrents/music/real_album", "mb_albumid": "11111111-1111-1111-1111-111111111111",
             })
-        start_job.assert_called_once()
+        self.assertEqual(len(calls_here), 1)
         # Fails further downstream (no real job/DB/engine wired up in this
         # unit test) -- the point is it is NOT rejected at the validation
         # gate (400) the way the outside-root/symlink cases above are.

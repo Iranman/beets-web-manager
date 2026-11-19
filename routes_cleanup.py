@@ -430,12 +430,23 @@ def _ai_review_batch(batch_start: int, unmatched: List[Path], lib_index: List[Di
     try:
         msg = _ai_review_call_provider(_ai_endpoint, req_body, api_key)
         if msg.get("refusal"):
+            # #533 item 7b: a refusal ends this batch cleanly but still falls
+            # through to the "done" log below, so the batch is not left looking
+            # unfinished in the job log.
             state["log"].append(f"  AI refusal: {msg['refusal'][:100]}")
-            return
-        parsed = json.loads(msg["content"])
-        matches = parsed.get("matches", []) if isinstance(parsed, dict) else []
+            matches = []
+        else:
+            parsed = json.loads(msg["content"])
+            matches = parsed.get("matches", []) if isinstance(parsed, dict) else []
         for m in matches:
-            _ai_review_apply_match(m, file_meta, lib_index, shown_ids, new_dupes, state, update_state)
+            # #533 item 7c: a single malformed match skips only itself; the rest
+            # of the batch's matches are still applied.
+            try:
+                _ai_review_apply_match(m, file_meta, lib_index, shown_ids, new_dupes, state, update_state)
+            except Exception as exc:
+                state["log"].append(
+                    f"  ⚠ Batch {batch_start//BATCH + 1} skipped a malformed match: "
+                    f"{provider_boundary.classify_exception(exc)}")
     except Exception as exc:
         # #533 item 5: route provider/parse exceptions through provider_boundary
         # so a non-ProviderError can't leak provider detail or credentials into
