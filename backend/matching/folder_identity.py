@@ -210,11 +210,14 @@ def rank_folder_candidates(releases: Iterable[Dict[str, Any]], folder_track_coun
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for release in releases:
         rgid = _s(release.get("release_group_id"))
-        # A release whose MusicBrainz lookup errored carries NO Release Group
-        # (``_folder_release_preflight`` returns before it reads one), so there
-        # is no canonical album identity to offer as a candidate and inventing
-        # one would be dishonest. The dropped release is NOT lost: it is counted
-        # as a failed lookup by ``import_identity`` and reaches the reviewer as
+        # Drop any release whose lookup errored. Both clauses are load-bearing:
+        # a plain failed lookup carries no Release Group, but the "release has no
+        # tracks" path in ``_folder_release_preflight`` reads a Release Group and
+        # THEN errors, so an errored row MAY still carry a (stale, unusable) rgid
+        # -- ``not release.get("error")`` is what keeps it out. Either way a
+        # failed lookup never contributes a candidate, and inventing one for it
+        # would be dishonest. The drop is NOT silent data loss: ``import_identity``
+        # counts it as a failed lookup and it reaches the reviewer as
         # ``release_lookup_failed`` (``decide_auto_import`` refuses, the warning,
         # and the "could not be evaluated" review suggestion). Defect (a): never
         # let the surviving sibling of such a drop pose as the answer.

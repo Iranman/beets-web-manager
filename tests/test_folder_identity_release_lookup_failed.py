@@ -43,8 +43,9 @@ class ReleaseLookupFailedTests(unittest.TestCase):
     def test_failed_lookup_does_not_suggest_surviving_sibling(self):
         """(i) 1968 lookup FAILS, 20-track reissue SUCCEEDS -> suggestion is NOT
         the reissue, names no Release Group, and auto-import is refused."""
+        reissue_title, reissue_artist = "lady soul (deluxe)", "aretha franklin"
         reissue = _resolved(REL_REISSUE, RG_REISSUE, 0.60, allowed=False, verified=0, total=20,
-                             title="lady soul (deluxe)", artist="aretha franklin")
+                             title=reissue_title, artist=reissue_artist)
         releases = [reissue, _errored(REL_1968)]
 
         candidates = rank_folder_candidates(releases, folder_track_count=10)
@@ -58,11 +59,23 @@ class ReleaseLookupFailedTests(unittest.TestCase):
         self.assertEqual(failed, 1)
         self.assertFalse(auto["eligible"], auto)
         self.assertTrue(any(r.startswith("release_lookup_failed") for r in auto["reasons"]), auto)
-        # The surviving worse sibling must never be presented as the answer.
+        # The surviving worse sibling must never be presented as the answer -- in
+        # the IDs or in the NAME shown as detected_album/detected_artist.
         self.assertEqual(suggestion["mb_releasegroupid"], "")
         self.assertEqual(suggestion["mb_albumid"], "")
         self.assertNotIn(RG_REISSUE, suggestion.values())
         self.assertNotIn(REL_REISSUE, suggestion.values())
+        # The reissue's distinctive title/artist must not leak into any field
+        # (these become the review row's detected_album / detected_artist).
+        self.assertNotIn(reissue_title, suggestion.values())
+        self.assertNotIn(reissue_artist, suggestion.values())
+        self.assertNotEqual(suggestion["album"], reissue_title)
+        self.assertNotEqual(suggestion["albumartist"], reissue_artist)
+        self.assertNotEqual(suggestion["artist"], reissue_artist)
+        # Falls back to neutral folder-derived text, like plain_suggestion.
+        folder_name = FOLDER.rsplit("/", 1)[-1]
+        self.assertEqual(suggestion["album"], folder_name)
+        self.assertEqual(suggestion["albumartist"], folder_name)
         self.assertIn("could not be evaluated", suggestion["reason"])
 
     def test_errored_release_carrying_a_release_group_is_still_dropped(self):

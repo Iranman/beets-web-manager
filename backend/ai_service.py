@@ -2760,13 +2760,13 @@ def _ai_batch_review_suggestion(folder: str, reason: str, identity: Dict[str, An
     """The review row's suggestion: the best deterministic candidate (never
     an AI pick). The full FolderIdentity goes in the evidence.
 
-    Defect (a): a failed MusicBrainz release lookup returns no Release Group
-    (``_folder_release_preflight`` errors before it reads one), so the correct
-    Release Group never reaches ``candidates`` and a worse-scoring surviving
-    sibling becomes ``candidates[0]``. Keyed off the authoritative
+    Defect (a): when a seed release's MusicBrainz lookup fails, that release is
+    dropped from ``candidates`` (``folder_identity.rank_folder_candidates``), so
+    the correct Release Group never reaches the list and a worse-scoring
+    surviving sibling becomes ``candidates[0]``. Keyed off the authoritative
     ``auto_import`` verdict (never AI), when any release lookup failed we name
-    no Release Group and route to review rather than presenting that sibling as
-    the answer."""
+    no Release Group AND no sibling-derived album/artist, routing to review
+    rather than presenting that sibling as the answer in any field."""
     auto = identity.get("auto_import") or {}
     reasons = list(auto.get("reasons") or [])
     top = (identity.get("candidates") or [{}])[0]
@@ -2776,8 +2776,12 @@ def _ai_batch_review_suggestion(folder: str, reason: str, identity: Dict[str, An
     album = _s(pf.get("release_title")) or name
     why = ", ".join(reasons) or "not eligible"
     if any(_s(r).startswith("release_lookup_failed") for r in reasons):
+        # The surviving sibling must not pose as the answer in ANY field. Its
+        # preflight name would otherwise leak into detected_album/detected_artist
+        # (and the fallback row that reads them), so fall back to neutral
+        # folder-derived text like the no-candidate ``plain_suggestion`` path.
         return {
-            "artist": artist, "albumartist": artist, "album": album,
+            "artist": name, "albumartist": name, "album": name,
             "mb_albumid": "", "mb_releasegroupid": "",
             "confidence": "low",
             "reason": f"Beets skipped this folder ({reason or 'not matched'}). "
