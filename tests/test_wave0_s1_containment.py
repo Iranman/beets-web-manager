@@ -80,7 +80,10 @@ class FakeAdapter:
 
 class _Env(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        # #533 item 10: ignore_cleanup_errors tolerates the rare "Directory not
+        # empty" race at teardown (a store/lock file landing between rmtree's
+        # scandir and rmdir), same as _RouteEnv's import temp dir already does.
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self._tmp.cleanup)
         close_job_stores_at_cleanup(self)
         self.root = Path(self._tmp.name)

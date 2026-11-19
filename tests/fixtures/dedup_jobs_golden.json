@@ -2225,7 +2225,7 @@
    ],
    [
     "log",
-    "  ⚠ Batch 1 error: OSError"
+    "  ⚠ Batch 1 skipped a malformed match: OSError"
    ],
    [
     "log",
@@ -14312,7 +14312,7 @@
    "<TMP>/downloads/Bulk/z.flac"
   ]
  },
- "ai_reply_bad_match_loses_rest_of_batch": {
+ "ai_reply_bad_match_skips_only_itself": {
   "events": [
    [
     "job_start",
@@ -14513,7 +14513,39 @@
    ],
    [
     "log",
-    "  ⚠ Batch 1 error: malformed response"
+    "  ⚠ Batch 1 skipped a malformed match: malformed response"
+   ],
+   [
+    "lib.get_item",
+    1
+   ],
+   [
+    "fp_match",
+    "<TMP>/downloads/New/two.flac",
+    "<TMP>/music/Art/Alb/01 Song One.flac"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "one.flac",
+     "current_item": "Batch 1 of 1",
+     "current_path": "<TMP>/downloads/New/one.flac",
+     "current_result": "AI duplicate candidate found",
+     "current_task": "Reviewing unmatched files with AI",
+     "duplicate_type": "AI duplicate",
+     "found_count": 2,
+     "progress_percent": 100,
+     "remaining_count": 0,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": null,
+     "scanned_count": 2,
+     "total_count": 2
+    }
+   ],
+   [
+    "log",
+    "  🤖 [medium] two.flac  →  Artist – Song One  (same song)"
    ],
    [
     "log",
@@ -14526,10 +14558,10 @@
      "current_file": "one.flac",
      "current_item": "Batch 1 of 1",
      "current_path": "<TMP>/downloads/New/one.flac",
-     "current_result": "1 duplicate file(s) found so far",
+     "current_result": "2 duplicate file(s) found so far",
      "current_task": "Reviewing unmatched files with AI",
      "duplicate_type": "AI duplicate",
-     "found_count": 1,
+     "found_count": 2,
      "progress_percent": 100,
      "remaining_count": 0,
      "scan_path": "<TMP>/downloads",
@@ -14542,19 +14574,19 @@
     "update_state",
     {
      "category": "Duplicates",
-     "current_result": "1 additional duplicate file(s) found",
+     "current_result": "2 additional duplicate file(s) found",
      "current_task": "AI duplicate review complete",
      "duplicate_type": "AI duplicate",
      "final_summary": {
       "duplicate_folders_found": 1,
-      "duplicate_tracks_found": 1,
+      "duplicate_tracks_found": 2,
       "duplicate_type_counts": {
-       "AI duplicate": 1
+       "AI duplicate": 2
       },
       "scanned_files": 2,
       "scanned_folders": 1
      },
-     "found_count": 1,
+     "found_count": 2,
      "progress_percent": 100,
      "remaining_count": 0,
      "scan_path": "<TMP>/downloads",
@@ -14565,7 +14597,7 @@
    ],
    [
     "log",
-    "🤖 AI review complete — 1 additional duplicate found"
+    "🤖 AI review complete — 2 additional duplicates found"
    ]
   ],
   "http": [
@@ -14584,7 +14616,7 @@
     "created_at": 1700000000.0,
     "current_item": null,
     "current_path": null,
-    "current_result": "1 additional duplicate file(s) found",
+    "current_result": "2 additional duplicate file(s) found",
     "current_task": "AI duplicate review complete",
     "duplicate_type": "AI duplicate",
     "duplicates": [
@@ -14603,21 +14635,37 @@
       "source_path": "<TMP>/downloads/New/one.flac",
       "source_size": 5000,
       "source_title": "Song One"
+     },
+     {
+      "confidence": "medium",
+      "fingerprint_verified": false,
+      "lib_album": "Alb",
+      "lib_artist": "Artist",
+      "lib_id": 1,
+      "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+      "lib_title": "Song One",
+      "match_type": "AI duplicate",
+      "reason": "AI: same song",
+      "source_artist": "Artist",
+      "source_filename": "two.flac",
+      "source_path": "<TMP>/downloads/New/two.flac",
+      "source_size": 5001,
+      "source_title": "Song One"
      }
     ],
     "final_summary": {
      "duplicate_folders_found": 1,
-     "duplicate_tracks_found": 1,
+     "duplicate_tracks_found": 2,
      "duplicate_type_counts": {
-      "AI duplicate": 1
+      "AI duplicate": 2
      },
      "scanned_files": 2,
      "scanned_folders": 1
     },
     "folders": [
      {
-      "all_dupes": false,
-      "dup_count": 1,
+      "all_dupes": true,
+      "dup_count": 2,
       "files": [
        {
         "confidence": "medium",
@@ -14634,6 +14682,22 @@
         "source_path": "<TMP>/downloads/New/one.flac",
         "source_size": 5000,
         "source_title": "Song One"
+       },
+       {
+        "confidence": "medium",
+        "fingerprint_verified": false,
+        "lib_album": "Alb",
+        "lib_artist": "Artist",
+        "lib_id": 1,
+        "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+        "lib_title": "Song One",
+        "match_type": "AI duplicate",
+        "reason": "AI: same song",
+        "source_artist": "Artist",
+        "source_filename": "two.flac",
+        "source_path": "<TMP>/downloads/New/two.flac",
+        "source_size": 5001,
+        "source_title": "Song One"
        }
       ],
       "name": "New",
@@ -14641,7 +14705,7 @@
       "total_files": 2
      }
     ],
-    "found": 1,
+    "found": 2,
     "kind": "ai_review",
     "scan_path": "<TMP>/downloads",
     "scanned": 2,
@@ -14676,21 +14740,37 @@
        "source_path": "<TMP>/downloads/New/one.flac",
        "source_size": 5000,
        "source_title": "Song One"
+      },
+      {
+       "confidence": "medium",
+       "fingerprint_verified": false,
+       "lib_album": "Alb",
+       "lib_artist": "Artist",
+       "lib_id": 1,
+       "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+       "lib_title": "Song One",
+       "match_type": "AI duplicate",
+       "reason": "AI: same song",
+       "source_artist": "Artist",
+       "source_filename": "two.flac",
+       "source_path": "<TMP>/downloads/New/two.flac",
+       "source_size": 5001,
+       "source_title": "Song One"
       }
      ],
      "final_summary": {
       "duplicate_folders_found": 1,
-      "duplicate_tracks_found": 1,
+      "duplicate_tracks_found": 2,
       "duplicate_type_counts": {
-       "AI duplicate": 1
+       "AI duplicate": 2
       },
       "scanned_files": 2,
       "scanned_folders": 1
      },
      "folders": [
       {
-       "all_dupes": false,
-       "dup_count": 1,
+       "all_dupes": true,
+       "dup_count": 2,
        "files": [
         {
          "confidence": "medium",
@@ -14707,6 +14787,22 @@
          "source_path": "<TMP>/downloads/New/one.flac",
          "source_size": 5000,
          "source_title": "Song One"
+        },
+        {
+         "confidence": "medium",
+         "fingerprint_verified": false,
+         "lib_album": "Alb",
+         "lib_artist": "Artist",
+         "lib_id": 1,
+         "lib_path": "<TMP>/music/Art/Alb/01 Song One.flac",
+         "lib_title": "Song One",
+         "match_type": "AI duplicate",
+         "reason": "AI: same song",
+         "source_artist": "Artist",
+         "source_filename": "two.flac",
+         "source_path": "<TMP>/downloads/New/two.flac",
+         "source_size": 5001,
+         "source_title": "Song One"
         }
        ],
        "name": "New",
@@ -14714,7 +14810,7 @@
        "total_files": 2
       }
      ],
-     "found": 1,
+     "found": 2,
      "kind": "ai_review",
      "scan_path": "<TMP>/downloads",
      "scanned": 2,
@@ -14726,7 +14822,8 @@
       "result": [
        [],
        [
-        "<TMP>/downloads/New/one.flac"
+        "<TMP>/downloads/New/one.flac",
+        "<TMP>/downloads/New/two.flac"
        ]
       ]
      },
@@ -16445,7 +16542,7 @@
    "<TMP>/downloads/Bulk/z.flac"
   ]
  },
- "ai_reply_refusal_skips_batch_bookkeeping": {
+ "ai_reply_refusal_still_logs_batch_done": {
   "events": [
    [
     "job_start",
@@ -16615,6 +16712,28 @@
    [
     "log",
     "  AI refusal: nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+   ],
+   [
+    "log",
+    "  Batch 1/2 done"
+   ],
+   [
+    "update_state",
+    {
+     "category": "Duplicates",
+     "current_file": "000 Song.flac",
+     "current_item": "Batch 1 of 2",
+     "current_path": "<TMP>/downloads/Bulk/000 Song.flac",
+     "current_result": "0 duplicate file(s) found so far",
+     "current_task": "Reviewing unmatched files with AI",
+     "found_count": 0,
+     "progress_percent": 95,
+     "remaining_count": 1,
+     "scan_path": "<TMP>/downloads",
+     "scan_scope": null,
+     "scanned_count": 20,
+     "total_count": 21
+    }
    ],
    [
     "cancel?"
@@ -17150,7 +17269,7 @@
    ],
    [
     "log",
-    "  ⚠ Batch 1 error: malformed response"
+    "  ⚠ Batch 1 skipped a malformed match: malformed response"
    ],
    [
     "log",
@@ -23640,30 +23759,6 @@
    [
     "log",
     "Cancelled by user from Jobs."
-   ],
-   [
-    "log",
-    "ERROR listing files: cancelled"
-   ],
-   [
-    "update_state",
-    {
-     "category": "Duplicates",
-     "current_result": "Failed to list source files",
-     "current_task": "Listing source audio files",
-     "error_count": 1,
-     "error_summary": "Could not list source files: cancelled",
-     "final_summary": {
-      "duplicate_tracks_found": 0,
-      "error": "cancelled",
-      "scanned_files": 0
-     },
-     "found_count": 0,
-     "progress_percent": 0,
-     "scan_path": "<TMP>/downloads",
-     "scan_scope": "scope",
-     "scanned_count": 0
-    }
    ]
   ],
   "http": [
@@ -23680,29 +23775,28 @@
   "jobs_state": {
    "job-1": {
     "created_at": 1700000000.0,
-    "current_result": "Failed to list source files",
+    "current_result": "Scanning source path",
     "current_task": "Listing source audio files",
     "duplicates": [],
-    "error_count": 1,
-    "error_summary": "Could not list source files: cancelled",
-    "final_summary": {
-     "duplicate_tracks_found": 0,
-     "error": "cancelled",
-     "scanned_files": 0
-    },
     "folders": [],
     "found": 0,
     "kind": "scan",
     "scan_path": "<TMP>/downloads",
     "scan_scope": "scope",
     "scanned": 0,
-    "status": "done",
+    "status": "cancelled",
     "total": 0
    }
   },
   "outcomes": [
    {
-    "result": null,
+    "error": [
+     [
+      "RuntimeError",
+      "cancelled",
+      "end"
+     ]
+    ],
     "safety": {}
    }
   ],
