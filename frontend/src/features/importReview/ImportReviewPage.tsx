@@ -51,6 +51,7 @@ import { MissingIdsBatchPanel } from './MissingIdsBatchPanel';
 import { MbidLink, getRecoveryIdentity, getRecoveryStage, isValidMbid } from './MbidLink';
 import type { MbEntity } from './MbidLink';
 import { RecoveryReviewCard } from './RecoveryReviewCard';
+import { AltCandidatesPanel } from './AltCandidatesPanel';
 import {
   sameMbid,
   isMusicBrainzUuid,
@@ -2778,9 +2779,11 @@ export function ReviewCard({
   const selectedConfidenceText = selectedConfidence
     ? `${confidenceLabel(selectedConfidence)}${selectedConfidenceScore !== null ? ` (${formatPercent(selectedConfidenceScore)})` : ''}`
     : '';
+  // Year is NOT folded into this meta line: it is shown as a distinct,
+  // explicitly labelled source/edition field below so the folder's original
+  // year is never conflated with the selected edition's release year.
   const meta = [
     item.artist,
-    item.year ? String(item.year) : '',
     item.tracks ? `${item.tracks} track${item.tracks === 1 ? '' : 's'}` : '',
     selectedConfidenceText || (item.confidence ? `${item.confidence} confidence` : ''),
   ].filter(Boolean);
@@ -2806,6 +2809,20 @@ export function ReviewCard({
   // even when the selected candidate passed its own preflight (the folder
   // verdict can refuse an importable candidate, e.g. release_lookup_failed).
   const readyVerdictRefused = pendingAiAutoImportVerdict(item) === false;
+  // Label refinement (owner-confirmed, deferred from slice 1): a verdict-refused
+  // folder that still HAS a candidate the matcher could not evaluate (e.g.
+  // release_lookup_failed -> a provided id, or ranked alt-candidates that none
+  // validated) is "Needs decision", NOT the reused "No MB candidate" wording
+  // (which is only for a folder with no candidate at all). Driven from the
+  // deterministic verdict, never from mb_valid. Bucket/state plumbing is
+  // unchanged (still 'no_candidate'); only the human-facing label differs.
+  const refusedUnevaluableCandidate = readyVerdictRefused
+    && (Boolean(item.mb_albumid) || (item.alt_candidates?.candidates?.length ?? 0) > 0);
+  // Source (folder/original) identity vs the selected edition's release year:
+  // two distinct fields, never conflated. Source year is the folder's own year;
+  // the edition release year comes only from a selected release candidate.
+  const sourceYear = item.year ? String(item.year) : (item.evidence?.folder?.guessed_year || '');
+  const editionYear = selectedMatch?.year ? String(selectedMatch.year) : '';
   const visibleMatchBucket: MatchBucket = audioMismatchActive
     ? 'audio_mismatch'
     : blockedActive
@@ -2919,7 +2936,9 @@ export function ReviewCard({
                 <MbidLink entity="release" id={item.current_mb_albumid} status="suggested" label="Release ID" />
               ) : null}
               <span className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${matchTones[visibleMatchBucket]}`}>
-                {matchLabels[visibleMatchBucket]}
+                {visibleMatchBucket === 'no_candidate' && refusedUnevaluableCandidate
+                  ? 'Needs decision'
+                  : matchLabels[visibleMatchBucket]}
               </span>
               <span className="rounded-md border border-sky-500/30 bg-sky-950/40 px-2.5 py-1 text-xs font-semibold text-sky-200">
                 {originDisplay}
@@ -2966,6 +2985,30 @@ export function ReviewCard({
 
             <h2 className="mt-3.5 truncate text-xl font-semibold tracking-tight text-graphite-50">{itemTitle(item)}</h2>
             {meta.length ? <div className="mt-1.5 text-sm text-muted">{meta.join(' · ')}</div> : null}
+            {/* Source identity vs edition release year: two distinct, labelled
+               fields so the folder's original year is never read as the selected
+               edition's year. */}
+            {(sourceYear || editionYear) ? (
+              <dl className="mt-1.5 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
+                {sourceYear ? (
+                  <div className="flex gap-1.5">
+                    <dt className="font-medium">Source year</dt>
+                    <dd className="text-graphite-100">{sourceYear}</dd>
+                  </div>
+                ) : null}
+                {editionYear ? (
+                  <div className="flex gap-1.5">
+                    <dt className="font-medium">Edition release year</dt>
+                    <dd className="text-graphite-100">{editionYear}</dd>
+                  </div>
+                ) : null}
+              </dl>
+            ) : null}
+            {visibleMatchBucket === 'no_candidate' && refusedUnevaluableCandidate ? (
+              <p className="mt-2 rounded border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+                Needs decision: the best candidate could not be evaluated, so auto-import was refused. Pick a release below or enter a MusicBrainz ID.
+              </p>
+            ) : null}
             <QualityUpgradeNotice evidence={item.evidence} />
 
             <RecoveryReviewCard
@@ -3061,6 +3104,9 @@ export function ReviewCard({
             ) : (
               <EvidenceSummary item={item} />
             )}
+            {!isRecordingReview ? (
+              <AltCandidatesPanel item={item} selectedRgid={mbid} onUseCandidate={onUseCandidate} />
+            ) : null}
             {!isRecordingReview && !suggestion && (item.evidence?.top_candidates ?? []).length > 0 ? (
               <CandidateCarousel
                 candidates={item.evidence?.top_candidates ?? []}
