@@ -129,6 +129,19 @@ class DecisionRuleTests(unittest.TestCase):
         skipped = self._decide("skipped item")
         self.assertEqual((skipped["blocked"], skipped["ready"]), (False, False))
 
+    def test_a_refused_deterministic_verdict_is_never_a_ready_bucket(self):
+        # ARCH-005 defect (b): backend/import_review_decision owns this.
+        self.assertEqual(self._decide("refused pending_ai suggestion")["match_bucket"], "no_candidate")
+        self.assertEqual(self._decide("refused by matching decision")["match_bucket"], "no_candidate")
+        # A genuine eligible verdict, and no verdict at all, both stay 'ready'.
+        self.assertEqual(self._decide("eligible pending_ai suggestion")["match_bucket"], "ready")
+        self.assertEqual(self._decide("no-verdict pending_ai keeps its bucket")["match_bucket"], "ready")
+        # Unit-level: the verdict helper reads both authorities and absence.
+        self.assertIs(decision.pending_ai_auto_import_verdict({"auto_import": {"eligible": False}}), False)
+        self.assertIs(decision.pending_ai_auto_import_verdict(
+            {"evidence": {"preflight": {"matching_decision": {"action_allowed": False}}}}), False)
+        self.assertIsNone(decision.pending_ai_auto_import_verdict({"type": "pending_ai"}))
+
     def test_an_id_is_required(self):
         self.assertEqual(self._decide("no ID entered, album")["apply_block_reason"],
                          "Enter or select a MusicBrainz Release Group ID first.")

@@ -61,6 +61,23 @@ def has_audio_mismatch_evidence(item: Dict[str, Any]) -> bool:
     return bool(preflight.get("acoustid_mismatch"))
 
 
+def pending_ai_auto_import_verdict(item: Dict[str, Any]) -> Optional[bool]:
+    """The deterministic auto-import verdict for a pending_ai item (ARCH-005):
+    ``True`` eligible, ``False`` explicitly refused, ``None`` when the pipeline
+    emitted no verdict (recovery-carrier / quality-upgrade paths). The item's
+    top-level ``auto_import`` (from backend.matching.folder_identity.decide_auto_import,
+    reasons like ``release_lookup_failed`` / ``no_release_group_verified``) is the
+    authority; ``evidence.preflight.matching_decision.action_allowed`` is the
+    fallback single eligibility authority. Neither present -> no verdict."""
+    auto = item.get("auto_import")
+    if isinstance(auto, dict) and "eligible" in auto:
+        return bool(auto.get("eligible"))
+    decision = ((item.get("evidence") or {}).get("preflight") or {}).get("matching_decision")
+    if isinstance(decision, dict) and "action_allowed" in decision:
+        return bool(decision.get("action_allowed"))
+    return None
+
+
 def item_match_bucket(item: Dict[str, Any]) -> str:
     """The bucket the item's own stored state puts it in."""
     if has_audio_mismatch_evidence(item):
@@ -79,6 +96,12 @@ def item_match_bucket(item: Dict[str, Any]) -> str:
     preflight = (item.get("evidence") or {}).get("preflight")
     if preflight and preflight.get("ok") is False:
         return "failed"
+    # ARCH-005: a "ready" bucket is driven SOLELY by the deterministic verdict,
+    # never by mb_valid/preflight.ok alone. An explicit refusal is never ready
+    # (it goes to the existing no_candidate review bucket). Absent verdict keeps
+    # the current bucket, so only an explicit negative demotes from ready.
+    if pending_ai_auto_import_verdict(item) is False:
+        return "no_candidate"
     return "ready"
 
 

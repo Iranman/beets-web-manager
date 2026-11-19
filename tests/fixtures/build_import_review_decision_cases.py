@@ -126,6 +126,15 @@ CASES = [
     ("skipped item", item(type="skipped", blocked_reason="Skipped by operator."), RG, match(), preview()),
     ("no candidate", item(mb_valid=False, mb_albumid=""), "", None, None),
     ("other type with a valid ID", item(type="needs_review", mb_valid=True), RG, None, None),
+    # ARCH-005 defect (b): a refused deterministic verdict is never a ready match,
+    # even with a syntactically valid mb_albumid. It goes to the no_candidate bucket.
+    ("refused pending_ai suggestion",
+     item(auto_import={"eligible": False, "reasons": ["release_lookup_failed:1"]}), RG, None, None),
+    ("refused by matching decision",
+     item(evidence={"preflight": {"matching_decision": {"action_allowed": False}}}), RG, None, None),
+    ("eligible pending_ai suggestion", item(auto_import={"eligible": True, "reasons": []}), RG, match(), preview()),
+    # No verdict emitted (recovery-carrier / quality-upgrade): the current bucket is preserved (ready).
+    ("no-verdict pending_ai keeps its bucket", item(), RG, match(), preview()),
 ]
 
 
