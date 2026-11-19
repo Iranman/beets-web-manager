@@ -99,16 +99,34 @@ class RecoverImportDurableRecoveryTests(unittest.TestCase):
             # all on this path (it only transitions the record's status).
             self.assertEqual(adapter.method_calls, [], adapter.method_calls)
 
-    def test_without_the_family_tag_the_record_would_stay_running(self):
-        # Control: proves the mutation_family tag is load-bearing. A Running
-        # recover-style record lacking it is exactly the pre-fix bug and the
-        # sweep leaves it Running.
+    def test_legacy_untagged_recover_record_is_resolved_by_source(self):
+        # #794 Part 1: a Running recover-style record written BEFORE #789 has no
+        # mutation_family. The family branches skip it, but the sweep now
+        # recognizes it by its stable ``source`` and routes it through the same
+        # never-replayed path -> Recovery Required (was: stuck Running forever).
         with tempfile.TemporaryDirectory() as tmp:
             tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
             tx = tx_store.create(
                 operation_type="Import", status="Running",
                 source="recover_upload_singleton", summary="DJ Me - My Track",
                 metadata={"workflow": "recover_upload_singleton"},  # pre-fix metadata
+            )
+            adapter = mock.Mock()
+            recovery.sweep(adapter=adapter, store=tx_store, before=time.time() + 5)
+            self.assertEqual(self._status(tx_store, tx["id"]), "Recovery Required")
+            # Never replayed and never auto-rolled-back: no adapter call at all.
+            self.assertEqual(adapter.method_calls, [], adapter.method_calls)
+
+    def test_non_recover_untagged_record_is_left_running(self):
+        # #794 Part 1 scope guard: the source-based recognition is narrow. A
+        # Running transaction that is neither a known family nor a recover record
+        # must still be left alone (not swept).
+        with tempfile.TemporaryDirectory() as tmp:
+            tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
+            tx = tx_store.create(
+                operation_type="Import", status="Running",
+                source="some_other_workflow", summary="unrelated",
+                metadata={"workflow": "something_else"},
             )
             recovery.sweep(adapter=mock.Mock(), store=tx_store, before=time.time() + 5)
             self.assertEqual(self._status(tx_store, tx["id"]), "Running")
