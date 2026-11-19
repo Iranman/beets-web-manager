@@ -29,6 +29,7 @@ Key decisions:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1685,12 +1686,19 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
     never writes through a symlink target, so the sidecar write can neither be
     redirected outside its own staged directory nor clobber an aliased file.
 
-    Known residual (needs a LIVE racing writer): a parent dir swapped to a
-    symlink between the symlink-chain check and the directory open could place
-    the new sidecar inside the swapped directory (it still cannot clobber an
-    aliased file -- the O_EXCL temp is a new name and os.replace is a dentry
-    swap). Robustly closing it needs a per-component openat(O_NOFOLLOW) walk from
-    a trusted root; low impact (a stray provenance JSON, never audio loss)."""
+    #793 R1: on Linux the directory is opened by descending from the TRUSTED
+    validated downloads-root fd one component at a time with
+    ``O_DIRECTORY|O_NOFOLLOW`` (via the reviewed
+    ``composite_workflows._staging_dir_fd`` walk), INCLUDING the ``recovered``
+    component itself, so a parent directory -- or ``recovered`` itself -- swapped
+    to a symlink in the window between the symlink-chain check and the open is
+    refused by the KERNEL atomically; there is no check-then-open gap for a live
+    racing writer to exploit. The recovered root is not re-resolved by pathname
+    (which would collapse a racing swap of the recovered component). When the
+    staged dir is not confinable under ``<downloads>/recovered`` it FAILS CLOSED
+    rather than writing by path. The Windows/no-dir_fd dev fallback keeps the
+    resolve+confine + O_EXCL temp + atomic ``os.replace`` path (best-effort, not
+    the deploy target)."""
     if "/" in name or "\\" in name or "\x00" in name or name in ("", ".", ".."):
         raise OSError("unsafe sidecar name")
     if _has_symlink_in_chain(parent):
@@ -1704,11 +1712,27 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
     # os.replace does not register dir_fd support on CPython, so the Linux path
     # below uses os.rename for the atomic swap.
     use_dirfd = (os.open in os.supports_dir_fd) and (os.rename in os.supports_dir_fd)
+
+    # #793 R1: confinement under <downloads>/recovered is required on EVERY path
+    # (Codex/QA #797) -- compute it regardless of dir_fd support and FAIL CLOSED
+    # when the staged dir is not under recovered, so neither the hardened walk nor
+    # the no-dir_fd fallback can ever write outside staging (provenance is always
+    # staged under recovered in production).
+    try:
+        dl_anchor = Path(validated_downloads_root()).resolve()
+        rel = resolved_parent.relative_to(dl_anchor).parts
+    except (OSError, ValueError):
+        rel = ()
+    if not rel or rel[0] != "recovered":
+        raise OSError("provenance directory is not under the recovered staging root")
+
     if not use_dirfd:
-        # Fallback (no dir_fd, e.g. Windows dev): still create an O_EXCL temp and
-        # atomically replace, so a symlinked/hard-linked target is not followed
-        # or clobbered. O_NOFOLLOW is a no-op here, but os.replace never follows
-        # the final-component symlink.
+        # No-dir_fd fallback (Windows dev): the staged dir is confirmed under
+        # recovered above; create an O_EXCL temp and atomically replace, so a
+        # symlinked/hard-linked target is not followed or clobbered. O_NOFOLLOW
+        # is a no-op where unsupported, but os.replace never follows the
+        # final-component symlink. (No kernel no-follow descent here; dir_fd is
+        # unavailable on this host, which is not the Linux deploy target.)
         tmp_path = str(resolved_parent / tmp_name)
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
         wrote = False
@@ -1733,33 +1757,40 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
             raise
         return final_path
 
-    dir_fd = os.open(str(resolved_parent),
-                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+    # Linux hardened path: descend from the trusted downloads-root anchor with
+    # O_DIRECTORY|O_NOFOLLOW per component (reusing the reviewed
+    # composite_workflows._staging_dir_fd walk), so a parent dir swapped to a
+    # symlink after the symlink-chain check above is refused by the kernel -- no
+    # check-then-open gap. The O_EXCL temp + atomic rename within that dir_fd are
+    # unchanged.
+    from backend import composite_workflows
     try:
-        tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
-                      0o600, dir_fd=dir_fd)
-        wrote = False
-        try:
-            _write_all(tfd, data)
-            os.fsync(tfd)
-            wrote = True
-        finally:
-            os.close(tfd)
-            if not wrote:
+        with composite_workflows._staging_dir_fd(dl_anchor, rel) as dir_fd:
+            tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+                          0o600, dir_fd=dir_fd)
+            wrote = False
+            try:
+                _write_all(tfd, data)
+                os.fsync(tfd)
+                wrote = True
+            finally:
+                os.close(tfd)
+                if not wrote:
+                    try:
+                        os.unlink(tmp_name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+            try:
+                os.rename(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            except OSError:
                 try:
                     os.unlink(tmp_name, dir_fd=dir_fd)
                 except OSError:
                     pass
-        try:
-            os.rename(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        except OSError:
-            try:
-                os.unlink(tmp_name, dir_fd=dir_fd)
-            except OSError:
-                pass
-            raise
-    finally:
-        os.close(dir_fd)
+                raise
+    except ValueError as exc:
+        # a symlinked/non-directory parent component was refused mid-walk
+        raise OSError(str(exc)) from exc
     return final_path
 
 
@@ -2357,6 +2388,59 @@ def _has_symlink_in_chain(path: Path) -> bool:
     return False
 
 
+def _staged_identity_pin(path: str) -> Optional[Dict[str, Any]]:
+    """Capture an inode+content identity pin for an already-resolved,
+    symlink-free staged file (#793 R2).
+
+    ``verify_and_match_staged_upload`` decides identity from this file's audio
+    bytes, but ``_recover_import_one`` later copies it into the library via
+    ``beets_adapter.run_import`` (which ingests BY PATH, not by fd). A
+    regular-file swap -- a rename onto the path OR an in-place rewrite --
+    between verification and that copy would import substituted audio under the
+    verified identity. Pinning (st_dev, st_ino, st_size, st_mtime_ns) + a
+    streaming sha256 and re-checking it immediately before the copy detects
+    both swap shapes. ``st_ctime_ns`` is also pinned: a swap-and-restore that
+    rewrites the file with the original content and forges ``st_mtime_ns`` back
+    via ``os.utime`` would leave dev/ino/size/sha/mtime matching, but ctime
+    (inode change time) bumps on any write and cannot be set by ``os.utime``,
+    so including it detects the forgery. fstat + read share ONE O_NOFOLLOW fd
+    so the stat and the hashed bytes describe the same open file. Returns
+    ``None`` (treated as a fail-closed mismatch by the caller) if the file
+    cannot be pinned."""
+    try:
+        # O_NONBLOCK so a FIFO swapped onto the path cannot block this open
+        # before the S_ISREG reject below (local DoS); it is a no-op on a real
+        # regular file. Mirrors the tag-write open's flags (R1).
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            return None
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+        return {
+            "dev": st.st_dev,
+            "ino": st.st_ino,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "ctime_ns": st.st_ctime_ns,
+            "sha256": h.hexdigest(),
+        }
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Optional[Dict[str, Any]], str]:
     """Verify ``staged_path`` is a regular, non-symlink audio file inside
     ``DOWNLOADS_ROOT/recovered`` (never under ``MUSIC_ROOT``) and has a valid
@@ -2448,6 +2532,16 @@ def verify_and_match_staged_upload(
         # claim so the outcome is never claim-less (F4).
         return {"ok": False, "error": err, "staged_file": _s(staged_path),
                 "authorization": evaluate_recover_authorization(auth_basis, auth_note)}
+
+    # #793 R2: pin the staged file's identity NOW, before ANY byte of it is read
+    # to decide identity (integrity probe, codec inspect, the AcoustID fingerprint
+    # AND its network lookup, the MusicBrainz search). Capturing the pin here -- at
+    # the start of verification rather than at this function's RETURN -- binds the
+    # import-time re-check (_recover_import_one) to the bytes that verification
+    # acted on. A content swap ANYWHERE from here through the Beets copy therefore
+    # fails the re-check, closing the wide verify-internal window (two network
+    # round-trips) that a return-time pin would silently bake in.
+    verified_pin = _staged_identity_pin(str(resolved))
 
     # Authorization: independent verification (own_account vs the owned-accounts
     # allowlist, matched against the sidecar's recorded IMMUTABLE identifiers —
@@ -2665,6 +2759,9 @@ def verify_and_match_staged_upload(
     return {
         "ok": True,
         "staged_file": str(resolved),
+        # #793 R2: pin captured at the START of verification (above), so the
+        # import-time re-check binds to the bytes identity was decided from.
+        "verified_pin": verified_pin,
         "provenance_file": str(resolved.with_suffix(resolved.suffix + ".recover.json")),
         "source_url": _s(sidecar.get("source_url")),
         "source_platform": _s(sidecar.get("source_platform")),
@@ -2814,15 +2911,16 @@ def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
 
     O_NONBLOCK keeps a planted FIFO from blocking the open.
 
-    Known residual (needs a LIVE racing writer in the staging tree, not static
-    planting): os.open(str(resolved)) re-traverses the path and follows
-    parent-directory symlinks, so a parent component swapped to a symlink in the
-    window between resolve() and this open could land the fd outside staging
-    even with O_NOFOLLOW on the final component. Static planting is fully closed
-    (_has_symlink_in_chain + resolve-confinement + nlink==1); robustly closing
-    the race needs a per-component openat(O_NOFOLLOW) walk or openat2
-    RESOLVE_NO_SYMLINKS. Same class as the scoped-out run_import inode-pinning
-    (#473 residual). This is a best-effort metadata stamp, not a destructive op."""
+    #793 R1: on Linux the final open descends from the TRUSTED validated
+    downloads-root fd one component at a time with ``O_DIRECTORY|O_NOFOLLOW``
+    (via the reviewed ``composite_workflows._staging_dir_fd`` walk), INCLUDING
+    the ``recovered`` component itself, and opens the leaf ``dir_fd``-relative
+    with ``O_NOFOLLOW``, so a parent component -- or ``recovered`` itself --
+    swapped to a symlink in the window between resolve() and this open is refused
+    by the KERNEL atomically; the fd can no longer land outside staging. The
+    Windows/no-dir_fd dev fallback keeps the resolve+confine
+    ``os.open(str(resolved))`` path (best-effort, not the deploy target). The
+    nlink==1 and regular-file checks on the returned fd are unchanged."""
     raw = _s(path).strip()
     if not raw or "\x00" in raw:
         return None
@@ -2839,10 +2937,31 @@ def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
             return None
     except OSError:
         return None
+    open_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    use_dirfd = os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY")
     try:
-        fd = os.open(str(resolved),
-                     os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    except OSError:
+        if use_dirfd:
+            # #793 R1: descend from the TRUSTED validated downloads-root fd one
+            # component at a time with O_DIRECTORY|O_NOFOLLOW (reusing the
+            # reviewed composite_workflows._staging_dir_fd walk), INCLUDING the
+            # ``recovered`` component itself, and open the leaf dir_fd-relative
+            # with O_NOFOLLOW, so a parent dir -- or ``recovered`` itself --
+            # swapped to a symlink after resolve() is refused by the kernel; no
+            # check-then-open gap. The downloads root is NOT re-resolved into the
+            # staged path, which would collapse a racing swap of the recovered
+            # component.
+            from backend import composite_workflows
+            dl_anchor = Path(validated_downloads_root()).resolve()
+            rel_parts = resolved.relative_to(dl_anchor).parts
+            if not rel_parts or rel_parts[0] != "recovered":
+                return None
+            with composite_workflows._staging_dir_fd(dl_anchor, rel_parts[:-1]) as parent_fd:
+                fd = os.open(rel_parts[-1], open_flags, dir_fd=parent_fd)
+        else:
+            # Windows dev fallback: resolve+confine (already validated above);
+            # dir_fd / O_NOFOLLOW no-follow semantics are a no-op on this host.
+            fd = os.open(str(resolved), open_flags)
+    except (OSError, ValueError, IndexError):
         return None
 
     def _refuse(_fd: int) -> None:
@@ -3093,6 +3212,31 @@ def _recover_import_one(
     match_source = verified["match_source"]
     # The verified authorization record travels onto EVERY outcome below (F4).
     authorization = verified.get("authorization")
+
+    # #793 R2: the verified identity was decided from this staged file's audio
+    # bytes inside verify_and_match_staged_upload. run_import copies BY PATH, so
+    # a regular-file swap (rename onto the path OR in-place rewrite) between
+    # verification and the copy would import substituted audio under the verified
+    # identity. Re-pin the SAME path now, before the file is consumed (conversion
+    # reads it, tag-stamping and the Beets copy follow), and refuse on any
+    # mismatch. FAIL CLOSED: a missing verified pin or an unreadable current pin
+    # both refuse -- never copy unverified bytes.
+    verified_pin = verified.get("verified_pin")
+    current_pin = _staged_identity_pin(resolved_file)
+    if not verified_pin or current_pin != verified_pin:
+        log.append(
+            f"  [recover-import] Refusing {Path(resolved_file).name}: staged file "
+            "changed after fingerprint verification (identity pin mismatch)"
+        )
+        return {
+            "staged_file": resolved_file,
+            "imported": False,
+            "status": "verification_failed",
+            "final_action": "reject",
+            "provenance_status": "unavailable",
+            "authorization": authorization,
+            "error": "staged file changed after fingerprint verification; import refused",
+        }
 
     # Always enforce existing-library conflict protection before importing.
     existing = _find_existing_library_conflict(artist, title, mb_trackid, adapter=adapter)
