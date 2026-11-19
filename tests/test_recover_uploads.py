@@ -99,13 +99,22 @@ def _allow_public(monkey_target="backend.ytdlp_guard.resolve_public_target"):
 @contextlib.contextmanager
 def _fetch_patches(stage_dir, duration=200.0, codec="opus"):
     """Patch the fetch seams so a fake download stages into an isolated dir
-    without a network, a JS runtime, or a real ffprobe."""
-    with mock.patch.object(recover_service, "_recover_stage_dir", return_value=stage_dir), \
+    without a network, a JS runtime, or a real ffprobe.
+
+    The staging dir is placed under ``<stage_dir>/recovered/youtube/run`` with
+    ``validated_downloads_root`` pointed at ``stage_dir``, mirroring production
+    (`_recover_stage_dir` = ``<downloads>/recovered/<platform>/<run>``) so the
+    #793-R1 fail-closed provenance writer treats it as a real recovered-root
+    staging dir rather than an out-of-tree path."""
+    rec = os.path.join(stage_dir, "recovered", "youtube", "run")
+    os.makedirs(rec, exist_ok=True)
+    with mock.patch.object(recover_service, "validated_downloads_root", return_value=stage_dir), \
+         mock.patch.object(recover_service, "_recover_stage_dir", return_value=rec), \
          mock.patch.object(recover_service, "_require_ytdlp_js_runtime", return_value={}), \
          mock.patch.object(recover_service, "_probe_file_duration", return_value=duration), \
          mock.patch.object(recover_service, "inspect_audio_file", return_value={"ok": True, "codec": codec}), \
          _allow_public():
-        yield
+        yield rec
 
 
 class GuardStillRejectsOnRecoverEntry(unittest.TestCase):
@@ -223,7 +232,10 @@ class TargetsBuiltThroughGuard(unittest.TestCase):
     def test_fetch_one_builds_url_target_and_stages(self):
         _FakeYDL.instances = []
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(recover_service, "_recover_stage_dir", return_value=tmp), \
+            rec = os.path.join(tmp, "recovered", "youtube", "run")
+            os.makedirs(rec, exist_ok=True)
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "_recover_stage_dir", return_value=rec), \
                  mock.patch.object(recover_service, "_require_ytdlp_js_runtime", return_value={}), \
                  mock.patch.object(recover_service, "_probe_file_duration", return_value=200.0), \
                  _allow_public():
@@ -592,14 +604,14 @@ class SingleItemFetchRejectsCollections(unittest.TestCase):
 
     def test_fetch_one_refuses_collection(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with _fetch_patches(tmp):
+            with _fetch_patches(tmp) as rec:
                 out = recover_service._recover_fetch_one(
                     "https://www.youtube.com/@me", [], run_id="r",
                     ydl_module=_make_fake(info=self._PLAYLIST))
             self.assertFalse(out["recovered"])
             self.assertEqual(out["category"], "collection")
-            # Nothing was staged.
-            self.assertEqual(list(Path(tmp).glob("*")), [])
+            # Nothing was staged (the fixture pre-creates the empty run dir).
+            self.assertEqual([p for p in Path(tmp).rglob("*") if p.is_file()], [])
 
 
 class ProvenanceFailureFailsItem(unittest.TestCase):
@@ -663,7 +675,9 @@ class ConcurrentJobsAreIsolated(unittest.TestCase):
     def test_two_concurrent_runs_do_not_interfere(self):
         with tempfile.TemporaryDirectory() as tmp:
             def stage_for(platform, run_id):
-                return os.path.join(tmp, platform, run_id)
+                d = os.path.join(tmp, "recovered", platform, run_id)
+                os.makedirs(d, exist_ok=True)
+                return d
 
             results = {}
 
@@ -672,7 +686,8 @@ class ConcurrentJobsAreIsolated(unittest.TestCase):
                 results[rid] = recover_service._recover_fetch_one(
                     "https://www.youtube.com/watch?v=abc", [], run_id=rid, ydl_module=fake)
 
-            with mock.patch.object(recover_service, "_recover_stage_dir", side_effect=stage_for), \
+            with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
+                 mock.patch.object(recover_service, "_recover_stage_dir", side_effect=stage_for), \
                  mock.patch.object(recover_service, "_require_ytdlp_js_runtime", return_value={}), \
                  mock.patch.object(recover_service, "_probe_file_duration", return_value=200.0), \
                  mock.patch.object(recover_service, "inspect_audio_file", return_value={"ok": True, "codec": "opus"}), \
@@ -716,9 +731,9 @@ class RetryFindsExistingStagedFile(unittest.TestCase):
 
         crash_module = type("yt_dlp", (), {"YoutubeDL": _CrashFake})
         with tempfile.TemporaryDirectory() as tmp:
-            # A prior crashed run left a complete file in this run's dir.
-            (Path(tmp) / "prior.opus").write_bytes(b"\x00" * 4096)
-            with _fetch_patches(tmp):
+            with _fetch_patches(tmp) as rec:
+                # A prior crashed run left a complete file in this run's dir.
+                (Path(rec) / "prior.opus").write_bytes(b"\x00" * 4096)
                 out = recover_service._recover_fetch_one(
                     "https://www.youtube.com/watch?v=abc", [], run_id="r",
                     ydl_module=crash_module)
@@ -1577,13 +1592,17 @@ class SafeStagingAndBeetsImport(unittest.TestCase):
         import json as _json
 
         with tempfile.TemporaryDirectory() as tmp:
-            staged = Path(tmp) / "song.m4a"
+            rec = Path(tmp) / "recovered" / "youtube" / "run"
+            rec.mkdir(parents=True)
+            staged = rec / "song.m4a"
             staged.write_bytes(b"\x00" * 128)
-            sidecar_path = recover_service._write_provenance(str(staged), {
-                "source_url": "https://user:pass@www.youtube.com/watch?v=abc123&token=SECRET_TOK&sig=DEAD",
-                "title": "Clean Song",
-                "nested": {"cookie": "SID=secret", "safe": "value"},
-            })
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                sidecar_path = recover_service._write_provenance(str(staged), {
+                    "source_url": "https://user:pass@www.youtube.com/watch?v=abc123&token=SECRET_TOK&sig=DEAD",
+                    "title": "Clean Song",
+                    "nested": {"cookie": "SID=secret", "safe": "value"},
+                })
             sidecar_text = Path(sidecar_path).read_text(encoding="utf-8")
             self.assertNotIn("SECRET_TOK", sidecar_text)
             self.assertNotIn("DEAD", sidecar_text)
@@ -3019,8 +3038,10 @@ class RecoverSecurityHardening473(unittest.TestCase):
                 os.link(library, sidecar)  # sidecar name aliases the library file
             except OSError:
                 self.skipTest("hard links not supported on this filesystem")
-            out = recover_service._write_provenance(
-                str(staged), {"source_url": "https://x/y", "title": "t"})
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                out = recover_service._write_provenance(
+                    str(staged), {"source_url": "https://x/y", "title": "t"})
             self.assertTrue(out, "provenance write should succeed")
             # The library inode is untouched: its content survives unchanged.
             self.assertEqual(library.read_bytes(), b"PRECIOUS-LIBRARY-CONTENT")
@@ -3041,8 +3062,10 @@ class RecoverSecurityHardening473(unittest.TestCase):
                 os.symlink(library, sidecar)
             except (OSError, NotImplementedError):
                 self.skipTest("symlinks not supported on this filesystem")
-            recover_service._write_provenance(
-                str(staged), {"source_url": "https://x/y"})
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                recover_service._write_provenance(
+                    str(staged), {"source_url": "https://x/y"})
             self.assertEqual(library.read_bytes(), b"PRECIOUS-LIBRARY-CONTENT")
 
     def test_A_parent_dir_symlink_is_refused(self):
@@ -3239,6 +3262,251 @@ class RecoverSecurityHardening473(unittest.TestCase):
             resolved, _sidecar, err = result["out"]
             self.assertIsNone(resolved)
             self.assertIn("supported audio file", err)
+
+
+@unittest.skipUnless(
+    hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd
+    and hasattr(os, "symlink") and hasattr(os, "O_NOFOLLOW"),
+    "parent-dir no-follow walk is Linux/dir_fd only; the Windows fallback is "
+    "intentionally the unhardened resolve+confine path",
+)
+class RecoverParentDirSwapTOCTOU793(unittest.TestCase):
+    """#793 R1: a parent DIRECTORY component swapped to a symlink pointing
+    OUTSIDE ``<downloads>/recovered`` in the window between validation
+    (``resolve()``) and the staging open must be refused by the per-component
+    O_NOFOLLOW walk -- the sidecar/tag write never lands outside the recovered
+    root. Fails on the pre-#793 code (final-component-only O_NOFOLLOW follows a
+    swapped grandparent); passes on the hardened walk."""
+
+    def _staged_tree(self, tmp):
+        recovered = Path(tmp) / "recovered"
+        run = recovered / "yt" / "run"
+        run.mkdir(parents=True)
+        return recovered, run
+
+    @contextlib.contextmanager
+    def _swap_grandparent_after_resolve(self, recovered, outside, trigger_suffix):
+        """Model the TOCTOU: let the real ``resolve()`` of the staged path run on
+        the clean tree, then (once) swap the grandparent ``recovered/yt`` to a
+        symlink pointing at ``outside`` before the open proceeds. Both the
+        pre-#793 code and the hardened code call ``resolve()``, so the same
+        injection drives the fail-before / pass-after comparison."""
+        real_resolve = Path.resolve
+        state = {"done": False}
+        yt = recovered / "yt"
+
+        def fake(self, *a, **k):
+            res = real_resolve(self, *a, **k)
+            key = str(self).replace("\\", "/")
+            if not state["done"] and key.endswith(trigger_suffix):
+                state["done"] = True
+                os.rename(str(yt), str(recovered / "yt_real"))
+                os.symlink(str(outside), str(yt), target_is_directory=True)
+            return res
+
+        with mock.patch.object(Path, "resolve", fake):
+            yield state
+
+    @contextlib.contextmanager
+    def _swap_dir_after_resolve(self, swap_dir, link_to, trigger_suffix):
+        """General form: let the real ``resolve()`` of the staged path run on the
+        clean tree, then (once) replace ``swap_dir`` with a symlink to
+        ``link_to`` before the open proceeds -- so ANY directory component
+        (including ``recovered`` itself) can be raced."""
+        real_resolve = Path.resolve
+        state = {"done": False}
+        swap_dir = Path(swap_dir)
+
+        def fake(self, *a, **k):
+            res = real_resolve(self, *a, **k)
+            key = str(self).replace("\\", "/")
+            if not state["done"] and key.endswith(trigger_suffix):
+                state["done"] = True
+                os.rename(str(swap_dir), str(swap_dir.with_name(swap_dir.name + "_real")))
+                os.symlink(str(link_to), str(swap_dir), target_is_directory=True)
+            return res
+
+        with mock.patch.object(Path, "resolve", fake):
+            yield state
+
+    def _gen_flac(self, path):
+        packed = (44100 << 44) | (1 << 41) | (15 << 36) | 44100
+        streaminfo = (struct.pack(">HH", 4096, 4096) + b"\x00" * 6
+                      + packed.to_bytes(8, "big") + b"\x00" * 16)
+        with open(path, "wb") as fh:
+            fh.write(b"fLaC" + bytes([0x80])
+                     + len(streaminfo).to_bytes(3, "big") + streaminfo)
+
+    def test_provenance_refused_when_recovered_component_swapped(self):
+        # Codex #793 finding 2: the recovered ROOT component itself swapped to a
+        # symlink in the check->open window. The walk descends `recovered` live
+        # from the trusted downloads-root fd with O_NOFOLLOW, so it is refused
+        # (the earlier code re-resolved the recovered root by pathname, which
+        # would have collapsed this swap and escaped).
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered, run = self._staged_tree(tmp)
+            staged = run / "track.flac"
+            staged.write_bytes(b"\x00" * 16)
+            outside = Path(tmp) / "outside"
+            (outside / "yt" / "run").mkdir(parents=True)
+            escaped = outside / "yt" / "run" / "track.flac.recover.json"
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp), \
+                 self._swap_dir_after_resolve(
+                     recovered, outside, "recovered/yt/run") as state:
+                out = recover_service._write_provenance(
+                    str(staged), {"source_url": "https://x/y"})
+            self.assertTrue(state["done"], "the swap injection never fired")
+            self.assertEqual(out, "", "a swapped recovered component must be refused")
+            self.assertFalse(escaped.exists(),
+                             "provenance escaped via a swapped recovered root")
+
+    def test_tag_write_refused_when_recovered_component_swapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered, run = self._staged_tree(tmp)
+            staged = run / "track.flac"
+            self._gen_flac(staged)
+            outside = Path(tmp) / "outside"
+            (outside / "yt" / "run").mkdir(parents=True)
+            victim = outside / "yt" / "run" / "track.flac"
+            self._gen_flac(victim)
+            before = victim.read_bytes()
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp), \
+                 self._swap_dir_after_resolve(
+                     recovered, outside, "recovered/yt/run/track.flac") as state:
+                recover_service._stamp_staged_identity_tags(
+                    str(staged), artist="Evil", title="Evil", album="Evil")
+            self.assertTrue(state["done"], "the swap injection never fired")
+            self.assertEqual(victim.read_bytes(), before,
+                             "tag write escaped via a swapped recovered root")
+
+    def test_provenance_fails_closed_when_parent_not_under_recovered(self):
+        # Codex #793 finding 1: a parent swapped to point OUTSIDE recovered in
+        # the check->resolve window makes resolved escape the recovered root.
+        # With dir_fd support the write must FAIL CLOSED, never take the
+        # path-based fallback that would land outside staging. Modelled
+        # deterministically by staging outside the recovered root.
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "elsewhere"
+            outside.mkdir()
+            staged = outside / "track.flac"
+            staged.write_bytes(b"\x00" * 16)
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                out = recover_service._write_provenance(
+                    str(staged), {"source_url": "https://x/y"})
+            self.assertEqual(out, "", "provenance must fail closed outside the recovered root")
+            self.assertFalse((outside / "track.flac.recover.json").exists(),
+                             "provenance wrote outside the recovered root")
+
+    def test_provenance_write_refused_when_grandparent_swapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered, run = self._staged_tree(tmp)
+            staged = run / "track.flac"
+            staged.write_bytes(b"\x00" * 16)
+            # Attacker-controlled tree OUTSIDE recovered/, with a matching
+            # grandchild dir so a swapped grandparent routes the write there.
+            outside = Path(tmp) / "outside"
+            (outside / "run").mkdir(parents=True)
+            escaped = outside / "run" / "track.flac.recover.json"
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp), \
+                 self._swap_grandparent_after_resolve(
+                     recovered, outside, "recovered/yt/run") as state:
+                out = recover_service._write_provenance(
+                    str(staged), {"source_url": "https://x/y", "title": "t"})
+            self.assertTrue(state["done"], "the swap injection never fired")
+            self.assertEqual(out, "", "a swapped parent chain must be refused")
+            self.assertFalse(escaped.exists(),
+                             "provenance sidecar escaped outside the recovered root")
+
+    def test_tag_write_refused_when_grandparent_swapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered, run = self._staged_tree(tmp)
+            staged = run / "track.flac"
+            self._gen_flac(staged)
+            # The attacker's library target OUTSIDE recovered/ that a swapped
+            # grandparent would redirect the in-place tag write onto.
+            outside = Path(tmp) / "outside"
+            (outside / "run").mkdir(parents=True)
+            victim = outside / "run" / "track.flac"
+            self._gen_flac(victim)
+            before = victim.read_bytes()
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp), \
+                 self._swap_grandparent_after_resolve(
+                     recovered, outside, "recovered/yt/run/track.flac") as state:
+                recover_service._stamp_staged_identity_tags(
+                    str(staged), artist="Evil", title="Evil", album="Evil")
+            self.assertTrue(state["done"], "the swap injection never fired")
+            self.assertEqual(victim.read_bytes(), before,
+                             "tag write escaped onto a file outside the recovered root")
+
+    def test_tag_write_fd_refused_directly(self):
+        # The open helper returns None (no fd) when the grandparent is swapped.
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered, run = self._staged_tree(tmp)
+            staged = run / "track.flac"
+            self._gen_flac(staged)
+            outside = Path(tmp) / "outside"
+            (outside / "run").mkdir(parents=True)
+            self._gen_flac(outside / "run" / "track.flac")
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp), \
+                 self._swap_grandparent_after_resolve(
+                     recovered, outside, "recovered/yt/run/track.flac"):
+                fd = recover_service._open_recovered_file_for_inplace_write(str(staged))
+            if fd is not None:
+                os.close(fd)
+            self.assertIsNone(fd, "a swapped grandparent must yield no fd")
+
+    def test_legitimate_in_root_provenance_write_still_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered, run = self._staged_tree(tmp)
+            staged = run / "track.flac"
+            staged.write_bytes(b"\x00" * 16)
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                out = recover_service._write_provenance(
+                    str(staged), {"source_url": "https://x/y", "title": "t"})
+            self.assertTrue(out, "a clean in-root provenance write must succeed")
+            self.assertTrue(Path(out).is_file())
+            self.assertIn("source_url", Path(out).read_text(encoding="utf-8"))
+            # It landed inside the recovered root, beside the staged file.
+            self.assertEqual(Path(out).parent, run)
+
+    def test_legitimate_in_root_tag_write_still_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered, run = self._staged_tree(tmp)
+            staged = run / "track.flac"
+            self._gen_flac(staged)
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                recover_service._stamp_staged_identity_tags(
+                    str(staged), artist="A", title="T", album="Al")
+            from mediafile import MediaFile
+            mf = MediaFile(str(staged))
+            self.assertEqual(mf.artist, "A")
+            self.assertEqual(mf.title, "T")
+
+    def test_static_in_root_symlink_parent_still_refused(self):
+        # An in-root symlink component (pointing at an in-root target) is still
+        # refused by the symlink-chain check, exactly as before -- the walk adds
+        # kernel enforcement without loosening the static guard.
+        with tempfile.TemporaryDirectory() as tmp:
+            recovered, run = self._staged_tree(tmp)
+            real_other = recovered / "yt" / "real_other"
+            real_other.mkdir()
+            link_run = recovered / "yt" / "linked"
+            os.symlink(str(real_other), str(link_run), target_is_directory=True)
+            staged = link_run / "track.flac"  # parent 'linked' is a symlink
+            staged.write_bytes(b"\x00" * 16)
+            with mock.patch.object(recover_service, "validated_downloads_root",
+                                   return_value=tmp):
+                out = recover_service._write_provenance(
+                    str(staged), {"source_url": "https://x/y"})
+            self.assertEqual(out, "", "an in-root symlinked parent is still refused")
 
 
 if __name__ == "__main__":
