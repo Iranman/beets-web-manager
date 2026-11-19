@@ -90,11 +90,14 @@ class RecoverImportDurableRecoveryTests(unittest.TestCase):
             self._run_crash(tmp, tx_store)
             tx = self._only_running(tx_store)
             # before = after the crash: the record predates this "restart".
-            results = recovery.sweep(adapter=mock.Mock(), store=tx_store, before=time.time() + 5)
+            adapter = mock.Mock()
+            results = recovery.sweep(adapter=adapter, store=tx_store, before=time.time() + 5)
             actions = {r["operation_id"]: r for r in results}
             self.assertIn(tx["id"], actions, results)
             self.assertEqual(self._status(tx_store, tx["id"]), "Recovery Required")
-            # The import is never replayed: the sweep touched no adapter mutation.
+            # The import is never replayed: the sweep touches no adapter method at
+            # all on this path (it only transitions the record's status).
+            self.assertEqual(adapter.method_calls, [], adapter.method_calls)
 
     def test_without_the_family_tag_the_record_would_stay_running(self):
         # Control: proves the mutation_family tag is load-bearing. A Running
