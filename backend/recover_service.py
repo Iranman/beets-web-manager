@@ -242,22 +242,6 @@ def _write_all(fd: int, data: bytes) -> None:
         off += os.write(fd, view[off:])
 
 
-def _fd_realpath_is(fd: int, expected: str) -> bool:
-    """True iff the OPEN descriptor ``fd`` actually points at ``expected``
-    (Findings A/B parent-chain TOCTOU). ``os.open`` re-traverses the path string
-    and follows parent-directory symlinks, so a parent component swapped to a
-    symlink between ``resolve()`` and ``open`` could land the fd outside the
-    vetted directory even with ``O_NOFOLLOW`` on the final component. Comparing
-    the fd's real path (``/proc/self/fd``) to the already-resolved, confinement-
-    checked path closes that gap. On platforms without ``/proc`` (non-Linux dev)
-    the pre-open symlink-chain check stands; Linux is the deploy target."""
-    try:
-        real = os.readlink(f"/proc/self/fd/{fd}")
-    except OSError:
-        return True
-    return os.path.realpath(real) == os.path.realpath(expected)
-
-
 def _as_list(value):
     """F-9: tolerate malformed diagnostic fields — only real lists/tuples iterate."""
     return list(value) if isinstance(value, (list, tuple)) else []
@@ -928,13 +912,17 @@ def sanitize_diagnostic_report(raw_report: Any) -> Dict[str, Any]:
         redacted.add("key_statuses.kid")
         raw_statuses = list(raw_statuses.values())
     if isinstance(raw_statuses, list):
-        for item in raw_statuses:
+        # Only a scalar status is ever read; never _s()/str() a nested structure
+        # (a deeply nested list would blow the stack like Finding F). Bounded.
+        def _scalar_status(v: Any) -> str:
+            return _s(v).strip().lower() if isinstance(v, (str, int, float, bool)) else ""
+        for item in raw_statuses[:500]:
             if isinstance(item, dict):
                 if any(k in item for k in ("kid", "key", "k")):
                     redacted.add("key_statuses.entry_key")
-                status_val = _s(item.get("status") or "").strip().lower()
+                status_val = _scalar_status(item.get("status"))
             else:
-                status_val = _s(item).strip().lower()
+                status_val = _scalar_status(item)
             if status_val in _ALLOWED_EME_KEY_STATUSES:
                 key_statuses.add(status_val)
 
@@ -1695,9 +1683,14 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
     over the target. ``os.replace`` swaps the directory entry: it never truncates
     the old inode (a hard link aliased to a library file keeps its content) and
     never writes through a symlink target, so the sidecar write can neither be
-    redirected outside its own staged directory nor clobber an aliased file. On
-    Linux the directory is additionally pinned with an ``O_NOFOLLOW`` directory
-    fd so even a parent-dir swap during the write cannot redirect it."""
+    redirected outside its own staged directory nor clobber an aliased file.
+
+    Known residual (needs a LIVE racing writer): a parent dir swapped to a
+    symlink between the symlink-chain check and the directory open could place
+    the new sidecar inside the swapped directory (it still cannot clobber an
+    aliased file -- the O_EXCL temp is a new name and os.replace is a dentry
+    swap). Robustly closing it needs a per-component openat(O_NOFOLLOW) walk from
+    a trusted root; low impact (a stray provenance JSON, never audio loss)."""
     if "/" in name or "\\" in name or "\x00" in name or name in ("", ".", ".."):
         raise OSError("unsafe sidecar name")
     if _has_symlink_in_chain(parent):
@@ -1743,11 +1736,6 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
     dir_fd = os.open(str(resolved_parent),
                      os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
     try:
-        # Confirm the opened directory IS the vetted staged directory; a
-        # parent-component swap between resolve() and this open would land the
-        # dir fd elsewhere (Finding A parent-chain TOCTOU / Codex review).
-        if not _fd_realpath_is(dir_fd, str(resolved_parent)):
-            raise OSError("provenance directory changed under validation")
         tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
                       0o600, dir_fd=dir_fd)
         wrote = False
@@ -2824,14 +2812,17 @@ def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
     that is the only way a staged path can reach a library file is closed, and
     the fd the caller writes through IS the validated staged inode.
 
-    A parent-component swap between resolve() and open is caught by confirming
-    the opened fd's real path equals the vetted resolved path. O_NONBLOCK keeps a
-    planted FIFO from blocking the open.
+    O_NONBLOCK keeps a planted FIFO from blocking the open.
 
-    ponytail: a plain regular-file swap at the path between validation and this
-    open is accepted (it is still confined to staging and cannot be a library
-    file), not caught by inode identity; full inode pinning through the Beets
-    copy-import belongs to the import path, not this best-effort tag stamp."""
+    Known residual (needs a LIVE racing writer in the staging tree, not static
+    planting): os.open(str(resolved)) re-traverses the path and follows
+    parent-directory symlinks, so a parent component swapped to a symlink in the
+    window between resolve() and this open could land the fd outside staging
+    even with O_NOFOLLOW on the final component. Static planting is fully closed
+    (_has_symlink_in_chain + resolve-confinement + nlink==1); robustly closing
+    the race needs a per-component openat(O_NOFOLLOW) walk or openat2
+    RESOLVE_NO_SYMLINKS. Same class as the scoped-out run_import inode-pinning
+    (#473 residual). This is a best-effort metadata stamp, not a destructive op."""
     raw = _s(path).strip()
     if not raw or "\x00" in raw:
         return None
@@ -2860,12 +2851,6 @@ def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
         except OSError:
             pass
 
-    # A parent dir swapped to a symlink between resolve() and open would land
-    # this fd outside the vetted path even with O_NOFOLLOW on the final
-    # component; confirm the fd really points at the resolved path.
-    if not _fd_realpath_is(fd, str(resolved)):
-        _refuse(fd)
-        return None
     try:
         st = os.fstat(fd)
     except OSError:

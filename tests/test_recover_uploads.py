@@ -3161,6 +3161,20 @@ class RecoverSecurityHardening473(unittest.TestCase):
         self.assertIn("[TRUNCATED]", json.dumps(
             recover_service._strip_secret_fields_recursive({"deep": nested}, set())))
 
+    def test_F_raw_key_statuses_deep_nesting_does_not_crash_sanitizer(self):
+        # A deeply nested raw key_statuses value is read before stripping; it
+        # must not str()/recurse into the nested structure (QA finding).
+        nested = []
+        cur = nested
+        for _ in range(25000):
+            inner: list = []
+            cur.append(inner)
+            cur = inner
+        o = recover_service.sanitize_diagnostic_report({
+            "source_url": "https://x/y", "key_statuses": nested})
+        self.assertTrue(o["ok"])
+        self.assertEqual(o["key_statuses"], [])
+
     def test_F_very_wide_report_is_node_capped(self):
         wide = {f"k{i}": i for i in range(200000)}
         redacted: set = set()
