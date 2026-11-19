@@ -1685,12 +1685,19 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
     never writes through a symlink target, so the sidecar write can neither be
     redirected outside its own staged directory nor clobber an aliased file.
 
-    Known residual (needs a LIVE racing writer): a parent dir swapped to a
-    symlink between the symlink-chain check and the directory open could place
-    the new sidecar inside the swapped directory (it still cannot clobber an
-    aliased file -- the O_EXCL temp is a new name and os.replace is a dentry
-    swap). Robustly closing it needs a per-component openat(O_NOFOLLOW) walk from
-    a trusted root; low impact (a stray provenance JSON, never audio loss)."""
+    #793 R1: on Linux the directory is opened by descending from the TRUSTED
+    validated downloads-root fd one component at a time with
+    ``O_DIRECTORY|O_NOFOLLOW`` (via the reviewed
+    ``composite_workflows._staging_dir_fd`` walk), INCLUDING the ``recovered``
+    component itself, so a parent directory -- or ``recovered`` itself -- swapped
+    to a symlink in the window between the symlink-chain check and the open is
+    refused by the KERNEL atomically; there is no check-then-open gap for a live
+    racing writer to exploit. The recovered root is not re-resolved by pathname
+    (which would collapse a racing swap of the recovered component). When the
+    staged dir is not confinable under ``<downloads>/recovered`` it FAILS CLOSED
+    rather than writing by path. The Windows/no-dir_fd dev fallback keeps the
+    resolve+confine + O_EXCL temp + atomic ``os.replace`` path (best-effort, not
+    the deploy target)."""
     if "/" in name or "\\" in name or "\x00" in name or name in ("", ".", ".."):
         raise OSError("unsafe sidecar name")
     if _has_symlink_in_chain(parent):
@@ -1704,11 +1711,27 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
     # os.replace does not register dir_fd support on CPython, so the Linux path
     # below uses os.rename for the atomic swap.
     use_dirfd = (os.open in os.supports_dir_fd) and (os.rename in os.supports_dir_fd)
+
+    # #793 R1: confinement under <downloads>/recovered is required on EVERY path
+    # (Codex/QA #797) -- compute it regardless of dir_fd support and FAIL CLOSED
+    # when the staged dir is not under recovered, so neither the hardened walk nor
+    # the no-dir_fd fallback can ever write outside staging (provenance is always
+    # staged under recovered in production).
+    try:
+        dl_anchor = Path(validated_downloads_root()).resolve()
+        rel = resolved_parent.relative_to(dl_anchor).parts
+    except (OSError, ValueError):
+        rel = ()
+    if not rel or rel[0] != "recovered":
+        raise OSError("provenance directory is not under the recovered staging root")
+
     if not use_dirfd:
-        # Fallback (no dir_fd, e.g. Windows dev): still create an O_EXCL temp and
-        # atomically replace, so a symlinked/hard-linked target is not followed
-        # or clobbered. O_NOFOLLOW is a no-op here, but os.replace never follows
-        # the final-component symlink.
+        # No-dir_fd fallback (Windows dev): the staged dir is confirmed under
+        # recovered above; create an O_EXCL temp and atomically replace, so a
+        # symlinked/hard-linked target is not followed or clobbered. O_NOFOLLOW
+        # is a no-op where unsupported, but os.replace never follows the
+        # final-component symlink. (No kernel no-follow descent here; dir_fd is
+        # unavailable on this host, which is not the Linux deploy target.)
         tmp_path = str(resolved_parent / tmp_name)
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
         wrote = False
@@ -1733,33 +1756,40 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
             raise
         return final_path
 
-    dir_fd = os.open(str(resolved_parent),
-                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+    # Linux hardened path: descend from the trusted downloads-root anchor with
+    # O_DIRECTORY|O_NOFOLLOW per component (reusing the reviewed
+    # composite_workflows._staging_dir_fd walk), so a parent dir swapped to a
+    # symlink after the symlink-chain check above is refused by the kernel -- no
+    # check-then-open gap. The O_EXCL temp + atomic rename within that dir_fd are
+    # unchanged.
+    from backend import composite_workflows
     try:
-        tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
-                      0o600, dir_fd=dir_fd)
-        wrote = False
-        try:
-            _write_all(tfd, data)
-            os.fsync(tfd)
-            wrote = True
-        finally:
-            os.close(tfd)
-            if not wrote:
+        with composite_workflows._staging_dir_fd(dl_anchor, rel) as dir_fd:
+            tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+                          0o600, dir_fd=dir_fd)
+            wrote = False
+            try:
+                _write_all(tfd, data)
+                os.fsync(tfd)
+                wrote = True
+            finally:
+                os.close(tfd)
+                if not wrote:
+                    try:
+                        os.unlink(tmp_name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+            try:
+                os.rename(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            except OSError:
                 try:
                     os.unlink(tmp_name, dir_fd=dir_fd)
                 except OSError:
                     pass
-        try:
-            os.rename(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        except OSError:
-            try:
-                os.unlink(tmp_name, dir_fd=dir_fd)
-            except OSError:
-                pass
-            raise
-    finally:
-        os.close(dir_fd)
+                raise
+    except ValueError as exc:
+        # a symlinked/non-directory parent component was refused mid-walk
+        raise OSError(str(exc)) from exc
     return final_path
 
 
@@ -2814,15 +2844,16 @@ def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
 
     O_NONBLOCK keeps a planted FIFO from blocking the open.
 
-    Known residual (needs a LIVE racing writer in the staging tree, not static
-    planting): os.open(str(resolved)) re-traverses the path and follows
-    parent-directory symlinks, so a parent component swapped to a symlink in the
-    window between resolve() and this open could land the fd outside staging
-    even with O_NOFOLLOW on the final component. Static planting is fully closed
-    (_has_symlink_in_chain + resolve-confinement + nlink==1); robustly closing
-    the race needs a per-component openat(O_NOFOLLOW) walk or openat2
-    RESOLVE_NO_SYMLINKS. Same class as the scoped-out run_import inode-pinning
-    (#473 residual). This is a best-effort metadata stamp, not a destructive op."""
+    #793 R1: on Linux the final open descends from the TRUSTED validated
+    downloads-root fd one component at a time with ``O_DIRECTORY|O_NOFOLLOW``
+    (via the reviewed ``composite_workflows._staging_dir_fd`` walk), INCLUDING
+    the ``recovered`` component itself, and opens the leaf ``dir_fd``-relative
+    with ``O_NOFOLLOW``, so a parent component -- or ``recovered`` itself --
+    swapped to a symlink in the window between resolve() and this open is refused
+    by the KERNEL atomically; the fd can no longer land outside staging. The
+    Windows/no-dir_fd dev fallback keeps the resolve+confine
+    ``os.open(str(resolved))`` path (best-effort, not the deploy target). The
+    nlink==1 and regular-file checks on the returned fd are unchanged."""
     raw = _s(path).strip()
     if not raw or "\x00" in raw:
         return None
@@ -2839,10 +2870,31 @@ def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
             return None
     except OSError:
         return None
+    open_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    use_dirfd = os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY")
     try:
-        fd = os.open(str(resolved),
-                     os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    except OSError:
+        if use_dirfd:
+            # #793 R1: descend from the TRUSTED validated downloads-root fd one
+            # component at a time with O_DIRECTORY|O_NOFOLLOW (reusing the
+            # reviewed composite_workflows._staging_dir_fd walk), INCLUDING the
+            # ``recovered`` component itself, and open the leaf dir_fd-relative
+            # with O_NOFOLLOW, so a parent dir -- or ``recovered`` itself --
+            # swapped to a symlink after resolve() is refused by the kernel; no
+            # check-then-open gap. The downloads root is NOT re-resolved into the
+            # staged path, which would collapse a racing swap of the recovered
+            # component.
+            from backend import composite_workflows
+            dl_anchor = Path(validated_downloads_root()).resolve()
+            rel_parts = resolved.relative_to(dl_anchor).parts
+            if not rel_parts or rel_parts[0] != "recovered":
+                return None
+            with composite_workflows._staging_dir_fd(dl_anchor, rel_parts[:-1]) as parent_fd:
+                fd = os.open(rel_parts[-1], open_flags, dir_fd=parent_fd)
+        else:
+            # Windows dev fallback: resolve+confine (already validated above);
+            # dir_fd / O_NOFOLLOW no-follow semantics are a no-op on this host.
+            fd = os.open(str(resolved), open_flags)
+    except (OSError, ValueError, IndexError):
         return None
 
     def _refuse(_fd: int) -> None:
