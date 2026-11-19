@@ -188,12 +188,40 @@ def _unknown_family(st: TransactionStore, tx: Dict[str, Any]) -> Dict[str, Any]:
     """#266 item 3 (ARCH-023): a Running transaction of a mutation family this
     version cannot resolve (removed, or never claimed with evidence) that a
     previous process left behind. It is never replayed; Recovery Required
-    lets the operator see it and clear it after checking the library."""
-    note = (f"Recovered after restart: this {tx['metadata']['mutation_family']!r} transaction was left Running by "
+    lets the operator see it and clear it after checking the library.
+
+    #794: also reached by legacy recover-import records (``source ==
+    "recover_upload_singleton"``) written Running before #789 tagged them with
+    ``mutation_family="recover_import_v1"``; those have no family, so the note
+    falls back to the ``source`` label."""
+    meta = tx.get("metadata") or {}
+    label = meta.get("mutation_family") or tx.get("source") or "unknown"
+    note = (f"Recovered after restart: this {label!r} transaction was left Running by "
             "an earlier process, and this version cannot tell from engine evidence whether it changed the "
             "library. Nothing was replayed; check the library and re-plan if needed.")
     out = st.transition(tx["id"], "Running", "Recovery Required", append_logs=[note])
     return {"operation_id": tx["id"], "action": "Recovery Required" if out else "skipped", "note": note}
+
+
+def _list_all_by_status(st: TransactionStore, status: str) -> List[Dict[str, Any]]:
+    """Page through every transaction in ``status`` (#794). ``TransactionStore.list``
+    caps a page at 500, so a single call silently misses the 501st+ record of a
+    large backlog; loop by offset until the reported total is covered so the sweep
+    resolves ALL Running transactions regardless of count. De-duped by id so a
+    concurrent write shifting the mtime-ordered page can't drop or double a record.
+    """
+    seen: Dict[str, Dict[str, Any]] = {}
+    offset = 0
+    while True:
+        page, total = st.list(status=status, limit=500, offset=offset)
+        if not page:
+            break
+        for row in page:
+            seen[row.get("id")] = row
+        offset += len(page)
+        if offset >= total:
+            break
+    return list(seen.values())
 
 
 def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[TransactionStore] = None,
@@ -204,7 +232,7 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
     st = _get_store(store)
     families = _families()
     results = []
-    rows, _total = st.list(status="Running", limit=1000)
+    rows = _list_all_by_status(st, "Running")
     for tx in rows:
         meta = tx.get("metadata") or {}
         # Folder cleanup's engine rollback is resumable: it records every
@@ -235,6 +263,15 @@ def sweep(*, adapter: Optional[BeetsAdapter] = None, store: Optional[Transaction
                 results.append(_interrupted_apply(st, tx["id"]))
             elif meta.get("mutation_family"):
                 results.append(_unknown_family(st, tx))
+            elif tx.get("source") == "recover_upload_singleton":
+                # #794: a legacy Recover My Uploads singleton import written
+                # Running BEFORE #789 tagged it mutation_family="recover_import_v1".
+                # It has no family, so the family branches above skip it and it
+                # stays Running forever. Recognize it by its stable source and
+                # route it through the SAME never-replayed / never-auto-rolled-back
+                # path (Recovery Required only). Scoped to recover records; a
+                # non-recover untagged Running record is still left untouched.
+                results.append(_unknown_family(st, tx))
         elif meta.get("mutation_family") in families:
             try:
                 results.append(resolve_transaction(st.get(tx["id"]), adapter=adapter, store=st,
@@ -253,7 +290,7 @@ def _interrupted_relocation_rollbacks(st: TransactionStore, before: float) -> Li
     from backend.composite_workflows import ALBUM_RELOCATION_FAMILY
     out = []
     for status in ("Completed", "Failed"):
-        rows, _total = st.list(status=status, limit=1000)
+        rows = _list_all_by_status(st, status)
         for tx in rows:
             meta = tx.get("metadata") or {}
             req = meta.get("rollback_request")
