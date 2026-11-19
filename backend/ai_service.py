@@ -2758,14 +2758,33 @@ def _ai_batch_albums_missing_release_group(album_ids: List[Any]) -> List[int]:
 
 def _ai_batch_review_suggestion(folder: str, reason: str, identity: Dict[str, Any]) -> Dict[str, Any]:
     """The review row's suggestion: the best deterministic candidate (never
-    an AI pick). The full FolderIdentity goes in the evidence."""
+    an AI pick). The full FolderIdentity goes in the evidence.
+
+    Defect (a): a failed MusicBrainz release lookup returns no Release Group
+    (``_folder_release_preflight`` errors before it reads one), so the correct
+    Release Group never reaches ``candidates`` and a worse-scoring surviving
+    sibling becomes ``candidates[0]``. Keyed off the authoritative
+    ``auto_import`` verdict (never AI), when any release lookup failed we name
+    no Release Group and route to review rather than presenting that sibling as
+    the answer."""
+    auto = identity.get("auto_import") or {}
+    reasons = list(auto.get("reasons") or [])
     top = (identity.get("candidates") or [{}])[0]
     pf = (top.get("evidence") or {}).get("preflight") or {}
     name = Path(folder).name
     artist = _s(pf.get("release_artist")) or name
-    why = ", ".join((identity.get("auto_import") or {}).get("reasons") or []) or "not eligible"
+    album = _s(pf.get("release_title")) or name
+    why = ", ".join(reasons) or "not eligible"
+    if any(_s(r).startswith("release_lookup_failed") for r in reasons):
+        return {
+            "artist": artist, "albumartist": artist, "album": album,
+            "mb_albumid": "", "mb_releasegroupid": "",
+            "confidence": "low",
+            "reason": f"Beets skipped this folder ({reason or 'not matched'}). "
+                      f"The best MusicBrainz candidate could not be evaluated ({why}); sent to review.",
+        }
     return {
-        "artist": artist, "albumartist": artist, "album": _s(pf.get("release_title")) or name,
+        "artist": artist, "albumartist": artist, "album": album,
         "mb_albumid": _s(top.get("representative_release_id")),
         "mb_releasegroupid": _s(top.get("release_group_id")),
         "confidence": "low",
