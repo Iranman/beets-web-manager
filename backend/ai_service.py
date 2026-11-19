@@ -2758,14 +2758,37 @@ def _ai_batch_albums_missing_release_group(album_ids: List[Any]) -> List[int]:
 
 def _ai_batch_review_suggestion(folder: str, reason: str, identity: Dict[str, Any]) -> Dict[str, Any]:
     """The review row's suggestion: the best deterministic candidate (never
-    an AI pick). The full FolderIdentity goes in the evidence."""
+    an AI pick). The full FolderIdentity goes in the evidence.
+
+    Defect (a): when a seed release's MusicBrainz lookup fails, that release is
+    dropped from ``candidates`` (``folder_identity.rank_folder_candidates``), so
+    the correct Release Group never reaches the list and a worse-scoring
+    surviving sibling becomes ``candidates[0]``. Keyed off the authoritative
+    ``auto_import`` verdict (never AI), when any release lookup failed we name
+    no Release Group AND no sibling-derived album/artist, routing to review
+    rather than presenting that sibling as the answer in any field."""
+    auto = identity.get("auto_import") or {}
+    reasons = list(auto.get("reasons") or [])
     top = (identity.get("candidates") or [{}])[0]
     pf = (top.get("evidence") or {}).get("preflight") or {}
     name = Path(folder).name
     artist = _s(pf.get("release_artist")) or name
-    why = ", ".join((identity.get("auto_import") or {}).get("reasons") or []) or "not eligible"
+    album = _s(pf.get("release_title")) or name
+    why = ", ".join(reasons) or "not eligible"
+    if any(_s(r).startswith("release_lookup_failed") for r in reasons):
+        # The surviving sibling must not pose as the answer in ANY field. Its
+        # preflight name would otherwise leak into detected_album/detected_artist
+        # (and the fallback row that reads them), so fall back to neutral
+        # folder-derived text like the no-candidate ``plain_suggestion`` path.
+        return {
+            "artist": name, "albumartist": name, "album": name,
+            "mb_albumid": "", "mb_releasegroupid": "",
+            "confidence": "low",
+            "reason": f"Beets skipped this folder ({reason or 'not matched'}). "
+                      f"The best MusicBrainz candidate could not be evaluated ({why}); sent to review.",
+        }
     return {
-        "artist": artist, "albumartist": artist, "album": _s(pf.get("release_title")) or name,
+        "artist": artist, "albumartist": artist, "album": album,
         "mb_albumid": _s(top.get("representative_release_id")),
         "mb_releasegroupid": _s(top.get("release_group_id")),
         "confidence": "low",

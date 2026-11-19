@@ -57,6 +57,7 @@ import {
   existingAlbumId,
   hasAudioMismatchEvidence,
   itemMatchBucket,
+  pendingAiAutoImportVerdict,
   selectedImportRows,
   selectedImportSourceFiles,
   actionLabel,
@@ -2801,12 +2802,16 @@ export function ReviewCard({
   const upgradeRow = isQualityUpgrade(item.evidence);
   const upgradeReasonId = `quality-upgrade-reason-${item.id}`;
   const blockedActive = shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState);
+  // ARCH-005: a refused deterministic verdict is never presented as "Ready",
+  // even when the selected candidate passed its own preflight (the folder
+  // verdict can refuse an importable candidate, e.g. release_lookup_failed).
+  const readyVerdictRefused = pendingAiAutoImportVerdict(item) === false;
   const visibleMatchBucket: MatchBucket = audioMismatchActive
     ? 'audio_mismatch'
     : blockedActive
       ? 'blocked'
       : selectedMatchActive
-        ? selectedMatch?.preflight_status === 'passed'
+        ? selectedMatch?.preflight_status === 'passed' && !readyVerdictRefused
           ? 'ready'
           : selectedMatch?.preflight_status === 'failed'
             ? 'failed'

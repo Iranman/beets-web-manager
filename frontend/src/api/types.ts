@@ -340,6 +340,10 @@ export interface ReviewEvidence {
     mb_releasegroupid?: string;
   };
   preflight?: ReviewPreflight | null;
+  /** Full deterministic FolderIdentity for a beets-skip Review row (ai_service).
+   * ARCH-005: `auto_import.eligible` here is the primary authority for the
+   * Review "ready" bucket; eligible=false is an explicit refusal. */
+  deterministic_decision?: { auto_import?: { eligible: boolean; reasons: string[] } } | null;
   /** Missing-track recovery (ARCH-030): structured identity of the existing
    * album this staged download is being recovered into. Read-only. */
   recovery_carrier?: RecoveryCarrierIdentity;
@@ -389,6 +393,10 @@ export interface ReviewItem {
   mb_releasegroupurl?: string;
   mb_url?: string;
   mb_valid?: boolean;
+  /** Deterministic auto-import verdict (backend decide_auto_import); ARCH-005
+   * single authority for the Review "ready" bucket. eligible=false is an
+   * explicit refusal (reasons e.g. release_lookup_failed, no_release_group_verified). */
+  auto_import?: { eligible: boolean; reasons: string[] };
   missing_id_type?: string;
   /** Missing IDs album rows: "missing_release_group" when the album has a Release ID but no Release Group. */
   missing_reason?: 'missing_release_group' | 'missing_release_id' | string;
