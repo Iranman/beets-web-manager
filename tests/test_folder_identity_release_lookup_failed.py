@@ -10,9 +10,15 @@ invent a candidate for the 1968 RG -- it must instead refuse to present the
 sibling and route to review, keyed off the authoritative ``auto_import``
 verdict. Synthetic evaluated releases only; no MusicBrainz/AcoustID I/O."""
 import unittest
+from pathlib import Path
 
+import tests.test_import_batch_phase_b as pb
 from backend.ai_service import _ai_batch_review_suggestion
 from backend.matching.folder_identity import decide_auto_import, rank_folder_candidates
+
+
+def setUpModule():
+    pb.setUpModule()
 
 # 1968 original (correct), 1995 combined reissue (surviving worse sibling).
 RG_1968, REL_1968 = "05571372-5b11-39b7-89c5-1c02589a27c8", "10000000-0000-0000-0000-000000001968"
@@ -119,6 +125,56 @@ class ReleaseLookupFailedTests(unittest.TestCase):
         self.assertFalse(any("release_lookup_failed" in r for r in auto["reasons"]), auto)
         self.assertEqual(suggestion["mb_releasegroupid"], RG_1968)
         self.assertNotIn("could not be evaluated", suggestion["reason"])
+
+
+class FailedLookupReviewRowTests(pb._Batch):
+    """End-to-end guard for the round-2 fix: drive a Beets-skipped folder whose
+    release lookup failed through the REAL review-row path and assert the
+    surviving sibling's name never reaches the suggestion OR the review row's
+    human-facing ``detected_artist``/``detected_album`` (which a pure-function
+    test of ``_ai_batch_review_suggestion`` alone cannot pin -- those fields are
+    assigned in ``_ai_batch_process_folder`` and read by the fallback row, so a
+    future change there could reintroduce the leak)."""
+
+    def setUp(self):
+        super().setUp()
+        self.leak_title, self.leak_artist = "lady soul (deluxe)", "aretha franklin"
+        # Beets skips folder A; identify returns the failed-lookup identity whose
+        # only surviving candidate is the worse-scoring sibling (distinctive
+        # preflight name that MUST NOT leak). Folder B imports normally.
+        self.reimport[self.folders[0]] = pb.skipped(self.folders[0])
+        self.ident = {
+            "folder": "", "skip_reason": "no_strong_match",
+            "candidates": [{"release_group_id": pb.OTHER_RG, "representative_release_id": "sibling-rel",
+                            "deterministic_rank": 1, "ai_rank": None,
+                            "evidence": {"preflight": {"release_title": self.leak_title,
+                                                       "release_artist": self.leak_artist}}}],
+            "auto_import": {"eligible": False, "release_group_id": "", "release_id": "",
+                            "reasons": ["release_lookup_failed:1", "no_release_group_verified"],
+                            "post_conditions": ["beets_strong_match", "single_new_album_with_release_group"]},
+            "conflicts": [], "warnings": ["release_lookup_failed:1"], "ai_state": {"status": "not_run"},
+        }
+
+    def test_failed_lookup_review_row_never_shows_the_sibling_name(self):
+        _, folders = self.run_batch()
+        a = folders[self.folders[0]]
+        folder_name = Path(self.folders[0]).name
+
+        self.assertEqual(a["status"], "review_created")
+        self.queued.assert_called_once()
+        suggestion = self.queued.call_args.args[1]
+        # The suggestion names no Release Group and no sibling-derived text.
+        self.assertEqual(suggestion["mb_releasegroupid"], "")
+        self.assertEqual(suggestion["mb_albumid"], "")
+        self.assertNotIn(self.leak_title, suggestion.values())
+        self.assertNotIn(self.leak_artist, suggestion.values())
+        self.assertEqual(suggestion["album"], folder_name)
+        self.assertEqual(suggestion["albumartist"], folder_name)
+        self.assertIn("could not be evaluated", suggestion["reason"])
+        # The review row's human-facing detected_* fields (the round-1 leak site).
+        self.assertEqual(a["detected_artist"], folder_name)
+        self.assertEqual(a["detected_album"], folder_name)
+        self.assertEqual(a["suggested_release_group_id"], "")
 
 
 if __name__ == "__main__":
