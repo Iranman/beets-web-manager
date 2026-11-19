@@ -131,6 +131,24 @@ class RecoverImportDurableRecoveryTests(unittest.TestCase):
             recovery.sweep(adapter=mock.Mock(), store=tx_store, before=time.time() + 5)
             self.assertEqual(self._status(tx_store, tx["id"]), "Running")
 
+    def test_live_legacy_recover_record_newer_than_before_is_left_running(self):
+        # #794 Part 1 liveness guard (QA regression): the source-based branch is
+        # still gated by `updated_at < before`. A legacy recover record written by
+        # the CURRENT process (updated_at >= before) is possibly still importing and
+        # must NOT be swept to Recovery Required under it.
+        with tempfile.TemporaryDirectory() as tmp:
+            tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
+            tx = tx_store.create(
+                operation_type="Import", status="Running",
+                source="recover_upload_singleton", summary="DJ Me - Live Track",
+                metadata={"workflow": "recover_upload_singleton"},
+            )
+            adapter = mock.Mock()
+            # before predates the record -> the record is newer than this "restart".
+            recovery.sweep(adapter=adapter, store=tx_store, before=time.time() - 5)
+            self.assertEqual(self._status(tx_store, tx["id"]), "Running")
+            self.assertEqual(adapter.method_calls, [], adapter.method_calls)
+
     def _status(self, tx_store: TransactionStore, tx_id: str) -> str:
         return tx_store.get(tx_id)["status"]
 
