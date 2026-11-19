@@ -61,6 +61,35 @@ def has_audio_mismatch_evidence(item: Dict[str, Any]) -> bool:
     return bool(preflight.get("acoustid_mismatch"))
 
 
+def pending_ai_auto_import_verdict(item: Dict[str, Any]) -> Optional[bool]:
+    """The deterministic auto-import verdict for a pending_ai item (ARCH-005):
+    ``True`` eligible, ``False`` explicitly refused, ``None`` when the pipeline
+    emitted no verdict (recovery-carrier / quality-upgrade paths).
+
+    The verdict comes from backend.matching.folder_identity.decide_auto_import
+    (reasons like ``release_lookup_failed`` / ``no_release_group_verified``).
+    On the real served Review row the beets-skip producer stores it ONLY at
+    ``evidence.deterministic_decision.auto_import.eligible`` (ai_service.review
+    hands only suggestion+evidence to the queued row; the ``auto_import`` field
+    it also passes goes to folder/job state, not the row), so that is the
+    primary source. A top-level ``item.auto_import`` and
+    ``evidence.preflight.matching_decision.action_allowed`` are read as
+    defensive fallbacks for other paths. First present source wins; none
+    present -> no verdict."""
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    det = evidence.get("deterministic_decision")
+    det_auto = det.get("auto_import") if isinstance(det, dict) else None
+    if isinstance(det_auto, dict) and "eligible" in det_auto:
+        return bool(det_auto.get("eligible"))
+    auto = item.get("auto_import")
+    if isinstance(auto, dict) and "eligible" in auto:
+        return bool(auto.get("eligible"))
+    decision = (evidence.get("preflight") or {}).get("matching_decision") if isinstance(evidence.get("preflight"), dict) else None
+    if isinstance(decision, dict) and "action_allowed" in decision:
+        return bool(decision.get("action_allowed"))
+    return None
+
+
 def item_match_bucket(item: Dict[str, Any]) -> str:
     """The bucket the item's own stored state puts it in."""
     if has_audio_mismatch_evidence(item):
@@ -79,6 +108,12 @@ def item_match_bucket(item: Dict[str, Any]) -> str:
     preflight = (item.get("evidence") or {}).get("preflight")
     if preflight and preflight.get("ok") is False:
         return "failed"
+    # ARCH-005: a "ready" bucket is driven SOLELY by the deterministic verdict,
+    # never by mb_valid/preflight.ok alone. An explicit refusal is never ready
+    # (it goes to the existing no_candidate review bucket). Absent verdict keeps
+    # the current bucket, so only an explicit negative demotes from ready.
+    if pending_ai_auto_import_verdict(item) is False:
+        return "no_candidate"
     return "ready"
 
 
@@ -202,6 +237,11 @@ def should_show_blocked_bucket(item: Dict[str, Any], mbid: Any, match: Optional[
 def should_show_ready_bucket(item: Dict[str, Any], mbid: Any, match: Optional[Dict[str, Any]],
                              preview_state: Optional[Dict[str, Any]]) -> bool:
     if item.get("type") == "skipped" or has_audio_mismatch_evidence(item):
+        return False
+    # ARCH-005: a refused deterministic verdict is never Ready, even when the
+    # selected match is importable (decide_auto_import can refuse a folder whose
+    # chosen candidate is itself verified/importable, e.g. release_lookup_failed).
+    if pending_ai_auto_import_verdict(item) is False:
         return False
     if should_show_blocked_bucket(item, mbid, match, preview_state):
         return False

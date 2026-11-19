@@ -43,7 +43,15 @@ class SharedCaseTests(unittest.TestCase):
             "build_cases", ROOT / "tests" / "fixtures" / "build_import_review_decision_cases.py")
         builder = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(builder)
-        self.assertEqual([c["name"] for c in CASES], [c[0] for c in builder.CASES])
+        # Finding C: compare the full generated CONTENT (name + input + expected),
+        # not just case names, so a stale fixture cannot pass. Rebuild exactly as
+        # the builder's main() does and round-trip through JSON so the comparison
+        # matches the on-disk types (the fixture is loaded from JSON).
+        rebuilt = []
+        for name, it, mbid, selected, state in builder.CASES:
+            entry = {"item": it, "mbid": mbid, "selected_match": selected, "target_preview_state": state}
+            rebuilt.append({"name": name, "input": entry, "expected": decision.decide(copy.deepcopy(entry))})
+        self.assertEqual(CASES, json.loads(json.dumps(rebuilt)))
 
     def test_every_decision_carries_the_full_payload(self):
         keys = {"match_bucket", "blocked", "ready", "can_apply", "apply_block_reason", "block_reason", "next_action",
@@ -128,6 +136,43 @@ class DecisionRuleTests(unittest.TestCase):
                          ("audio_mismatch", False, False))
         skipped = self._decide("skipped item")
         self.assertEqual((skipped["blocked"], skipped["ready"]), (False, False))
+
+    def test_a_refused_deterministic_verdict_is_never_a_ready_bucket(self):
+        # ARCH-005 defect (b): backend/import_review_decision owns this.
+        # REAL served-row shape: verdict only at evidence.deterministic_decision.auto_import.
+        real = self._decide("refused folder (deterministic_decision only)")
+        self.assertEqual((real["match_bucket"], real["ready"]), ("no_candidate", False))
+        # Refused folder WITH an importable selected match: still never Ready.
+        with_match = self._decide("refused folder with an importable match")
+        self.assertEqual((with_match["match_bucket"], with_match["ready"]), ("no_candidate", False))
+        # Defensive fallback sources also demote.
+        self.assertEqual(self._decide("refused pending_ai suggestion")["match_bucket"], "no_candidate")
+        self.assertEqual(self._decide("refused by matching decision")["match_bucket"], "no_candidate")
+        # A genuine eligible verdict (real shape or fallback), and no verdict at all, stay 'ready'.
+        self.assertEqual(self._decide("eligible folder (deterministic_decision only)")["match_bucket"], "ready")
+        self.assertTrue(self._decide("eligible folder (deterministic_decision only)")["ready"])
+        self.assertEqual(self._decide("eligible pending_ai suggestion")["match_bucket"], "ready")
+        self.assertEqual(self._decide("no-verdict pending_ai keeps its bucket")["match_bucket"], "ready")
+        # Unit-level: the helper reads the real location first, then fallbacks, then absence.
+        self.assertIs(decision.pending_ai_auto_import_verdict(
+            {"evidence": {"deterministic_decision": {"auto_import": {"eligible": False}}}}), False)
+        self.assertIs(decision.pending_ai_auto_import_verdict(
+            {"evidence": {"deterministic_decision": {"auto_import": {"eligible": True}}}}), True)
+        self.assertIs(decision.pending_ai_auto_import_verdict({"auto_import": {"eligible": False}}), False)
+        self.assertIs(decision.pending_ai_auto_import_verdict(
+            {"evidence": {"preflight": {"matching_decision": {"action_allowed": False}}}}), False)
+        self.assertIsNone(decision.pending_ai_auto_import_verdict({"type": "pending_ai"}))
+
+    def test_the_queue_ready_filter_is_verdict_gated(self):
+        # ARCH-005: the server-side Ready filter/count excludes a refused folder.
+        from backend import import_review_service as svc
+        ready_base = {"type": "pending_ai", "status": "Pending AI", "mb_valid": True, "mb_albumid": REL}
+        self.assertTrue(svc._review_queue_status_matches(dict(ready_base), "ready"))
+        refused = {**ready_base, "evidence": {"deterministic_decision":
+                   {"auto_import": {"eligible": False, "reasons": ["release_lookup_failed:1"]}}}}
+        self.assertFalse(svc._review_queue_status_matches(refused, "ready"))
+        eligible = {**ready_base, "evidence": {"deterministic_decision": {"auto_import": {"eligible": True}}}}
+        self.assertTrue(svc._review_queue_status_matches(eligible, "ready"))
 
     def test_an_id_is_required(self):
         self.assertEqual(self._decide("no ID entered, album")["apply_block_reason"],

@@ -126,6 +126,30 @@ CASES = [
     ("skipped item", item(type="skipped", blocked_reason="Skipped by operator."), RG, match(), preview()),
     ("no candidate", item(mb_valid=False, mb_albumid=""), "", None, None),
     ("other type with a valid ID", item(type="needs_review", mb_valid=True), RG, None, None),
+    # ARCH-005 defect (b): a refused deterministic verdict is never a ready match,
+    # even with a syntactically valid mb_albumid. It goes to the no_candidate bucket.
+    # REAL served-row shape: the verdict lives ONLY at evidence.deterministic_decision.auto_import
+    # (ai_service.review stores suggestion+evidence on the row; evidence carries the identity dict).
+    ("refused folder (deterministic_decision only)",
+     item(evidence={"origin_step": "beets_skip", "deterministic_decision":
+          {"auto_import": {"eligible": False, "reasons": ["release_lookup_failed:1"]}}}), RG, None, None),
+    # Refused folder whose chosen candidate is itself importable (decide_auto_import still
+    # refuses, e.g. release_lookup_failed): selecting the match must NOT make it Ready.
+    ("refused folder with an importable match",
+     item(evidence={"deterministic_decision":
+          {"auto_import": {"eligible": False, "reasons": ["no_release_group_verified"]}}}), RG, match(), preview()),
+    # Defensive fallback sources (other paths): top-level auto_import and preflight.matching_decision.
+    ("refused pending_ai suggestion",
+     item(auto_import={"eligible": False, "reasons": ["release_lookup_failed:1"]}), RG, None, None),
+    ("refused by matching decision",
+     item(evidence={"preflight": {"matching_decision": {"action_allowed": False}}}), RG, None, None),
+    # Eligible verdict (real shape) still imports and is Ready.
+    ("eligible folder (deterministic_decision only)",
+     item(evidence={"deterministic_decision": {"auto_import": {"eligible": True, "reasons": []}}}),
+     RG, match(), preview()),
+    ("eligible pending_ai suggestion", item(auto_import={"eligible": True, "reasons": []}), RG, match(), preview()),
+    # No verdict emitted (recovery-carrier / quality-upgrade): the current bucket is preserved (ready).
+    ("no-verdict pending_ai keeps its bucket", item(), RG, match(), preview()),
 ]
 
 

@@ -15,6 +15,7 @@ from backend.ai_evidence_service import _enrich_track_ai_candidate
 from backend.pending_review_store import _AI_PENDING_FILE, _ai_pending_lock, _load_pending_reviews, _save_pending_reviews, _trusted_stored_review_path
 from backend.ai_batch_state_service import _MUSIC_FORMAT_POLICY_REVIEW_NOTE, _is_music_format_policy_handled_error
 from backend.import_reconciliation_service import _import_review_auto_job_for_key, _resolve_import_review_selected_audio_file, _review_paths_equal, _review_status_key
+from backend.import_review_decision import pending_ai_auto_import_verdict
 from backend.app_runtime import _path_has_symlink_component_under, _path_is_under, _path_lexically_under, _redact_security_text
 from helpers_mb import _fetch_mb_recording_details, _resolve_release_group_to_release, _mb_release_group_candidates
 from backend.beets_adapter import lib
@@ -198,6 +199,9 @@ def _review_queue_status_matches(row: Dict[str, Any], status_filter: str) -> boo
             and bool(row.get("mb_valid"))
             and not row.get("blocked_reason")
             and preflight.get("ok") is not False
+            # ARCH-005: a refused deterministic verdict is never counted/filtered
+            # as Ready (the verdict is the sole authority for the Ready state).
+            and pending_ai_auto_import_verdict(row) is not False
         )
     return True
 
