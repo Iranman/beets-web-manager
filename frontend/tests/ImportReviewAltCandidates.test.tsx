@@ -99,6 +99,27 @@ describe('AltCandidatesPanel', () => {
     expect(within(rows[1]).getByText('Suggestion')).toBeTruthy();
   });
 
+  it('preserves the backend array order verbatim (never re-sorts by score, rank, or best-verified)', () => {
+    // Deliberately scrambled: the backend put a low-score unvalidated suggestion
+    // FIRST and the high-score best-verified match SECOND. Any client-side
+    // re-sort (by score desc, deterministic_rank, or is_best_verified) would
+    // move the best match to row 0. The panel must render the given order.
+    const scrambled: ReviewAltCandidates = {
+      best_verified_release_group_id: RG_BEST,
+      auto_import: { eligible: false, reasons: [] },
+      candidates: [
+        { ...altCandidates.candidates[1], deterministic_rank: 2, score: 0.40, is_best_verified: false, action_allowed: false },
+        { ...altCandidates.candidates[0], deterministic_rank: 1, score: 0.97, is_best_verified: true, action_allowed: true },
+      ],
+    };
+    render(<AltCandidatesPanel item={baseItem({ alt_candidates: scrambled })} onUseCandidate={() => undefined} />);
+    const rows = screen.getAllByTestId('alt-candidate');
+    expect(rows).toHaveLength(2);
+    // Row 0 is the given-first suggestion, row 1 the given-second best match.
+    expect(within(rows[0]).getByText('Suggestion')).toBeTruthy();
+    expect(within(rows[1]).getByText('Best verified match')).toBeTruthy();
+  });
+
   it('distinguishes a validated candidate from a suggestion in text (not colour alone)', () => {
     render(<AltCandidatesPanel item={baseItem({ alt_candidates: altCandidates })} onUseCandidate={() => undefined} />);
     expect(screen.getByText('Best verified match')).toBeTruthy();
