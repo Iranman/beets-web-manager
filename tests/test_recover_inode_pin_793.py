@@ -20,6 +20,22 @@ from backend import recover_service
 from backend.transaction_engine import TransactionStore
 
 
+def _ctime_discriminates(tmpdir: str) -> bool:
+    """True if this platform's st_ctime_ns bumps on a same-content rewrite with
+    a restored mtime (Linux inode-change-time, the canonical runner). On
+    platforms where st_ctime is creation time (Windows) it does not, so the
+    forged-metadata-restore cases cannot exercise the ctime discriminator and
+    are skipped there."""
+    # Probe raw os.stat (independent of _staged_identity_pin) so this reflects
+    # platform semantics, not whether the pin currently includes ctime.
+    p = Path(tmpdir) / "_ctime_probe"
+    p.write_bytes(b"x" * 64)
+    st1 = os.stat(str(p))
+    p.write_bytes(b"x" * 64)  # identical content, fresh write
+    os.utime(str(p), ns=(st1.st_atime_ns, st1.st_mtime_ns))  # forge mtime back
+    return os.stat(str(p)).st_ctime_ns != st1.st_ctime_ns
+
+
 class StagedIdentityPinUnitTests(unittest.TestCase):
     def _write(self, path: Path, data: bytes) -> None:
         path.write_bytes(data)
@@ -51,6 +67,34 @@ class StagedIdentityPinUnitTests(unittest.TestCase):
             os.replace(str(other), str(p))  # new inode under the same path
             self.assertNotEqual(recover_service._staged_identity_pin(str(p)), before)
 
+    def test_pin_includes_ctime_ns(self):
+        # Platform-independent guard that ctime is pinned (and thus compared,
+        # since the re-check is full-dict equality): fails on a pin that omits
+        # it. The behavioural forged-restore cases below are gated on ctime
+        # actually discriminating, which is reliable only on the Linux runner.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "a.flac"
+            self._write(p, b"\x01" * 4096)
+            self.assertIn("ctime_ns", recover_service._staged_identity_pin(str(p)))
+
+    def test_pin_detects_forged_metadata_restore(self):
+        # Swap-and-restore: same inode, identical content (same size+sha), mtime
+        # forged back via os.utime. Only st_ctime_ns (which os.utime cannot set)
+        # moves -- the pin must still differ.
+        with tempfile.TemporaryDirectory() as tmp:
+            if not _ctime_discriminates(tmp):
+                self.skipTest("platform st_ctime is not inode-change-time")
+            p = Path(tmp) / "a.flac"
+            self._write(p, b"\x01" * 4096)
+            before = recover_service._staged_identity_pin(str(p))
+            st = os.stat(str(p))
+            self._write(p, b"\x01" * 4096)  # identical content
+            os.utime(str(p), ns=(st.st_atime_ns, st.st_mtime_ns))  # forge mtime back
+            after = recover_service._staged_identity_pin(str(p))
+            self.assertEqual(after["sha256"], before["sha256"])
+            self.assertEqual(after["mtime_ns"], before["mtime_ns"])
+            self.assertNotEqual(after, before)  # ctime_ns discriminates
+
     def test_missing_file_pins_to_none(self):
         self.assertIsNone(recover_service._staged_identity_pin("/no/such/file.flac"))
 
@@ -76,16 +120,25 @@ class RecoverImportInodePinTests(unittest.TestCase):
         )
         return str(staged)
 
-    def _run(self, tmp, tx_store, fake_adapter, *, swap: bool, swap_during_fingerprint: bool = False):
+    def _run(self, tmp, tx_store, fake_adapter, *, swap: bool,
+             swap_during_fingerprint: bool = False, forge_restore: bool = False):
         staged = self._staged(tmp)
         real_verify = recover_service.verify_and_match_staged_upload
 
         def verify_then_maybe_swap(staged_path, **kw):
+            pre_bytes = Path(staged_path).read_bytes() if forge_restore else None
+            pre_stat = os.stat(staged_path) if forge_restore else None
             res = real_verify(staged_path, **kw)
             if swap and res.get("ok"):
                 # Attacker replaces the regular file's content on the SAME path
                 # AFTER verification returns, BEFORE the beets copy.
                 Path(res["staged_file"]).write_bytes(b"\xff" * 8192)
+            if forge_restore and res.get("ok"):
+                # Swap-and-restore: rewrite the ORIGINAL content and forge mtime
+                # back after verification. dev/ino/size/sha/mtime all match the
+                # pin; only ctime (which os.utime cannot set) moves.
+                Path(res["staged_file"]).write_bytes(pre_bytes)
+                os.utime(res["staged_file"], ns=(pre_stat.st_atime_ns, pre_stat.st_mtime_ns))
             return res
 
         # The identity-deciding read. When swap_during_fingerprint is set, the
@@ -144,6 +197,19 @@ class RecoverImportInodePinTests(unittest.TestCase):
             tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
             fake_adapter = self._adapter()
             res = self._run(tmp, tx_store, fake_adapter, swap=False, swap_during_fingerprint=True)
+            self.assertFalse(res.get("imported"))
+            self.assertEqual(res.get("status"), "verification_failed")
+            fake_adapter.run_import.assert_not_called()
+
+    def test_forged_metadata_restore_is_refused(self):
+        # Swap-and-restore with forged mtime: dev/ino/size/sha/mtime match the
+        # pin, only ctime moved. The import must still be refused (ctime pin).
+        with tempfile.TemporaryDirectory() as tmp:
+            if not _ctime_discriminates(tmp):
+                self.skipTest("platform st_ctime is not inode-change-time")
+            tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
+            fake_adapter = self._adapter()
+            res = self._run(tmp, tx_store, fake_adapter, swap=False, forge_restore=True)
             self.assertFalse(res.get("imported"))
             self.assertEqual(res.get("status"), "verification_failed")
             fake_adapter.run_import.assert_not_called()

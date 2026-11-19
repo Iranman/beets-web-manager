@@ -2369,9 +2369,14 @@ def _staged_identity_pin(path: str) -> Optional[Dict[str, Any]]:
     between verification and that copy would import substituted audio under the
     verified identity. Pinning (st_dev, st_ino, st_size, st_mtime_ns) + a
     streaming sha256 and re-checking it immediately before the copy detects
-    both swap shapes. fstat + read share ONE O_NOFOLLOW fd so the stat and the
-    hashed bytes describe the same open file. Returns ``None`` (treated as a
-    fail-closed mismatch by the caller) if the file cannot be pinned."""
+    both swap shapes. ``st_ctime_ns`` is also pinned: a swap-and-restore that
+    rewrites the file with the original content and forges ``st_mtime_ns`` back
+    via ``os.utime`` would leave dev/ino/size/sha/mtime matching, but ctime
+    (inode change time) bumps on any write and cannot be set by ``os.utime``,
+    so including it detects the forgery. fstat + read share ONE O_NOFOLLOW fd
+    so the stat and the hashed bytes describe the same open file. Returns
+    ``None`` (treated as a fail-closed mismatch by the caller) if the file
+    cannot be pinned."""
     try:
         # O_NONBLOCK so a FIFO swapped onto the path cannot block this open
         # before the S_ISREG reject below (local DoS); it is a no-op on a real
@@ -2397,6 +2402,7 @@ def _staged_identity_pin(path: str) -> Optional[Dict[str, Any]]:
             "ino": st.st_ino,
             "size": st.st_size,
             "mtime_ns": st.st_mtime_ns,
+            "ctime_ns": st.st_ctime_ns,
             "sha256": h.hexdigest(),
         }
     except OSError:
