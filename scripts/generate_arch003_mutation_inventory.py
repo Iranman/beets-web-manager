@@ -277,6 +277,11 @@ _REVIEWED_RULE_DETAILS = {
         "review_reason": "#548 (security F1): recovery_service.mark_staging_folder_kept writes the .bwm_kept_for_retry marker in a staging folder directly under the validated <downloads>/_beets_missing_import root. It descends fd-relative with O_DIRECTORY|O_NOFOLLOW, creates a fresh O_CREAT|O_EXCL|O_NOFOLLOW temp there and renames it over the marker with dir_fd, so a planted symlink or hardlink is replaced, never written through; on error it unlinks only its own temp. Never touches MUSIC_ROOT or library media.",
         "reviewed_in_pr": 553,
     },
+    "reviewed-473-recover-provenance-atomic-write": {
+        "domain": "import_reconciliation",
+        "review_reason": "#473 (security owner classification): recover_service._atomic_write_in_recovered persists the .recover.json provenance sidecar beside a staged recovery file under the validated <downloads>/recovered tree. The full parent chain is symlink-checked, the payload is written to a fresh O_CREAT|O_EXCL|O_NOFOLLOW temp (dir-fd relative on Linux) and atomically renamed over the target, so a planted symlink or hard-linked sidecar is replaced via a dentry swap -- never written through or truncated; on any failure it unlinks only its own temp. Never touches MUSIC_ROOT or authoritative library media; same staging-only disposition as the other recover_service download-staging sinks. Independently reviewed (Codex + QA).",
+        "reviewed_in_pr": None,
+    },
     "reviewed-wave26-pretracking-filename-repair": {
         "domain": "import_reconciliation",
         "review_reason": "Wave 26 independent review: beets_client.move_file used only to strip a broken template token from a file's own name (same directory, collision-avoided, exception-wrapped) on a file that reimport_disk's own docstring confirms is 'not in the beets DB' at this point -- no DB row exists yet to protect or verify against. A real engine-native atomic rename, not a fabricated transaction family; genuinely lower-risk than a DB-tracked mutation, but not yet composed through a dedicated controlled family -- tracked in docs/TECHNICAL_DEBT.md for a future folder/file-rename primitive.",
@@ -407,6 +412,12 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     # tracked TransactionStore record.
     "_probe_file_duration": ("READ_ONLY_FALSE_POSITIVE", "none", "recover-ffprobe-read-only-duration"),
     "_write_provenance": ("STAGING_ONLY", "staging_v1", "recover-provenance-sidecar-in-downloads"),
+    # #473: the provenance sidecar write moved out of _write_provenance into
+    # _atomic_write_in_recovered (O_EXCL temp + atomic rename), which introduces
+    # discovered unlink/rename/replace sinks. Same staging-only disposition.
+    "_atomic_write_in_recovered": ("STAGING_ONLY", "", "reviewed-473-recover-provenance-atomic-write"),
+    "_write_all": ("STAGING_ONLY", "", "reviewed-473-recover-provenance-atomic-write"),
+    "_open_recovered_file_for_inplace_write": ("STAGING_ONLY", "staging_v1", "recover-staging-identity-tag-stamp"),
     "_recover_fetch_one": ("STAGING_ONLY", "staging_v1", "recover-download-staging-dir-and-corrupt-cleanup"),
     "_stamp_staged_identity_tags": ("STAGING_ONLY", "staging_v1", "recover-staging-identity-tag-stamp"),
     "_prune_orphan_recover_dirs": ("STAGING_ONLY", "staging_v1", "recover-orphan-staging-dir-cleanup"),
