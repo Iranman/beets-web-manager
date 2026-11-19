@@ -2373,7 +2373,13 @@ def _staged_identity_pin(path: str) -> Optional[Dict[str, Any]]:
     hashed bytes describe the same open file. Returns ``None`` (treated as a
     fail-closed mismatch by the caller) if the file cannot be pinned."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # O_NONBLOCK so a FIFO swapped onto the path cannot block this open
+        # before the S_ISREG reject below (local DoS); it is a no-op on a real
+        # regular file. Mirrors the tag-write open's flags (R1).
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
     except OSError:
         return None
     try:
@@ -2490,6 +2496,16 @@ def verify_and_match_staged_upload(
         # claim so the outcome is never claim-less (F4).
         return {"ok": False, "error": err, "staged_file": _s(staged_path),
                 "authorization": evaluate_recover_authorization(auth_basis, auth_note)}
+
+    # #793 R2: pin the staged file's identity NOW, before ANY byte of it is read
+    # to decide identity (integrity probe, codec inspect, the AcoustID fingerprint
+    # AND its network lookup, the MusicBrainz search). Capturing the pin here -- at
+    # the start of verification rather than at this function's RETURN -- binds the
+    # import-time re-check (_recover_import_one) to the bytes that verification
+    # acted on. A content swap ANYWHERE from here through the Beets copy therefore
+    # fails the re-check, closing the wide verify-internal window (two network
+    # round-trips) that a return-time pin would silently bake in.
+    verified_pin = _staged_identity_pin(str(resolved))
 
     # Authorization: independent verification (own_account vs the owned-accounts
     # allowlist, matched against the sidecar's recorded IMMUTABLE identifiers —
@@ -2707,9 +2723,9 @@ def verify_and_match_staged_upload(
     return {
         "ok": True,
         "staged_file": str(resolved),
-        # #793 R2: pin the fingerprint-verified bytes so _recover_import_one can
-        # refuse the import if the staged file is swapped before the copy.
-        "verified_pin": _staged_identity_pin(str(resolved)),
+        # #793 R2: pin captured at the START of verification (above), so the
+        # import-time re-check binds to the bytes identity was decided from.
+        "verified_pin": verified_pin,
         "provenance_file": str(resolved.with_suffix(resolved.suffix + ".recover.json")),
         "source_url": _s(sidecar.get("source_url")),
         "source_platform": _s(sidecar.get("source_platform")),

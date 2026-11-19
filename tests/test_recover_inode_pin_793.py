@@ -76,7 +76,7 @@ class RecoverImportInodePinTests(unittest.TestCase):
         )
         return str(staged)
 
-    def _run(self, tmp, tx_store, fake_adapter, *, swap: bool):
+    def _run(self, tmp, tx_store, fake_adapter, *, swap: bool, swap_during_fingerprint: bool = False):
         staged = self._staged(tmp)
         real_verify = recover_service.verify_and_match_staged_upload
 
@@ -84,9 +84,23 @@ class RecoverImportInodePinTests(unittest.TestCase):
             res = real_verify(staged_path, **kw)
             if swap and res.get("ok"):
                 # Attacker replaces the regular file's content on the SAME path
-                # AFTER fingerprint verification, BEFORE the beets copy.
+                # AFTER verification returns, BEFORE the beets copy.
                 Path(res["staged_file"]).write_bytes(b"\xff" * 8192)
             return res
+
+        # The identity-deciding read. When swap_during_fingerprint is set, the
+        # attacker rewrites the staged file DURING verify's internal window --
+        # after the pin must already be bound, while verify is still deciding
+        # identity (the AcoustID + MusicBrainz round-trips). The swap must still
+        # be caught at import time (regression for the return-time-pin defect).
+        def identity_decision(path, **kw):
+            if swap_during_fingerprint:
+                Path(path).write_bytes(b"\xee" * 8192)
+            return {
+                "fingerprint_status": "no_result", "acoustid_status": "no_result",
+                "metadata_agreement": "degraded", "conflicts": ["no_acoustid_result"],
+                "acoustid_match_score": 0.0,
+            }
 
         with mock.patch.object(recover_service, "validated_downloads_root", return_value=tmp), \
              mock.patch("backend.app_runtime.transactions", tx_store), \
@@ -98,11 +112,8 @@ class RecoverImportInodePinTests(unittest.TestCase):
                                return_value={"ok": True, "codec": "flac"}), \
              mock.patch.object(recover_service, "_find_recovered_item_by_token",
                                return_value={"id": 1, "path": staged}), \
-             mock.patch("backend.acoustid_service._audio_identity_decision", return_value={
-                 "fingerprint_status": "no_result", "acoustid_status": "no_result",
-                 "metadata_agreement": "degraded", "conflicts": ["no_acoustid_result"],
-                 "acoustid_match_score": 0.0,
-             }), \
+             mock.patch("backend.acoustid_service._audio_identity_decision",
+                        side_effect=identity_decision), \
              mock.patch("helpers_mb._mb_recording_search", return_value=[]):
             return recover_service._recover_import_one(
                 staged, [], adapter=fake_adapter, auth_basis="own_account"
@@ -121,6 +132,18 @@ class RecoverImportInodePinTests(unittest.TestCase):
             fake_adapter = self._adapter()
             res = self._run(tmp, tx_store, fake_adapter, swap=True)
             # Fail closed: import refused, verified bytes never copied.
+            self.assertFalse(res.get("imported"))
+            self.assertEqual(res.get("status"), "verification_failed")
+            fake_adapter.run_import.assert_not_called()
+
+    def test_swap_during_verify_internal_window_is_refused(self):
+        # Regression: the pin must bind to the bytes identity was DECIDED from,
+        # not to verify's return-time bytes. A swap during the fingerprint /
+        # AcoustID / MusicBrainz window must still be refused at import.
+        with tempfile.TemporaryDirectory() as tmp:
+            tx_store = TransactionStore(root=os.path.join(tmp, "txstore"))
+            fake_adapter = self._adapter()
+            res = self._run(tmp, tx_store, fake_adapter, swap=False, swap_during_fingerprint=True)
             self.assertFalse(res.get("imported"))
             self.assertEqual(res.get("status"), "verification_failed")
             fake_adapter.run_import.assert_not_called()
