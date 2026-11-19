@@ -2404,26 +2404,22 @@ def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Opt
     except Exception as exc:
         return None, None, f"staging root validation failed: {exc}"
 
-    # Finding B: open the (now confined) file ONCE with O_NOFOLLOW and decide the
-    # regular-file and hard-link checks on the fstat'd inode, so the inode
-    # validated here is the one the caller later operates on (closes the
-    # resolve()->stat() window where a path swap could change the inode under
-    # us). O_NONBLOCK so a FIFO planted with an audio extension cannot block the
-    # worker on open (Codex review); the fstat below then rejects the
-    # non-regular inode.
+    # Require a regular file by metadata only (stat on the symlink-free resolved
+    # path), never by opening the path here: a stat never blocks, so a FIFO
+    # planted with an audio
+    # extension cannot stall the worker (``is_file()`` is False for it), and no
+    # request-derived path reaches ``os.open`` at validation time. The inode the
+    # one in-place mutation operates on is pinned at the write sink itself
+    # (``_open_recovered_file_for_inplace_write``, O_NOFOLLOW), which is where a
+    # post-validation swap must be caught.
     # Reject hard links: a freshly staged recovery file has a single link. A
     # hard link under recovered/ could point at a MUSIC_ROOT file (same inode,
     # different path, so resolve()/MUSIC_ROOT checks miss it); stamping tags on
     # it would mutate the library file in place, outside the transaction engine.
     try:
-        _vfd = os.open(str(resolved),
-                       os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        _vst = resolved.stat()
     except OSError:
-        return None, None, "staged path is not a supported audio file"
-    try:
-        _vst = os.fstat(_vfd)
-    finally:
-        os.close(_vfd)
+        return None, None, "cannot stat staged audio file"
     if not _stat.S_ISREG(_vst.st_mode):
         return None, None, "staged path is not a supported audio file"
     if _vst.st_nlink > 1:
