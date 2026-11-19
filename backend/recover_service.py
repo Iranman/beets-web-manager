@@ -29,6 +29,7 @@ Key decisions:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -2357,6 +2358,59 @@ def _has_symlink_in_chain(path: Path) -> bool:
     return False
 
 
+def _staged_identity_pin(path: str) -> Optional[Dict[str, Any]]:
+    """Capture an inode+content identity pin for an already-resolved,
+    symlink-free staged file (#793 R2).
+
+    ``verify_and_match_staged_upload`` decides identity from this file's audio
+    bytes, but ``_recover_import_one`` later copies it into the library via
+    ``beets_adapter.run_import`` (which ingests BY PATH, not by fd). A
+    regular-file swap -- a rename onto the path OR an in-place rewrite --
+    between verification and that copy would import substituted audio under the
+    verified identity. Pinning (st_dev, st_ino, st_size, st_mtime_ns) + a
+    streaming sha256 and re-checking it immediately before the copy detects
+    both swap shapes. ``st_ctime_ns`` is also pinned: a swap-and-restore that
+    rewrites the file with the original content and forges ``st_mtime_ns`` back
+    via ``os.utime`` would leave dev/ino/size/sha/mtime matching, but ctime
+    (inode change time) bumps on any write and cannot be set by ``os.utime``,
+    so including it detects the forgery. fstat + read share ONE O_NOFOLLOW fd
+    so the stat and the hashed bytes describe the same open file. Returns
+    ``None`` (treated as a fail-closed mismatch by the caller) if the file
+    cannot be pinned."""
+    try:
+        # O_NONBLOCK so a FIFO swapped onto the path cannot block this open
+        # before the S_ISREG reject below (local DoS); it is a no-op on a real
+        # regular file. Mirrors the tag-write open's flags (R1).
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            return None
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+        return {
+            "dev": st.st_dev,
+            "ino": st.st_ino,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "ctime_ns": st.st_ctime_ns,
+            "sha256": h.hexdigest(),
+        }
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Optional[Dict[str, Any]], str]:
     """Verify ``staged_path`` is a regular, non-symlink audio file inside
     ``DOWNLOADS_ROOT/recovered`` (never under ``MUSIC_ROOT``) and has a valid
@@ -2448,6 +2502,16 @@ def verify_and_match_staged_upload(
         # claim so the outcome is never claim-less (F4).
         return {"ok": False, "error": err, "staged_file": _s(staged_path),
                 "authorization": evaluate_recover_authorization(auth_basis, auth_note)}
+
+    # #793 R2: pin the staged file's identity NOW, before ANY byte of it is read
+    # to decide identity (integrity probe, codec inspect, the AcoustID fingerprint
+    # AND its network lookup, the MusicBrainz search). Capturing the pin here -- at
+    # the start of verification rather than at this function's RETURN -- binds the
+    # import-time re-check (_recover_import_one) to the bytes that verification
+    # acted on. A content swap ANYWHERE from here through the Beets copy therefore
+    # fails the re-check, closing the wide verify-internal window (two network
+    # round-trips) that a return-time pin would silently bake in.
+    verified_pin = _staged_identity_pin(str(resolved))
 
     # Authorization: independent verification (own_account vs the owned-accounts
     # allowlist, matched against the sidecar's recorded IMMUTABLE identifiers —
@@ -2665,6 +2729,9 @@ def verify_and_match_staged_upload(
     return {
         "ok": True,
         "staged_file": str(resolved),
+        # #793 R2: pin captured at the START of verification (above), so the
+        # import-time re-check binds to the bytes identity was decided from.
+        "verified_pin": verified_pin,
         "provenance_file": str(resolved.with_suffix(resolved.suffix + ".recover.json")),
         "source_url": _s(sidecar.get("source_url")),
         "source_platform": _s(sidecar.get("source_platform")),
@@ -3093,6 +3160,31 @@ def _recover_import_one(
     match_source = verified["match_source"]
     # The verified authorization record travels onto EVERY outcome below (F4).
     authorization = verified.get("authorization")
+
+    # #793 R2: the verified identity was decided from this staged file's audio
+    # bytes inside verify_and_match_staged_upload. run_import copies BY PATH, so
+    # a regular-file swap (rename onto the path OR in-place rewrite) between
+    # verification and the copy would import substituted audio under the verified
+    # identity. Re-pin the SAME path now, before the file is consumed (conversion
+    # reads it, tag-stamping and the Beets copy follow), and refuse on any
+    # mismatch. FAIL CLOSED: a missing verified pin or an unreadable current pin
+    # both refuse -- never copy unverified bytes.
+    verified_pin = verified.get("verified_pin")
+    current_pin = _staged_identity_pin(resolved_file)
+    if not verified_pin or current_pin != verified_pin:
+        log.append(
+            f"  [recover-import] Refusing {Path(resolved_file).name}: staged file "
+            "changed after fingerprint verification (identity pin mismatch)"
+        )
+        return {
+            "staged_file": resolved_file,
+            "imported": False,
+            "status": "verification_failed",
+            "final_action": "reject",
+            "provenance_status": "unavailable",
+            "authorization": authorization,
+            "error": "staged file changed after fingerprint verification; import refused",
+        }
 
     # Always enforce existing-library conflict protection before importing.
     existing = _find_existing_library_conflict(artist, title, mb_trackid, adapter=adapter)
