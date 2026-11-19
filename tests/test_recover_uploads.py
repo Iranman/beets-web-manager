@@ -10,6 +10,7 @@ import contextlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
@@ -3117,11 +3118,20 @@ class RecoverSecurityHardening473(unittest.TestCase):
             self.assertEqual(mf.title, "T")
 
     def _gen_flac(self, path, duration=1):
-        subprocess.run(
-            ["ffmpeg", "-nostdin", "-y", "-f", "lavfi",
-             "-i", f"sine=frequency=440:duration={duration}",
-             "-c:a", "flac", str(path)],
-            check=True, capture_output=True, timeout=60)
+        # A genuine minimal FLAC built in pure Python (no ffmpeg), so the
+        # Finding-B refusal/success checks run on every CI runner -- the
+        # unit-tests and security jobs have no ffmpeg on PATH, and shelling
+        # out to it made these three tests error with FileNotFoundError.
+        # Same hand-built, mutagen/mediafile-readable STREAMINFO header used
+        # by the other no-ffmpeg FLAC tests (e.g. test_arch030_recid_position_veto,
+        # test_webmanager_album_art). mediafile stamps and reads real Vorbis
+        # tags through it, so test_B_succeeds still proves a real tag write.
+        packed = (44100 << 44) | (1 << 41) | (15 << 36) | 44100
+        streaminfo = (struct.pack(">HH", 4096, 4096) + b"\x00" * 6
+                      + packed.to_bytes(8, "big") + b"\x00" * 16)
+        with open(path, "wb") as fh:
+            fh.write(b"fLaC" + bytes([0x80])
+                     + len(streaminfo).to_bytes(3, "big") + streaminfo)
 
     # ── Finding C: only canonical platform/protocol values are echoed ──
     def test_C_source_platform_is_allowlisted(self):
