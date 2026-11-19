@@ -2386,12 +2386,31 @@ def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Opt
     if resolved.suffix.lower() not in _RECOVER_AUDIO_EXT:
         return None, None, "staged path is not a supported audio file"
 
-    # Finding B: open the file ONCE with O_NOFOLLOW and decide the regular-file
-    # and hard-link checks on the fstat'd inode, so the inode validated here is
-    # the one the caller later operates on (closes the resolve()->stat() window
-    # where a path swap could change the inode under us). O_NONBLOCK so a FIFO
-    # planted with an audio extension cannot block the worker on open (Codex
-    # review); the fstat below then rejects the non-regular inode.
+    # Confine the user-provided path to DOWNLOADS_ROOT/recovered (and out of
+    # MUSIC_ROOT) BEFORE opening it, so a path derived from request input never
+    # reaches os.open unconfined (py/path-injection).
+    try:
+        music_root = Path(MUSIC_ROOT).resolve()
+        if resolved == music_root or music_root in resolved.parents:
+            return None, None, "refusing path inside MUSIC_ROOT"
+    except Exception:
+        pass
+
+    try:
+        dl_root = Path(validated_downloads_root()).resolve()
+        recovered_root = (dl_root / "recovered").resolve()
+        if resolved != recovered_root and recovered_root not in resolved.parents:
+            return None, None, "staged path must reside under DOWNLOADS_ROOT/recovered"
+    except Exception as exc:
+        return None, None, f"staging root validation failed: {exc}"
+
+    # Finding B: open the (now confined) file ONCE with O_NOFOLLOW and decide the
+    # regular-file and hard-link checks on the fstat'd inode, so the inode
+    # validated here is the one the caller later operates on (closes the
+    # resolve()->stat() window where a path swap could change the inode under
+    # us). O_NONBLOCK so a FIFO planted with an audio extension cannot block the
+    # worker on open (Codex review); the fstat below then rejects the
+    # non-regular inode.
     # Reject hard links: a freshly staged recovery file has a single link. A
     # hard link under recovered/ could point at a MUSIC_ROOT file (same inode,
     # different path, so resolve()/MUSIC_ROOT checks miss it); stamping tags on
@@ -2409,21 +2428,6 @@ def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Opt
         return None, None, "staged path is not a supported audio file"
     if _vst.st_nlink > 1:
         return None, None, "refusing staged file with multiple hard links"
-
-    try:
-        music_root = Path(MUSIC_ROOT).resolve()
-        if resolved == music_root or music_root in resolved.parents:
-            return None, None, "refusing path inside MUSIC_ROOT"
-    except Exception:
-        pass
-
-    try:
-        dl_root = Path(validated_downloads_root()).resolve()
-        recovered_root = (dl_root / "recovered").resolve()
-        if resolved != recovered_root and recovered_root not in resolved.parents:
-            return None, None, "staged path must reside under DOWNLOADS_ROOT/recovered"
-    except Exception as exc:
-        return None, None, f"staging root validation failed: {exc}"
 
     sidecar_path = resolved.with_suffix(resolved.suffix + ".recover.json")
     if _has_symlink_in_chain(sidecar_path) or not sidecar_path.is_file():
