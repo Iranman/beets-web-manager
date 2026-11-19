@@ -2919,6 +2919,14 @@ def _recover_import_one(
             source="recover_upload_singleton",
             summary=f"{artist} - {title}",
             metadata={
+                # #473: tag the recovery family at creation, not only after a
+                # successful import. A crash mid-import leaves this record
+                # Running; the restart sweep (transaction_recovery.sweep) keys on
+                # mutation_family to resolve such a record to Recovery Required
+                # (never replayed). Without it the record stayed Running forever.
+                # Literal mirrors transaction_engine.RECOVER_IMPORT_FAMILY (a
+                # persisted wire value, as other family ids are used literally).
+                "mutation_family": "recover_import_v1",
                 "workflow": "recover_upload_singleton",
                 "staged_file": resolved_file,
                 "import_file": import_file,
