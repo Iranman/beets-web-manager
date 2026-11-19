@@ -233,6 +233,31 @@ def _canonical_protocols(protocols: Any) -> List[str]:
     return sorted(out)
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte of ``data`` (os.write may short-write); callers unlink
+    the temp on any failure so a partial write never becomes the final file."""
+    view = memoryview(data)
+    off = 0
+    while off < len(view):
+        off += os.write(fd, view[off:])
+
+
+def _fd_realpath_is(fd: int, expected: str) -> bool:
+    """True iff the OPEN descriptor ``fd`` actually points at ``expected``
+    (Findings A/B parent-chain TOCTOU). ``os.open`` re-traverses the path string
+    and follows parent-directory symlinks, so a parent component swapped to a
+    symlink between ``resolve()`` and ``open`` could land the fd outside the
+    vetted directory even with ``O_NOFOLLOW`` on the final component. Comparing
+    the fd's real path (``/proc/self/fd``) to the already-resolved, confinement-
+    checked path closes that gap. On platforms without ``/proc`` (non-Linux dev)
+    the pre-open symlink-chain check stands; Linux is the deploy target."""
+    try:
+        real = os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return True
+    return os.path.realpath(real) == os.path.realpath(expected)
+
+
 def _as_list(value):
     """F-9: tolerate malformed diagnostic fields — only real lists/tuples iterate."""
     return list(value) if isinstance(value, (list, tuple)) else []
@@ -802,6 +827,12 @@ def _strip_secret_fields_recursive(
     if isinstance(obj, dict):
         cleaned: Dict[str, Any] = {}
         for k, v in obj.items():
+            # Charge the budget for EVERY entry, including discarded secret-named
+            # keys, so a very wide dict of forbidden keys cannot do unbounded
+            # redaction work (Finding F / Codex review).
+            if _budget[0] <= 0:
+                break
+            _budget[0] -= 1
             key_str = _s(k).strip()
             key_low = key_str.lower()
             if (
@@ -819,8 +850,6 @@ def _strip_secret_fields_recursive(
                 continue
             cleaned[key_str] = _strip_secret_fields_recursive(
                 v, redacted, parent_key=key_low, _depth=_depth + 1, _budget=_budget)
-            if _budget[0] <= 0:
-                break
         return cleaned
     if isinstance(obj, list):
         out: List[Any] = []
@@ -1689,10 +1718,18 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
         # the final-component symlink.
         tmp_path = str(resolved_parent / tmp_name)
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+        wrote = False
         try:
-            os.write(fd, data)
+            _write_all(fd, data)
+            wrote = True
         finally:
             os.close(fd)
+            if not wrote:
+                # A partial/failed write must never become the final file.
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
         try:
             os.replace(tmp_path, final_path)
         except OSError:
@@ -1706,13 +1743,25 @@ def _atomic_write_in_recovered(parent: Path, name: str, data: bytes) -> str:
     dir_fd = os.open(str(resolved_parent),
                      os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
     try:
+        # Confirm the opened directory IS the vetted staged directory; a
+        # parent-component swap between resolve() and this open would land the
+        # dir fd elsewhere (Finding A parent-chain TOCTOU / Codex review).
+        if not _fd_realpath_is(dir_fd, str(resolved_parent)):
+            raise OSError("provenance directory changed under validation")
         tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
                       0o600, dir_fd=dir_fd)
+        wrote = False
         try:
-            os.write(tfd, data)
+            _write_all(tfd, data)
             os.fsync(tfd)
+            wrote = True
         finally:
             os.close(tfd)
+            if not wrote:
+                try:
+                    os.unlink(tmp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
         try:
             os.rename(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except OSError:
@@ -2340,13 +2389,16 @@ def _validate_staged_recover_file(staged_path: str) -> Tuple[Optional[Path], Opt
     # Finding B: open the file ONCE with O_NOFOLLOW and decide the regular-file
     # and hard-link checks on the fstat'd inode, so the inode validated here is
     # the one the caller later operates on (closes the resolve()->stat() window
-    # where a path swap could change the inode under us).
+    # where a path swap could change the inode under us). O_NONBLOCK so a FIFO
+    # planted with an audio extension cannot block the worker on open (Codex
+    # review); the fstat below then rejects the non-regular inode.
     # Reject hard links: a freshly staged recovery file has a single link. A
     # hard link under recovered/ could point at a MUSIC_ROOT file (same inode,
     # different path, so resolve()/MUSIC_ROOT checks miss it); stamping tags on
     # it would mutate the library file in place, outside the transaction engine.
     try:
-        _vfd = os.open(str(resolved), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        _vfd = os.open(str(resolved),
+                       os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return None, None, "staged path is not a supported audio file"
     try:
@@ -2772,6 +2824,10 @@ def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
     that is the only way a staged path can reach a library file is closed, and
     the fd the caller writes through IS the validated staged inode.
 
+    A parent-component swap between resolve() and open is caught by confirming
+    the opened fd's real path equals the vetted resolved path. O_NONBLOCK keeps a
+    planted FIFO from blocking the open.
+
     ponytail: a plain regular-file swap at the path between validation and this
     open is accepted (it is still confined to staging and cannot be a library
     file), not caught by inode identity; full inode pinning through the Beets
@@ -2793,23 +2849,39 @@ def _open_recovered_file_for_inplace_write(path: str) -> Optional[int]:
     except OSError:
         return None
     try:
-        fd = os.open(str(resolved), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(str(resolved),
+                     os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError:
+        return None
+
+    def _refuse(_fd: int) -> None:
+        try:
+            os.close(_fd)
+        except OSError:
+            pass
+
+    # A parent dir swapped to a symlink between resolve() and open would land
+    # this fd outside the vetted path even with O_NOFOLLOW on the final
+    # component; confirm the fd really points at the resolved path.
+    if not _fd_realpath_is(fd, str(resolved)):
+        _refuse(fd)
         return None
     try:
         st = os.fstat(fd)
     except OSError:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        _refuse(fd)
         return None
     if not _stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        _refuse(fd)
         return None
+    # Clear O_NONBLOCK now that the inode is confirmed regular, so mediafile's
+    # ordinary blocking reads/writes behave normally.
+    try:
+        import fcntl
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+    except Exception:
+        pass
     return fd
 
 

@@ -3168,6 +3168,54 @@ class RecoverSecurityHardening473(unittest.TestCase):
         # Node cap keeps the output bounded well below the input size.
         self.assertLessEqual(len(out), recover_service._MAX_STRIP_NODES)
 
+    def test_F_very_wide_forbidden_keys_are_also_node_capped(self):
+        # Codex review: discarded secret-named keys must consume the budget too,
+        # or a wide dict of forbidden keys does unbounded redaction work. Prove
+        # the budget bounds the work by counting how many keys are inspected.
+        import itertools
+
+        class CountingKeys(dict):
+            def __init__(self):
+                super().__init__()
+                self.seen = itertools.count()
+
+            def items(self):
+                for i in range(10_000_000):
+                    next(self.seen)
+                    yield f"secret_{i}", i
+
+        wide = CountingKeys()
+        recover_service._strip_secret_fields_recursive(wide, set())
+        # Processing stopped at the node cap, nowhere near 10M entries.
+        self.assertLessEqual(next(wide.seen), recover_service._MAX_STRIP_NODES + 5)
+
+    def test_F5_fifo_staged_path_does_not_block_validation(self):
+        # Codex review: a FIFO planted with an audio extension must be rejected
+        # (O_NONBLOCK), never block the recovery worker on open.
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("os.mkfifo unavailable on this platform")
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._recovered_dir(tmp)
+            fifo = d / "pipe.flac"
+            os.mkfifo(fifo)
+            Path(str(fifo) + ".recover.json").write_text(
+                '{"source_url": "https://x/y"}', encoding="utf-8")
+            result = {}
+
+            def _run():
+                with mock.patch.object(recover_service, "validated_downloads_root",
+                                       return_value=tmp):
+                    result["out"] = recover_service._validate_staged_recover_file(str(fifo))
+
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(timeout=10)
+            self.assertFalse(t.is_alive(), "validation blocked on a FIFO")
+            resolved, _sidecar, err = result["out"]
+            self.assertIsNone(resolved)
+            self.assertIn("supported audio file", err)
+
 
 if __name__ == "__main__":
     unittest.main()
