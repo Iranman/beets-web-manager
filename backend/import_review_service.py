@@ -231,6 +231,18 @@ _ALT_CANDIDATE_CAP = 8
 _ALT_PER_TRACK_CAP = 120
 
 
+def _alt_int(value: Any) -> int:
+    """Best-effort int for a stored numeric field. The serializer is a pure,
+    total projection rendered inside the Review-queue loop (which only logs on
+    error), so a single malformed evidence blob must never raise -- that would
+    drop this item and every later pending row from the queue. A non-numeric
+    value degrades to 0, matching the surrounding ``or 0`` intent."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _alt_candidate_score(candidate: Dict[str, Any]) -> float:
     """The canonical 0..1 match score for one ranked candidate, read from the
     representative release's canonical_match (never recomputed)."""
@@ -254,7 +266,7 @@ def _alt_candidate_per_track(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(a, dict):
             continue
         rows.append({
-            "position": int(a.get("target_index") or 0) + 1,
+            "position": _alt_int(a.get("target_index")) + 1,
             "local_title": _s(a.get("local_title")),
             "mb_title": _s(a.get("target_title")),
             "recording_id": _s(a.get("target_recording_id")),
@@ -280,7 +292,7 @@ def _alt_candidate_per_track(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(m, dict):
             continue
         rows.append({
-            "position": int(m.get("track") or 0) or None,
+            "position": _alt_int(m.get("track")) or None,
             "local_title": "",
             "mb_title": _s(m.get("title")),
             "recording_id": _s(m.get("recording_id") or m.get("mb_recording_id") or m.get("mb_trackid")),
@@ -322,15 +334,15 @@ def serialize_review_alt_candidates(evidence: Optional[Dict[str, Any]],
         row = {
             "release_group_id": rgid,
             "representative_release_id": rep,
-            "deterministic_rank": int(cand.get("deterministic_rank") or 0),
+            "deterministic_rank": _alt_int(cand.get("deterministic_rank")),
             "ai_rank": cand.get("ai_rank"),
             "score": _alt_candidate_score(cand),
             "action_allowed": action_allowed,
             "review_reasons": [str(r) for r in (ev.get("review_reasons") or [])],
             "conflicts": [str(c) for c in (ev.get("conflicts") or [])],
             "coverage": {
-                "local_tracks_verified": int(ev.get("local_tracks_verified") or 0),
-                "local_tracks_total": int(ev.get("local_tracks_total") or 0),
+                "local_tracks_verified": _alt_int(ev.get("local_tracks_verified")),
+                "local_tracks_total": _alt_int(ev.get("local_tracks_total")),
             },
             "sources": [str(s) for s in (ev.get("sources") or [])],
             "edition_match": [str(e) for e in (ev.get("edition_match") or [])],

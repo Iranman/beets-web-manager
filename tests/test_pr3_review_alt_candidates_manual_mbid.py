@@ -119,6 +119,28 @@ class AltCandidateSerializerTests(unittest.TestCase):
             self.assertEqual(out["best_verified_release_group_id"], "")
             self.assertIsNone(out["auto_import"]["eligible"])
 
+    def test_nonnumeric_fields_never_raise_and_do_not_drop_later_candidates(self):
+        # QA regression (F3): the serializer runs inside the review-queue loop
+        # whose only error handling is a single outer try/except; a raise here
+        # would silently drop this item AND every subsequent pending row. A
+        # malformed numeric field must degrade, not raise, and must not hide a
+        # following well-formed candidate.
+        bad = _candidate(RG1, REL1, "notanint", 0.9, action_allowed=False,
+                         verified="x", total="y", with_alignment=True)
+        bad["matching_decision"]["evidence"]["canonical_match"]["track_alignment"]["assignments"][0]["target_index"] = "z"
+        good = _candidate(RG2, REL2, 2, 0.5, action_allowed=True, verified=2, total=2,
+                          with_alignment=False)
+        ev = {"deterministic_decision": {"auto_import": {"eligible": False, "reasons": []},
+                                         "candidates": [bad, good]}}
+        out = serialize_review_alt_candidates(ev, include_per_track=True)
+        self.assertEqual([c["release_group_id"] for c in out["candidates"]], [RG1, RG2])
+        self.assertEqual(out["candidates"][0]["deterministic_rank"], 0)
+        self.assertEqual(out["candidates"][0]["coverage"],
+                         {"local_tracks_verified": 0, "local_tracks_total": 0})
+        # the later well-formed candidate survives and is the verified best
+        self.assertTrue(out["candidates"][1]["is_best_verified"])
+        self.assertEqual(out["best_verified_release_group_id"], RG2)
+
 
 class ReviewPayloadRefusalVerdictTests(unittest.TestCase):
     """A provided ID queued to Review because it could not import must read as
