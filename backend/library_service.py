@@ -634,6 +634,36 @@ def _resolve_album_release_for_import(mb_input: str, artist: str, album: str,
     return ""
 
 
+def resolve_release_group_to_compatible_release(
+        mb_input: str, artist: str, album: str, year: str, track_count: int, log: list,
+        source_folder: str = "", existing_album_id: int = 0,
+        allow_provided_release_override: bool = False, allow_oversized_partial: bool = True,
+        wanted_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
+    """PR3/Lane C: the canonical shared resolver for a user-supplied MusicBrainz
+    release OR release-group ID -> a concrete release UUID that is COMPATIBLE
+    with the folder's actual files.
+
+    This is the single, stable entrypoint PR5 (import execution hardening) and
+    the manual-MBID path reuse instead of duplicating resolution. It delegates
+    verbatim to ``_resolve_album_release_for_import`` and inherits its two
+    non-negotiable guarantees:
+
+    * a provided/explicit Release Group is only ever resolved to a release of
+      THAT SAME Release Group (``_accept_from_release_group`` never falls back to
+      a free search that could pick another group), so partial/superset overlap
+      never silently reassigns identity; and
+    * it fails closed (returns ``""`` -> caller queues Review) whenever no
+      release of the requested group passes the folder preflight.
+
+    Returns the chosen release UUID, or ``""`` when nothing compatible resolved.
+    """
+    return _resolve_album_release_for_import(
+        mb_input, artist, album, year, track_count, log,
+        source_folder=source_folder, existing_album_id=existing_album_id,
+        allow_provided_release_override=allow_provided_release_override,
+        allow_oversized_partial=allow_oversized_partial, wanted_tracks=wanted_tracks)
+
+
 def _in_app_private_root(path: Path) -> bool:
     """Whether ``path`` is under ``<downloads>/_beets_missing_import`` or a
     playlist download root, as written or once resolved (#583: a root reached

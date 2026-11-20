@@ -359,6 +359,60 @@ export interface ReviewEvidence {
   };
 }
 
+/** PR3/Lane C: per-track matched/failed/why for one ranked alt-candidate,
+ * projected from the stored track_alignment (serialize_review_alt_candidates).
+ * A pure projection of already-stored evidence — never a MusicBrainz round-trip.
+ * The live, authoritative per-track view for a SELECTED release stays
+ * GET /api/candidates/<id>/tracks. */
+export interface ReviewAltCandidatePerTrack {
+  /** 1-based release position, or null for an unmatched local file. */
+  position: number | null;
+  local_title: string;
+  mb_title: string;
+  recording_id: string;
+  /** e.g. matched / fuzzy / unmatched_local / missing. */
+  status: string;
+  acoustid_status: string;
+  is_deterministic: boolean;
+  /** Human-readable why (conflicts/warnings, or why a track is missing/extra). */
+  reason: string;
+}
+
+/** PR3/Lane C: one ranked Release-Group candidate the deterministic identifier
+ * already produced, reshaped for the Review UI by serialize_review_alt_candidates.
+ * Rendered in the given deterministic order — never re-sorted by the frontend. */
+export interface ReviewAltCandidate {
+  release_group_id: string;
+  representative_release_id: string;
+  deterministic_rank: number;
+  ai_rank?: number | null;
+  /** Canonical 0..1 match score read from the representative release. */
+  score: number;
+  /** The auto-import verdict for THIS candidate: true = validated/importable,
+   * false = a suggestion that was not validated. */
+  action_allowed: boolean;
+  /** Why this candidate still needs review (empty when action_allowed). */
+  review_reasons: string[];
+  conflicts: string[];
+  coverage: { local_tracks_verified: number; local_tracks_total: number };
+  sources: string[];
+  edition_match: string[];
+  mb_release_url: string;
+  mb_release_group_url: string;
+  /** True only for the single best verified Release Group in this set. */
+  is_best_verified: boolean;
+  per_track?: ReviewAltCandidatePerTrack[];
+}
+
+/** PR3/Lane C: the ranked alt-candidate contract on a pending_ai review row
+ * (routes_import serialize_review_alt_candidates). `auto_import` is the folder's
+ * authoritative deterministic verdict (the "why"); candidates are ordered. */
+export interface ReviewAltCandidates {
+  best_verified_release_group_id: string;
+  auto_import: { eligible: boolean | null; reasons: string[] };
+  candidates: ReviewAltCandidate[];
+}
+
 export interface ReviewItem {
   id: string;
   type: Exclude<ReviewItemType, 'all'>;
@@ -433,6 +487,10 @@ export interface ReviewItem {
   created_by_workflow?: string;
   /** Missing-IDs rows: a Pending Review folder already claims this album. */
   in_import_review?: boolean;
+  /** PR3/Lane C: ranked alternative candidates (best verified + why +
+   * alternatives, with per-track from stored evidence) projected on each
+   * pending_ai row by serialize_review_alt_candidates. Already ranked. */
+  alt_candidates?: ReviewAltCandidates;
 }
 
 export interface ReviewQueueResponse {

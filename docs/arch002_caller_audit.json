@@ -673,6 +673,10 @@
       "DISPLAY_ONLY",
       "Revalidation loop moved from the route (F10); eligibility is evaluate_import_eligibility."
     ],
+    "backend/import_review_service.py::serialize_review_alt_candidates": [
+      "DISPLAY_ONLY",
+      "PR3/Lane C: projects the already-computed deterministic decision (evidence.deterministic_decision.candidates + auto_import, from folder_identity.rank_folder_candidates/decide_auto_import, both CANONICAL_FINAL_DECISION) into a UI-ready ranked alt-candidate shape. It reads each stored candidate's action_allowed/review_reasons for presentation only (the sole pattern hit); it never re-ranks, re-scores, gates, or decides, and the 'best verified' marker is just the first already-action_allowed candidate."
+    ],
     "backend/serializers.py::<module>": [
       "DISPLAY_ONLY",
       "Allowlist of client identity fields for POST /api/ai-pending-review and the import-with-id ai_suggestion (F16); trust fields are dropped, not decided."

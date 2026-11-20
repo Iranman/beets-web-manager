@@ -3329,6 +3329,12 @@ def _folder_import_review_payload(ctx: _FolderImportContext, mb_albumid: str, se
             f"https://musicbrainz.org/release-group/{selected_releasegroupid}"
             if selected_releasegroupid else ""
         ),
+        # PR3/Lane C: mb_valid is ONLY syntactic ("the provided album MBID is a
+        # well-formed UUID"); it is NOT a readiness/verified signal. This folder
+        # is being queued precisely because the provided ID could not be
+        # imported, so a well-formed id must never read downstream as "ready".
+        # Readiness is the authoritative deterministic verdict stamped below
+        # (slice-1 contract, read by import_review_decision).
         "mb_valid": bool(_MB_UUID_RE.match(_s(mb_albumid).strip().lower())),
         "confidence": "low",
         "albumartist": sug.get("albumartist") or Path(folder_path).parent.name,
@@ -3354,6 +3360,16 @@ def _folder_import_review_payload(ctx: _FolderImportContext, mb_albumid: str, se
         wanted_tracks=(scan_result or {}).get("wanted_tracks") or wanted_tracks,
         reason=reason,
     )
+    # PR3/Lane C: this review payload is built ONLY when a provided ID could not
+    # be imported, so stamp the authoritative slice-1 verdict as an explicit
+    # refusal. The Review "Ready" bucket is verdict-driven (import_review_decision.
+    # pending_ai_auto_import_verdict), so without this an unimportable-but-
+    # syntactically-valid id (mb_valid True) would still read as Ready. Reuse the
+    # deterministic_decision contract; do not invent a parallel readiness notion.
+    if not isinstance(evidence.get("deterministic_decision"), dict):
+        evidence["deterministic_decision"] = {
+            "auto_import": {"eligible": False, "reasons": ["manual_review_required"]}
+        }
     return sug, evidence
 
 
