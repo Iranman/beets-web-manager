@@ -32189,6 +32189,14 @@
     {
      "allow_existing": true,
      "evidence": {
+      "deterministic_decision": {
+       "auto_import": {
+        "eligible": false,
+        "reasons": [
+         "manual_review_required"
+        ]
+       }
+      },
       "packet": true
      }
     }
@@ -33466,6 +33474,14 @@
     {
      "allow_existing": true,
      "evidence": {
+      "deterministic_decision": {
+       "auto_import": {
+        "eligible": false,
+        "reasons": [
+         "manual_review_required"
+        ]
+       }
+      },
       "packet": true
      }
     }
@@ -33690,6 +33706,14 @@
     {
      "allow_existing": true,
      "evidence": {
+      "deterministic_decision": {
+       "auto_import": {
+        "eligible": false,
+        "reasons": [
+         "manual_review_required"
+        ]
+       }
+      },
       "packet": true
      }
     }
@@ -33914,6 +33938,14 @@
     {
      "allow_existing": true,
      "evidence": {
+      "deterministic_decision": {
+       "auto_import": {
+        "eligible": false,
+        "reasons": [
+         "manual_review_required"
+        ]
+       }
+      },
       "packet": true
      }
     }
@@ -34698,6 +34730,14 @@
     {
      "allow_existing": true,
      "evidence": {
+      "deterministic_decision": {
+       "auto_import": {
+        "eligible": false,
+        "reasons": [
+         "manual_review_required"
+        ]
+       }
+      },
       "packet": true
      }
     }
@@ -35056,6 +35096,14 @@
     {
      "allow_existing": true,
      "evidence": {
+      "deterministic_decision": {
+       "auto_import": {
+        "eligible": false,
+        "reasons": [
+         "manual_review_required"
+        ]
+       }
+      },
       "packet": true
      }
     }
@@ -35280,6 +35328,14 @@
     {
      "allow_existing": true,
      "evidence": {
+      "deterministic_decision": {
+       "auto_import": {
+        "eligible": false,
+        "reasons": [
+         "manual_review_required"
+        ]
+       }
+      },
       "packet": true
      }
     }

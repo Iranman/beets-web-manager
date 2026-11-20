@@ -220,6 +220,175 @@ def _import_review_suggestion_is_stale(item: Dict[str, Any]) -> bool:
     return _import_review_folder_signature(path) != stored_sig
 
 
+# PR3/Lane C: a clean, UI-ready projection of the ranked folder candidates the
+# deterministic identifier already produced (backend.matching.folder_identity.
+# rank_folder_candidates, stored verbatim at
+# evidence.deterministic_decision.candidates by ai_service.review). This only
+# RESHAPES that stored evidence -- it never re-ranks, re-scores or calls MB, so
+# it stays a pure function of the review item's evidence. Caps bound the payload
+# for a pathological folder; real folders have a handful of release groups.
+_ALT_CANDIDATE_CAP = 8
+_ALT_PER_TRACK_CAP = 120
+
+
+def _alt_int(value: Any) -> int:
+    """Best-effort int for a stored numeric field. The serializer is a pure,
+    total projection rendered inside the Review-queue loop (which only logs on
+    error), so a single malformed evidence blob must never raise -- that would
+    drop this item and every later pending row from the queue. A non-numeric
+    value (including a non-finite float like inf/nan) degrades to 0, matching
+    the surrounding ``or 0`` intent."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _alt_candidate_score(candidate: Dict[str, Any]) -> float:
+    """The canonical 0..1 match score for one ranked candidate, read from the
+    representative release's canonical_match (never recomputed). Every nested
+    hop is isinstance-guarded, not just ``or {}``: a truthy non-dict (e.g. a
+    corrupted/legacy ``matching_decision`` list) would otherwise raise on
+    ``.get`` and -- via the queue's single outer try/except -- silently drop
+    this row and every later one (same totality contract as ``_alt_int``)."""
+    md = candidate.get("matching_decision")
+    md = md if isinstance(md, dict) else {}
+    ev = md.get("evidence")
+    ev = ev if isinstance(ev, dict) else {}
+    canonical = ev.get("canonical_match")
+    canonical = canonical if isinstance(canonical, dict) else {}
+    try:
+        return round(float(canonical.get("score") or 0.0), 6)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _alt_candidate_per_track(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Per-track matched/failed/why for one candidate, sourced from the stored
+    track_alignment (no MusicBrainz round-trip). The live, authoritative
+    per-track view for a selected release stays GET /api/candidates/<id>/tracks;
+    this is the cheap stored-evidence projection for the ranked alternatives."""
+    # Every nested hop isinstance-guarded (not just ``or {}``): a truthy non-dict
+    # anywhere in the chain would raise on ``.get`` and drop this + all later
+    # queue rows. Lists are likewise coerced before iteration.
+    md = candidate.get("matching_decision")
+    md = md if isinstance(md, dict) else {}
+    cev = md.get("evidence")
+    cev = cev if isinstance(cev, dict) else {}
+    canonical = cev.get("canonical_match")
+    canonical = canonical if isinstance(canonical, dict) else {}
+    alignment = canonical.get("track_alignment")
+    alignment = alignment if isinstance(alignment, dict) else {}
+    rows: List[Dict[str, Any]] = []
+    assignments = alignment.get("assignments")
+    for a in (assignments if isinstance(assignments, list) else []):
+        if not isinstance(a, dict):
+            continue
+        conflicts = a.get("conflicts")
+        warnings = a.get("warnings")
+        reasons = (conflicts if isinstance(conflicts, list) else []) \
+            or (warnings if isinstance(warnings, list) else [])
+        rows.append({
+            "position": _alt_int(a.get("target_index")) + 1,
+            "local_title": _s(a.get("local_title")),
+            "mb_title": _s(a.get("target_title")),
+            "recording_id": _s(a.get("target_recording_id")),
+            "status": _s(a.get("status")),
+            "acoustid_status": _s(a.get("acoustid_status")),
+            "is_deterministic": bool(a.get("is_deterministic")),
+            "reason": "; ".join(str(r) for r in reasons if r),
+        })
+    unmatched = alignment.get("unmatched_local")
+    for u in (unmatched if isinstance(unmatched, list) else []):
+        if not isinstance(u, dict):
+            continue
+        rows.append({
+            "position": None,
+            "local_title": _s(u.get("local_title")),
+            "mb_title": "",
+            "recording_id": "",
+            "status": "unmatched_local",
+            "acoustid_status": "",
+            "is_deterministic": False,
+            "reason": _s(u.get("reason")) or "local file matched no release track",
+        })
+    missing = alignment.get("missing_tracks")
+    for m in (missing if isinstance(missing, list) else []):
+        if not isinstance(m, dict):
+            continue
+        rows.append({
+            "position": _alt_int(m.get("track")) or None,
+            "local_title": "",
+            "mb_title": _s(m.get("title")),
+            "recording_id": _s(m.get("recording_id") or m.get("mb_recording_id") or m.get("mb_trackid")),
+            "status": "missing",
+            "acoustid_status": "",
+            "is_deterministic": False,
+            "reason": "no local file matched this release track",
+        })
+    return rows[:_ALT_PER_TRACK_CAP]
+
+
+def serialize_review_alt_candidates(evidence: Optional[Dict[str, Any]],
+                                    *, include_per_track: bool = False) -> Dict[str, Any]:
+    """Project evidence.deterministic_decision into the ranked alt-candidate
+    contract the Import Review UI renders: the authoritative auto-import verdict
+    (the "why"), the best verified Release Group, and every ranked Release Group
+    with its deterministic rank, canonical score, verified track coverage,
+    action_allowed/review_reasons and MusicBrainz URLs. Pure reshape of already
+    stored evidence; no ranking, scoring or network here.
+    """
+    evidence = evidence if isinstance(evidence, dict) else {}
+    det = evidence.get("deterministic_decision")
+    det = det if isinstance(det, dict) else {}
+    raw = det.get("candidates")
+    raw = raw if isinstance(raw, list) else []
+    auto = det.get("auto_import") if isinstance(det.get("auto_import"), dict) else {}
+
+    out: List[Dict[str, Any]] = []
+    best_rgid = ""
+    for cand in raw[:_ALT_CANDIDATE_CAP]:
+        if not isinstance(cand, dict):
+            continue
+        ev = cand.get("evidence") if isinstance(cand.get("evidence"), dict) else {}
+        rgid = _s(cand.get("release_group_id"))
+        rep = _s(cand.get("representative_release_id"))
+        action_allowed = bool(ev.get("action_allowed"))
+        if action_allowed and not best_rgid:
+            best_rgid = rgid
+        row = {
+            "release_group_id": rgid,
+            "representative_release_id": rep,
+            "deterministic_rank": _alt_int(cand.get("deterministic_rank")),
+            "ai_rank": cand.get("ai_rank"),
+            "score": _alt_candidate_score(cand),
+            "action_allowed": action_allowed,
+            "review_reasons": [str(r) for r in (ev.get("review_reasons") if isinstance(ev.get("review_reasons"), list) else [])],
+            "conflicts": [str(c) for c in (ev.get("conflicts") if isinstance(ev.get("conflicts"), list) else [])],
+            "coverage": {
+                "local_tracks_verified": _alt_int(ev.get("local_tracks_verified")),
+                "local_tracks_total": _alt_int(ev.get("local_tracks_total")),
+            },
+            "sources": [str(s) for s in (ev.get("sources") if isinstance(ev.get("sources"), list) else [])],
+            "edition_match": [str(e) for e in (ev.get("edition_match") if isinstance(ev.get("edition_match"), list) else [])],
+            "mb_release_url": f"https://musicbrainz.org/release/{rep}" if rep else "",
+            "mb_release_group_url": f"https://musicbrainz.org/release-group/{rgid}" if rgid else "",
+        }
+        if include_per_track:
+            row["per_track"] = _alt_candidate_per_track(cand)
+        out.append(row)
+    for row in out:
+        row["is_best_verified"] = bool(best_rgid and row["release_group_id"] == best_rgid)
+    return {
+        "best_verified_release_group_id": best_rgid,
+        "auto_import": {
+            "eligible": auto.get("eligible") if "eligible" in auto else None,
+            "reasons": [str(r) for r in (auto.get("reasons") if isinstance(auto.get("reasons"), list) else [])],
+        },
+        "candidates": out,
+    }
+
+
 def _candidate_track_local_candidates(folder: str) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     if not folder:

@@ -4,8 +4,14 @@
 // even when the selected candidate is itself importable with a passed
 // preflight. This guards the component badge path (visibleMatchBucket), which
 // the decision-fixture parity suite does not render. Round-1 QA FAILED because
-// this path was ungated. Reuses existing states: the badge demotes to the
-// existing "No MB candidate" label, no new badge.
+// this path was ungated.
+//
+// PR4/Lane D label refinement (owner-confirmed, deferred from slice 1): a
+// verdict-refused folder that still HAS a candidate the matcher could not
+// evaluate (here: a provided mb_albumid + release_lookup_failed) now reads
+// "Needs decision", not the reused "No MB candidate" wording (which is reserved
+// for a folder with no candidate at all). The bucket plumbing stays
+// 'no_candidate'; only the human-facing label changes.
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -54,10 +60,14 @@ function renderCard(evidence?: ReviewEvidence) {
 }
 
 describe('ARCH-005 Import Review Ready badge is verdict-gated', () => {
-  it('a refused deterministic verdict never shows "Ready match"', () => {
+  it('a refused deterministic verdict with an unevaluable candidate reads "Needs decision", never "Ready match"', () => {
     renderCard({ origin_step: 'beets_skip', deterministic_decision: { auto_import: { eligible: false, reasons: ['release_lookup_failed:1'] } } } as unknown as ReviewEvidence);
     expect(screen.queryByText('Ready match')).toBeNull();
-    expect(screen.getByText('No MB candidate')).toBeTruthy();
+    // Refined label: the item carries a provided mb_albumid that could not be
+    // evaluated, so it is "Needs decision", not the no-candidate-at-all wording.
+    expect(screen.queryByText('No MB candidate')).toBeNull();
+    expect(screen.getByText('Needs decision')).toBeTruthy();
+    expect(screen.getByText(/best candidate could not be evaluated/i)).toBeTruthy();
   });
 
   it('an eligible verdict still shows "Ready match"', () => {
