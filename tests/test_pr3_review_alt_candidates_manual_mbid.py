@@ -141,6 +141,47 @@ class AltCandidateSerializerTests(unittest.TestCase):
         self.assertTrue(out["candidates"][1]["is_best_verified"])
         self.assertEqual(out["best_verified_release_group_id"], RG2)
 
+    def test_malformed_container_and_nonfinite_fields_never_raise(self):
+        # QA re-review of F3: the F3 fix only guarded numeric *strings*. These
+        # three corrupted-evidence shapes still reached unguarded `.get`/`int`/
+        # comprehension sites and raised (AttributeError / OverflowError /
+        # TypeError), which the queue's single outer try/except turns into a
+        # silent drop of this row AND every later pending row. Each must degrade.
+        shapes = {
+            "matching_decision_is_list": {
+                "release_group_id": RG1, "deterministic_rank": 1,
+                "matching_decision": ["corrupt"],  # truthy non-dict -> .get raises
+                "evidence": {"action_allowed": False},
+            },
+            "rank_is_infinity": {
+                "release_group_id": RG1, "deterministic_rank": float("inf"),  # int(inf) OverflowError
+                "evidence": {"action_allowed": False},
+            },
+            "review_reasons_not_a_list": {
+                "release_group_id": RG1, "deterministic_rank": 1,
+                "evidence": {"action_allowed": False, "review_reasons": 5},  # non-iterable
+            },
+            "track_alignment_is_list": {
+                "release_group_id": RG1, "deterministic_rank": 1,
+                "matching_decision": {"evidence": {"canonical_match": {"track_alignment": ["x"]}}},
+                "evidence": {"action_allowed": False},
+            },
+        }
+        good = _candidate(RG2, REL2, 2, 0.5, action_allowed=True, verified=2, total=2,
+                          with_alignment=False)
+        for name, bad in shapes.items():
+            ev = {"deterministic_decision": {"auto_import": {"eligible": False, "reasons": []},
+                                             "candidates": [bad, good]}}
+            out = serialize_review_alt_candidates(ev, include_per_track=True)
+            # never raises; the malformed row is kept (degraded) and the later
+            # well-formed candidate is NOT dropped and is still the verified best.
+            self.assertEqual([c["release_group_id"] for c in out["candidates"]], [RG1, RG2], name)
+            self.assertEqual(out["candidates"][0]["deterministic_rank"], 0 if name == "rank_is_infinity" else 1, name)
+            self.assertEqual(out["candidates"][0]["score"], 0.0, name)
+            self.assertEqual(out["candidates"][0]["review_reasons"], [], name)
+            self.assertTrue(out["candidates"][1]["is_best_verified"], name)
+            self.assertEqual(out["best_verified_release_group_id"], RG2, name)
+
 
 class ReviewPayloadRefusalVerdictTests(unittest.TestCase):
     """A provided ID queued to Review because it could not import must read as
