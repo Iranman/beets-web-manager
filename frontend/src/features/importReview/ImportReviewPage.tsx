@@ -2804,8 +2804,16 @@ export function ReviewCard({
   // an explicit user action — never auto-imported.
   const onUseAltCandidate = useCallback((rgid: string) => {
     onUseCandidate(rgid);
-    if (typeof rgid === 'string' && rgid.trim()) onValidateManualId(rgid);
-  }, [onUseCandidate, onValidateManualId]);
+    if (typeof rgid === 'string' && rgid.trim()) {
+      onValidateManualId(rgid);
+      // The manual-entry + Validate/Import controls can sit far below the
+      // candidate the user just clicked. Focus them so the click has a visible,
+      // in-view result: the user sees "Checking MusicBrainz ID…" resolve to
+      // validated and the Import action enable, instead of a greyed-out button
+      // a viewport away.
+      onFocusManualEntry();
+    }
+  }, [onUseCandidate, onValidateManualId, onFocusManualEntry]);
   const isLibraryNoMb = item.type === 'library_no_mb' && Boolean(item.album_id);
   const matchBucket = itemMatchBucket(item);
   const selectedMatchActive = Boolean(selectedMatch);

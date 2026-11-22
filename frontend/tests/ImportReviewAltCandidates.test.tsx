@@ -174,6 +174,31 @@ describe('AltCandidatesPanel', () => {
     const { container } = render(<AltCandidatesPanel item={baseItem()} onUseCandidate={() => undefined} />);
     expect(container.firstChild).toBeNull();
   });
+
+  // Declutter (progressive disclosure): the primary decision stays open; the
+  // alternatives keep every field but collapse into one disclosure.
+  it('keeps the primary candidate open and discloses the alternatives behind a summary', () => {
+    const { container } = render(<AltCandidatesPanel item={baseItem({ alt_candidates: altCandidates })} selectedRgid="" onUseCandidate={() => undefined} />);
+    // The best-verified (primary) candidate is shown directly, not inside a disclosure.
+    const best = screen.getByText('Best verified match').closest('[data-testid="alt-candidate"]');
+    expect(best).toBeTruthy();
+    expect(best?.closest('details')).toBeNull();
+    // The alternative sits inside a collapsed disclosure, still fully present.
+    expect(screen.getByText(/Show 1 other candidate/i)).toBeTruthy();
+    const details = container.querySelector('details.group');
+    expect(details).toBeTruthy();
+    expect(details?.hasAttribute('open')).toBe(false);
+    const suggestion = screen.getByText('Suggestion').closest('[data-testid="alt-candidate"]');
+    expect(details?.contains(suggestion ?? null)).toBe(true);
+    // No data was dropped: both candidates remain in the DOM.
+    expect(screen.getAllByTestId('alt-candidate')).toHaveLength(2);
+  });
+
+  it('opens the alternatives disclosure when a disclosed candidate is the selected release', () => {
+    const { container } = render(<AltCandidatesPanel item={baseItem({ alt_candidates: altCandidates })} selectedRgid={RG_ALT} onUseCandidate={() => undefined} />);
+    const details = container.querySelector('details.group');
+    expect(details?.hasAttribute('open')).toBe(true);
+  });
 });
 
 function renderCard(item: ReviewItem, extra: { selectedMatch?: unknown; manualValidation?: ManualValidationStateForTest; onValidateManualId?: () => void } = {}) {
@@ -255,5 +280,42 @@ describe('ReviewCard manual-MBID validate response', () => {
     // response buttons already cover the enabled path. Here we assert the
     // primary control is wired and present.
     expect(screen.getByRole('button', { name: /validate id/i })).toBeTruthy();
+  });
+});
+
+describe('ReviewCard "Use this release" wiring (Problem 1 regression)', () => {
+  // The album-target bug: clicking "Use this release" only populated the manual
+  // field (onUseCandidate) and never validated, so Import stayed blocked. The
+  // fix composes onUseCandidate + onValidateManualId. This renders the real
+  // ReviewCard -> AltCandidatesPanel so the regression cannot silently return.
+  it('routes a ranked candidate through BOTH onUseCandidate and onValidateManualId', () => {
+    const onUse = vi.fn();
+    const onValidate = vi.fn();
+    const item = baseItem({ alt_candidates: altCandidates });
+    render(
+      <MemoryRouter>
+        <ReviewCard
+          item={item}
+          mbid=""
+          manualFocusToken={0}
+          onMbidChange={() => undefined}
+          onUseCandidate={onUse}
+          onSelectMatch={() => undefined}
+          onFocusManualEntry={() => undefined}
+          onValidateManualId={onValidate}
+          onClearManualId={() => undefined}
+          onSuggest={() => undefined}
+          onApply={() => undefined}
+          onDismiss={() => undefined}
+          onDeleteFolder={() => undefined}
+          onCleanupFiles={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+    const best = screen.getByText('Best verified match').closest('[data-testid="alt-candidate"]');
+    expect(best).toBeTruthy();
+    fireEvent.click(within(best as HTMLElement).getByRole('button', { name: /use this release/i }));
+    expect(onUse).toHaveBeenCalledWith(RG_BEST);
+    expect(onValidate).toHaveBeenCalledWith(RG_BEST);
   });
 });

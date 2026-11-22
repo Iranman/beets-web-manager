@@ -108,10 +108,14 @@ function CandidateRow({
   return (
     <li
       data-testid="alt-candidate"
-      className={`rounded border p-3 ${candidate.is_best_verified ? 'border-emerald-500/40 bg-emerald-950/20' : 'border-graphite-700 bg-graphite-900'}`}
+      className={`rounded border p-2.5 ${candidate.is_best_verified ? 'border-emerald-500/40 bg-emerald-950/20' : 'border-graphite-700 bg-graphite-900'}`}
       aria-current={inUse ? 'true' : undefined}
     >
-      <div className="flex flex-wrap items-center gap-2">
+      {/* Compact decision row: the badge, rank, match, coverage and the action
+          on one scannable line. All supporting detail (IDs, evidence, edition,
+          reasons, per-track) lives in the "Details" disclosure below so the
+          panel leads with the decision, not the full dossier for every edition. */}
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
         <span className={`rounded-md border px-2 py-0.5 text-xs font-semibold ${status.tone}`}>{status.label}</span>
         <span className="text-xs text-muted">Rank {candidate.deterministic_rank || index + 1}</span>
         {scorePct ? <span className="text-xs font-semibold text-graphite-100">{scorePct} match</span> : null}
@@ -119,57 +123,62 @@ function CandidateRow({
           {verified}/{totalTracks} track{totalTracks === 1 ? '' : 's'} verified
         </span>
         {inUse ? <span className="text-xs font-semibold text-emerald-300">Selected</span> : null}
-      </div>
-
-      <p id={headingId} className="mt-1.5 text-xs text-muted">{status.description}</p>
-
-      {candidate.sources.length ? (
-        <div className="mt-1.5 text-xs text-muted">Evidence: {candidate.sources.join(', ')}</div>
-      ) : null}
-      {candidate.edition_match.length ? (
-        <div className="mt-0.5 text-xs text-muted">Edition: {candidate.edition_match.join(', ')}</div>
-      ) : null}
-
-      {reasons.length ? (
-        <div className="mt-2 rounded border border-amber-500/30 bg-amber-950/30 px-2 py-1.5 text-xs text-amber-200">
-          <div className="font-semibold">Why this needs review</div>
-          <ul className="mt-0.5 list-disc space-y-0.5 pl-4">
-            {reasons.map((reason) => <li key={reason}>{reason}</li>)}
-          </ul>
-        </div>
-      ) : null}
-
-      <div className="mt-2 space-y-1">
-        {candidate.mb_release_group_url ? (
-          <MbidLink entity="release-group" id={candidate.release_group_id} status={candidate.action_allowed ? 'verified' : 'suggested'} label="Release Group" />
-        ) : null}
-        {candidate.mb_release_url && candidate.representative_release_id ? (
-          <MbidLink entity="release" id={candidate.representative_release_id} status="suggested" label="Release (edition)" />
-        ) : null}
-      </div>
-
-      {perTrack.length ? (
-        <details className="mt-2 rounded border border-graphite-800 bg-graphite-950/40">
-          <summary className="cursor-pointer px-3 py-1.5 text-xs font-medium text-graphite-100">
-            Per-track detail ({perTrack.length})
-          </summary>
-          <div className="overflow-x-auto">
-            <PerTrackTable rows={perTrack} />
-          </div>
-        </details>
-      ) : null}
-
-      <div className="mt-2">
         <button
           type="button"
-          className="rounded border border-graphite-600 px-2.5 py-1 text-xs font-semibold text-graphite-100 transition-colors hover:bg-graphite-800 disabled:cursor-not-allowed disabled:opacity-40"
+          className="ml-auto rounded border border-graphite-600 px-2.5 py-1 text-xs font-semibold text-graphite-100 transition-colors hover:bg-graphite-800 disabled:cursor-not-allowed disabled:opacity-40"
           onClick={() => onUseCandidate(candidate.release_group_id)}
           disabled={!candidate.release_group_id || inUse}
+          aria-label={inUse ? `${status.label} — selected` : `Use this release — ${status.label}`}
           aria-describedby={headingId}
         >
           {inUse ? 'Selected' : 'Use this release'}
         </button>
       </div>
+
+      <details className="mt-2 rounded border border-graphite-800 bg-graphite-950/40">
+        <summary className="cursor-pointer rounded px-2.5 py-1.5 text-xs font-medium text-graphite-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
+          Details
+        </summary>
+        <div className="space-y-1.5 px-2.5 pb-2.5 pt-0.5">
+          <p id={headingId} className="text-xs text-muted">{status.description}</p>
+
+          {candidate.sources.length ? (
+            <div className="text-xs text-muted">Evidence: {candidate.sources.join(', ')}</div>
+          ) : null}
+          {candidate.edition_match.length ? (
+            <div className="text-xs text-muted">Edition: {candidate.edition_match.join(', ')}</div>
+          ) : null}
+
+          {reasons.length ? (
+            <div className="rounded border border-amber-500/30 bg-amber-950/30 px-2 py-1.5 text-xs text-amber-200">
+              <div className="font-semibold">Why this needs review</div>
+              <ul className="mt-0.5 list-disc space-y-0.5 pl-4">
+                {reasons.map((reason) => <li key={reason}>{reason}</li>)}
+              </ul>
+            </div>
+          ) : null}
+
+          <div className="space-y-1">
+            {candidate.mb_release_group_url ? (
+              <MbidLink entity="release-group" id={candidate.release_group_id} status={candidate.action_allowed ? 'verified' : 'suggested'} label="Release Group" />
+            ) : null}
+            {candidate.mb_release_url && candidate.representative_release_id ? (
+              <MbidLink entity="release" id={candidate.representative_release_id} status="suggested" label="Release (edition)" />
+            ) : null}
+          </div>
+
+          {perTrack.length ? (
+            <details className="rounded border border-graphite-800 bg-graphite-950/60">
+              <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-graphite-200">
+                Per-track detail ({perTrack.length})
+              </summary>
+              <div className="overflow-x-auto">
+                <PerTrackTable rows={perTrack} />
+              </div>
+            </details>
+          ) : null}
+        </div>
+      </details>
     </li>
   );
 }
@@ -192,6 +201,20 @@ export function AltCandidatesPanel({
   const refused = verdict.eligible === false;
   const verified = verdict.eligible === true;
 
+  // Progressive disclosure (Operate mode): the primary decision — the first
+  // ranked candidate, which is the best-verified match when one exists — stays
+  // open. The remaining alternatives keep every field but collapse into one
+  // disclosure so the page leads with the decision, not the full ranked list.
+  // Order is preserved verbatim (never re-sorted): primary is candidates[0],
+  // the rest follow in given order. The disclosure opens automatically when the
+  // currently selected release is one of the alternatives, so a prior choice is
+  // never hidden.
+  const [primary, ...rest] = alt.candidates;
+  const restSelected = rest.some(
+    (candidate) =>
+      sameMbid(selectedRgid, candidate.release_group_id) || sameMbid(selectedRgid, candidate.representative_release_id),
+  );
+
   return (
     <section className="mt-3 rounded border border-graphite-700 bg-graphite-900/60 p-3" aria-label="Ranked MusicBrainz candidates">
       <div className="flex flex-wrap items-center gap-2">
@@ -209,31 +232,58 @@ export function AltCandidatesPanel({
         </span>
       </div>
 
-      {refused ? (
+      {/* When a verified candidate exists, the "Best verified match" row below
+          plus the "Needs decision" badge already carry the message, and the
+          review card states it once — so the panel does not repeat it. Only the
+          no-verified case needs its own line here, since nothing else says it. */}
+      {refused && !alt.best_verified_release_group_id ? (
         <p className="mt-1.5 text-xs text-amber-200">
-          {alt.best_verified_release_group_id
-            ? 'Auto-import was refused. A verified candidate is below — review it before importing.'
-            : 'Auto-import was refused: the best candidate could not be evaluated. Choose a release below or enter a MusicBrainz ID.'}
+          Auto-import was refused: the best candidate could not be evaluated. Choose a release below or enter a MusicBrainz ID.
         </p>
       ) : null}
 
       {verdict.reasons.length ? (
-        <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-xs text-muted">
-          {verdict.reasons.map((reason) => <li key={reason}>{reason}</li>)}
-        </ul>
+        <details className="mt-1.5 text-xs text-muted">
+          <summary className="cursor-pointer rounded font-medium text-graphite-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
+            Why auto-import was refused ({verdict.reasons.length})
+          </summary>
+          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+            {verdict.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+          </ul>
+        </details>
       ) : null}
 
       <ul className="mt-2.5 space-y-2.5">
-        {alt.candidates.map((candidate, index) => (
+        {primary ? (
           <CandidateRow
-            key={candidate.release_group_id || index}
-            candidate={candidate}
-            index={index}
+            key={primary.release_group_id || 0}
+            candidate={primary}
+            index={0}
             selectedRgid={selectedRgid}
             onUseCandidate={onUseCandidate}
           />
-        ))}
+        ) : null}
       </ul>
+
+      {rest.length ? (
+        <details className="group mt-2.5 rounded border border-graphite-800 bg-graphite-950/40" open={restSelected || undefined}>
+          <summary className="cursor-pointer rounded px-3 py-2 text-xs font-semibold text-graphite-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
+            <span className="group-open:hidden">Show {rest.length} other candidate{rest.length === 1 ? '' : 's'}</span>
+            <span className="hidden group-open:inline">Hide {rest.length} other candidate{rest.length === 1 ? '' : 's'}</span>
+          </summary>
+          <ul className="space-y-2.5 px-3 pb-3">
+            {rest.map((candidate, i) => (
+              <CandidateRow
+                key={candidate.release_group_id || i + 1}
+                candidate={candidate}
+                index={i + 1}
+                selectedRgid={selectedRgid}
+                onUseCandidate={onUseCandidate}
+              />
+            ))}
+          </ul>
+        </details>
+      ) : null}
     </section>
   );
 }
