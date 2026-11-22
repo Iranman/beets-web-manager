@@ -128,8 +128,13 @@ class ImportReviewRecordingIdFrontendTests(unittest.TestCase):
         self.assertIn("MusicBrainz ID changed. Validate ID before importing.", handler)
         self.assertIn("delete targetPreviewKeysRef.current[item.id];", handler)
         use_candidate = _source_between(IMPORT_REVIEW_SOURCE, "const handleUseCandidate = useCallback(", "const handleSelectMatch = useCallback(")
-        self.assertIn("if (activeItem.target_kind === 'item')", use_candidate)
-        self.assertIn("delete next[activeItem.id];", use_candidate)
+        # Defect E fix (PR #813): use-candidate clears stale album match state for ALL
+        # target kinds, not only items, so a prior selectedMatch/validation/preview can
+        # never strand the album flow. The clear must stay unconditional and must still
+        # drop both the selected match and the target preview for the active item.
+        self.assertNotIn("if (activeItem.target_kind === 'item')", use_candidate)
+        self.assertIn("delete n[item.id];", use_candidate)
+        self.assertIn("delete targetPreviewKeysRef.current[item.id];", use_candidate)
 
 
 if __name__ == "__main__":
