@@ -2765,7 +2765,7 @@ export function ReviewCard({
   onUseCandidate: (mbid: string) => void;
   onSelectMatch?: (match: SelectedMatch) => void;
   onFocusManualEntry: () => void;
-  onValidateManualId: () => void;
+  onValidateManualId: (overrideValue?: string) => void;
   onClearManualId: () => void;
   onSuggest: () => void;
   onApply: () => void;
@@ -2795,6 +2795,17 @@ export function ReviewCard({
   const busy = actionState?.status === 'running';
   const [addMbidsOpen, setAddMbidsOpen] = useState(false);
   const navigate = useNavigate();
+  // "Use this release" from the ranked candidates panel has no onSelectMatch
+  // companion (unlike the carousel and the "Use This Match" buttons), so for an
+  // album target it used to only populate the manual-entry field and leave
+  // Import blocked ("Select the visible MusicBrainz match first"). Compose the
+  // existing handlers: adopt + clear stale (onUseCandidate) then validate the
+  // chosen id on the normal manual-MBID pipeline so Import unblocks. Apply stays
+  // an explicit user action — never auto-imported.
+  const onUseAltCandidate = useCallback((rgid: string) => {
+    onUseCandidate(rgid);
+    if (typeof rgid === 'string' && rgid.trim()) onValidateManualId(rgid);
+  }, [onUseCandidate, onValidateManualId]);
   const isLibraryNoMb = item.type === 'library_no_mb' && Boolean(item.album_id);
   const matchBucket = itemMatchBucket(item);
   const selectedMatchActive = Boolean(selectedMatch);
@@ -3130,7 +3141,7 @@ export function ReviewCard({
               <EvidenceSummary item={item} />
             )}
             {!isRecordingReview ? (
-              <AltCandidatesPanel item={item} selectedRgid={mbid} onUseCandidate={onUseCandidate} />
+              <AltCandidatesPanel item={item} selectedRgid={mbid} onUseCandidate={onUseAltCandidate} />
             ) : null}
             {!isRecordingReview && !suggestion && (item.evidence?.top_candidates ?? []).length > 0 ? (
               <CandidateCarousel
@@ -3184,7 +3195,7 @@ export function ReviewCard({
               sx={{ '& .MuiFormHelperText-root': { color: 'text.secondary' } }}
             />
             <div className="grid grid-cols-2 gap-2">
-              <Button size="small" variant="contained" onClick={onValidateManualId} disabled={busy || manualChecking || !mbid.trim()}>
+              <Button size="small" variant="contained" onClick={() => onValidateManualId()} disabled={busy || manualChecking || !mbid.trim()}>
                 {manualChecking ? 'Checking ID…' : 'Validate ID'}
               </Button>
               <Button size="small" variant="outlined" onClick={onClearManualId} disabled={busy || manualChecking || !mbid.trim()}>
@@ -3222,7 +3233,7 @@ export function ReviewCard({
                     </Button>
                   ) : null}
                   {manualValid && item.target_kind !== 'item' ? (
-                    <Button size="small" variant="outlined" onClick={onValidateManualId} disabled={busy || manualChecking}>
+                    <Button size="small" variant="outlined" onClick={() => onValidateManualId()} disabled={busy || manualChecking}>
                       Use This Release
                     </Button>
                   ) : null}
@@ -4931,16 +4942,29 @@ export function ImportReviewPage({
 
   const handleUseCandidate = useCallback((value: string) => {
     if (!activeItem) return;
-    setMbids((c) => ({ ...c, [activeItem.id]: value }));
-    if (activeItem.target_kind === 'item') {
-      setSelectedMatches((current) => {
-        if (!current[activeItem.id]) return current;
-        const next = { ...current };
-        delete next[activeItem.id];
-        return next;
-      });
-      delete targetPreviewKeysRef.current[activeItem.id];
-    }
+    const item = activeItem;
+    const next = typeof value === 'string' ? value : '';
+    // Adopt the chosen id AND clear any stale selection/validation/preview for
+    // this item across ALL target kinds (QA "Defect E"). Album targets used to
+    // skip this clear, so a previous selectedMatch/validation/preview stayed and
+    // the UI showed contradictory state. The explicit "Use this release" button
+    // additionally auto-validates the chosen id (see ReviewCard.onUseAltCandidate),
+    // which is what unblocks Import; Apply stays an explicit user action.
+    setMbids((current) => ({ ...current, [item.id]: next }));
+    setSelectedMatches((current) => {
+      if (!current[item.id]) return current;
+      const n = { ...current };
+      delete n[item.id];
+      return n;
+    });
+    setManualValidations((current) => {
+      if (!current[item.id]) return current;
+      const n = { ...current };
+      delete n[item.id];
+      return n;
+    });
+    setTargetPreviews((current) => { const n = { ...current }; delete n[item.id]; return n; });
+    delete targetPreviewKeysRef.current[item.id];
   }, [activeItem]);
 
   const handleSelectMatch = useCallback((match: SelectedMatch) => {
@@ -4974,10 +4998,13 @@ export function ImportReviewPage({
     delete targetPreviewKeysRef.current[item.id];
   }, [activeItem]);
 
-  const handleValidateManualId = useCallback(async () => {
+  const handleValidateManualId = useCallback(async (overrideValue?: string) => {
     if (!activeItem) return;
     const item = activeItem;
-    const value = (mbids[item.id] ?? '').trim();
+    // `overrideValue` lets "Use this release" validate the chosen id directly,
+    // without waiting for the setMbids state update to flush. A click handler
+    // can pass a SyntheticEvent here, so only a string override is honoured.
+    const value = ((typeof overrideValue === 'string' ? overrideValue : mbids[item.id]) ?? '').trim();
     if (!value) {
       setManualValidations((current) => ({ ...current, [item.id]: { status: 'error', message: 'This is not a valid MusicBrainz UUID or URL.' } }));
       return;
