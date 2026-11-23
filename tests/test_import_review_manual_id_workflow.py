@@ -452,6 +452,64 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         self.assertEqual(selected["representative_release_id"], RELEASE_ID)
         self.assertTrue(selected["is_importable"])
         self.assertTrue(selected["auto_fix_eligible"])
+        # An auto-importable safe match is of course also human-confirmable.
+        self.assertTrue(selected["manual_import_allowed"])
+
+    def test_rg_resolved_no_conflict_is_human_confirmable_even_when_auto_blocked(self):
+        # #813: the reported dead end. A correct album (Release Group resolved,
+        # every local track matched, no conflict) whose recordings are simply
+        # not in AcoustID gets action_allowed=False from the canonical decision,
+        # so it is NOT auto-importable -- but a human may still deliberately
+        # confirm-and-import it. is_importable stays False (auto gate untouched);
+        # manual_import_allowed is True so the UI can offer "Confirm & import".
+        preflight = {
+            "ok": True, "matches": 1, "expected": 1, "audio_count": 1,
+            "match_ratio": 1.0, "source_match_ratio": 1.0,
+            "matching_decision": {
+                "action_allowed": False, "manual_import_allowed": True,
+                "conflicts": [], "warnings": ["acoustid_no_result"],
+                "explanation": ("AcoustID returned no fingerprint match for these files "
+                                "(the recording is not in the AcoustID database): "
+                                "confirm the match manually in Review."),
+            },
+        }
+        selected = self.app_module._import_review_build_revalidated_match(
+            {"suggestion": {"identity_validated": True}}, _comparison(), preflight)
+        self.assertFalse(selected["is_importable"])          # auto gate still closed
+        self.assertFalse(selected["auto_fix_eligible"])       # never auto-enqueued
+        self.assertTrue(selected["manual_import_allowed"])    # human may confirm
+        self.assertNotIn("ACOUSTID_API_KEY", selected["preflight_reason"])
+
+    def test_hard_conflict_is_never_human_confirmable(self):
+        # A canonical hard conflict (wrong RG, artist/recording contradiction)
+        # is real evidence against the match: not auto-importable AND not
+        # human-confirmable.
+        preflight = {
+            "ok": True, "matches": 1, "expected": 1, "audio_count": 1,
+            "match_ratio": 1.0, "source_match_ratio": 1.0,
+            "matching_decision": {
+                "action_allowed": False, "manual_import_allowed": False,
+                "conflicts": ["artist_id_conflict"], "warnings": [],
+            },
+        }
+        selected = self.app_module._import_review_build_revalidated_match(
+            {"suggestion": {"identity_validated": True}}, _comparison(), preflight)
+        self.assertFalse(selected["is_importable"])
+        self.assertFalse(selected["manual_import_allowed"])
+
+    def test_acoustid_release_mismatch_is_never_human_confirmable(self):
+        # The fingerprint points at a DIFFERENT release: withhold both the auto
+        # and the manual-confirm affordance.
+        preflight = {
+            "ok": True, "matches": 1, "expected": 1, "audio_count": 1,
+            "match_ratio": 1.0, "source_match_ratio": 1.0,
+            "acoustid_mismatch": True,
+            "matching_decision": {"action_allowed": False, "manual_import_allowed": True,
+                                  "conflicts": [], "warnings": []},
+        }
+        selected = self.app_module._import_review_build_revalidated_match(
+            {"suggestion": {"identity_validated": True}}, _comparison(), preflight)
+        self.assertFalse(selected["manual_import_allowed"])
 
     def test_revalidated_score_ignores_ai_label_and_stored_scores(self):
         # QA B1 (#521): 3/10 track evidence must not become auto-fixable

@@ -158,3 +158,99 @@ test('Use this release validates the chosen release and unblocks Import (album t
   // ...and the Import action becomes available — a usable result from one click.
   await expect(panel.getByRole('button', { name: /Complete Verified Import|Import with ID/ }).first()).toBeEnabled();
 });
+
+// #813: a genuinely-correct album that every local file matches with 0 conflicts
+// and a Safe target preview, but which could NOT be auto-verified
+// (is_importable=false — e.g. its recordings are not in AcoustID), used to be a
+// dead end: a disabled "Import with ID" + "Not importable" banner with no way
+// to import. The backend now marks it manual_import_allowed, and the UI offers
+// an explicit "Confirm match & import" control (gated by a confirm dialog) that
+// runs the controlled import-with-id path. This test injects that state at the
+// browser boundary (REAL built frontend + real handlers) and mocks the import
+// endpoint — it performs NO real mutation, so it is safe in the serial suite.
+// It FAILS on main (no confirm control; the only import button was disabled).
+test('Confirm match & import unblocks a correct album that could not be auto-verified (#813)', async ({ page }) => {
+  const RG = 'dddddddd-4444-4444-8444-dddddddddddd';
+  const REL = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
+  const reviewFolder = `/downloads/${FOLDER}`;
+  const item = {
+    id: 'rq-manual-confirm', type: 'pending_ai', status: 'Pending AI', target_kind: 'album',
+    path: reviewFolder, folder_name: FOLDER, album: 'Review Album', artist: 'Review Artist',
+    albumartist: 'Review Artist', year: 1998, tracks: 2, mb_valid: false,
+    auto_import: { eligible: false, reasons: ['no_release_group_verified'] },
+    evidence: { deterministic_decision: { auto_import: { eligible: false, reasons: ['no_release_group_verified'] } } },
+  };
+  const selectedMatch = {
+    release_group_id: RG, representative_release_id: REL, artist: 'Review Artist', album: 'Review Album',
+    year: '1998', track_match_count: 2, total_tracks: 2, local_track_count: 2,
+    track_mapping: [
+      { num: 1, status: 'matched', source_path: `${reviewFolder}/01 Review One.flac`, local_title: 'Review One', mb_title: 'Review One', mb_trackid: '' },
+      { num: 2, status: 'matched', source_path: `${reviewFolder}/02 Review Two.flac`, local_title: 'Review Two', mb_title: 'Review Two', mb_trackid: '' },
+    ],
+    // NOT automatically importable, but a human may confirm it.
+    preflight_status: 'passed', preflight_reason: 'Every track matched; the recordings are not in AcoustID.',
+    is_release_group_usable: true, is_importable: false, manual_import_allowed: true,
+    is_partial_import: false, confidence_score: 0, confidence_level: 'not_importable', missing_track_count: 0,
+    match_count: 2, preflight_ok: false, identity_validated: true, source: 'manual',
+  };
+  const json = (route: Route, body: unknown) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  let importBody: Record<string, unknown> | null = null;
+
+  await page.route('**/api/import/review-queue**', (route) => {
+    const limit = new URL(route.request().url()).searchParams.get('limit');
+    return json(route, { ok: true, items: limit === '0' ? [] : [item], total: 1, offset: 0, limit: 100, counts: { pending_ai: 1 }, origin_counts: {} });
+  });
+  await page.route('**/api/folders/ai-suggest', (route) => json(route, { ok: true }));
+  await page.route('**/api/import-review/manual-id/validate', (route) => {
+    const payload = JSON.parse(route.request().postData() || '{}');
+    return json(route, {
+      ok: true, entity_type: 'release-group', input_mbid: payload.musicbrainz_id, release_group_id: RG,
+      representative_release_id: REL, musicbrainz_url: `https://musicbrainz.org/release-group/${RG}`,
+      selected_match: selectedMatch, status_lines: ['2/2 tracks matched', 'Release group verified against the folder.'],
+      message: 'Manual MusicBrainz ID validated.',
+    });
+  });
+  await page.route('**/api/folders/import-target-preview', (route) => json(route, {
+    ok: true, safe: true, status: 'safe', blocked_reasons: [], warnings: [], tracks_to_import_count: 2, real_conflict_count: 0,
+    tracks: [{ source_path: `${reviewFolder}/01 Review One.flac` }, { source_path: `${reviewFolder}/02 Review Two.flac` }],
+  }));
+  await page.route('**/api/folders/import-with-id', (route) => {
+    importBody = JSON.parse(route.request().postData() || '{}');
+    return json(route, { ok: true, job_id: 'job-813' });
+  });
+
+  await page.goto('/import?tab=review');
+  const panel = page.getByRole('tabpanel', { name: /Review Queue/ });
+  await expect(panel.getByRole('heading', { name: 'Review Album', level: 2 })).toBeVisible();
+
+  // Validate the id -> seeds the manual_import_allowed match + Safe preview.
+  await panel.getByRole('textbox', { name: /MusicBrainz Release or Release Group ID/ }).fill(RG);
+  await panel.getByRole('button', { name: 'Validate ID' }).click();
+
+  // The dead end is replaced: an ENABLED "Confirm match & import" appears, and
+  // there is no disabled "Import with ID" button competing with it.
+  const confirmControl = panel.getByTestId('review-confirm-import-button');
+  await expect(confirmControl).toBeEnabled();
+  await expect(panel.getByRole('button', { name: 'Import with ID' })).toHaveCount(0);
+
+  // It is gated by a confirm dialog; nothing imports until confirmed.
+  await confirmControl.click();
+  const dialog = page.getByRole('dialog', { name: 'Confirm Match & Import' });
+  await expect(dialog.getByText(/writes tags and moves files into the library/)).toBeVisible();
+  expect(importBody).toBeNull();
+
+  await dialog.getByRole('button', { name: 'Confirm match & import' }).click();
+  // Mutation-safety (#816): confirm sends ONLY the matched subset + its track mapping
+  // via the audited import-with-id route, never a bare whole-folder import.
+  await expect.poll(() => importBody).toEqual({
+    path: reviewFolder,
+    mb_albumid: REL,
+    mb_releasegroupid: RG,
+    queue_review: true,
+    selected_source_files: [
+      `${reviewFolder}/01 Review One.flac`,
+      `${reviewFolder}/02 Review Two.flac`,
+    ],
+    track_mapping: selectedMatch.track_mapping,
+  });
+});

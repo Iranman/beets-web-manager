@@ -470,6 +470,9 @@ class MatchingDecision:
             "identity_proof": _s(self.decision.get("identity_proof") or ""),
             "review_required": review_required,
             "action_allowed": action_allowed,
+            # #813: strictly weaker than action_allowed -- a human may confirm-
+            # and-import this match, but it is never automatically imported.
+            "manual_import_allowed": bool(self.decision.get("manual_import_allowed", False)),
             "reason_code": reason_code,
             "explanation": explanation,
             "safety_key": safety_key,
@@ -1281,6 +1284,20 @@ def build_album_matching_decision(
         },
     }
 
+    # #813: a VALIDATED Release Group with NO hard conflicts is something a
+    # human may deliberately confirm-and-import from Review, even when the
+    # evidence is not strong enough for AUTOMATIC action (identity_proof below
+    # DETERMINISTIC, e.g. a correct album whose recordings are simply not in
+    # AcoustID and carry no embedded MB tags). This is descriptive only and is
+    # strictly weaker than `action_allowed`: it NEVER authorizes automatic or
+    # destructive action (the auto-enqueue gate still keys off action_allowed),
+    # it only tells the UI it may offer an explicit, logged, human-confirmed
+    # import via the existing controlled confirmed-import path. A hard conflict
+    # (wrong RG, artist/recording contradiction, off-release fingerprint) or a
+    # missing Release Group withholds it -- that is real evidence against the
+    # match, not a mere lack of proof.
+    manual_import_allowed = bool(candidate_rg_id and not conflicts)
+
     decision_payload = {
         "confidence_score": confidence_score,
         "confidence_tier": confidence_tier,
@@ -1289,6 +1306,7 @@ def build_album_matching_decision(
         "identity_proof": proof_value,
         "review_required": review_required,
         "action_allowed": action_allowed,
+        "manual_import_allowed": manual_import_allowed,
         "reason_code": reason_code,
         "reason": eligibility_reason,
         "eligibility_reason": eligibility_reason,

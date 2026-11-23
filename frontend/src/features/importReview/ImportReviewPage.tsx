@@ -136,6 +136,11 @@ type ManualValidationState = {
 
 type ConfirmIntent =
   | { kind: 'apply'; item: ReviewItem; mbid: string; entity: MbEntity }
+  // #813: an explicit, human-confirmed import of a match that is NOT
+  // automatically importable but IS manual_import_allowed (valid Release
+  // Group, no hard conflict, safe target preview). Runs the controlled
+  // import-with-id path; the human click is the authorization.
+  | { kind: 'confirm_import'; item: ReviewItem; releaseGroupId: string; representativeReleaseId: string }
   | { kind: 'dismiss'; item: ReviewItem }
   | { kind: 'delete_folder'; item: ReviewItem; folderStats?: FolderStatsResponse }
   | { kind: 'cleanup_files'; item: ReviewItem; files: string[]; wrongAudio: boolean }
@@ -2768,6 +2773,7 @@ export function ReviewCard({
   onClearManualId,
   onSuggest,
   onApply,
+  onConfirmImport,
   onDismiss,
   onDeleteFolder,
   onCleanupFiles,
@@ -2789,6 +2795,7 @@ export function ReviewCard({
   onClearManualId: () => void;
   onSuggest: () => void;
   onApply: () => void;
+  onConfirmImport?: () => void;
   onDismiss: () => void;
   onDeleteFolder: () => void;
   onCleanupFiles: () => void;
@@ -2844,6 +2851,34 @@ export function ReviewCard({
   const upgradeRow = isQualityUpgrade(item.evidence);
   const upgradeReasonId = `quality-upgrade-reason-${item.id}`;
   const blockedActive = shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState);
+  // #813: an import-like folder whose selected match the backend says a human
+  // MAY confirm-and-import (manual_import_allowed) although it is not
+  // AUTOMATICALLY importable (is_importable=false — e.g. a correct album whose
+  // recordings are simply not in AcoustID). This is the dead-end case that used
+  // to show only a disabled "Import with ID" + "Not importable" banner. Shown
+  // only when the target preview is safe with zero conflicts, the Release Group
+  // is a valid UUID, and there is a representative release for the import body.
+  // When is_importable is true the existing auto path owns the button; when
+  // both are false the item stays blocked as before.
+  const importLikeItem = item.type === 'pending_ai' && !existingAlbumId(item);
+  const manualConfirmPreview = targetPreviewState?.status === 'ready' ? targetPreviewState.preview : undefined;
+  const manualConfirmEligible = Boolean(
+    importLikeItem
+    && selectedMatch?.manual_import_allowed === true
+    && selectedMatch?.is_importable !== true
+    && selectedMatch?.identity_validated !== false
+    && !audioMismatchActive
+    && isMusicBrainzUuid(selectedMatch?.release_group_id)
+    && isMusicBrainzUuid(selectedMatch?.representative_release_id)
+    && manualConfirmPreview?.safe === true
+    && (manualConfirmPreview?.real_conflict_count ?? 0) === 0
+    // #813 mutation-safety: the confirm path imports the whole folder
+    // (selected_source_files is the matched subset). If the preview says
+    // unmatched local extras would stay in review, "Every local track
+    // matched this release" is a lie and the import would sweep them in.
+    // Hide the control until there are no unmatched extras.
+    && (manualConfirmPreview?.unmatched_extra_count ?? 0) === 0,
+  );
   // ARCH-005: a refused deterministic verdict is never presented as "Ready",
   // even when the selected candidate passed its own preflight (the folder
   // verdict can refuse an importable candidate, e.g. release_lookup_failed).
@@ -3329,7 +3364,10 @@ export function ReviewCard({
               </div>
             ) : null}
 
-            {blockedActive && visibleBlockReason ? (
+            {/* #813: when the match is human-confirmable, the amber "Import
+               blocked / Not importable" banner is NOT a dead end — the
+               confirm panel below offers the way forward instead. */}
+            {blockedActive && visibleBlockReason && !manualConfirmEligible ? (
               <div className="rounded border border-amber-500/40 bg-amber-950/40 px-2 py-1.5 text-xs text-amber-200">
                 <div className="font-semibold">{isRecordingReview ? 'Attach blocked' : 'Import blocked'}</div>
                 <div className="mt-0.5">{visibleBlockReason}</div>
@@ -3352,14 +3390,49 @@ export function ReviewCard({
               </div>
             ) : null}
 
+            {/* #813: the explicit human-confirmed import path for a correct
+               album the matcher could not AUTOMATICALLY verify (e.g. its
+               recordings are not in AcoustID). Every track matched, 0 conflicts,
+               target preview Safe — so the only thing missing is machine proof,
+               which a person can supply by confirming. The button opens a
+               confirm dialog (it writes to the library); it never auto-imports. */}
+            {manualConfirmEligible ? (
+              <div
+                className="rounded border border-sky-500/40 bg-sky-950/40 px-2 py-2 text-xs text-sky-100"
+                data-testid="review-manual-confirm-panel"
+              >
+                <div className="font-semibold text-sky-50">Match verified by you</div>
+                <div className="mt-0.5 text-sky-200">
+                  {selectedMatch?.preflight_reason
+                    || 'Every local track matched this release with no conflicts, but it could not be automatically verified (its recordings may not be in AcoustID). Confirm the match to import it.'}
+                </div>
+                <div className="mt-2">
+                  <Button
+                    size="small"
+                    variant="contained"
+                    color="primary"
+                    onClick={() => onConfirmImport?.()}
+                    disabled={busy || Boolean(importJobActive)}
+                    data-testid="review-confirm-import-button"
+                  >
+                    Confirm match &amp; import
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
             {/* Recovery items get their single primary action inside
                RecoveryReviewCard (NEXT section), so the footer here shows only
                the secondary "Find Match" — never a competing primary Import. */}
-            <div className={recoveryIdentity ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-2 gap-2'}>
+            <div className={recoveryIdentity || manualConfirmEligible ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-2 gap-2'}>
               <Button size="small" variant="outlined" onClick={onSuggest} disabled={busy}>
                 Find Match
               </Button>
-              {recoveryIdentity ? null : (
+              {/* #813: when the match is human-confirmable, the enabled
+                 "Confirm match & import" control in the panel above is the
+                 primary action; the disabled auto "Import with ID" button is
+                 suppressed so there is exactly one import control. */}
+              {recoveryIdentity || manualConfirmEligible ? null : (
                 <Button
                   size="small"
                   variant="contained"
@@ -3466,6 +3539,8 @@ export function ConfirmDialog({
         ? 'Revalidate and Import Eligible Items'
       : intent?.kind === 'clean_stale'
         ? 'Clean Stale Review Entries'
+      : intent?.kind === 'confirm_import'
+        ? 'Confirm Match & Import'
         : 'Start Tagging Job';
   const detail = intent?.kind === 'dismiss'
     ? 'This removes the folder from Pending Review only. Audio files are not deleted.'
@@ -3481,6 +3556,8 @@ export function ConfirmDialog({
         ? `This re-checks ${intent.ids.length} visible pending review item${intent.ids.length === 1 ? '' : 's'} and may start import jobs for items that now pass the safety checks. Those jobs can write tags and move files according to the configured path template. Items that still need review stay in the queue.`
       : intent?.kind === 'clean_stale'
         ? 'This removes Pending Review entries whose folder no longer exists or whose album is already in the library. Only review metadata changes; no audio files are deleted.'
+      : intent?.kind === 'confirm_import'
+        ? 'You are confirming this MusicBrainz Release Group is the correct match. This starts a backend Beets job that writes tags and moves files into the library according to the configured path template. If the release is already in your library, nothing is imported.'
         : 'This starts a backend Beets job that can write tags and move files according to the configured path template.';
 
   return (
@@ -3510,6 +3587,13 @@ export function ConfirmDialog({
                     </div>
                   );
                 })()
+              ) : null}
+              {intent?.kind === 'confirm_import' ? (
+                <div className="mt-2 space-y-2">
+                  <MbidLink entity="release-group" id={intent.releaseGroupId} status="suggested" label="Release Group ID (canonical album identity)" />
+                  <MbidLink entity="release" id={intent.representativeReleaseId} status="suggested" label="Release ID (edition imported)" />
+                  {item.path ? <div className="truncate font-mono text-xs text-muted" title={item.path}>{item.path}</div> : null}
+                </div>
               ) : null}
               {intent?.kind === 'delete_folder' && item.path ? (
                 <div className="mt-2 space-y-2">
@@ -3590,6 +3674,8 @@ export function ConfirmDialog({
                     ? `Revalidate ${intent.ids.length} and import eligible`
                     : intent?.kind === 'clean_stale'
                       ? 'Clean stale entries'
+                    : intent?.kind === 'confirm_import'
+                      ? 'Confirm match & import'
                       : 'Confirm'}
             </Button>
           </div>
@@ -4760,6 +4846,65 @@ export function ImportReviewPage({
     }
   }, [pollJobBackground, removeLocalItem, selectedMatches, setAction, suggestions, targetPreviews]);
 
+  // #813: open the explicit confirm dialog for a human-confirmed import of a
+  // match the backend marked manual_import_allowed (correct album, every track
+  // matched, 0 conflicts, Safe preview) but NOT automatically importable. The
+  // dialog — not this call — authorizes the write.
+  const startConfirmImport = useCallback((item: ReviewItem) => {
+    const sm = selectedMatches[item.id];
+    if (!sm || sm.manual_import_allowed !== true) return;
+    const releaseGroupId = (sm.release_group_id || '').trim();
+    const representativeReleaseId = (sm.representative_release_id || '').trim();
+    if (!releaseGroupId || !representativeReleaseId) {
+      setAction(item.id, { status: 'error', message: 'This match is missing the Release Group or representative release needed to import.' });
+      return;
+    }
+    setConfirmIntent({ kind: 'confirm_import', item, releaseGroupId, representativeReleaseId });
+  }, [selectedMatches, setAction]);
+
+  // #813: the human-confirmed import itself. Bypasses the auto decision gate on
+  // purpose — the confirm dialog IS the authorization (see spec #813) — and
+  // posts the minimal controlled import-with-id body. queue_review keeps an
+  // uncertain outcome in Review rather than failing; the job result (success /
+  // already-in-library / error) is surfaced honestly by pollJobBackground.
+  const runConfirmedImport = useCallback(async (item: ReviewItem, releaseGroupId: string, representativeReleaseId: string) => {
+    if (runningJobItemIdsRef.current.has(item.id)) return;
+    setAction(item.id, { status: 'running', message: 'Starting confirmed import…' });
+    // Mirror runApply: the backend treats an empty selected_source_files as a
+    // whole-folder import, which would sweep in any file the matched subset
+    // excludes. Send the same matched subset + track_mapping runApply sends.
+    const sm = selectedMatches[item.id];
+    const preview = currentTargetPreviewState(item, sm, targetPreviews)?.preview;
+    const unfilteredSelectedFiles = selectedImportSourceFiles(sm);
+    const selectedSourceFiles = selectedImportSourceFiles(sm, preview);
+    const keepReviewAfterSuccess = Boolean(
+      (sm?.is_partial_import && unmatchedExtraTrackCount(sm) > 0)
+      || selectedSourceFiles.length < unfilteredSelectedFiles.length,
+    );
+    try {
+      const started = await importWithId({
+        path: item.path || '',
+        mb_albumid: representativeReleaseId,
+        mb_releasegroupid: releaseGroupId,
+        selected_source_files: selectedSourceFiles,
+        track_mapping: sm?.track_mapping,
+        queue_review: true,
+      });
+      if (!started.job_id) throw new Error('Backend did not return a job id');
+      const label = 'Confirm match & import';
+      setBackgroundJobs((prev) => ({
+        ...prev,
+        [item.id]: { jobId: started.job_id!, status: 'running', label, message: `Job ${started.job_id} queued.`, item },
+      }));
+      removeLocalItem(item);
+      void pollJobBackground(started.job_id, item, label, keepReviewAfterSuccess);
+    } catch (err) {
+      const message = errorMessage(err);
+      const aiWarning = optionalAiWarning(message);
+      setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
+    }
+  }, [pollJobBackground, removeLocalItem, selectedMatches, setAction, targetPreviews]);
+
   // Separate from runApply on purpose: a confirmed-review attach must only
   // ever be reachable through the explicit confirm dialog (see
   // ConfirmDialog's 'attach_recording_confirm' branch), never through the
@@ -4910,6 +5055,7 @@ export function ImportReviewPage({
     setConfirmIntent(null);
     if (!intent) return;
     if (intent.kind === 'apply') void runApply(intent.item, intent.mbid);
+    else if (intent.kind === 'confirm_import') void runConfirmedImport(intent.item, intent.releaseGroupId, intent.representativeReleaseId);
     else if (intent.kind === 'dismiss') void runDismiss(intent.item);
     else if (intent.kind === 'cleanup_files') void runCleanupFiles(intent.item, intent.files);
     else if (intent.kind === 'attach_recording_confirm') {
@@ -4917,7 +5063,7 @@ export function ImportReviewPage({
     } else if (intent.kind === 'revalidate') void handleRevalidateQueue(intent.ids);
     else if (intent.kind === 'clean_stale') void handleCleanupStale();
     else void runDeleteFolder(intent.item);
-  }, [confirmIntent, handleCleanupStale, handleRevalidateQueue, runApply, runCleanupFiles, runConfirmedAttach, runDeleteFolder, runDismiss]);
+  }, [confirmIntent, handleCleanupStale, handleRevalidateQueue, runApply, runConfirmedImport, runCleanupFiles, runConfirmedAttach, runDeleteFolder, runDismiss]);
 
   const selectFilter = useCallback((nextFilter: QueueFilter) => {
     setFilter(nextFilter);
@@ -5474,6 +5620,7 @@ export function ImportReviewPage({
               onClearManualId={handleClearManualId}
               onSuggest={() => void handleSuggest(activeItem)}
               onApply={() => startApply(activeItem)}
+              onConfirmImport={() => startConfirmImport(activeItem)}
               onDismiss={() => requestDismiss(activeItem)}
               onDeleteFolder={() => void requestDeleteFolder(activeItem)}
               onCleanupFiles={() => requestCleanupFiles(activeItem)}

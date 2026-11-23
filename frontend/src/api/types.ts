@@ -2794,6 +2794,10 @@ export interface ImportWithIdPayload {
     source_path?: string;
   }>;
   ai_suggestion?: AiSuggestion;
+  // #813: when true (default on the backend), an uncertain import is queued to
+  // Review rather than failing outright. The human-confirmed "Confirm match &
+  // import" path sends it explicitly.
+  queue_review?: boolean;
 }
 
 export interface AutoEnqueueImportPayload extends ImportWithIdPayload {

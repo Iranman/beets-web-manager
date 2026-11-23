@@ -3647,6 +3647,16 @@ def _folder_import_refuse_failed_apply(ctx: _FolderImportContext, apply_res: Dic
                           "kept_album_ids": kept_ids, "reason": reason},
             reason, log, allow_existing=True)
     elif apply_res.get("code") == "not_imported":
+        # #813: Beets skipped the whole folder as a duplicate -- the release is
+        # already in the library. Say that plainly (no new row was inserted)
+        # instead of the ambiguous "no confident match, or already in library".
+        if _s(apply_res.get("skip_reason")).strip().lower() == "duplicate":
+            # _folder_import_review_and_raise raises; no new row was inserted
+            # (duplicate_action=skip), so the library is unchanged.
+            _folder_import_review_and_raise(
+                ctx, mb_albumid, selected_releasegroupid,
+                f"This release is already in your library; nothing was imported. "
+                f"(MusicBrainz release {mb_albumid}, release group {selected_releasegroupid}.)")
         _folder_import_review_and_raise(
             ctx, mb_albumid, selected_releasegroupid,
             f"Beets could not confidently match this source to MusicBrainz release "

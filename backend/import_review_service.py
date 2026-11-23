@@ -819,6 +819,10 @@ def _manual_review_validate_album_identifier(parsed: Dict[str, str], payload: Di
         folder,
         representative_release_id,
         existing_album_id=int(payload.get("existing_album_id") or payload.get("album_id") or 0),
+        # Fingerprint the staged files so a genuine NO_RESULT is reported as
+        # such (accurate "confirm manually" message), never the fingerprint-
+        # blind UNAVAILABLE that falsely tells the user to set a configured key.
+        fingerprint_evidence=True,
     ) if representative_release_id else None
     preflight = _import_review_revalidation_preflight(comparison, acoustic_preflight)
     selected_match = _import_review_build_revalidated_match(
@@ -1399,6 +1403,24 @@ def _import_review_build_revalidated_match(
         and preflight_status == "passed"
         and not matching_decision_blocks
     )
+    # #813: a match a human may deliberately confirm-and-import even though it
+    # is not AUTOMATICALLY importable (is_importable=False because the
+    # canonical decision withheld action_allowed for lack of recording-level
+    # proof). It needs a usable Release Group + representative release, at least
+    # one verified local track, an identity that was not rejected, no AcoustID
+    # release mismatch, and -- when the canonical decision is present -- its
+    # own manual_import_allowed (a valid RG with no hard conflict). This drives
+    # ONLY the explicit "Confirm match & import" control; every automatic gate
+    # (auto-enqueue, ready bucket, auto_fix_eligible) still keys off
+    # is_importable / action_allowed and is unchanged.
+    manual_import_allowed = bool(
+        identity_ok
+        and is_release_group_usable
+        and has_representative
+        and importable_count > 0
+        and not preflight.get("acoustid_mismatch")
+        and (not matching_decision or matching_decision.get("manual_import_allowed", True))
+    )
     confidence_score = _import_review_revalidation_confidence_score(suggestion, comparison, preflight)
     confidence_level = _import_review_confidence_level(confidence_score, is_importable, preflight_status)
     extra_count = int(comparison.get("extra_count") or 0)
@@ -1428,6 +1450,7 @@ def _import_review_build_revalidated_match(
         "preflight_reason": reason,
         "is_release_group_usable": is_release_group_usable,
         "is_importable": is_importable,
+        "manual_import_allowed": manual_import_allowed,
         "is_partial_import": bool(importable_count > 0 and total_tracks and importable_count < total_tracks),
         "confidence_score": round(float(confidence_score), 3),
         "confidence_level": confidence_level,
@@ -1621,6 +1644,9 @@ def _run_import_review_revalidation(review_ids: Iterable[str], *, auto_enqueue: 
                 path,
                 representative_release_id,
                 existing_album_id=existing_album_id,
+                # Same as the manual-validate path: real per-file AcoustID
+                # evidence so the stored decision reports no_result accurately.
+                fingerprint_evidence=True,
             ) if representative_release_id else None
             preflight = _import_review_revalidation_preflight(comparison, acoustic_preflight)
             selected_match = _import_review_build_revalidated_match(item, comparison, preflight)
