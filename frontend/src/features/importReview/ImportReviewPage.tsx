@@ -2871,7 +2871,13 @@ export function ReviewCard({
     && isMusicBrainzUuid(selectedMatch?.release_group_id)
     && isMusicBrainzUuid(selectedMatch?.representative_release_id)
     && manualConfirmPreview?.safe === true
-    && (manualConfirmPreview?.real_conflict_count ?? 0) === 0,
+    && (manualConfirmPreview?.real_conflict_count ?? 0) === 0
+    // #813 mutation-safety: the confirm path imports the whole folder
+    // (selected_source_files is the matched subset). If the preview says
+    // unmatched local extras would stay in review, "Every local track
+    // matched this release" is a lie and the import would sweep them in.
+    // Hide the control until there are no unmatched extras.
+    && (manualConfirmPreview?.unmatched_extra_count ?? 0) === 0,
   );
   // ARCH-005: a refused deterministic verdict is never presented as "Ready",
   // even when the selected candidate passed its own preflight (the folder
@@ -4864,11 +4870,24 @@ export function ImportReviewPage({
   const runConfirmedImport = useCallback(async (item: ReviewItem, releaseGroupId: string, representativeReleaseId: string) => {
     if (runningJobItemIdsRef.current.has(item.id)) return;
     setAction(item.id, { status: 'running', message: 'Starting confirmed import…' });
+    // Mirror runApply: the backend treats an empty selected_source_files as a
+    // whole-folder import, which would sweep in any file the matched subset
+    // excludes. Send the same matched subset + track_mapping runApply sends.
+    const sm = selectedMatches[item.id];
+    const preview = currentTargetPreviewState(item, sm, targetPreviews)?.preview;
+    const unfilteredSelectedFiles = selectedImportSourceFiles(sm);
+    const selectedSourceFiles = selectedImportSourceFiles(sm, preview);
+    const keepReviewAfterSuccess = Boolean(
+      (sm?.is_partial_import && unmatchedExtraTrackCount(sm) > 0)
+      || selectedSourceFiles.length < unfilteredSelectedFiles.length,
+    );
     try {
       const started = await importWithId({
         path: item.path || '',
         mb_albumid: representativeReleaseId,
         mb_releasegroupid: releaseGroupId,
+        selected_source_files: selectedSourceFiles,
+        track_mapping: sm?.track_mapping,
         queue_review: true,
       });
       if (!started.job_id) throw new Error('Backend did not return a job id');
@@ -4878,13 +4897,13 @@ export function ImportReviewPage({
         [item.id]: { jobId: started.job_id!, status: 'running', label, message: `Job ${started.job_id} queued.`, item },
       }));
       removeLocalItem(item);
-      void pollJobBackground(started.job_id, item, label);
+      void pollJobBackground(started.job_id, item, label, keepReviewAfterSuccess);
     } catch (err) {
       const message = errorMessage(err);
       const aiWarning = optionalAiWarning(message);
       setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
-  }, [pollJobBackground, removeLocalItem, setAction]);
+  }, [pollJobBackground, removeLocalItem, selectedMatches, setAction, targetPreviews]);
 
   // Separate from runApply on purpose: a confirmed-review attach must only
   // ever be reachable through the explicit confirm dialog (see

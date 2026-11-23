@@ -177,6 +177,10 @@ describe('#813 Import Review page: confirm dialog then controlled import-with-id
       path: '/downloads/a',
       mb_albumid: REL,
       mb_releasegroupid: RG,
+      // #813 mutation-safety: the confirm path now carries the matched subset
+      // + track_mapping (not a bare whole-folder import), mirroring runApply.
+      selected_source_files: ['/downloads/a/01.flac'],
+      track_mapping: manualConfirmMatch().track_mapping,
       queue_review: true,
     });
   });
