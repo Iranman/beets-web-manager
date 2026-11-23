@@ -248,6 +248,13 @@ LIDARR_KEY    = (
     or _config_file_first_line("LIDARR_API_KEY_FILE", "/config/lidarr_api_key")
 )
 
+# Overall wall-clock budget for the whole paged wanted-list read (every page
+# together), on top of the per-page timeout. A slow-but-answering Lidarr on a
+# large library would otherwise page for tens of minutes; once the budget is
+# spent the fetch stops and the Find Music list is built from the library side
+# alone (the Lidarr part is marked unavailable, never hard-failed).
+LIDARR_WANTED_DEADLINE_SECONDS = _env_int("LIDARR_WANTED_DEADLINE_SECONDS", 600, minimum=60)
+
 
 from backend import config_layers as _config_layers  # noqa: E402  (leaf module, no backend imports)
 
