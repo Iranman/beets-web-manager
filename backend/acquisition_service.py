@@ -2321,19 +2321,27 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
                         raise ValueError("wanted/missing page is short of totalRecords")
                     moved = moved or prev_total not in (None, total)
                     prev_total = total
+                    # Converting each record stays inside the failure boundary: a
+                    # pathological field (e.g. a numeric id that overflows int())
+                    # is bad data, so the fetch degrades to ([], reason) and the
+                    # build falls back to the library side -- it must not propagate
+                    # out and hard-fail the Find Music job (IA-08; bad data degrades).
+                    for rec in records:
+                        try:
+                            row = _lidarr_wanted_row(rec)
+                        except Exception as row_exc:  # any per-record raise is bad data
+                            raise ValueError("unexpected wanted/missing record") from row_exc
+                        if row is not None and row["lidarr_id"]:
+                            if row["lidarr_id"] in seen_ids or row["lidarr_id"] in pass_ids:
+                                continue  # the list moved between pages
+                            pass_ids.add(row["lidarr_id"])
+                        pass_records += 1  # a record Lidarr counted, kept or not
+                        if row is not None:
+                            pass_rows.append(row)
                 except Exception as exc:
                     reason = _lidarr_wanted_error(exc)
                     _app_logger.warning("Lidarr wanted-list fetch failed: %s (%s)", reason, type(exc).__name__)
                     return [], reason
-                for rec in records:
-                    row = _lidarr_wanted_row(rec)
-                    if row is not None and row["lidarr_id"]:
-                        if row["lidarr_id"] in seen_ids or row["lidarr_id"] in pass_ids:
-                            continue  # the list moved between pages
-                        pass_ids.add(row["lidarr_id"])
-                    pass_records += 1  # a record Lidarr counted, kept or not
-                    if row is not None:
-                        pass_rows.append(row)
                 if progress is not None:
                     progress(len(results) + len(pass_rows), earlier_passes + total)
                 page += 1

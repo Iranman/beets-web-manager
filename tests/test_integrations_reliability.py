@@ -592,6 +592,16 @@ class LidarrWantedTests(_BoundaryCase):
             with self.subTest(reason=reason):
                 self.assertEqual(self._fetch(effects), ([], reason))
 
+    def test_a_pathological_record_degrades_not_hard_fails(self):  # QA F2 follow-up
+        # A record with an out-of-range numeric id (1e309 -> float('inf')) makes
+        # _lidarr_wanted_row's int(id) raise OverflowError -- not caught by its
+        # (TypeError, ValueError) guard. That per-record raise must degrade the
+        # whole fetch to ([], reason), not propagate out and hard-fail the Find
+        # Music job (contradicting the "bad data degrades" guarantee).
+        bad = dict(_WANTED, id=1e309)  # json round-trips to inf; int(inf) overflows
+        rows, error = self._fetch([_wanted_page([bad])])
+        self.assertEqual((rows, error), ([], "Lidarr returned an unexpected response"))
+
     def test_secure_urlopen_dns_failure_is_unreachable_not_a_block(self):  # QA F2
         from backend import security
         def resolves_to(ip):

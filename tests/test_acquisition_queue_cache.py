@@ -148,6 +148,38 @@ class SnapshotBuildTests(_CacheCase):
         self.assertEqual((status, body["total"], body["cache"]["state"]), (200, 1, "ready"))
         self.assertEqual(body["wanted_error"], "Lidarr did not respond in time (wanted list)")
 
+    def test_pathological_wanted_record_degrades_the_build(self):  # QA F2 follow-up
+        # End-to-end with the REAL fetch: a wanted page whose record has an
+        # out-of-range numeric id (1e309 -> inf, int(inf) overflows) must degrade
+        # the build to the library side and SUCCEED, not propagate an OverflowError
+        # that hard-fails the Find Music job and discards the library work.
+        import io
+        import urllib.request
+
+        class _Resp(io.BytesIO):
+            status = 200
+
+            def __init__(self, body):
+                super().__init__(json.dumps(body).encode())
+                self.headers = {"Content-Type": "application/json"}
+
+        bad_page = {"page": 1, "totalRecords": 1, "records": [
+            {"id": 1e309, "title": "Album", "releaseDate": "1999-01-01", "albumType": "Album",
+             "monitored": True, "foreignAlbumId": "aaaaaaaa-0000-4000-8000-000000000000",
+             "artist": {"artistName": "Artist"}}]}
+        self.library = self._library_with_one_downloadable_album()
+        with mock.patch.object(acq, "_acq_fetch_lidarr_wanted", acq.fetch_lidarr_wanted), \
+                mock.patch.object(acq, "LIDARR_KEY", "k"), \
+                mock.patch.object(acq, "LIDARR_URL", "http://lidarr.test:8686"), \
+                mock.patch.object(urllib.request, "urlopen", side_effect=[_Resp(bad_page)]):
+            job = self._build()
+        self.assertEqual(job.status, "success", job.log)
+        self.assertTrue(job.result.get("degraded"))
+        snap, cache = acq.acquisition_queue_snapshot()
+        self.assertEqual(len(snap["items"]), 1)
+        self.assertEqual(snap["items"][0]["artist"], "Local Artist")
+        self.assertEqual(snap["wanted_error"], "Lidarr returned an unexpected response")
+
     def test_lidarr_error_without_a_snapshot_publishes_library_rows(self):
         self.library = self._library_with_one_downloadable_album()
         self.wanted_error = "Lidarr rejected the API key"
