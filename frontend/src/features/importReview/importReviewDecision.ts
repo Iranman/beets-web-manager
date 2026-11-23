@@ -58,6 +58,11 @@ export type SelectedMatch = {
   preflight_reason: string;
   is_release_group_usable: boolean;
   is_importable: boolean;
+  // #813: strictly weaker than is_importable — a human may deliberately
+  // confirm-and-import this match (valid Release Group, no hard conflict) even
+  // when it is not AUTOMATICALLY importable. Gates ONLY the explicit "Confirm
+  // match & import" control, never any automatic/ready/auto-fix path.
+  manual_import_allowed?: boolean;
   is_partial_import: boolean;
   confidence_score: number | null;
   confidence_level: MatchConfidenceLevel;
