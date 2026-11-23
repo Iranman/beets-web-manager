@@ -700,6 +700,24 @@ class LidarrWantedTests(_BoundaryCase):
             rows, error = acq.fetch_lidarr_wanted()
         self.assertEqual((len(rows), error, urlopen.call_count), (total, "", 4))
 
+    def test_overall_deadline_stops_a_slow_but_answering_lidarr(self):
+        # A Lidarr that answers every page but slowly must not page past the
+        # overall budget (the ~41 min live hang); it stops with the timeout
+        # reason instead of looping through every page.
+        total = 10 * _PAGE  # ten pages promised
+
+        def fake(req, timeout=None):
+            page = int(req.full_url.split("page=")[1].split("&")[0])
+            return _wanted_page([dict(_WANTED, id=i + (page - 1) * _PAGE) for i in range(1, _PAGE + 1)], total=total)
+        # Budget 100 s; the fake monotonic clock crosses it at the third page.
+        clock = iter([0, 10, 60, 150, 300, 600])
+        with mock.patch.object(acq, "LIDARR_WANTED_DEADLINE_SECONDS", 100), \
+                mock.patch.object(acq.time, "monotonic", lambda: next(clock)), \
+                mock.patch.object(urllib.request, "urlopen", side_effect=fake) as urlopen:
+            rows, error = acq.fetch_lidarr_wanted()
+        self.assertEqual((rows, error), ([], "Lidarr did not respond in time (wanted list)"))
+        self.assertEqual(urlopen.call_count, 2)  # stopped well short of the ten pages
+
     def test_one_retry_on_timeout_then_success(self):  # ACQ-11
         rows, error = self._fetch([socket.timeout("slow"), _wanted_page([_WANTED])])
         self.assertEqual((len(rows), error), (1, ""))

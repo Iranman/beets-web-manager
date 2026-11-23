@@ -116,29 +116,47 @@ class SnapshotBuildTests(_CacheCase):
         acq._acq_queue.update(snapshot=None, loaded=False)
         self.assertEqual(len(acq.acquisition_queue_snapshot()[0]["items"]), 250)
 
-    def test_lidarr_error_keeps_the_last_good_snapshot(self):
-        self._build()
-        built_at = acq.acquisition_queue_snapshot()[1]["built_at"]
-        self.wanted = self.wanted[:10]
-        self.wanted_error = "Could not reach Lidarr"
-        job = self._build(force=True)
-        self.assertEqual(job.status, "failed")
-        snap, cache = acq.acquisition_queue_snapshot()
-        self.assertEqual(len(snap["items"]), 250)  # not the library-only list
-        self.assertEqual((cache["state"], cache["last_error"], cache["built_at"]),
-                         ("failed", "Could not reach Lidarr", built_at))
-        status, body = self._get("?limit=5")
-        self.assertEqual(status, 200)
-        self.assertEqual((body["total"], body["cache"]["state"]), (250, "failed"))
-        self.assertEqual(body["cache"]["last_error"], "Could not reach Lidarr")
+    def _library_with_one_downloadable_album(self):
+        # One album with track rows missing but a known release group, so it is a
+        # downloadable Find Music row from the library side alone.
+        return {"ok": True, "library_version": 4, "artists": [
+            {"name": "Local Artist", "albums": [
+                {"albumartist": "Local Artist", "album": "Local Album", "year": 2002,
+                 "album_id": 7, "aldir": "/m/Local Artist/Local Album", "track_count": 10,
+                 "tracks": [], "mb_albumid": "bbbbbbbb-0000-4000-8000-000000000000",
+                 "mb_releasegroupid": "aaaaaaaa-0000-4000-8000-000000000000"}]}]}
 
-    def test_lidarr_error_without_a_snapshot_publishes_nothing(self):
-        self.wanted_error = "Lidarr rejected the API key"
+    def test_lidarr_error_degrades_to_the_library_side(self):
+        # A Lidarr failure no longer discards the completed library work or fails
+        # the job: the list is rebuilt from the library side and the Lidarr part
+        # is marked unavailable (was: hard-fail, keep the last good snapshot).
         self._build()
+        self.library = self._library_with_one_downloadable_album()
+        self.wanted = self.wanted[:10]
+        self.wanted_error = "Lidarr did not respond in time (wanted list)"
+        job = self._build(force=True)
+        self.assertEqual(job.status, "success", job.log)
+        self.assertTrue(job.result.get("degraded"))
+        self.assertTrue(any("library side only" in line for line in job.log))
         snap, cache = acq.acquisition_queue_snapshot()
-        self.assertIsNone(snap)
-        self.assertEqual(cache["state"], "failed")
-        self.assertFalse(self.cache_file.exists())
+        # The library row survives; the Lidarr-only wanted rows are dropped.
+        self.assertEqual(len(snap["items"]), 1)
+        self.assertEqual(snap["items"][0]["artist"], "Local Artist")
+        self.assertEqual(snap["wanted_error"], "Lidarr did not respond in time (wanted list)")
+        self.assertEqual((cache["state"], cache["last_error"]), ("ready", ""))
+        status, body = self._get("?limit=5")
+        self.assertEqual((status, body["total"], body["cache"]["state"]), (200, 1, "ready"))
+        self.assertEqual(body["wanted_error"], "Lidarr did not respond in time (wanted list)")
+
+    def test_lidarr_error_without_a_snapshot_publishes_library_rows(self):
+        self.library = self._library_with_one_downloadable_album()
+        self.wanted_error = "Lidarr rejected the API key"
+        job = self._build()
+        self.assertEqual(job.status, "success", job.log)
+        snap, cache = acq.acquisition_queue_snapshot()
+        self.assertEqual(len(snap["items"]), 1)
+        self.assertEqual((snap["wanted_error"], cache["state"]), ("Lidarr rejected the API key", "ready"))
+        self.assertTrue(self.cache_file.exists())
 
     def test_library_error_is_a_failed_build(self):
         self.library = {"ok": False, "error": "Beets unavailable"}
@@ -271,7 +289,8 @@ class QueueRouteTests(_CacheCase):
         self.assertEqual(len(self.store.all()), before)
 
     def test_failed_build_is_not_retried_on_every_read(self):
-        self.wanted_error = "Could not reach Lidarr"
+        # A library error is the hard-failure case (a Lidarr error now degrades).
+        self.library = {"ok": False, "error": "Beets unavailable"}
         acq._acq_queue["snapshot"] = dict(acq._acq_queue["snapshot"], built_at=time.time() - 7 * 3600)
         _, body = self._get("?limit=1")
         self.store.get(body["cache"]["job_id"])._thread.join(10)

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import backend.job_contract as job_contract
-from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_IMPORT_CATEGORY, QBIT_IMPORT_TAG, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
+from backend.app_runtime import _app_logger, AUDIO_EXT, LIDARR_KEY, LIDARR_URL, LIDARR_WANTED_DEADLINE_SECONDS, MUSIC_ROOT, QBIT_CATEGORY, QBIT_FILTER, QBIT_IMPORT_CATEGORY, QBIT_IMPORT_TAG, QBIT_PASSWORD, QBIT_PATH_ALIASES, QBIT_REPAIR_ALLOWED_ROOTS, QBIT_URL, QBIT_USERNAME, TORRENT_SOURCE_ROOTS, _MB_UUID_RE, _s, _ur
 from backend.ytdlp_service import _audio_files_in_dir, _direct_source_unavailable_reason, _download_method_label, _spotiflac_album_download, _spotiflac_missing_tracks_download, _ytdlp_album_download, _ytdlp_missing_tracks_download
 from backend.ai_service import _ai_match_evidence_packet, _qbit_rel_name_unsafe, _validate_import_source_audio
 from backend.import_service import _delete_staged_import_folder, _recovery_plex_sync_leg, _stage_selected_audio_files, _start_reimport_disk_job_internal, _wanted_tracks_not_in_album
@@ -2268,7 +2268,10 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
     Needs no request context, so a background job can call it. Pages of
     250 are read until ``totalRecords`` is covered, each through
     provider_boundary with a 60 s timeout (the lidarr policy retries a
-    timeout or 5xx once), and rows are de-duplicated by Lidarr album id.
+    timeout or 5xx once), under an overall wall-clock budget
+    (``LIDARR_WANTED_DEADLINE_SECONDS``) so a slow Lidarr cannot page for
+    tens of minutes; exceeding it returns the read-timeout reason. Rows are
+    de-duplicated by Lidarr album id.
     Fewer distinct records than the last page's ``totalRecords`` is an
     error, also when the list changed during the fetch.
 
@@ -2283,6 +2286,13 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
     results: List[Dict[str, Any]] = []
     seen_ids: set = set()
     earlier_passes = 0
+    # Overall budget across every page: a slow-but-answering Lidarr must not page
+    # for tens of minutes and hang the whole Find Music build (the per-page
+    # timeout alone bounds one page, not the cumulative loop). When the budget is
+    # spent the build degrades to the library side. ponytail: a page already in
+    # flight can overshoot by up to one page's timeout+retry; raise the budget
+    # (LIDARR_WANTED_DEADLINE_SECONDS) for very large libraries.
+    deadline_at = time.monotonic() + LIDARR_WANTED_DEADLINE_SECONDS
     for monitored in ((True, False) if include_unmonitored else (True,)):
         # ARCH-028 N2: a pass during which totalRecords moved may have lost a
         # row across a page boundary even when the count matches, so it is
@@ -2295,6 +2305,10 @@ def fetch_lidarr_wanted(*, progress: Optional[Callable[[int, int], None]] = None
             while page <= pages:
                 if cancel is not None and cancel():
                     return [], LIDARR_WANTED_CANCELLED
+                if time.monotonic() >= deadline_at:
+                    _app_logger.warning("Lidarr wanted-list fetch exceeded its %.0fs budget at page %d; "
+                                        "degrading to the library side", LIDARR_WANTED_DEADLINE_SECONDS, page)
+                    return [], "Lidarr did not respond in time (wanted list)"
                 try:
                     records, total = _lidarr_wanted_page(page, monitored)
                     pages = -(-total // _LIDARR_WANTED_PAGE_SIZE)
@@ -2686,14 +2700,21 @@ def _acq_queue_build_job(force: bool, include_unmonitored: bool) -> Callable[...
         if payload.get("wanted_error") == LIDARR_WANTED_CANCELLED or cancel_event.is_set():
             raise RuntimeError("cancelled")  # the previous snapshot stays
         wanted_error = _s(payload.get("wanted_error") or "")
-        # Lidarr not configured is a setup state (library rows only), not a failure.
-        error = _s(payload.get("library_error") or "") or (
-            wanted_error if wanted_error != _LIDARR_NOT_CONFIGURED else "")
-        if error:
-            # Never publish a list missing one side: keep the last good one.
+        # A Lidarr failure degrades to the library side: the list is built from
+        # the Beets rows and the Lidarr part is marked unavailable (carried on
+        # the snapshot as wanted_error, which the Find Music tab shows). One
+        # optional provider being slow or down must not discard the completed
+        # library work or fail the whole job. Only a library error -- which
+        # leaves nothing to show -- is a hard failure. "Lidarr not configured"
+        # is a setup state, shown without the error styling.
+        library_error = _s(payload.get("library_error") or "")
+        if library_error:
             with _acq_queue_lock:
-                _acq_queue.update(last_error=error, last_error_at=time.time())
-            return {"ok": False, "error": f"Find Music list not updated: {error}"}
+                _acq_queue.update(last_error=library_error, last_error_at=time.time())
+            return {"ok": False, "error": f"Find Music list not updated: {library_error}"}
+        if wanted_error and wanted_error != _LIDARR_NOT_CONFIGURED:
+            _app_logger.warning("Find Music built from the library side only: %s", wanted_error)
+            log.append(f"Lidarr wanted list unavailable ({wanted_error}); showing the library side only")
         with _acq_queue_lock:
             # A download that finished while this build ran may predate its library read.
             done = [d for d in _acq_queue["done"] if d[0] >= started]
@@ -2710,8 +2731,12 @@ def _acq_queue_build_job(force: bool, include_unmonitored: bool) -> Callable[...
             }
             _acq_queue.update(snapshot=snapshot, loaded=True, last_error="", last_error_at=0.0, done=done)
         _acq_queue_persist()
-        log.append(f"Find Music list ready: {len(snapshot['items'])} row(s) in {snapshot['build_seconds']} s")
-        return {"ok": True, "total": len(snapshot["items"]), "build_seconds": snapshot["build_seconds"]}
+        degraded = bool(wanted_error and wanted_error != _LIDARR_NOT_CONFIGURED)
+        suffix = " (Lidarr wanted list unavailable)" if degraded else ""
+        log.append(f"Find Music list ready: {len(snapshot['items'])} row(s) in "
+                   f"{snapshot['build_seconds']} s{suffix}")
+        return {"ok": True, "total": len(snapshot["items"]), "build_seconds": snapshot["build_seconds"],
+                "wanted_error": wanted_error, "degraded": degraded}
     return _do
 
 

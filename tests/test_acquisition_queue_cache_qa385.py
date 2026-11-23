@@ -167,10 +167,12 @@ class FailurePreservationTests(_CacheCase):
         self.assertEqual((cache["state"], cache["last_error"]), ("ready", ""))
 
     def test_success_after_failure_clears_the_error(self):
-        self.wanted_error = "Could not reach Lidarr"
+        # A hard failure is a library error now (a Lidarr error degrades).
+        good_library = self.library
+        self.library = {"ok": False, "error": "Beets unavailable"}
         self._build()
         self.assertEqual(_acq().acquisition_queue_snapshot()[1]["state"], "failed")
-        self.wanted_error = ""
+        self.library = good_library
         self.assertEqual(self._build(force=True).status, "success")
         cache = _acq().acquisition_queue_snapshot()[1]
         self.assertEqual((cache["state"], cache["last_error"], cache["last_error_at"]), ("ready", "", None))
@@ -334,7 +336,8 @@ class DownloadAllSnapshotTests(_CacheCase):
 
     def test_failed_rebuild_still_uses_the_last_good_snapshot(self):
         self._build(include_unmonitored=True)
-        self.wanted_error = "Could not reach Lidarr"
+        # A hard-failing rebuild is a library error now (a Lidarr error degrades).
+        self.library = {"ok": False, "error": "Beets unavailable"}
         self._build(force=True)
         with mock.patch.object(_acq(), "_build_acquisition_queue_payload") as build:
             status, body = self._post({})
