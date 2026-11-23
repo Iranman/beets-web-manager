@@ -444,6 +444,19 @@ function deleteFolderActionLabel(item?: ReviewItem): string {
   return wrongSourceEvidenceNote(item) ? 'Delete Wrong Audio' : 'Delete Folder';
 }
 
+// The actionable next steps for a pending_ai folder with no valid release-group
+// ID. Kept as its own constant so the refused-folder decision banner can surface
+// just the guidance (without repeating the "no valid ID" diagnostic lead) while
+// the standalone match note keeps its full wording. #813 follow-up.
+export const UNRESOLVED_ID_GUIDANCE =
+  'Use Find Match, enter a MusicBrainz ID, or delete the source folder if the files are wrong.';
+// Same guidance without the "enter a MusicBrainz ID" clause, for the decision
+// banner's non-verified variant whose sentence already says "enter a MusicBrainz
+// ID" — so it reads once, not twice.
+export const UNRESOLVED_ID_GUIDANCE_SHORT =
+  'Use Find Match, or delete the source folder if the files are wrong.';
+const UNRESOLVED_ID_NOTE = `No valid MusicBrainz release-group ID is selected yet. ${UNRESOLVED_ID_GUIDANCE}`;
+
 function matchReviewNote(item: ReviewItem): string {
   const preflight = item.evidence?.preflight;
   if (hasAudioMismatchEvidence(item)) {
@@ -456,7 +469,7 @@ function matchReviewNote(item: ReviewItem): string {
     return `The selected release failed tracklist preflight (${preflight.matches ?? 0}/${preflight.expected ?? 0}). Pick a release that matches this folder before importing.`;
   }
   if (item.type === 'pending_ai' && !item.mb_valid) {
-    return 'No valid MusicBrainz release-group ID is selected yet. Use Find Match, enter a MusicBrainz ID, or delete the source folder if the files are wrong.';
+    return UNRESOLVED_ID_NOTE;
   }
   return '';
 }
@@ -1358,10 +1371,13 @@ const BATCH_STOP_TEXT: Record<string, string> = {
 
 /** Why a batch import stopped on this folder (#394), with the paths the server
  * named. Paths are plain text; the list is capped so a huge folder stays readable. */
-export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
+export function BatchStopEvidence({ evidence, hideSkipNote }: { evidence?: ReviewEvidence; hideSkipNote?: boolean }) {
   if (!evidence?.origin_step || isQualityUpgrade(evidence)) return null;
   const code = evidence.origin_step === 'pre_import' ? evidence.conflict || '' : evidence.origin_step;
-  const text = BATCH_STOP_TEXT[code] || `Batch import stopped: ${code.replace(/_/g, ' ')}.`;
+  // #813 follow-up: when the refused-folder decision banner already states the
+  // skip, the plain "Beets skipped this folder" sentence is redundant noise.
+  // Drop just that sentence; any named skipped paths below still render.
+  const text = hideSkipNote && code === 'beets_skip' ? '' : BATCH_STOP_TEXT[code] || `Batch import stopped: ${code.replace(/_/g, ' ')}.`;
   const [title, paths] = evidence.symlinked_paths?.length
     ? ['Links found', evidence.symlinked_paths]
     : evidence.unreadable_paths?.length
@@ -1370,9 +1386,12 @@ export function BatchStopEvidence({ evidence }: { evidence?: ReviewEvidence }) {
         ? ['Skipped by Beets', evidence.skipped_paths]
         : ['', []];
   const more = paths.length - BATCH_PATHS_SHOWN;
+  // Nothing left to say (suppressed note, no named paths) → render nothing
+  // rather than an empty amber box.
+  if (!text && !paths.length) return null;
   return (
     <div className="rounded border border-amber-500/30 bg-amber-950/40 px-2 py-1 text-amber-200">
-      <div>{text}</div>
+      {text ? <div>{text}</div> : null}
       {paths.length ? (
         <>
           <div className="mt-1 font-semibold">{title}</div>
@@ -1416,16 +1435,17 @@ export function QualityUpgradeNotice({ evidence }: { evidence?: ReviewEvidence }
   );
 }
 
-function EvidenceSummary({ item, evidence: evidenceOverride }: { item?: ReviewItem; evidence?: ReviewEvidence }) {
+function EvidenceSummary({ item, evidence: evidenceOverride, hideSkipNote }: { item?: ReviewItem; evidence?: ReviewEvidence; hideSkipNote?: boolean }) {
   const evidence = evidenceOverride ?? item?.evidence;
   const top = evidence?.top_candidates ?? [];
   const preflight = evidence?.preflight;
   const best = top[0];
   const examples = preflight?.examples ?? [];
-  const batchStop = <BatchStopEvidence evidence={evidence} />;
+  const batchStop = <BatchStopEvidence evidence={evidence} hideSkipNote={hideSkipNote} />;
 
   if (!best && !preflight) {
-    return evidence?.origin_step ? <div className="mt-3 text-xs text-muted">{batchStop}</div> : null;
+    const skipHidden = hideSkipNote && evidence?.origin_step === 'beets_skip' && !evidence?.skipped_paths?.length;
+    return evidence?.origin_step && !skipHidden ? <div className="mt-3 text-xs text-muted">{batchStop}</div> : null;
   }
 
   return (
@@ -2857,10 +2877,26 @@ export function ReviewCard({
             : matchBucket
         : matchBucket;
   const matchNote = matchReviewNote(item);
+  // #813 follow-up: a refused no-candidate folder stacked ~4 redundant top-of-card
+  // notices — the amber decision note (below), the raw backend reason, the match
+  // note, and the "Beets skipped this folder" evidence line — all restating
+  // "needs decision / skipped / no valid ID". Collapse to the single decision
+  // banner: fold the match-note guidance into it, drop the duplicate raw reason
+  // and the beets-skip sentence here. The skip-reason codes still live in the
+  // AltCandidatesPanel "Why auto-import was refused" disclosure.
+  const decisionBannerShown = visibleMatchBucket === 'no_candidate' && refusedUnevaluableCandidate;
+  // The raw backend reason (item.reason) is the one place the Beets skip-reason
+  // code (e.g. "no_strong_match") is carried on the card — it is NOT folded into
+  // auto_import.reasons, so the AltCandidatesPanel "Why auto-import was refused"
+  // disclosure does not hold it. So when the decision banner takes over the top
+  // of the card, the reason is not dropped: it is relocated verbatim into a
+  // collapsed disclosure INSIDE that banner (decisionBannerReason below), keeping
+  // every skip code reachable (hard constraint) without a fourth top-level notice.
   const wrongSourceNote = wrongSourceEvidenceNote(item);
   const staleStoredReason = selectedMatchActive && /preflight failed|failed tracklist preflight|rejected selected musicbrainz release/i.test(item.reason || '');
-  const visibleReason = blockedActive || staleStoredReason ? '' : item.reason;
-  const visibleMatchNote = selectedMatchActive && !audioMismatchActive ? '' : matchNote;
+  const visibleReason = blockedActive || staleStoredReason || decisionBannerShown ? '' : item.reason;
+  const decisionBannerReason = decisionBannerShown ? (item.reason || '') : '';
+  const visibleMatchNote = (selectedMatchActive && !audioMismatchActive) || decisionBannerShown ? '' : matchNote;
   const visibleBlockReason = applyBlockedReason || storedBlockedReason(item);
   const visibleBlockHint = applyBlockedReason
     ? blockedActionHint(applyBlockedReason)
@@ -3040,12 +3076,40 @@ export function ReviewCard({
                 ) : null}
               </dl>
             ) : null}
-            {visibleMatchBucket === 'no_candidate' && refusedUnevaluableCandidate ? (
-              <p className="mt-2 rounded border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
-                {item.alt_candidates?.best_verified_release_group_id
-                  ? 'Needs decision: auto-import was refused. A verified candidate is below — review it before importing.'
-                  : 'Needs decision: the best candidate could not be evaluated, so auto-import was refused. Pick a release below or enter a MusicBrainz ID.'}
-              </p>
+            {decisionBannerShown ? (
+              <div className="mt-2 rounded border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+                {/* The single consolidated decision line. The first sentence copy
+                    is locked by ImportReviewQaDefects "defect C"; the folded
+                    guidance sits beneath it so the actionable next steps survive
+                    without their own separate banner. */}
+                <p>
+                  {item.alt_candidates?.best_verified_release_group_id
+                    ? 'Needs decision: auto-import was refused. A verified candidate is below — review it before importing.'
+                    : 'Needs decision: the best candidate could not be evaluated, so auto-import was refused. Pick a release below or enter a MusicBrainz ID.'}
+                </p>
+                {matchNote ? (
+                  <p className="mt-1 text-amber-200/80">
+                    {/* The non-verified decision sentence already says "enter a
+                        MusicBrainz ID", so the guidance drops that clause there to
+                        avoid repeating it; everything else is preserved. */}
+                    {matchNote === UNRESOLVED_ID_NOTE
+                      ? (item.alt_candidates?.best_verified_release_group_id ? UNRESOLVED_ID_GUIDANCE : UNRESOLVED_ID_GUIDANCE_SHORT)
+                      : matchNote}
+                  </p>
+                ) : null}
+                {/* The raw backend reason carries the Beets skip code (e.g.
+                    no_strong_match), which lives nowhere else on the card.
+                    Relocated here, collapsed, so it is one click away rather than
+                    a fourth top-level banner — the skip code is never lost. */}
+                {decisionBannerReason ? (
+                  <details className="mt-1.5 text-xs text-amber-200/80">
+                    <summary className="cursor-pointer rounded font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300">
+                      Why Beets skipped this folder
+                    </summary>
+                    <p className="mt-1">{decisionBannerReason}</p>
+                  </details>
+                ) : null}
+              </div>
             ) : null}
             <QualityUpgradeNotice evidence={item.evidence} />
 
@@ -3146,7 +3210,7 @@ export function ReviewCard({
                 </div>
               </div>
             ) : (
-              <EvidenceSummary item={item} />
+              <EvidenceSummary item={item} hideSkipNote={decisionBannerShown} />
             )}
             {!isRecordingReview ? (
               <AltCandidatesPanel item={item} selectedRgid={mbid} onUseCandidate={onUseAltCandidate} />

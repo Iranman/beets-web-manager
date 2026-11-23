@@ -120,7 +120,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("const visibleMatchBucket: MatchBucket = audioMismatchActive", review_source)
         self.assertIn(": blockedActive", review_source)
         self.assertIn("const staleStoredReason = selectedMatchActive && /preflight failed|failed tracklist preflight|rejected selected musicbrainz release/i.test(item.reason || '')", review_source)
-        self.assertIn("const visibleMatchNote = selectedMatchActive && !audioMismatchActive ? '' : matchNote", review_source)
+        self.assertIn("const visibleMatchNote = (selectedMatchActive && !audioMismatchActive) || decisionBannerShown ? '' : matchNote", review_source)
         self.assertIn("actionLabel(item, selectedMatch, targetPreviewState?.preview)", review_source)
         self.assertIn("Next: {visibleBlockHint}", review_source)
 
