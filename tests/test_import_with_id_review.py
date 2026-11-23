@@ -198,5 +198,91 @@ class PreflightRejectionReasonTests(unittest.TestCase):
         self.assertNotIn("rejected by folder tracklist", text)
 
 
+import backend.import_service as isvc_mod
+
+# A no-mount inspect source whose per-file AcoustID lookup genuinely answered
+# empty (NO_RESULT = [] hits), as the interactive validate/revalidation path
+# now records once it fingerprints.
+_NO_RESULT_SOURCE = {"ok": True, "audio_files": [
+    {"relative_path": "01 Track One.flac",
+     "properties": {"title": "Track One", "track": 1, "length": 200}, "acoustid_hits": []},
+    {"relative_path": "02 Track Two.flac",
+     "properties": {"title": "Track Two", "track": 2, "length": 210}, "acoustid_hits": []}]}
+
+
+class ConfirmImportMessageTests(unittest.TestCase):
+    """#813: a configured-AcoustID + RG-resolved + 0-conflict + full-match item
+    whose recordings are simply not in AcoustID must NOT be told to set a key
+    that is already set, and must be human-confirmable."""
+
+    def _pre(self, *, fingerprint_evidence):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "downloads" / "batch" / "Plain LP"
+            src.mkdir(parents=True)
+            with mock.patch.object(ms, "MUSIC_ROOT", Path(tmp) / "music"), \
+                 mock.patch.object(ms, "DOWNLOADS_ROOT", Path(tmp) / "downloads"), \
+                 mock.patch.object(ms, "_fetch_mb_release_tracklist", return_value=TWO_TRACK_MB), \
+                 mock.patch.object(ms, "_acoustid_multi_file", return_value={}), \
+                 mock.patch.object(ms.composite_workflows, "inspect_import_source",
+                                   return_value=_NO_RESULT_SOURCE):
+                return ms._folder_release_preflight(str(src), REL, fingerprint_evidence=fingerprint_evidence)
+
+    def test_fingerprint_blind_path_reproduces_the_false_key_message(self):
+        # The old behavior: without per-file fingerprint evidence every track
+        # defaults to UNAVAILABLE, so the decision falsely tells the user to set
+        # a configured key.
+        d = self._pre(fingerprint_evidence=False)["matching_decision"]
+        self.assertIn("acoustid_unavailable", d["warnings"])
+        self.assertIn("ACOUSTID_API_KEY", d["explanation"])
+
+    def test_fingerprinted_no_result_gives_accurate_message_and_is_confirmable(self):
+        d = self._pre(fingerprint_evidence=True)["matching_decision"]
+        # Answered-empty lookup: reported as no_result, never as unavailable.
+        self.assertIn("acoustid_no_result", d["warnings"])
+        self.assertNotIn("acoustid_unavailable", d["warnings"])
+        self.assertNotIn("ACOUSTID_API_KEY", d["explanation"])
+        self.assertNotIn("not configured or not reachable", d["explanation"])
+        # Still not AUTOMATICALLY importable (no recording-level proof)...
+        self.assertFalse(d["action_allowed"])
+        # ...but a human may confirm-and-import this conflict-free, RG-resolved match.
+        self.assertTrue(d["manual_import_allowed"])
+
+
+class AlreadyInLibraryMessageTests(unittest.TestCase):
+    """DONE #3: a whole-folder duplicate skip is reported as 'already in your
+    library', not the ambiguous 'no confident match, or already in library'."""
+
+    def _ctx(self):
+        return isvc_mod._FolderImportContext(
+            log=[], cancel_event=None, folder_path=SRC, ai_suggestion={},
+            raw_mb_input=REL, input_looks_like_release_group=False,
+            queue_review_on_uncertain=True, light_confirm=False,
+            existing_album_id=0, wanted_tracks=[], source_is_library=False,
+            selected_subset_import=False)
+
+    def test_duplicate_skip_is_reported_as_already_in_library(self):
+        ctx = self._ctx()
+        apply_res = {"ok": False, "code": "not_imported", "skip_reason": "duplicate",
+                     "error": "Beets did not import this folder as the selected release."}
+        with mock.patch.object(isvc_mod, "_queue_folder_for_manual_review") as q:
+            with self.assertRaises(RuntimeError) as cm:
+                isvc_mod._folder_import_refuse_failed_apply(ctx, apply_res, REL, RG)
+        self.assertIn("already in your library", str(cm.exception))
+        reason = q.call_args.args[2]
+        self.assertIn("already in your library", reason)
+        self.assertNotIn("no confident match", reason)
+
+    def test_non_duplicate_not_imported_keeps_the_match_failure_message(self):
+        ctx = self._ctx()
+        apply_res = {"ok": False, "code": "not_imported", "skip_reason": "",
+                     "error": "Beets did not import this folder as the selected release."}
+        with mock.patch.object(isvc_mod, "_queue_folder_for_manual_review") as q:
+            with self.assertRaises(RuntimeError):
+                isvc_mod._folder_import_refuse_failed_apply(ctx, apply_res, REL, RG)
+        reason = q.call_args.args[2]
+        self.assertIn("could not confidently match", reason)
+        self.assertNotIn("already in your library", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

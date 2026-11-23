@@ -1088,7 +1088,16 @@ def _ai_preflight_note(preflight: Optional[Dict[str, Any]]) -> str:
 
 def _run_ai_release_preflight(folder_path: str, mb_albumid: str,
                               existing_album_id: int = 0,
-                              wanted_tracks: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+                              wanted_tracks: Optional[List[Dict[str, Any]]] = None,
+                              *, fingerprint_evidence: bool = False) -> Optional[Dict[str, Any]]:
+    # `fingerprint_evidence` (#303/#813 confirm-import): only the interactive
+    # Import Review validate/revalidation callers set it, so each staged file's
+    # answered AcoustID hits reach the canonical evaluator. That makes a genuine
+    # NO_RESULT ([] hits) read as no_result instead of the fingerprint-blind
+    # UNAVAILABLE default -- the difference between the accurate "confirm the
+    # match manually" message and the false "set ACOUSTID_API_KEY" one. It never
+    # widens any gate: automatic import still needs real confirmed/complete
+    # recording-level proof (this wrapper only gathers evidence).
     folder_path = _s(folder_path).strip()
     mb_albumid = _s(mb_albumid).strip()
     if not folder_path or not mb_albumid:
@@ -1100,6 +1109,7 @@ def _run_ai_release_preflight(folder_path: str, mb_albumid: str,
             existing_album_id=existing_album_id,
             log=None,
             wanted_tracks=wanted_tracks or None,
+            fingerprint_evidence=fingerprint_evidence,
         )
     except Exception as ex:
         _app_logger.warning("Preflight failed to run: %s", type(ex).__name__)

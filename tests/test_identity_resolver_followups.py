@@ -234,5 +234,39 @@ class AcoustIDUnavailableReviewReasonTests(unittest.TestCase):
         self.assertNotIn("ACOUSTID_API_KEY", d["eligibility_reason"])
 
 
+class ManualImportAllowedContractTests(unittest.TestCase):
+    """#813: a Release-Group-resolved, conflict-free album a human may confirm-
+    and-import even when the evidence is too weak for AUTOMATIC action."""
+
+    OTHER_RG = "22222222-2222-2222-2222-222222222222"
+
+    def _decide(self, current, candidate, items=None):
+        from backend.matching_contract import build_album_matching_decision
+        tracks = [{"title": "Song 1", "track": 1, "length": 200}]
+        return build_album_matching_decision(current=current, candidate=candidate,
+                                              items=items if items is not None else [{"title": "Song 1", "track": 1, "length": 200}],
+                                              mb_tracks=tracks).decision
+
+    def test_rg_resolved_no_conflict_is_manual_importable_though_not_auto(self):
+        d = self._decide({"album": "Album", "artist": "Artist"},
+                         {"mb_releasegroupid": RG, "mb_albumid": REL_A, "album": "Album", "artist": "Artist"})
+        # No recording-level proof -> automatic action withheld...
+        self.assertFalse(d["action_allowed"])
+        # ...but a human may confirm-and-import this conflict-free, RG-resolved match.
+        self.assertTrue(d["manual_import_allowed"])
+
+    def test_release_group_conflict_is_not_manual_importable(self):
+        d = self._decide({"album": "Album", "artist": "Artist", "mb_releasegroupid": self.OTHER_RG},
+                         {"mb_releasegroupid": RG, "mb_albumid": REL_A, "album": "Album", "artist": "Artist"})
+        self.assertIn("release_group_conflict", d["conflicts"])
+        self.assertFalse(d["action_allowed"])
+        self.assertFalse(d["manual_import_allowed"])
+
+    def test_missing_release_group_is_not_manual_importable(self):
+        d = self._decide({"album": "Album", "artist": "Artist"},
+                         {"mb_albumid": REL_A, "album": "Album", "artist": "Artist"})
+        self.assertFalse(d["manual_import_allowed"])
+
+
 if __name__ == "__main__":
     unittest.main()
