@@ -240,5 +240,17 @@ test('Confirm match & import unblocks a correct album that could not be auto-ver
   expect(importBody).toBeNull();
 
   await dialog.getByRole('button', { name: 'Confirm match & import' }).click();
-  await expect.poll(() => importBody).toEqual({ path: reviewFolder, mb_albumid: REL, mb_releasegroupid: RG, queue_review: true });
+  // Mutation-safety (#816): confirm sends ONLY the matched subset + its track mapping
+  // via the audited import-with-id route, never a bare whole-folder import.
+  await expect.poll(() => importBody).toEqual({
+    path: reviewFolder,
+    mb_albumid: REL,
+    mb_releasegroupid: RG,
+    queue_review: true,
+    selected_source_files: [
+      `${reviewFolder}/01 Review One.flac`,
+      `${reviewFolder}/02 Review Two.flac`,
+    ],
+    track_mapping: selectedMatch.track_mapping,
+  });
 });
