@@ -689,6 +689,26 @@ def _source_artist(task):
     return artist if artist is not None else getattr(task, "cur_artist", None)
 
 
+def _acoustid_hit_every_file(task, match) -> bool:
+    """True when the chroma plugin is loaded and AcoustID returned, for every
+    file in the task, the recording id of the Release track Beets mapped that
+    file to -- positive fingerprint identity evidence for the pinned Release.
+    Uses chroma's own ``_matches`` (the ``track_id`` distance key is 0 even
+    without a hit, so it is never the signal). Empty or absent -> False."""
+    chroma = sys.modules.get("beetsplug.chroma")  # imported only when Beets loaded it
+    matches = getattr(chroma, "_matches", None)
+    items = list(getattr(task, "items", None) or [])
+    mapping = getattr(match, "mapping", None) or {}
+    if not isinstance(matches, dict) or not items:
+        return False
+    for item in items:
+        track_id = getattr(mapping.get(item), "track_id", None)
+        hit = matches.get(item.path)
+        if not track_id or not hit or track_id not in hit[0]:
+            return False
+    return True
+
+
 def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int) -> bool:
     """True when the album-level ``artist`` penalty of a missing-track repair
     says nothing against the pinned Release (the source names only some of
@@ -711,17 +731,8 @@ def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int)
         return False
     if album is None or album.get("mb_albumid") != release_id:
         return False
-    chroma = sys.modules.get("beetsplug.chroma")  # imported only when Beets loaded it
-    matches = getattr(chroma, "_matches", None)
-    items = list(getattr(task, "items", None) or [])
-    mapping = getattr(match, "mapping", None) or {}
-    if not isinstance(matches, dict) or not items:
+    if not _acoustid_hit_every_file(task, match):  # G2
         return False
-    for item in items:
-        track_id = getattr(mapping.get(item), "track_id", None)
-        hit = matches.get(item.path)
-        if not track_id or not hit or track_id not in hit[0]:
-            return False
     info = match.info
     if getattr(info, "va", False):
         return False
@@ -733,7 +744,7 @@ def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int)
 
 
 def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
-                          lib=None, existing_album_id: int = 0):
+                          lib=None, existing_album_id: int = 0, human_confirmed: bool = False):
     """The Release pinned by the request's one search id as a match, or None.
 
     Beets caps the recommendation of any match with missing tracks at medium
@@ -758,7 +769,18 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     album on this Release, an AcoustID hit on the mapped recording for every
     file, the source artist a part of the Release's credit). ``album`` and
     every track-level penalty stay in. Such a match is flagged
-    ``webmanager_partial_artist_relaxed`` and reported for the audit trail."""
+    ``webmanager_partial_artist_relaxed`` and reported for the audit trail.
+
+    ``human_confirmed`` is the explicit human Confirm/Import-with-ID path (a
+    person picked this exact Release after Web Manager verified it); it is
+    never set for auto-import or unattended recovery. On that path only, and
+    only when AcoustID matched every file to the recording of its mapped track
+    (``_acoustid_hit_every_file``), the numeric bar is relaxed from
+    ``match.strong_rec_thresh`` to ``match.medium_rec_thresh``: fingerprint
+    identity, not text similarity, is the evidence. Every structural guard
+    above still holds (pinned Release is best candidate, no extra items, no
+    penalty capped below strong), and without a fingerprint hit on every file
+    the strong bar is kept (fail closed). Flagged ``webmanager_confirmed_relaxed``."""
     candidates = list(getattr(task, "candidates", None) or [])
     if not release_id or not candidates:
         return None
@@ -780,6 +802,20 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT)
     if max_distance > 0 and raw / max_distance < thresh:
         return match
+    # Explicit human confirm, fingerprint-backed: accept the pinned Release
+    # past Beets' fuzzy auto bar, up to MEDIUM, when AcoustID matched every
+    # file to the recording of its mapped track. Fail closed to strong (above)
+    # when any file lacks a hit, and never on the auto/recovery path.
+    if human_confirmed and _acoustid_hit_every_file(task, match):
+        medium = beets_config["match"]["medium_rec_thresh"].as_number()
+        if max_distance > 0 and raw / max_distance < medium:
+            task.webmanager_confirmed_relaxed = True
+            log.info("Pinned release %s accepted for %s on the explicit human-confirmed "
+                     "path at the medium bar (AcoustID hit on every file; distance %.4f < %.4f)",
+                     release_id,
+                     [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
+                     (raw / max_distance) if max_distance else 0.0, medium)
+            return match
     if missing and _artist_relaxable(task, match, release_id, lib, existing_album_id):
         raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT | {"artist"})
         if max_distance > 0 and raw / max_distance < thresh:
@@ -851,7 +887,8 @@ def duplicate_evidence(task, found_duplicates) -> Dict[str, Any]:
 
 
 def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: str = "",
-                          allow_missing_tracks: bool = False, existing_album_id: int = 0):
+                          allow_missing_tracks: bool = False, existing_album_id: int = 0,
+                          human_confirmed: bool = False):
     """Beets' own import session: the quiet terminal session (what
     ``beet import -q`` runs) when autotagging, else the base session.
 
@@ -874,7 +911,7 @@ def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: st
         def choose_match(self, task):
             tasks.append(task)
             partial = _pinned_partial_match(task, pinned_release_id, allow_missing_tracks,
-                                            self.lib, existing_album_id)
+                                            self.lib, existing_album_id, human_confirmed)
             if partial is not None:
                 # Stock choose_match lets plugins act first (badfiles'
                 # import_action_on_error: skip); the override must not skip that.
@@ -1012,6 +1049,17 @@ def run_import():
         return jsonify({
             "error": "existing_album_id must be a non-negative integer",
             "error_code": "INVALID_EXISTING_ALBUM_ID",
+        }), 400
+
+    # The explicit human Confirm/Import-with-ID path (plugin 1.21.0). On this
+    # path only, a fingerprint-backed pinned Release may be accepted at the
+    # medium rather than the strong bar (_pinned_partial_match). Never set by
+    # auto-import or unattended recovery, so their gate is unchanged.
+    human_confirmed = data.get("human_confirmed", False)
+    if not isinstance(human_confirmed, bool):
+        return jsonify({
+            "error": "human_confirmed must be a boolean",
+            "error_code": "INVALID_HUMAN_CONFIRMED",
         }), 400
 
     # Policy 2: Validate duplicate_action strictly
@@ -1201,7 +1249,7 @@ def run_import():
                 tasks: List[Any] = []
                 session = _import_session_class(
                     autotag, tasks, search_ids[0] if len(search_ids) == 1 else "", allow_missing_tracks,
-                    existing_album_id if allow_missing_tracks else 0)(
+                    existing_album_id if allow_missing_tracks else 0, human_confirmed)(
                     lib, loghandler=None, paths=path_bytes, query=None
                 )
                 global _IMPORTED_ALBUM_IDS

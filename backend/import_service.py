@@ -3941,6 +3941,13 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
     if selection_refusal:
         return selection_refusal
     selected_subset_import = bool(selected_source_files)
+    # The explicit, human-driven Confirm/Import-with-ID path: a person picked
+    # this exact Release after Web Manager verified it. NOT an auto-import
+    # replay (auto_import) and NOT an unattended recovery auto-insert
+    # (recovery_carrier_id). Only this path relaxes Beets' pinned-match bar to
+    # medium for a fingerprint-backed release; auto/recovery keep the strong
+    # bar unchanged.
+    human_confirmed_import = not auto_import and not _recovery_auto_insert_id
     preserve_torrent_source = (_preserve_torrent_source_path(folder_path)
                                or _review_row_is_torrent_source(folder_path))
     if not existing_album_id:
@@ -4086,6 +4093,13 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # A folder already inside the library is imported where it is.
             "in_place": source_is_library and not selected_subset_import,
             "duplicate_action": "keep" if existing_album_id else "skip",
+            # Explicit human confirm: let Beets accept this fingerprint-backed
+            # pinned Release at the medium bar (operations._pinned_partial_match).
+            "human_confirmed": human_confirmed_import,
+            # A deliberate human-confirmed subset holds only some of the
+            # Release's tracks; without this Beets caps a missing-track match at
+            # medium and skips it. Only on the human path, only for a subset.
+            "allow_missing_tracks": human_confirmed_import and selected_subset_import,
         })
         if not plan_res.get("ok"):
             raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
