@@ -553,6 +553,7 @@ class BeetsAdapter:
         timeout: Optional[float] = None,
         allow_missing_tracks: bool = False,
         existing_album_id: int = 0,
+        human_confirmed: bool = False,
     ) -> Dict[str, Any]:
         """Execute a non-interactive import with Beets' own ImportSession.
 
@@ -564,7 +565,10 @@ class BeetsAdapter:
         apply the pinned Release to a folder holding only some of its tracks.
         ``existing_album_id`` (plugin 1.18.4) names the library album such a
         repair fills; the plugin checks it is on the pinned Release before it
-        may set the artist penalty aside.
+        may set the artist penalty aside. ``human_confirmed`` (plugin 1.21.0)
+        marks the explicit human Confirm/Import-with-ID path, on which a
+        fingerprint-backed pinned Release is accepted at the medium rather than
+        the strong bar; it is never sent for auto-import or recovery.
         """
         payload = {
             "paths": [paths] if isinstance(paths, str) else paths,
@@ -587,6 +591,8 @@ class BeetsAdapter:
             payload["allow_missing_tracks"] = True
             if existing_album_id:
                 payload["existing_album_id"] = int(existing_album_id)
+        if human_confirmed:
+            payload["human_confirmed"] = True
         headers = {}
         if is_async:
             headers["Prefer"] = "respond-async"

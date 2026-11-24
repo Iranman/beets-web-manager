@@ -24214,8 +24214,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -24473,8 +24475,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -24748,8 +24752,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -25023,8 +25029,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -25302,8 +25310,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -25577,8 +25587,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -25839,8 +25851,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -26028,8 +26042,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -26213,8 +26229,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -26475,8 +26493,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -26661,8 +26681,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -26828,8 +26850,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -26995,8 +27019,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -27171,8 +27197,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -27420,8 +27448,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -27811,8 +27841,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -28403,8 +28435,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -28871,8 +28905,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -29130,8 +29166,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -29389,8 +29427,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -29629,8 +29669,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -29880,8 +29922,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -30131,8 +30175,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -30390,8 +30436,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -30614,8 +30662,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -30854,8 +30904,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -31113,8 +31165,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -31380,8 +31434,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 7,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -31639,8 +31695,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -31879,8 +31937,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -32749,8 +32809,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -35521,8 +35583,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": true,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -35769,8 +35833,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": true,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -36188,8 +36254,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "human_confirmed": true,
       "in_place": true,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -36588,8 +36656,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -36878,8 +36948,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -37223,8 +37295,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -37591,8 +37665,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -37747,8 +37823,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -37900,8 +37978,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -38169,8 +38249,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -38460,8 +38542,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -38751,8 +38835,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -39042,8 +39128,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -39392,8 +39480,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -39674,8 +39764,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -39933,8 +40025,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -40184,8 +40278,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -40443,8 +40539,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 6,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -40910,8 +41008,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -41169,8 +41269,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "",
@@ -41796,8 +41898,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -42075,8 +42179,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -42748,8 +42854,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -43033,8 +43141,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -43490,8 +43600,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -43811,8 +43923,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -44119,8 +44233,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -44404,8 +44520,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -44717,8 +44835,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",
@@ -45028,8 +45148,10 @@
     "cw.plan_confirmed_import",
     [
      {
+      "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
       "mb_release_group_resolved": "22222222-2222-2222-2222-222222222222",

@@ -251,5 +251,103 @@ class PinnedArtistRelaxationTests(unittest.TestCase):
             self.assertIsNone(ops._pinned_partial_match(task, REL, True, _Lib({5: {"mb_albumid": REL}}), 5))
 
 
+MEDIUM = 0.25  # Beets' default match.medium_rec_thresh
+
+
+class PinnedHumanConfirmedMediumBarTests(unittest.TestCase):
+    """webmanager plugin 1.21.0: on the explicit human Confirm/Import-with-ID
+    path only, a fingerprint-backed pinned Release is accepted up to the MEDIUM
+    bar instead of STRONG. The John Williams classical shape (album title text
+    score 0.807, every track AcoustID-confirmed) sits at ratio ~0.105 -- over
+    strong (skipped by Beets) but under medium -- so it imports only here."""
+
+    def _case(self, album=0.807, track_title=0.0, length=0.0, human_confirmed=True,
+              chroma=True, drop_hit=False, wrong_hit=False, extra_items=(), album_id=REL,
+              missing=0, allow_missing=False, ntracks=8):
+        items = [_Item(k) for k in range(1, ntracks + 1)]
+        dist = _album([_track(title=track_title, length=length, data_source=None) for _ in items],
+                      missing=missing, artist=0.0, album=album, data_source=None)
+        info = types.SimpleNamespace(album_id=album_id, va=False, artists=[], artists_credit=[], artist="")
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[object()] * missing, extra_items=list(extra_items),
+            mapping={it: types.SimpleNamespace(track_id=TRACK_IDS[k - 1]) for k, it in enumerate(items, 1)})
+        task = types.SimpleNamespace(candidates=[match], items=items, cur_artist="",
+                                     paths=[b"/downloads/Williams"])
+        hits = {it.path: ([TRACK_IDS[k - 1]], [REL]) for k, it in enumerate(items, 1)}
+        if drop_hit:
+            hits.pop(items[-1].path)
+        if wrong_hit:
+            hits[items[-1].path] = ([TRACK_IDS[0]], [REL])  # a recording the file is not mapped to
+        modules = {"beetsplug.chroma": types.SimpleNamespace(_matches=hits)} if chroma else {}
+        with mock.patch.dict(sys.modules, modules):
+            if not chroma:
+                sys.modules.pop("beetsplug.chroma", None)
+            got = ops._pinned_partial_match(task, REL, allow_missing, None, 0, human_confirmed)
+        return got, match, task
+
+    def test_classical_shape_sits_between_strong_and_medium(self):
+        _, match, _ = self._case()
+        raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
+        self.assertGreaterEqual(raw / mx, THRESH)   # Beets skips it: over strong
+        self.assertLess(raw / mx, MEDIUM)           # but within medium
+
+    def test_a_human_confirmed_fingerprinted_import_is_accepted_and_flagged(self):
+        got, match, task = self._case(human_confirmed=True)
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_relaxed", False))
+
+    def test_b_without_fingerprint_hits_fails_closed_to_strong(self):
+        # chroma not loaded, a dropped file, and a wrong recording all refuse.
+        for name, kw in (("no chroma", {"chroma": False}),
+                         ("one file lacks a hit", {"drop_hit": True}),
+                         ("one file mapped to another recording", {"wrong_hit": True})):
+            with self.subTest(name):
+                got, _, task = self._case(human_confirmed=True, **kw)
+                self.assertIsNone(got)
+                self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
+
+    def test_c_auto_path_still_refuses_the_text_distant_match(self):
+        # The automatic gate is byte-for-byte unchanged: same distance, same
+        # fingerprint hits, human_confirmed False -> still skipped.
+        got, _, task = self._case(human_confirmed=False)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
+
+    def test_d_strong_match_is_unchanged_on_both_paths(self):
+        # A genuinely strong pinned match (ratio under 0.04) still imports with
+        # no relaxation flag, whether human_confirmed or not.
+        for human in (True, False):
+            with self.subTest(human_confirmed=human):
+                got, match, task = self._case(album=0.3, human_confirmed=human)
+                raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
+                self.assertLess(raw / mx, THRESH)
+                self.assertIs(got, match)
+                self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
+
+    def test_e_over_medium_is_refused_even_when_human_confirmed(self):
+        # Medium is a real bar, not a blind force: too far in text -> refused.
+        got, match, _ = self._case(album=0.807, track_title=0.5, human_confirmed=True)
+        raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
+        self.assertGreaterEqual(raw / mx, MEDIUM)
+        self.assertIsNone(got)
+
+    def test_f_structural_guards_still_hold_under_human_confirmed(self):
+        for name, kw in (("extra items", {"extra_items": [object()]}),
+                         ("not the pinned release", {"album_id": "b6a6e718-3d8e-4c3e-9eaa-7b54af639bb9"})):
+            with self.subTest(name):
+                got, _, _ = self._case(human_confirmed=True, **kw)
+                self.assertIsNone(got)
+
+    def test_g_human_confirmed_subset_needs_allow_missing(self):
+        # A deliberate 8-of-10 subset: missing tracks are allowed only with
+        # allow_missing (step 3), and only then does the medium bar apply.
+        got, match, task = self._case(missing=2, allow_missing=True, human_confirmed=True)
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_relaxed", False))
+        # Without allow_missing the missing tracks refuse it before the bar.
+        got2, _, _ = self._case(missing=2, allow_missing=False, human_confirmed=True)
+        self.assertIsNone(got2)
+
+
 if __name__ == "__main__":
     unittest.main()

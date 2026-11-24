@@ -82,6 +82,19 @@ class ConfirmedImportTests(unittest.TestCase):
         src = (Path(__file__).resolve().parents[1] / "backend" / "import_service.py").read_text(encoding="utf-8")
         self.assertIn('"allow_missing_tracks": bool(existing_album_id and wanted_tracks)', src)
 
+    def test_human_confirmed_passes_through_only_when_the_plan_says_so(self):
+        """The explicit human Confirm/Import-with-ID path records
+        human_confirmed in the plan; apply forwards it to run_import. Every
+        other import (auto/recovery) omits it, so the plugin keeps the strong
+        bar -- the automatic gate is untouched."""
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        self._run(ad, human_confirmed=True)
+        self.assertIs(ad.run_import.call_args.kwargs["human_confirmed"], True)
+        for meta in ({}, {"human_confirmed": False}):
+            ad = _adapter({"id": 9, "mb_albumid": REL})
+            self._run(ad, **meta)
+            self.assertIs(ad.run_import.call_args.kwargs["human_confirmed"], False)
+
     def test_artist_relaxation_is_recorded_in_the_transaction(self):
         ad = _adapter({"id": 9, "mb_albumid": REL})
         ad.run_import.return_value = {"success": True, "partial_artist_relaxed": ["/downloads/A"]}
@@ -94,6 +107,21 @@ class ConfirmedImportTests(unittest.TestCase):
         res, tx = self._run(ad, allow_missing_tracks=True, existing_album_id=5, duplicate_action="keep")
         self.assertFalse(tx["metadata"]["engine_result"]["partial_artist_relaxed"])
         self.assertFalse(any("artist penalty set aside" in line for line in tx.get("logs") or []))
+
+    def test_confirmed_relaxation_is_recorded_in_the_transaction(self):
+        """2b: a human-confirmed import accepted at the medium bar records WHY
+        the strong gate was bypassed, mirroring partial_artist_relaxed."""
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        ad.run_import.return_value = {"success": True, "confirmed_relaxed": ["/downloads/A"]}
+        res, tx = self._run(ad, human_confirmed=True)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(tx["metadata"]["engine_result"]["confirmed_relaxed"])
+        self.assertTrue(any("explicit human-confirmed path at the medium bar" in line for line in tx["logs"]))
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        ad.run_import.return_value = {"success": True, "confirmed_relaxed": []}
+        res, tx = self._run(ad, human_confirmed=True)
+        self.assertFalse(tx["metadata"]["engine_result"]["confirmed_relaxed"])
+        self.assertFalse(any("human-confirmed path at the medium bar" in line for line in tx.get("logs") or []))
 
     def test_move_and_in_place_modes(self):
         ad = _adapter({"id": 9, "mb_albumid": REL})
@@ -402,14 +430,27 @@ class ConfirmedImportJobTests(unittest.TestCase):
         self.assertEqual(code, 200, body)
         return self.result
 
-    def _import_with_id(self, album_rg):
+    def _import_with_id(self, album_rg, **extra):
         isvc = self.isvc
         self.ad = _adapter({"id": 9, "mb_albumid": REL, "mb_releasegroupid": album_rg})
         src = "/downloads/Artist - Album"
         with mock.patch.object(isvc, "_resolve_import_review_source_path", return_value=(src, None)),              mock.patch.object(isvc, "_preserve_torrent_source_path", return_value=True),              mock.patch.object(isvc, "_beet_import_timeout", return_value=60):
-            body, code = isvc.start_folder_import_with_id({"path": src, "mb_albumid": REL})
+            body, code = isvc.start_folder_import_with_id({"path": src, "mb_albumid": REL, **extra})
         self.assertEqual(code, 200, body)
         return self.result
+
+    def test_import_with_id_is_the_human_confirmed_path(self):
+        # The Review "Confirm match & import" control: human_confirmed reaches
+        # the plugin, so a fingerprint-backed pinned Release is accepted at the
+        # medium bar.
+        self._import_with_id(RG)
+        self.assertIs(self.ad.run_import.call_args.kwargs["human_confirmed"], True)
+
+    def test_auto_import_replay_is_not_human_confirmed(self):
+        # An auto-import replay of a stored suggestion keeps the strong bar: the
+        # automatic gate is byte-for-byte unchanged.
+        self._import_with_id(RG, auto_import=True)
+        self.assertIs(self.ad.run_import.call_args.kwargs["human_confirmed"], False)
 
     def _assert_kept_and_not_retagged(self):
         self.assertEqual(self.cw_calls, [])  # no retag, relocate or row removal
