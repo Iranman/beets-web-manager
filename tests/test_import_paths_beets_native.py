@@ -123,6 +123,25 @@ class ConfirmedImportTests(unittest.TestCase):
         self.assertFalse(tx["metadata"]["engine_result"]["confirmed_relaxed"])
         self.assertFalse(any("human-confirmed path at the medium bar" in line for line in tx.get("logs") or []))
 
+    def test_fingerprint_primary_acceptance_is_recorded_in_the_transaction(self):
+        """1.22.0: an over-medium folder accepted on the human-confirmed path by
+        complete fingerprint identity records WHY the text ceiling was overridden
+        and persists confirmed_fingerprint_primary on the engine_result."""
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        ad.run_import.return_value = {"success": True,
+                                      "confirmed_fingerprint_primary": ["/downloads/A"]}
+        res, tx = self._run(ad, human_confirmed=True)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(tx["metadata"]["engine_result"]["confirmed_fingerprint_primary"])
+        self.assertTrue(any("text-distance ceiling was overridden" in line for line in tx["logs"]))
+        # The medium-bar line is NOT emitted for a fingerprint-primary acceptance.
+        self.assertFalse(any("medium bar" in line for line in tx["logs"]))
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        ad.run_import.return_value = {"success": True, "confirmed_fingerprint_primary": []}
+        res, tx = self._run(ad, human_confirmed=True)
+        self.assertFalse(tx["metadata"]["engine_result"]["confirmed_fingerprint_primary"])
+        self.assertFalse(any("text-distance ceiling was overridden" in line for line in tx.get("logs") or []))
+
     def test_move_and_in_place_modes(self):
         ad = _adapter({"id": 9, "mb_albumid": REL})
         self._run(ad, use_move=True)

@@ -5389,11 +5389,16 @@ def apply_confirmed_import(
                              undo={"album_id": album_id, "item_ids": item_ids, "move_files": move_files})
             relaxed = imported.get("partial_artist_relaxed") if isinstance(imported, dict) else None
             confirmed_relaxed = imported.get("confirmed_relaxed") if isinstance(imported, dict) else None
+            confirmed_fp_primary = imported.get("confirmed_fingerprint_primary") if isinstance(imported, dict) else None
             relax_logs = []
             if relaxed:
                 relax_logs.append(f"Beets matched {relaxed} to the pinned release with the artist penalty set aside "
                                   "(AcoustID matched every file; the source artist is part of the release credit)")
-            if confirmed_relaxed:
+            if confirmed_fp_primary:
+                relax_logs.append(f"Beets accepted {confirmed_fp_primary} on the explicit human-confirmed path by complete "
+                                  "recording-level fingerprint identity (AcoustID matched every file to its mapped recording; "
+                                  "the text-distance ceiling was overridden; the automatic gate is unchanged)")
+            elif confirmed_relaxed:
                 relax_logs.append(f"Beets accepted {confirmed_relaxed} on the explicit human-confirmed path at the medium "
                                   "bar (AcoustID matched every file to its mapped recording; the automatic gate is unchanged)")
             st.transition(operation_id, "Running", "Completed",
@@ -5404,7 +5409,8 @@ def apply_confirmed_import(
                                                       "in_place": in_place,
                                                       "write_tags": True,
                                                       "partial_artist_relaxed": bool(relaxed),
-                                                      "confirmed_relaxed": bool(confirmed_relaxed)}})
+                                                      "confirmed_relaxed": bool(confirmed_relaxed),
+                                                      "confirmed_fingerprint_primary": bool(confirmed_fp_primary)}})
     except ResourceLockConflictError as exc:
         return _fail("Running", "resource_busy", _lock_busy(operation_id, exc)["error"], mutated=True,
                      album_ids=[album_id],

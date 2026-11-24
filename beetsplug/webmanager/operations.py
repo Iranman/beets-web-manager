@@ -775,12 +775,16 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     person picked this exact Release after Web Manager verified it); it is
     never set for auto-import or unattended recovery. On that path only, and
     only when AcoustID matched every file to the recording of its mapped track
-    (``_acoustid_hit_every_file``), the numeric bar is relaxed from
-    ``match.strong_rec_thresh`` to ``match.medium_rec_thresh``: fingerprint
-    identity, not text similarity, is the evidence. Every structural guard
-    above still holds (pinned Release is best candidate, no extra items, no
-    penalty capped below strong), and without a fingerprint hit on every file
-    the strong bar is kept (fail closed). Flagged ``webmanager_confirmed_relaxed``."""
+    (``_acoustid_hit_every_file``), complete recording-level fingerprint
+    identity accepts the pinned Release irrespective of Beets' text distance:
+    fingerprint identity, not text similarity, is the evidence, so classical,
+    transliterated and heavy edition/feat. variants import. Every structural
+    guard above still holds (pinned Release is best candidate, no extra items,
+    no penalty capped below strong), and without a fingerprint hit on every
+    file the strong bar is kept (fail closed). Flagged
+    ``webmanager_confirmed_fingerprint_primary`` (and, when the text distance
+    was also under ``match.medium_rec_thresh``, ``webmanager_confirmed_relaxed``
+    for #817 back-compat)."""
     candidates = list(getattr(task, "candidates", None) or [])
     if not release_id or not candidates:
         return None
@@ -802,20 +806,28 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT)
     if max_distance > 0 and raw / max_distance < thresh:
         return match
-    # Explicit human confirm, fingerprint-backed: accept the pinned Release
-    # past Beets' fuzzy auto bar, up to MEDIUM, when AcoustID matched every
-    # file to the recording of its mapped track. Fail closed to strong (above)
-    # when any file lacks a hit, and never on the auto/recovery path.
+    # Explicit human confirm, fingerprint-backed: complete recording-level
+    # fingerprint identity (AcoustID matched every file to the recording of its
+    # mapped track) accepts the pinned Release IRRESPECTIVE of Beets' text
+    # distance -- the text ceiling is overridden, not merely raised. Fail closed
+    # to strong (above) when any file lacks a hit, and never on the
+    # auto/recovery path. raw/max is computed only for the log and the #817
+    # back-compat sub-flag; it does not gate acceptance.
     if human_confirmed and _acoustid_hit_every_file(task, match):
         medium = beets_config["match"]["medium_rec_thresh"].as_number()
-        if max_distance > 0 and raw / max_distance < medium:
+        ratio = (raw / max_distance) if max_distance > 0 else 0.0
+        task.webmanager_confirmed_fingerprint_primary = True
+        if max_distance > 0 and ratio < medium:
+            # #817 back-compat: the common sub-case (text also under medium)
+            # keeps its telemetry flag.
             task.webmanager_confirmed_relaxed = True
-            log.info("Pinned release %s accepted for %s on the explicit human-confirmed "
-                     "path at the medium bar (AcoustID hit on every file; distance %.4f < %.4f)",
-                     release_id,
-                     [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
-                     (raw / max_distance) if max_distance else 0.0, medium)
-            return match
+        log.info("Pinned release %s accepted for %s on the explicit human-confirmed "
+                 "path by complete recording-level fingerprint identity (AcoustID hit on "
+                 "every file); text ceiling overridden (distance %.4f)",
+                 release_id,
+                 [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
+                 ratio)
+        return match
     if missing and _artist_relaxable(task, match, release_id, lib, existing_album_id):
         raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT | {"artist"})
         if max_distance > 0 and raw / max_distance < thresh:
@@ -1298,6 +1310,10 @@ def run_import():
                     "confirmed_relaxed": [
                         util.displayable_path(tp) for t in tasks
                         if getattr(t, "webmanager_confirmed_relaxed", False) and not getattr(t, "skip", False)
+                        for tp in getattr(t, "paths", None) or []],
+                    "confirmed_fingerprint_primary": [
+                        util.displayable_path(tp) for t in tasks
+                        if getattr(t, "webmanager_confirmed_fingerprint_primary", False) and not getattr(t, "skip", False)
                         for tp in getattr(t, "paths", None) or []],
                     "imported_album_ids": sorted(set(imported_ids)),
                 }
