@@ -69,6 +69,34 @@ class EmbeddedAutotagTests(unittest.TestCase):
     def test_unknown_release_is_skipped(self):
         self._assert_nothing_imported(self._run("not_found"), "no_candidates")
 
+    # Regression for the #819 live failure: a human-confirmed, fingerprint-
+    # verified, divergent-title pinned release must import through a REAL
+    # `beet import --search-id` session -- exercising choose_match /
+    # _pinned_partial_match, not a direct call with _matches pre-injected.
+    def test_divergent_titles_without_fingerprint_evidence_are_refused(self):
+        # Chroma absent and no Web Manager evidence: the fingerprint-primary
+        # override cannot fire, so Beets' strong text bar refuses the
+        # divergent-title release (this is the pre-fix live behaviour).
+        out = self._run("fp_primary_divergent")
+        self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["imported_album_ids"], [])
+        self.assertEqual([s["reason"] for s in out["import"]["skipped"]], ["no_strong_match"])
+        self.assertEqual(out["import"]["confirmed_fingerprint_primary"], [])
+        self.assertEqual((out["albums"], out["items"]), ([], []))
+
+    def test_divergent_titles_import_with_web_manager_fingerprint_evidence(self):
+        # Same divergent-title release, now with Web Manager's own per-file
+        # AcoustID evidence threaded in (fingerprint_confirmed). The override
+        # engages and the release imports past the text-distance ceiling.
+        out = self._run("fp_primary_confirmed")
+        self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["skipped"], [])
+        self.assertEqual(len(out["import"]["imported_album_ids"]), 1)
+        self.assertEqual(len(out["import"]["confirmed_fingerprint_primary"]), 1)
+        self.assertEqual(out["albums"], [{"album": "Jóga", "albumartist": "Björk",
+                                          "mb_albumid": REL, "mb_releasegroupid": RG}])
+        self.assertEqual(out["stats_after"], {"albums": 1, "items": 2})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,8 +60,18 @@ for d in (cfg, music, dl):
     os.makedirs(d)
 src = os.path.join(dl, "Björk - Jóga")
 os.makedirs(src)
-tracks = ([("Jóga (Introvert Breaks mix)", 641), ("Jóga (Introvert 4/4 mix)", 534)] if scenario != "mismatch"
-          else [("Something Else", 30), ("Another Song", 45)])
+# The fp_primary_* scenarios keep the real artist/album but give the files
+# divergent (classical-style) titles, so Beets' album text distance exceeds
+# its strong threshold exactly as the live John Williams import did -- the
+# fingerprint-primary override is the only thing that can accept them.
+DIVERGENT = [("Violin Concerto no. 1 I. Prologue", 641),
+             ("Serenade after Plato II. Aristophanes", 534)]
+if scenario == "mismatch":
+    tracks = [("Something Else", 30), ("Another Song", 45)]
+elif scenario in ("fp_primary_divergent", "fp_primary_confirmed"):
+    tracks = DIVERGENT
+else:
+    tracks = [("Jóga (Introvert Breaks mix)", 641), ("Jóga (Introvert 4/4 mix)", 534)]
 for n, (title, secs) in enumerate(tracks, 1):
     wav(os.path.join(src, f"0{n}.wav"), title, secs, n)
 with open(os.path.join(cfg, "config.yaml"), "w", encoding="utf-8") as f:
@@ -77,10 +87,21 @@ beets_embedded._separate_beets_address = lambda: ""
 beets_embedded._beet_commands = lambda: []
 a = BeetsAdapter()
 out = {"status_ok": beets_embedded.status()["ok"]}
+# fp_primary_*: the explicit human-confirmed Import-with-ID path. Chroma is NOT
+# loaded (plugins: [musicbrainz]), mirroring a pinned --search-id run whose
+# in-session AcoustID lookup yields nothing, so the threaded per-file evidence
+# is the ONLY fingerprint signal. "confirmed" supplies the release recording
+# ids as Web Manager's own evidence; "divergent" supplies none (bug repro).
+human_confirmed = scenario in ("fp_primary_divergent", "fp_primary_confirmed")
+REC = ["846b5995-88f2-4d18-ae6d-fdc971615fd0", "06191ccf-303d-4a51-82dd-db04e860576f"]
+fp_evidence = ({os.path.join(src, f"0{n}.wav"): REC for n in (1, 2)}
+               if scenario == "fp_primary_confirmed" else None)
 try:
     res = a.run_import(paths=[src], autotag=True, search_ids=[REL], quiet_fallback="skip",
-                       copy=True, move=False, write=False)
-    out["import"] = {k: res.get(k) for k in ("ok", "skipped", "imported_album_ids", "no_strong_match")}
+                       copy=True, move=False, write=False,
+                       human_confirmed=human_confirmed, fingerprint_confirmed=fp_evidence)
+    out["import"] = {k: res.get(k) for k in ("ok", "skipped", "imported_album_ids", "no_strong_match",
+                                             "confirmed_fingerprint_primary")}
 except BeetsAdapterError as ex:
     out["import_error"] = [type(ex).__name__, ex.status_code, ex.error_code, str(ex)]
 albums = a.get_albums()

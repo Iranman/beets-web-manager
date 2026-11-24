@@ -554,6 +554,7 @@ class BeetsAdapter:
         allow_missing_tracks: bool = False,
         existing_album_id: int = 0,
         human_confirmed: bool = False,
+        fingerprint_confirmed: Optional[Dict[str, List[str]]] = None,
     ) -> Dict[str, Any]:
         """Execute a non-interactive import with Beets' own ImportSession.
 
@@ -569,6 +570,11 @@ class BeetsAdapter:
         marks the explicit human Confirm/Import-with-ID path, on which a
         fingerprint-backed pinned Release is accepted at the medium rather than
         the strong bar; it is never sent for auto-import or recovery.
+        ``fingerprint_confirmed`` (plugin 1.23.0) is Web Manager's own per-file
+        AcoustID evidence ``{source_file_path: [recording_id, ...]}`` the plugin
+        reads instead of chroma's unreliable in-session ``_matches``; it is only
+        sent on the human-confirmed path and is advisory (missing -> the strong
+        bar is kept, fail closed).
         """
         payload = {
             "paths": [paths] if isinstance(paths, str) else paths,
@@ -593,6 +599,11 @@ class BeetsAdapter:
                 payload["existing_album_id"] = int(existing_album_id)
         if human_confirmed:
             payload["human_confirmed"] = True
+            if fingerprint_confirmed:
+                payload["fingerprint_confirmed"] = {
+                    str(k): [str(r) for r in (v or [])]
+                    for k, v in fingerprint_confirmed.items() if v
+                }
         headers = {}
         if is_async:
             headers["Prefer"] = "respond-async"
