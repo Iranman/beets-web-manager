@@ -254,12 +254,14 @@ class PinnedArtistRelaxationTests(unittest.TestCase):
 MEDIUM = 0.25  # Beets' default match.medium_rec_thresh
 
 
-class PinnedHumanConfirmedMediumBarTests(unittest.TestCase):
-    """webmanager plugin 1.21.0: on the explicit human Confirm/Import-with-ID
-    path only, a fingerprint-backed pinned Release is accepted up to the MEDIUM
-    bar instead of STRONG. The John Williams classical shape (album title text
-    score 0.807, every track AcoustID-confirmed) sits at ratio ~0.105 -- over
-    strong (skipped by Beets) but under medium -- so it imports only here."""
+class PinnedHumanConfirmedFingerprintPrimaryTests(unittest.TestCase):
+    """webmanager plugin 1.22.0: on the explicit human Confirm/Import-with-ID
+    path only, complete recording-level fingerprint identity (AcoustID matched
+    every file to its mapped recording) accepts the pinned Release IRRESPECTIVE
+    of Beets' text distance -- the text ceiling is overridden, not merely raised
+    to MEDIUM (which #817 did). The John Williams classical shape (album title
+    text score 0.807, and here track titles also divergent so ratio exceeds
+    MEDIUM) imports because every track is fingerprint-confirmed."""
 
     def _case(self, album=0.807, track_title=0.0, length=0.0, human_confirmed=True,
               chroma=True, drop_hit=False, wrong_hit=False, extra_items=(), album_id=REL,
@@ -285,66 +287,85 @@ class PinnedHumanConfirmedMediumBarTests(unittest.TestCase):
             got = ops._pinned_partial_match(task, REL, allow_missing, None, 0, human_confirmed)
         return got, match, task
 
-    def test_classical_shape_sits_between_strong_and_medium(self):
-        _, match, _ = self._case()
+    def test_john_williams_over_medium_is_accepted_by_fingerprint_identity(self):
+        # DECISIVE positive: text distance is pushed OVER medium (album title +
+        # track titles divergent), yet every file is fingerprint-confirmed, so
+        # it imports. This FAILS on #817 (medium ceiling) -- non-vacuous.
+        got, match, task = self._case(album=0.807, track_title=0.5, human_confirmed=True)
         raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
-        self.assertGreaterEqual(raw / mx, THRESH)   # Beets skips it: over strong
-        self.assertLess(raw / mx, MEDIUM)           # but within medium
-
-    def test_a_human_confirmed_fingerprinted_import_is_accepted_and_flagged(self):
-        got, match, task = self._case(human_confirmed=True)
+        self.assertGreaterEqual(raw / mx, MEDIUM)   # over medium: #817 skipped it
         self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+        # Over medium, so the #817 back-compat sub-flag is NOT set.
+        self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
+
+    def test_a_under_medium_sets_both_primary_and_backcompat_flags(self):
+        # The common sub-case (text also under medium) keeps the #817 flag too.
+        got, match, task = self._case(album=0.807, human_confirmed=True)
+        raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
+        self.assertGreaterEqual(raw / mx, THRESH)   # over strong (Beets skipped it)
+        self.assertLess(raw / mx, MEDIUM)           # but under medium
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
         self.assertTrue(getattr(task, "webmanager_confirmed_relaxed", False))
 
     def test_b_without_fingerprint_hits_fails_closed_to_strong(self):
-        # chroma not loaded, a dropped file, and a wrong recording all refuse.
+        # chroma not loaded, a dropped file, and a wrong recording all refuse,
+        # even though the text distance (album 0.807) is under medium -- the
+        # text score cannot carry it without fingerprint proof.
         for name, kw in (("no chroma", {"chroma": False}),
                          ("one file lacks a hit", {"drop_hit": True}),
                          ("one file mapped to another recording", {"wrong_hit": True})):
             with self.subTest(name):
                 got, _, task = self._case(human_confirmed=True, **kw)
                 self.assertIsNone(got)
+                self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
                 self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
 
     def test_c_auto_path_still_refuses_the_text_distant_match(self):
         # The automatic gate is byte-for-byte unchanged: same distance, same
-        # fingerprint hits, human_confirmed False -> still skipped.
+        # fingerprint hits, human_confirmed False -> still skipped, no flags.
         got, _, task = self._case(human_confirmed=False)
         self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
         self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
 
+    def test_c2_auto_path_refuses_even_over_medium(self):
+        # Same John Williams over-medium folder on the auto path still skips.
+        got, _, task = self._case(album=0.807, track_title=0.5, human_confirmed=False)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
     def test_d_strong_match_is_unchanged_on_both_paths(self):
-        # A genuinely strong pinned match (ratio under 0.04) still imports with
-        # no relaxation flag, whether human_confirmed or not.
+        # A genuinely strong pinned match (ratio under 0.04) still imports via
+        # the strong gate with no relax flags, whether human_confirmed or not.
         for human in (True, False):
             with self.subTest(human_confirmed=human):
                 got, match, task = self._case(album=0.3, human_confirmed=human)
                 raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
                 self.assertLess(raw / mx, THRESH)
                 self.assertIs(got, match)
+                self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
                 self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
 
-    def test_e_over_medium_is_refused_even_when_human_confirmed(self):
-        # Medium is a real bar, not a blind force: too far in text -> refused.
-        got, match, _ = self._case(album=0.807, track_title=0.5, human_confirmed=True)
-        raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
-        self.assertGreaterEqual(raw / mx, MEDIUM)
-        self.assertIsNone(got)
-
     def test_f_structural_guards_still_hold_under_human_confirmed(self):
+        # Fingerprint identity overrides only the TEXT ceiling; every structural
+        # guard (no extra items; best candidate is the pinned release) still
+        # refuses even a fully fingerprint-confirmed, human-confirmed folder.
         for name, kw in (("extra items", {"extra_items": [object()]}),
                          ("not the pinned release", {"album_id": "b6a6e718-3d8e-4c3e-9eaa-7b54af639bb9"})):
             with self.subTest(name):
-                got, _, _ = self._case(human_confirmed=True, **kw)
+                got, _, task = self._case(human_confirmed=True, **kw)
                 self.assertIsNone(got)
+                self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
 
     def test_g_human_confirmed_subset_needs_allow_missing(self):
         # A deliberate 8-of-10 subset: missing tracks are allowed only with
-        # allow_missing (step 3), and only then does the medium bar apply.
+        # allow_missing (step 3); only then is the folder fingerprint-accepted.
         got, match, task = self._case(missing=2, allow_missing=True, human_confirmed=True)
         self.assertIs(got, match)
-        self.assertTrue(getattr(task, "webmanager_confirmed_relaxed", False))
-        # Without allow_missing the missing tracks refuse it before the bar.
+        self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+        # Without allow_missing the missing tracks refuse it before acceptance.
         got2, _, _ = self._case(missing=2, allow_missing=False, human_confirmed=True)
         self.assertIsNone(got2)
 

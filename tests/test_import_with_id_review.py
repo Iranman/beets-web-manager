@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover
 
 import backend.library_service as lsvc
 import backend.matching_service as ms
+import backend.import_review_service as irs
 
 REL, RG = base.REL, base.RG
 RG_OTHER = "33333333-3333-3333-3333-333333333333"
@@ -246,6 +247,34 @@ class ConfirmImportMessageTests(unittest.TestCase):
         self.assertFalse(d["action_allowed"])
         # ...but a human may confirm-and-import this conflict-free, RG-resolved match.
         self.assertTrue(d["manual_import_allowed"])
+
+
+class AcoustidMismatchBlocksConfirmControlTests(unittest.TestCase):
+    """C4 backstop (1.22.0): fingerprint-primary acceptance lives in the plugin,
+    but a human must never be able to CONFIRM an item whose fingerprints say it
+    is a different recording. The confirm control keys off manual_import_allowed;
+    an AcoustID release mismatch must drop it to False so human_confirmed is
+    never forwarded for a mismatched folder. Conflict resolution stays in the
+    backend gate -- it is not moved into the plugin."""
+
+    def _match(self, *, acoustid_mismatch):
+        comparison = {
+            "selected_release_group_id": RG,
+            "representative_release_id": REL,
+            "comparison": [{"status": "matched"}, {"status": "matched"}],
+            "mb_track_count": 2, "local_track_count": 2, "matched_count": 2,
+        }
+        preflight = {"acoustid_mismatch": acoustid_mismatch}
+        return irs._import_review_build_revalidated_match({"suggestion": {}}, comparison, preflight)
+
+    def test_clean_match_is_human_confirmable(self):
+        self.assertTrue(self._match(acoustid_mismatch=False)["manual_import_allowed"])
+
+    def test_acoustid_mismatch_cannot_drive_the_confirm_control(self):
+        d = self._match(acoustid_mismatch=True)
+        self.assertFalse(d["manual_import_allowed"])
+        self.assertFalse(d["is_importable"])
+        self.assertEqual(d["preflight_status"], "failed")
 
 
 class AlreadyInLibraryMessageTests(unittest.TestCase):
