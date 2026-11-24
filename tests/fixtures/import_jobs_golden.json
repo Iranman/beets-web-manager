@@ -24211,12 +24211,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -24472,12 +24485,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -24749,12 +24775,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -25026,12 +25065,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -25307,12 +25359,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -25584,12 +25649,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -25848,12 +25926,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -26039,12 +26130,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -26226,12 +26330,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -26490,12 +26607,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -26678,12 +26808,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -26847,12 +26990,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -27016,12 +27172,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -27194,12 +27363,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -27445,12 +27627,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -27838,12 +28033,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -28432,12 +28640,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -28902,12 +29123,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -29163,12 +29397,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -29424,12 +29671,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -29666,12 +29926,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -29919,12 +30192,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -30172,12 +30458,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -30433,12 +30732,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -30659,12 +30971,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -30901,12 +31226,33 @@
    ],
    [
     "call",
+    "cw.find_all_items_by_album_id",
+    [
+     5
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -31162,12 +31508,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -31431,12 +31790,33 @@
    ],
    [
     "call",
+    "cw.find_all_items_by_album_id",
+    [
+     7
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 7,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -31692,12 +32072,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -31934,12 +32327,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -32806,12 +33212,33 @@
    ],
    [
     "call",
+    "cw.find_all_items_by_album_id",
+    [
+     5
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -35580,12 +36007,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/music/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": true,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -35830,12 +36270,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/music/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": true,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -36251,12 +36704,33 @@
    ],
    [
     "call",
+    "cw.find_all_items_by_album_id",
+    [
+     5
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/music/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": true,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -36653,12 +37127,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -36945,12 +37432,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/staged"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -37298,6 +37798,7 @@
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -37662,12 +38163,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -37820,12 +38334,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -37975,12 +38502,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -38252,6 +38792,7 @@
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "fingerprint_confirmed": {},
       "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -38545,6 +39086,7 @@
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -38838,6 +39380,7 @@
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -39131,6 +39674,7 @@
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": false,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -39477,12 +40021,33 @@
    ],
    [
     "call",
+    "cw.find_all_items_by_album_id",
+    [
+     5
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -39761,12 +40326,33 @@
    ],
    [
     "call",
+    "cw.find_all_items_by_album_id",
+    [
+     5
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -40022,12 +40608,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -40275,12 +40874,33 @@
    ],
    [
     "call",
+    "cw.find_all_items_by_album_id",
+    [
+     5
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 5,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -40536,12 +41156,33 @@
    ],
    [
     "call",
+    "cw.find_all_items_by_album_id",
+    [
+     6
+    ],
+    {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "keep",
       "existing_album_id": 6,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -41005,12 +41646,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -41266,12 +41920,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -41895,12 +42562,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -42176,12 +42856,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -42851,12 +43544,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -43138,12 +43844,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/staged"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -43597,12 +44316,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/staged"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -43920,12 +44652,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/staged"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -44230,12 +44975,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/staged"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -44517,12 +45275,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -44832,12 +45603,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/staged"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": true,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",
@@ -45145,12 +45929,25 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
       "allow_missing_tracks": false,
       "duplicate_action": "skip",
       "existing_album_id": 0,
+      "fingerprint_confirmed": {},
       "human_confirmed": true,
       "in_place": false,
       "mb_albumid": "11111111-1111-1111-1111-111111111111",

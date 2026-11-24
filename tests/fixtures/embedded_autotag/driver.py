@@ -93,8 +93,11 @@ out = {"status_ok": beets_embedded.status()["ok"]}
 # is the ONLY fingerprint signal. "confirmed" supplies the release recording
 # ids as Web Manager's own evidence; "divergent" supplies none (bug repro).
 human_confirmed = scenario in ("fp_primary_divergent", "fp_primary_confirmed")
+# One confirmed recording id per file (as production does -- at most one), each
+# the recording of the release track that file is length-matched to (641s/534s
+# -> track 1/2): 01.wav -> Breaks mix, 02.wav -> 4/4 mix.
 REC = ["846b5995-88f2-4d18-ae6d-fdc971615fd0", "06191ccf-303d-4a51-82dd-db04e860576f"]
-fp_evidence = ({os.path.join(src, f"0{n}.wav"): REC for n in (1, 2)}
+fp_evidence = ({os.path.join(src, f"0{n}.wav"): [REC[n - 1]] for n in (1, 2)}
                if scenario == "fp_primary_confirmed" else None)
 try:
     res = a.run_import(paths=[src], autotag=True, search_ids=[REL], quiet_fallback="skip",

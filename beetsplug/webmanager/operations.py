@@ -721,23 +721,27 @@ def _acoustid_hit_every_file(task, match, confirmed=None) -> bool:
     if not items:
         return False
     if confirmed:
+        def _base(p):
+            return os.path.basename(os.fsdecode(p) if isinstance(p, bytes) else p)
         by_key = {_fp_path_key(k): {str(r).lower() for r in (v or [])}
                   for k, v in confirmed.items()}
-        # ponytail: basename fallback only for basenames unique in the map,
-        # so a multi-disc folder that repeats "01.flac" never cross-matches.
-        base_seen: Dict[str, int] = {}
-        for k in confirmed:
-            b = os.path.basename(os.fsdecode(k) if isinstance(k, bytes) else k)
-            base_seen[b] = base_seen.get(b, 0) + 1
-        by_base = {os.path.basename(os.fsdecode(k) if isinstance(k, bytes) else k):
-                   {str(r).lower() for r in (v or [])}
+        # Basename fallback covers a source-vs-Beets path divergence (symlink/
+        # realpath), but ONLY for a basename that is unambiguous across the
+        # WHOLE task -- exactly one task item AND one evidence entry carry it.
+        # Counting over evidence alone would let an UNCONFIRMED sibling on an
+        # asymmetric multi-disc folder (disc1/01.flac confirmed, disc2/01.flac
+        # not) borrow its sibling's recording when the mapped ids coincide
+        # (N2 fail-open). Counting over all items keeps every file fail-closed.
+        item_bases = [_base(it.path) for it in items]
+        conf_bases = [_base(k) for k in confirmed]
+        by_base = {_base(k): {str(r).lower() for r in (v or [])}
                    for k, v in confirmed.items()
-                   if base_seen[os.path.basename(os.fsdecode(k) if isinstance(k, bytes) else k)] == 1}
+                   if item_bases.count(_base(k)) == 1 and conf_bases.count(_base(k)) == 1}
         for item in items:
             track_id = getattr(mapping.get(item), "track_id", None)
             hit = by_key.get(_fp_path_key(item.path))
             if hit is None:
-                hit = by_base.get(os.path.basename(os.fsdecode(item.path)))
+                hit = by_base.get(_base(item.path))
             if not track_id or not hit or str(track_id).lower() not in hit:
                 return False
         return True

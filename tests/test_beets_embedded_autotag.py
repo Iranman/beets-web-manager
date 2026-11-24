@@ -32,8 +32,10 @@ class EmbeddedAutotagTests(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("BEETS_", "BEETSDIR"))}
         env.update({"BWM_ROOT": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1",
                     "PYTHONUSERBASE": os.environ.get("PYTHONUSERBASE") or site.getuserbase()})
+        # Each scenario spins up a fresh embedded Beets import in a subprocess;
+        # 300s was tight under parallel CI load (N1), so allow more headroom.
         proc = subprocess.run([sys.executable, str(DRIVER), scenario], cwd=str(ROOT), env=env,
-                              capture_output=True, text=True, timeout=300)
+                              capture_output=True, text=True, timeout=600)
         self.assertEqual(proc.returncode, 0, proc.stderr[-4000:])
         out = json.loads(proc.stdout.strip().splitlines()[-1])
         # Only the recorded release lookup is asked for, and the engine stays healthy.
