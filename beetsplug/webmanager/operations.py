@@ -689,17 +689,65 @@ def _source_artist(task):
     return artist if artist is not None else getattr(task, "cur_artist", None)
 
 
-def _acoustid_hit_every_file(task, match) -> bool:
-    """True when the chroma plugin is loaded and AcoustID returned, for every
-    file in the task, the recording id of the Release track Beets mapped that
-    file to -- positive fingerprint identity evidence for the pinned Release.
-    Uses chroma's own ``_matches`` (the ``track_id`` distance key is 0 even
-    without a hit, so it is never the signal). Empty or absent -> False."""
-    chroma = sys.modules.get("beetsplug.chroma")  # imported only when Beets loaded it
-    matches = getattr(chroma, "_matches", None)
+def _fp_path_key(path) -> str:
+    """Normalize a path (bytes or str) to a stable key for matching the
+    backend's per-file fingerprint evidence against a task item's path."""
+    if isinstance(path, bytes):
+        path = os.fsdecode(path)
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _acoustid_hit_every_file(task, match, confirmed=None) -> bool:
+    """True when, for every file in the task, AcoustID confirmed the recording
+    id of the Release track Beets mapped that file to -- positive
+    fingerprint identity evidence for the pinned Release.
+
+    ``confirmed`` is Web Manager's own per-file evidence (plugin 1.23.0),
+    ``{path: [recording_id, ...]}``, computed by the backend's reliable cached
+    AcoustID lookup at validate/preflight time. When present it is the
+    authority. A real ``beet import --search-id`` session does NOT reliably
+    populate chroma's in-session module-level ``_matches``: chroma fingerprints
+    on ``import_task_start`` via a SEPARATE live AcoustID network lookup
+    (chroma.acoustid_match) that is often empty (network/rate-limit/no-result)
+    or returns a recording-id shape that does not contain the pinned Release's
+    recording for a classical/divergent file -- so the #819 override gated on
+    it never fired live. Falling back to chroma's ``_matches`` only when the
+    backend supplied nothing keeps the old behaviour for callers that have no
+    evidence (the ``track_id`` distance key is 0 even without a hit, so it is
+    never the signal). Any file without a confirming recording -> False (fail
+    closed)."""
     items = list(getattr(task, "items", None) or [])
     mapping = getattr(match, "mapping", None) or {}
-    if not isinstance(matches, dict) or not items:
+    if not items:
+        return False
+    if confirmed:
+        def _base(p):
+            return os.path.basename(os.fsdecode(p) if isinstance(p, bytes) else p)
+        by_key = {_fp_path_key(k): {str(r).lower() for r in (v or [])}
+                  for k, v in confirmed.items()}
+        # Basename fallback covers a source-vs-Beets path divergence (symlink/
+        # realpath), but ONLY for a basename that is unambiguous across the
+        # WHOLE task -- exactly one task item AND one evidence entry carry it.
+        # Counting over evidence alone would let an UNCONFIRMED sibling on an
+        # asymmetric multi-disc folder (disc1/01.flac confirmed, disc2/01.flac
+        # not) borrow its sibling's recording when the mapped ids coincide
+        # (N2 fail-open). Counting over all items keeps every file fail-closed.
+        item_bases = [_base(it.path) for it in items]
+        conf_bases = [_base(k) for k in confirmed]
+        by_base = {_base(k): {str(r).lower() for r in (v or [])}
+                   for k, v in confirmed.items()
+                   if item_bases.count(_base(k)) == 1 and conf_bases.count(_base(k)) == 1}
+        for item in items:
+            track_id = getattr(mapping.get(item), "track_id", None)
+            hit = by_key.get(_fp_path_key(item.path))
+            if hit is None:
+                hit = by_base.get(_base(item.path))
+            if not track_id or not hit or str(track_id).lower() not in hit:
+                return False
+        return True
+    chroma = sys.modules.get("beetsplug.chroma")  # imported only when Beets loaded it
+    matches = getattr(chroma, "_matches", None)
+    if not isinstance(matches, dict):
         return False
     for item in items:
         track_id = getattr(mapping.get(item), "track_id", None)
@@ -709,7 +757,7 @@ def _acoustid_hit_every_file(task, match) -> bool:
     return True
 
 
-def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int) -> bool:
+def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int, confirmed=None) -> bool:
     """True when the album-level ``artist`` penalty of a missing-track repair
     says nothing against the pinned Release (the source names only some of
     the Release's credited artists, e.g. "38 Spesh" for "38 Spesh & Harry
@@ -731,7 +779,7 @@ def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int)
         return False
     if album is None or album.get("mb_albumid") != release_id:
         return False
-    if not _acoustid_hit_every_file(task, match):  # G2
+    if not _acoustid_hit_every_file(task, match, confirmed):  # G2
         return False
     info = match.info
     if getattr(info, "va", False):
@@ -744,7 +792,8 @@ def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int)
 
 
 def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
-                          lib=None, existing_album_id: int = 0, human_confirmed: bool = False):
+                          lib=None, existing_album_id: int = 0, human_confirmed: bool = False,
+                          fingerprint_confirmed=None):
     """The Release pinned by the request's one search id as a match, or None.
 
     Beets caps the recommendation of any match with missing tracks at medium
@@ -813,7 +862,7 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     # to strong (above) when any file lacks a hit, and never on the
     # auto/recovery path. raw/max is computed only for the log and the #817
     # back-compat sub-flag; it does not gate acceptance.
-    if human_confirmed and _acoustid_hit_every_file(task, match):
+    if human_confirmed and _acoustid_hit_every_file(task, match, fingerprint_confirmed):
         medium = beets_config["match"]["medium_rec_thresh"].as_number()
         ratio = (raw / max_distance) if max_distance > 0 else 0.0
         task.webmanager_confirmed_fingerprint_primary = True
@@ -828,7 +877,7 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
                  [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
                  ratio)
         return match
-    if missing and _artist_relaxable(task, match, release_id, lib, existing_album_id):
+    if missing and _artist_relaxable(task, match, release_id, lib, existing_album_id, fingerprint_confirmed):
         raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT | {"artist"})
         if max_distance > 0 and raw / max_distance < thresh:
             task.webmanager_partial_artist_relaxed = True
@@ -900,7 +949,7 @@ def duplicate_evidence(task, found_duplicates) -> Dict[str, Any]:
 
 def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: str = "",
                           allow_missing_tracks: bool = False, existing_album_id: int = 0,
-                          human_confirmed: bool = False):
+                          human_confirmed: bool = False, fingerprint_confirmed=None):
     """Beets' own import session: the quiet terminal session (what
     ``beet import -q`` runs) when autotagging, else the base session.
 
@@ -923,7 +972,8 @@ def _import_session_class(autotag: bool, tasks: List[Any], pinned_release_id: st
         def choose_match(self, task):
             tasks.append(task)
             partial = _pinned_partial_match(task, pinned_release_id, allow_missing_tracks,
-                                            self.lib, existing_album_id, human_confirmed)
+                                            self.lib, existing_album_id, human_confirmed,
+                                            fingerprint_confirmed)
             if partial is not None:
                 # Stock choose_match lets plugins act first (badfiles'
                 # import_action_on_error: skip); the override must not skip that.
@@ -1073,6 +1123,22 @@ def run_import():
             "error": "human_confirmed must be a boolean",
             "error_code": "INVALID_HUMAN_CONFIRMED",
         }), 400
+
+    # Web Manager's own per-file fingerprint evidence (plugin 1.23.0):
+    # {source_file_path: [recording_id, ...]}, the recording(s) the backend's
+    # reliable cached AcoustID lookup confirmed for each file. It is what the
+    # human-confirmed fingerprint-primary acceptance (_pinned_partial_match)
+    # reads INSTEAD of chroma's in-session _matches, which a pinned
+    # --search-id run does not reliably populate. Keys and recording ids are
+    # validated; anything malformed is dropped (fail closed -> strong bar).
+    raw_fp = data.get("fingerprint_confirmed") or {}
+    fingerprint_confirmed: Dict[str, List[str]] = {}
+    if isinstance(raw_fp, dict):
+        for k, v in raw_fp.items():
+            if isinstance(k, str) and k and isinstance(v, list):
+                rids = [x.lower() for x in v if isinstance(x, str) and _MB_UUID.match(x.lower())]
+                if rids:
+                    fingerprint_confirmed[k] = rids
 
     # Policy 2: Validate duplicate_action strictly
     raw_dup = data.get("duplicate_action", "skip")
@@ -1261,7 +1327,8 @@ def run_import():
                 tasks: List[Any] = []
                 session = _import_session_class(
                     autotag, tasks, search_ids[0] if len(search_ids) == 1 else "", allow_missing_tracks,
-                    existing_album_id if allow_missing_tracks else 0, human_confirmed)(
+                    existing_album_id if allow_missing_tracks else 0, human_confirmed,
+                    fingerprint_confirmed)(
                     lib, loghandler=None, paths=path_bytes, query=None
                 )
                 global _IMPORTED_ALBUM_IDS

@@ -30,7 +30,8 @@ from backend.beets_adapter import lib, BeetsError, BeetsUnavailableError, BeetsA
 import backend.composite_workflows as composite_workflows
 import backend.import_reconciliation as _import_reconciliation
 import backend.item_replacement as _item_replacement
-from backend.acoustid_service import (ACOUSTID_FAILURE_MESSAGES, _acoustid_hits_or_none,
+from backend.acoustid_service import (ACOUSTID_FAILURE_MESSAGES, _acoustid_fingerprint_ids,
+                                      _acoustid_hits_or_none,
                                       _acoustid_lookup_cached_outcome, _album_item_abs_path,
                                       acoustid_failure_status)
 from backend.artwork_service import _ART_EXTS, _move_artwork_to_target
@@ -2588,6 +2589,32 @@ def _target_preview_source_files(folder_path: str, existing_album_id: int = 0) -
     return files
 
 
+def _confirmed_recording_evidence(folder_path: str, existing_album_id: int = 0) -> Dict[str, List[str]]:
+    """Per-source-file AcoustID-confirmed recording ids for the human-confirmed
+    fingerprint-primary import path (plugin 1.23.0 ``fingerprint_confirmed``).
+
+    A pinned ``beet import --search-id`` session does NOT reliably populate
+    chroma's in-session fingerprint evidence (its lookup is a separate live
+    AcoustID network call that is often empty or returns a different
+    recording-id shape for classical/divergent releases), so Web Manager
+    supplies its OWN reliable, cached per-file evidence here -- the same
+    canonical AcoustID recording identity used everywhere else
+    (_acoustid_fingerprint_ids / MI-5: confirmed-only, never a different
+    recording). The plugin accepts the pinned Release irrespective of text
+    distance only when every imported file's mapped recording is confirmed
+    here; a file with no confirmed recording is simply absent, so the plugin
+    keeps Beets' strong text bar for it (fail closed)."""
+    evidence: Dict[str, List[str]] = {}
+    for path in _target_preview_source_files(folder_path, existing_album_id):
+        try:
+            rids = _acoustid_fingerprint_ids(str(path))
+        except Exception:
+            rids = []
+        if rids:
+            evidence[os.path.abspath(str(path))] = [_s(r).strip().lower() for r in rids if _s(r).strip()]
+    return {k: v for k, v in evidence.items() if v}
+
+
 _IMPORT_REVIEW_IMPORTABLE_STATUSES = {"matched", "fuzzy", "verified_match", "acoustid_verified"}
 
 
@@ -4096,6 +4123,16 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # Explicit human confirm: let Beets accept this fingerprint-backed
             # pinned Release at the medium bar (operations._pinned_partial_match).
             "human_confirmed": human_confirmed_import,
+            # Web Manager's OWN per-file AcoustID evidence (plugin 1.23.0):
+            # {source_file: [recording_id]}. The plugin reads this instead of
+            # chroma's unreliable in-session _matches when deciding the
+            # fingerprint-primary override, so a pinned --search-id import of a
+            # divergent-title (e.g. classical) release actually engages live.
+            # Only computed/sent on the human path; absent -> strong bar kept.
+            "fingerprint_confirmed": (
+                _confirmed_recording_evidence(import_folder_path, existing_album_id)
+                if human_confirmed_import else {}
+            ),
             # A deliberate human-confirmed subset holds only some of the
             # Release's tracks; without this Beets caps a missing-track match at
             # medium and skips it. Only on the human path, only for a subset.

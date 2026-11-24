@@ -142,6 +142,26 @@ class ConfirmedImportTests(unittest.TestCase):
         self.assertFalse(tx["metadata"]["engine_result"]["confirmed_fingerprint_primary"])
         self.assertFalse(any("text-distance ceiling was overridden" in line for line in tx.get("logs") or []))
 
+    def test_fingerprint_confirmed_forwarded_only_on_the_human_path(self):
+        """1.23.0: Web Manager's own per-file AcoustID evidence reaches
+        run_import ONLY on the human-confirmed path. Auto/recovery (human
+        False or absent) forward None, even if a map is present in the plan,
+        so the automatic gate never sees fingerprint evidence."""
+        evidence = {"/downloads/A/01.flac": ["00000000-0000-4000-8000-000000000001"]}
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        self._run(ad, human_confirmed=True, fingerprint_confirmed=evidence)
+        self.assertEqual(ad.run_import.call_args.kwargs["fingerprint_confirmed"], evidence)
+        # Auto/recovery: same populated map in the plan, but NOT forwarded.
+        for meta in ({"fingerprint_confirmed": evidence},
+                     {"human_confirmed": False, "fingerprint_confirmed": evidence}):
+            ad = _adapter({"id": 9, "mb_albumid": REL})
+            self._run(ad, **meta)
+            self.assertIsNone(ad.run_import.call_args.kwargs["fingerprint_confirmed"])
+        # import_service only COMPUTES evidence on the human path (else {}).
+        src = (Path(__file__).resolve().parents[1] / "backend" / "import_service.py").read_text(encoding="utf-8")
+        self.assertIn("_confirmed_recording_evidence(import_folder_path, existing_album_id)\n"
+                      "                if human_confirmed_import else {}", src)
+
     def test_move_and_in_place_modes(self):
         ad = _adapter({"id": 9, "mb_albumid": REL})
         self._run(ad, use_move=True)

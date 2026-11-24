@@ -5321,11 +5321,13 @@ def apply_confirmed_import(
             existing_album_id = int(meta.get("existing_album_id") or 0) if allow_missing else 0
         except (TypeError, ValueError):
             existing_album_id = 0
+        fingerprint_confirmed = meta.get("fingerprint_confirmed") if meta.get("human_confirmed") is True else None
         imported = ad.run_import(
             paths=paths, autotag=True, search_ids=[release_id], quiet_fallback="skip",
             duplicate_action=duplicate_action, copy=not (use_move or in_place), move=use_move, write=True,
             timeout=timeout, allow_missing_tracks=allow_missing, existing_album_id=existing_album_id,
-            human_confirmed=meta.get("human_confirmed") is True)
+            human_confirmed=meta.get("human_confirmed") is True,
+            fingerprint_confirmed=fingerprint_confirmed if isinstance(fingerprint_confirmed, dict) else None)
         new = [a for a in ad.find_all_albums_by_mb_albumid(release_id) if int(a.get("id") or 0) not in before]
     except Exception as ex:  # any failure ends Failed, never a stuck Running/Preview row
         refused = _import_refused(ex)

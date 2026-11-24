@@ -370,5 +370,126 @@ class PinnedHumanConfirmedFingerprintPrimaryTests(unittest.TestCase):
         self.assertIsNone(got2)
 
 
+class _PathItem:
+    """A source file at an arbitrary path (for path-key / basename tests)."""
+
+    def __init__(self, path: bytes):
+        self.path = path
+
+
+class PinnedConfirmedEvidenceBranchTests(unittest.TestCase):
+    """webmanager plugin 1.23.0: the human-confirmed override accepts the pinned
+    Release from Web Manager's OWN per-file AcoustID evidence
+    (``fingerprint_confirmed``), NOT chroma's in-session ``_matches`` (which a
+    pinned ``--search-id`` run does not reliably populate). Chroma is NOT loaded
+    in any of these cases, proving acceptance stands on the threaded evidence
+    alone -- the live path the #819 unit tests never exercised."""
+
+    def _case(self, evidence, items=None, album=0.807, track_title=0.5,
+              human_confirmed=True, album_id=REL, ntracks=8):
+        items = items if items is not None else [_Item(k) for k in range(1, ntracks + 1)]
+        dist = _album([_track(title=track_title, data_source=None) for _ in items],
+                      missing=0, artist=0.0, album=album, data_source=None)
+        info = types.SimpleNamespace(album_id=album_id, va=False, artists=[], artists_credit=[], artist="")
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[], extra_items=[],
+            mapping={it: types.SimpleNamespace(track_id=TRACK_IDS[k - 1]) for k, it in enumerate(items, 1)})
+        task = types.SimpleNamespace(candidates=[match], items=items, cur_artist="",
+                                     paths=[b"/downloads/Williams"])
+        # chroma deliberately absent: evidence must carry it on its own.
+        with mock.patch.dict(sys.modules, {}):
+            sys.modules.pop("beetsplug.chroma", None)
+            got = ops._pinned_partial_match(task, album_id, False, None, 0,
+                                            human_confirmed, evidence)
+        return got, match, task
+
+    def _evidence_one_id_per_file(self, items):
+        # Exactly one confirmed recording id per file (as production supplies),
+        # keyed by the item's own path -- the mapped track's recording.
+        return {it.path: [TRACK_IDS[k - 1]] for k, it in enumerate(items, 1)}
+
+    def test_correct_evidence_accepts_over_medium_without_chroma(self):
+        items = [_Item(k) for k in range(1, 9)]
+        raw, mx = None, None
+        got, match, task = self._case(self._evidence_one_id_per_file(items), items=items)
+        raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
+        self.assertGreaterEqual(raw / mx, MEDIUM)  # over medium: text alone would skip
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+    def test_wrong_recording_id_is_refused(self):
+        items = [_Item(k) for k in range(1, 9)]
+        ev = self._evidence_one_id_per_file(items)
+        ev[items[3].path] = ["99999999-0000-4000-8000-000000000099"]  # not the mapped recording
+        got, _, task = self._case(ev, items=items)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+    def test_a_file_absent_from_evidence_fails_closed(self):
+        items = [_Item(k) for k in range(1, 9)]
+        ev = self._evidence_one_id_per_file(items)
+        ev.pop(items[2].path)  # one file has no confirmed recording
+        got, _, task = self._case(ev, items=items)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+    def test_basename_fallback_matches_a_diverged_path(self):
+        # Evidence keyed by a differently-rooted path (symlink/realpath
+        # divergence) still matches a unique basename.
+        items = [_PathItem(b"/music/lib/Williams/%02d.flac" % k) for k in range(1, 3)]
+        ev = {b"/downloads/Williams/%02d.flac" % k: [TRACK_IDS[k - 1]] for k in range(1, 3)}
+        got, match, _ = self._case(ev, items=items, ntracks=2)
+        self.assertIs(got, match)
+
+    def test_n2_duplicate_basename_across_discs_cannot_borrow(self):
+        # Asymmetric multi-disc: disc1/01.flac is confirmed, disc2/01.flac is
+        # NOT, and both mapped recordings are the SAME id. The basename "01.flac"
+        # is NOT unique across task items, so disc2 must not borrow disc1's
+        # evidence -> fail closed (this is the N2 fail-open the fix closes).
+        items = [_PathItem(b"/dl/Album/disc1/01.flac"), _PathItem(b"/dl/Album/disc2/01.flac")]
+        dist = _album([_track(title=0.5, data_source=None) for _ in items],
+                      missing=0, artist=0.0, album=0.807, data_source=None)
+        info = types.SimpleNamespace(album_id=REL, va=False, artists=[], artists_credit=[], artist="")
+        # Both files mapped to the SAME recording id, so a borrow WOULD pass.
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[], extra_items=[],
+            mapping={it: types.SimpleNamespace(track_id=TRACK_IDS[0]) for it in items})
+        task = types.SimpleNamespace(candidates=[match], items=items, cur_artist="",
+                                     paths=[b"/dl/Album"])
+        evidence = {b"/dl/Album/disc1/01.flac": [TRACK_IDS[0]]}  # only disc1 confirmed
+        with mock.patch.dict(sys.modules, {}):
+            sys.modules.pop("beetsplug.chroma", None)
+            got = ops._pinned_partial_match(task, REL, False, None, 0, True, evidence)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+    def test_auto_path_ignores_evidence(self):
+        # human_confirmed False: even complete, correct evidence does not relax
+        # the text bar (the automatic gate is unchanged).
+        items = [_Item(k) for k in range(1, 9)]
+        got, _, task = self._case(self._evidence_one_id_per_file(items), items=items,
+                                  human_confirmed=False)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+    def test_evidence_takes_priority_over_a_misleading_chroma(self):
+        # Evidence present but a stale/empty chroma _matches is also loaded:
+        # the backend evidence is the authority, so acceptance still stands.
+        items = [_Item(k) for k in range(1, 9)]
+        ev = self._evidence_one_id_per_file(items)
+        dist = _album([_track(title=0.5, data_source=None) for _ in items],
+                      missing=0, artist=0.0, album=0.807, data_source=None)
+        info = types.SimpleNamespace(album_id=REL, va=False, artists=[], artists_credit=[], artist="")
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[], extra_items=[],
+            mapping={it: types.SimpleNamespace(track_id=TRACK_IDS[k - 1]) for k, it in enumerate(items, 1)})
+        task = types.SimpleNamespace(candidates=[match], items=items, cur_artist="",
+                                     paths=[b"/downloads/Williams"])
+        with mock.patch.dict(sys.modules, {"beetsplug.chroma": types.SimpleNamespace(_matches={})}):
+            got = ops._pinned_partial_match(task, REL, False, None, 0, True, ev)
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+
 if __name__ == "__main__":
     unittest.main()
