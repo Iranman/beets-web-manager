@@ -108,6 +108,21 @@ class ConfirmedImportTests(unittest.TestCase):
         self.assertFalse(tx["metadata"]["engine_result"]["partial_artist_relaxed"])
         self.assertFalse(any("artist penalty set aside" in line for line in tx.get("logs") or []))
 
+    def test_confirmed_relaxation_is_recorded_in_the_transaction(self):
+        """2b: a human-confirmed import accepted at the medium bar records WHY
+        the strong gate was bypassed, mirroring partial_artist_relaxed."""
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        ad.run_import.return_value = {"success": True, "confirmed_relaxed": ["/downloads/A"]}
+        res, tx = self._run(ad, human_confirmed=True)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(tx["metadata"]["engine_result"]["confirmed_relaxed"])
+        self.assertTrue(any("explicit human-confirmed path at the medium bar" in line for line in tx["logs"]))
+        ad = _adapter({"id": 9, "mb_albumid": REL})
+        ad.run_import.return_value = {"success": True, "confirmed_relaxed": []}
+        res, tx = self._run(ad, human_confirmed=True)
+        self.assertFalse(tx["metadata"]["engine_result"]["confirmed_relaxed"])
+        self.assertFalse(any("human-confirmed path at the medium bar" in line for line in tx.get("logs") or []))
+
     def test_move_and_in_place_modes(self):
         ad = _adapter({"id": 9, "mb_albumid": REL})
         self._run(ad, use_move=True)

@@ -5388,16 +5388,23 @@ def apply_confirmed_import(
                              "review it before continuing.", mutated=True, album_ids=[album_id],
                              undo={"album_id": album_id, "item_ids": item_ids, "move_files": move_files})
             relaxed = imported.get("partial_artist_relaxed") if isinstance(imported, dict) else None
+            confirmed_relaxed = imported.get("confirmed_relaxed") if isinstance(imported, dict) else None
+            relax_logs = []
+            if relaxed:
+                relax_logs.append(f"Beets matched {relaxed} to the pinned release with the artist penalty set aside "
+                                  "(AcoustID matched every file; the source artist is part of the release credit)")
+            if confirmed_relaxed:
+                relax_logs.append(f"Beets accepted {confirmed_relaxed} on the explicit human-confirmed path at the medium "
+                                  "bar (AcoustID matched every file to its mapped recording; the automatic gate is unchanged)")
             st.transition(operation_id, "Running", "Completed",
-                          append_logs=[f"Beets matched {relaxed} to the pinned release with the artist penalty set aside "
-                                       "(AcoustID matched every file; the source artist is part of the release credit)"]
-                          if relaxed else [],
+                          append_logs=relax_logs,
                           metadata={"engine_result": {"album_id": album_id, "item_ids": item_ids,
                                                       "mb_releasegroupid": got_rg,
                                                       "move_files": move_files,
                                                       "in_place": in_place,
                                                       "write_tags": True,
-                                                      "partial_artist_relaxed": bool(relaxed)}})
+                                                      "partial_artist_relaxed": bool(relaxed),
+                                                      "confirmed_relaxed": bool(confirmed_relaxed)}})
     except ResourceLockConflictError as exc:
         return _fail("Running", "resource_busy", _lock_busy(operation_id, exc)["error"], mutated=True,
                      album_ids=[album_id],

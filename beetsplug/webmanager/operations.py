@@ -1295,6 +1295,10 @@ def run_import():
                         util.displayable_path(tp) for t in tasks
                         if getattr(t, "webmanager_partial_artist_relaxed", False) and not getattr(t, "skip", False)
                         for tp in getattr(t, "paths", None) or []],
+                    "confirmed_relaxed": [
+                        util.displayable_path(tp) for t in tasks
+                        if getattr(t, "webmanager_confirmed_relaxed", False) and not getattr(t, "skip", False)
+                        for tp in getattr(t, "paths", None) or []],
                     "imported_album_ids": sorted(set(imported_ids)),
                 }
                 if op_id_arg:
