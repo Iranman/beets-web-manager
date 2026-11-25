@@ -42,7 +42,7 @@ mkdir beets web-manager
 curl -fsSL -o beets/config.yaml https://raw.githubusercontent.com/Iranman/beets-web-manager/main/config.yaml.example
 ```
 
-`config.yaml` must set `directory: /music` and `library: /config/musiclibrary.blb` (the template does). Without a `config.yaml`, Beets starts with exactly those defaults and reports `config_missing` until you add one. Already have a Beets `/config` folder? Use it instead of `./beets`.
+`config.yaml` must set `directory: /music` and `library: /config/musiclibrary.blb` (the template does). You can skip this step: if no `config.yaml` exists in the mounted `/config` folder, Web Manager writes a curated starter `config.yaml` there on first run (with those same defaults and the `web`, `webmanager`, `chroma`, `fetchart` and `embedart` plugins), then leaves it alone — it is yours to edit, and an existing `config.yaml` is never overwritten. Already have a Beets `/config` folder? Use it instead of `./beets`.
 
 ### Step 2: Create `docker-compose.yml`
 
