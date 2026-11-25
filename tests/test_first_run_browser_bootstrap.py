@@ -118,6 +118,23 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(resp2.status_code, 401)
 
+    def test_first_run_writes_starter_beets_config(self):
+        """#603: completing first-run setup materialises the starter Beets
+        config (write-only-when-absent). The handler must invoke
+        write_starter_config_if_missing exactly once on a successful claim, and
+        a failed/no-op write must never break setup (the writer is fail-safe)."""
+        app_module._migrate_or_initialize_setup_state()
+        self.assertTrue(app_module._first_run_setup_required())
+        import backend.beets_embedded as be
+        with mock.patch.object(be, "write_starter_config_if_missing", return_value=None) as writer:
+            resp = self.client.post(
+                "/api/setup/first-run",
+                json={"username": "freshadmin", "password": _VALID_TEST_PASSWORD},
+                headers=_SAME_ORIGIN_CSRF_HEADERS,
+            )
+        self.assertEqual(resp.status_code, 200)
+        writer.assert_called_once_with()
+
     def test_v018_upgrade_migration_security(self):
         """Scenario: upgrade from v0.1.8 generated-password installation.
 

@@ -23,6 +23,7 @@ import secrets
 import shutil
 import socket
 import stat
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -63,6 +64,87 @@ def _bundled_plugins() -> List[str]:
         if (n.endswith(".py") and n != "__init__.py")
         or os.path.isfile(os.path.join(_BUNDLED_PLUGIN_DIR, n, "__init__.py"))
     )
+
+# Curated starter config written on a fresh install (issue #603) when no Beets
+# config exists yet. `directory`/`library` are filled with the SAME resolved
+# values the in-memory fresh-install overlay above computes, so materialising
+# the file changes nothing about how Beets runs -- it only makes the config
+# visible and editable and clears the `config_missing` warning. The web and
+# webmanager plugins are still forced in memory, so removing them here is safe.
+_STARTER_CONFIG_TEMPLATE = """\
+# Beets config created by Beets Web Manager at first setup.
+# Edit freely -- Web Manager reads this file. It always runs the web + webmanager
+# plugins (added in memory even if you remove them here). Keep secrets OUT of this
+# file; the AcoustID API key is managed by Web Manager, not stored here.
+{directory_line}
+{library_line}
+
+plugins:
+  - web
+  - webmanager
+  - chroma        # AcoustID fingerprinting (needs fpcalc -- included in the image)
+  - fetchart
+  - embedart
+
+import:
+  write: yes
+  copy: yes
+  resume: ask
+  duplicate_action: skip
+"""
+
+
+def write_starter_config_if_missing() -> Optional[str]:
+    """Write a curated starter ``config.yaml`` on a fresh install, only when no
+    Beets config file exists yet. Returns the path written, or None if one was
+    already present or the write failed (fail-safe: never raises, never
+    overwrites). This is the one place the app writes the user's config; every
+    other path treats it as read-only (docs/adr/0006-embedded-beets.md)."""
+    import yaml
+    from beets import config
+
+    from backend.config_layers import music_root
+    tmp = None
+    try:
+        target = os.fsdecode(config.user_config_path())
+        if os.path.isfile(target):
+            log.debug("Beets config already exists at %s; leaving it untouched", target)
+            return None
+        directory = music_root()
+        library = os.path.join(os.fsdecode(config.config_dir()), "musiclibrary.blb")
+        # safe_dump quotes each value exactly as the YAML beets reads it back.
+        body = _STARTER_CONFIG_TEMPLATE.format(
+            directory_line=yaml.safe_dump({"directory": directory}, allow_unicode=True).strip(),
+            library_line=yaml.safe_dump({"library": library}, allow_unicode=True).strip(),
+        )
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        # mkstemp gives an unpredictable name created O_EXCL, so a symlink
+        # pre-planted at the temp path can't be followed to truncate the
+        # library or a media file. The never-overwrite guard on `target`
+        # (isfile -> return) above is unchanged.
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target) or ".", prefix=".config.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, 0o644)
+        except OSError:
+            pass
+        os.replace(tmp, target)  # atomic; never clobbers via a partial write
+        log.info("Wrote a starter Beets config at %s (first setup); edit it freely", target)
+        return target
+    except Exception:
+        # Fail-safe: a config the app couldn't write must never block startup.
+        # Beets keeps running from the in-memory defaults as before.
+        log.warning("Could not write a starter Beets config; continuing on defaults", exc_info=True)
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return None
+
 
 _init_lock = threading.Lock()
 _engine: Optional["EmbeddedBeets"] = None
