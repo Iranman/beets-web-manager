@@ -150,10 +150,6 @@ _install_transaction_job_hooks()
 _bootstrap_auth_token_if_missing()
 _migrate_or_initialize_setup_state()
 _bootstrap_browser_password_if_missing()
-# Fresh install (#603): materialise a curated starter Beets config when none
-# exists. Write-only-when-absent, so an existing/user-mounted config is never
-# touched; runs before the engine's first lazy start so `config_missing` clears.
-beets_embedded.write_starter_config_if_missing()
 
 
 @app.before_request

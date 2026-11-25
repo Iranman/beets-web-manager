@@ -236,6 +236,13 @@ class EmbeddedBeets:
                f"{'it' if len(legacy) == 1 else 'them'} from your Compose file, and remove the old "
                "`beets` service (docs/INSTALLATION.md).", severity="warning")
 
+        # Fresh install (#603): materialise a curated starter config.yaml before
+        # the config is read, so this same init reads it and `config_missing`
+        # clears. Write-only-when-absent, so an existing/user-mounted config is
+        # never touched. Done here (not at app boot) so importing the app never
+        # pulls Beets in before the outbound-urllib patch is installed.
+        write_starter_config_if_missing()
+
         config_path = ""
         try:
             config_path = os.fsdecode(config.user_config_path())
