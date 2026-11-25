@@ -5,8 +5,9 @@ Boots docker-compose.yml (one container; Beets runs inside Web Manager, ADR
 folders, and checks:
 1. A fresh install with no Beets config.yaml comes up healthy: /health/live,
    /health/ready, /api/health `beets.ok` and the Compose healthcheck. Beets
-   creates its library at /config/musiclibrary.blb and nothing is installed
-   into /config (no beetsplug folder, no config.yaml written).
+   creates its library at /config/musiclibrary.blb, Web Manager writes a
+   curated starter config.yaml there (issue #603) so config_missing clears,
+   and nothing else is installed into /config (no beetsplug folder).
 2. Nothing listens on port 8338 and no separate Beets service exists.
 3. First-run browser setup, Basic Auth and the auto-generated bearer token.
 4. The image's Beets is exactly the requirements.txt pin.
@@ -296,16 +297,34 @@ def run_acceptance() -> None:
             return
         _ok("Healthy on /health/live, /health/ready and /api/health (beets.ok), and Docker reports healthy")
         codes = stack.beets_codes()
-        if "config_missing" not in codes:
-            _fail(f"Fresh install without config.yaml should report config_missing, got {codes}")
+        # #603: a fresh install writes a curated starter config.yaml at engine
+        # startup, so config_missing must NOT fire (it did on the pre-#603
+        # behavior); the empty-library warning (library_created) is expected.
+        if "config_missing" in codes:
+            _fail(f"Fresh install should auto-create config.yaml and clear config_missing, got {codes}")
+        else:
+            _ok("Fresh install: config_missing cleared by the auto-created starter config.yaml")
         if not (stack.beets_dir / "musiclibrary.blb").exists():
             _fail("Beets did not create /config/musiclibrary.blb on a fresh install")
         else:
             _ok("Fresh install: Beets created /config/musiclibrary.blb")
-        if (stack.beets_dir / "config.yaml").exists() or (stack.beets_dir / "beetsplug").exists():
-            _fail("Web Manager wrote into the Beets /config folder (config.yaml or beetsplug/)")
+        # #603: the starter config.yaml is the one thing Web Manager writes into
+        # /config. It must exist, carry the resolved directory/library/plugins,
+        # and still nothing else (no beetsplug/) must be installed there.
+        starter = stack.beets_dir / "config.yaml"
+        if (stack.beets_dir / "beetsplug").exists():
+            _fail("Web Manager installed a beetsplug/ folder into /config (it must not)")
+        elif not starter.exists():
+            _fail("Web Manager did not write the starter config.yaml on a fresh install (#603)")
         else:
-            _ok("Nothing was installed into /config (no config.yaml written, no beetsplug folder)")
+            text = starter.read_text(encoding="utf-8")
+            needed = ("directory: /music", "library: /config/musiclibrary.blb", "- web", "- webmanager",
+                      "the AcoustID API key is managed by Web Manager, not stored here")
+            missing = [s for s in needed if s not in text]
+            if missing:
+                _fail(f"Starter config.yaml is missing expected content: {missing}")
+            else:
+                _ok("Fresh install: wrote a curated starter config.yaml (directory/library/plugins, no-secret header), no beetsplug/")
 
         # 2. One container, no port 8338
         print("==> Step 5: Verifying one service and no port 8338...")
