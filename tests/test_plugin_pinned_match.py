@@ -309,20 +309,26 @@ class PinnedHumanConfirmedFingerprintPrimaryTests(unittest.TestCase):
         self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
         self.assertTrue(getattr(task, "webmanager_confirmed_relaxed", False))
 
-    def test_b_without_fingerprint_hits_fails_closed_to_strong(self):
-        # A fingerprint signal that is PRESENT but does not confirm every file
-        # is a conflict: it refuses (no fingerprint-primary flag, and the forced
-        # pin does not fire -- a present-but-incomplete signal is not forced).
-        # (The zero-signal "no chroma" case is now force-accepted on the human
-        # path; see PinnedHumanConfirmedForcedTests.)
-        for name, kw in (("one file lacks a hit", {"drop_hit": True}),
-                         ("one file mapped to another recording", {"wrong_hit": True})):
+    def test_b_chroma_signal_never_blocks_or_accepts(self):
+        # #825 live / #827: chroma's in-session _matches is NOT reliable identity
+        # evidence (its shared-key lookup returns a loose hit for almost any
+        # catalog file, below Web Manager's canonical confirmed-only bar), so it
+        # is consulted for NEITHER acceptance NOR blocking of the human force.
+        # With NO threaded backend evidence (fingerprint_confirmed=None), a chroma
+        # hit -- incomplete OR pointing at another recording -- does not confirm
+        # every file (so the fingerprint-primary flag stays off) and does not
+        # count as a disagreement (so the human force still fires). This is the
+        # exact live condition the prior `_has_any_fingerprint_signal` gate
+        # mis-blocked. A genuine disagreement must come from the reliable backend
+        # channel; see PinnedConfirmedEvidenceBranchTests.
+        for name, kw in (("one file lacks a chroma hit", {"drop_hit": True}),
+                         ("one file maps to another chroma recording", {"wrong_hit": True})):
             with self.subTest(name):
-                got, _, task = self._case(human_confirmed=True, **kw)
-                self.assertIsNone(got)
+                got, match, task = self._case(human_confirmed=True, **kw)
+                self.assertIs(got, match)
                 self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
                 self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
-                self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
+                self.assertTrue(getattr(task, "webmanager_confirmed_forced", False))
 
     def test_c_auto_path_still_refuses_the_text_distant_match(self):
         # The automatic gate is byte-for-byte unchanged: same distance, same
@@ -427,13 +433,20 @@ class PinnedConfirmedEvidenceBranchTests(unittest.TestCase):
         self.assertIsNone(got)
         self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
 
-    def test_a_file_absent_from_evidence_fails_closed(self):
+    def test_a_file_absent_from_evidence_does_not_confirm_but_force_fills_gap(self):
+        # One file has no confirmed recording: fingerprint-PRIMARY still fails
+        # closed (it needs EVERY file, so no primary flag). The other 7 files
+        # positively confirm the pinned release and NONE disagree, so on the
+        # human path the forced pin legitimately fills the one-file gap (#825/#827:
+        # a human pin fills where there is no proof; it never overrides a
+        # disagreement -- see test_wrong_recording_id_is_refused).
         items = [_Item(k) for k in range(1, 9)]
         ev = self._evidence_one_id_per_file(items)
         ev.pop(items[2].path)  # one file has no confirmed recording
-        got, _, task = self._case(ev, items=items)
-        self.assertIsNone(got)
+        got, match, task = self._case(ev, items=items)
+        self.assertIs(got, match)
         self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+        self.assertTrue(getattr(task, "webmanager_confirmed_forced", False))
 
     def test_basename_fallback_matches_a_diverged_path(self):
         # Evidence keyed by a differently-rooted path (symlink/realpath
@@ -462,8 +475,13 @@ class PinnedConfirmedEvidenceBranchTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {}):
             sys.modules.pop("beetsplug.chroma", None)
             got = ops._pinned_partial_match(task, REL, False, None, 0, True, evidence)
-        self.assertIsNone(got)
+        # The borrow protection still holds for fingerprint-PRIMARY: disc2 does
+        # not borrow disc1's recording, so no false fingerprint-identity flag.
         self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+        # disc2 is simply unconfirmed (no proof, not a disagreement) and disc1
+        # confirms the pin, so on the human path the forced pin fills the gap.
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_forced", False))
 
     def test_2a_evidence_for_a_non_task_file_cannot_be_borrowed(self):
         # #821 2a: a task file whose ONLY same-basename evidence entry belongs
@@ -486,7 +504,36 @@ class PinnedConfirmedEvidenceBranchTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {}):
             sys.modules.pop("beetsplug.chroma", None)
             got = ops._pinned_partial_match(task, REL, False, None, 0, True, evidence)
+        # The task-local scoping still holds for fingerprint-PRIMARY: the task
+        # file does not borrow the non-task entry, so no false identity flag.
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+        # The task file therefore has NO applicable evidence (no proof, not a
+        # disagreement), so on the human path the forced pin fills the gap -- the
+        # same outcome as the live 0-evidence folder.
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_forced", False))
+
+    def test_backend_confirmed_different_recording_blocks_the_force(self):
+        # The reliable channel DOES carry disagreement: Web Manager's own cached
+        # AcoustID lookup confirmed a recording for the (only) file that is NOT
+        # the pinned track it maps to. Even human-confirmed, the forced pin must
+        # fail closed to review -- a human pin never overrides a confident
+        # fingerprint disagreement (#827 tri-state).
+        item = _PathItem(b"/dl/Album/01.flac")
+        dist = _album([_track(title=0.5, data_source=None)],
+                      missing=0, artist=0.0, album=0.807, data_source=None)
+        info = types.SimpleNamespace(album_id=REL, va=False, artists=[], artists_credit=[], artist="")
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[], extra_items=[],
+            mapping={item: types.SimpleNamespace(track_id=TRACK_IDS[0])})
+        task = types.SimpleNamespace(candidates=[match], items=[item], cur_artist="",
+                                     paths=[b"/dl/Album"])
+        evidence = {b"/dl/Album/01.flac": ["99999999-0000-4000-8000-000000000099"]}  # a different recording
+        with mock.patch.dict(sys.modules, {}):
+            sys.modules.pop("beetsplug.chroma", None)
+            got = ops._pinned_partial_match(task, REL, False, None, 0, True, evidence)
         self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
         self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
 
     def test_auto_path_ignores_evidence(self):

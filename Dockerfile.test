@@ -1,12 +1,14 @@
 # Supported local environment for the backend test suite (docs/DEVELOPMENT.md).
 # Mirrors CI's unit-tests job: Python 3.13 + requirements-dev.txt (which adds
 # the pinned beets fixture package), the CLI tools some tests drive (sqlite3,
-# ffmpeg, curl), and a non-root user like the GitHub runner, so permission
-# tests run instead of skipping as root. Test-only; never published or
-# deployed. The source tree is bind-mounted at /src at run time.
+# ffmpeg, curl), fpcalc (libchromaprint-tools) so the chroma plugin loads and
+# the embedded-import chroma regression tests run instead of skipping, and a
+# non-root user like the GitHub runner, so permission tests run instead of
+# skipping as root. Test-only; never published or deployed. The source tree is
+# bind-mounted at /src at run time.
 FROM python:3.13-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends sqlite3 ffmpeg curl \
+ && apt-get install -y --no-install-recommends sqlite3 ffmpeg curl libchromaprint-tools \
  && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt requirements-dev.txt /tmp/req/
 RUN pip install --no-cache-dir -r /tmp/req/requirements-dev.txt

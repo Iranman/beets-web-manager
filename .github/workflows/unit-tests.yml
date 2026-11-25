@@ -17,6 +17,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+      - name: Install fpcalc (chroma plugin) so embedded-import chroma tests run
+        # Without fpcalc on PATH the embedded self-test flags chroma as an error,
+        # so the chroma-loaded import regression tests (tests.test_beets_embedded_
+        # autotag) would skip -- the exact gap that let #825 pass CI yet fail
+        # live. libchromaprint-tools provides /usr/bin/fpcalc, as the published
+        # image's Dockerfile installs it.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libchromaprint-tools
       - run: pip install -r requirements.txt
       - name: Set a fake CI-only web auth token
         # Prevents _bootstrap_auth_token_if_missing() from generating and

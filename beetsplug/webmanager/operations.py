@@ -699,6 +699,51 @@ def _fp_path_key(path) -> str:
     return os.path.normcase(os.path.abspath(path))
 
 
+def _confirmed_recordings_for_items(task, confirmed) -> Dict[Any, set]:
+    """Per task item, the set of recording ids Web Manager's reliable cached
+    AcoustID lookup CONFIRMED for that physical file -- resolved by exact path
+    key, else by a basename that is unambiguous across the whole task AND
+    task-local (under one of ``task.paths``). An item with no such evidence maps
+    to an empty set. Only this backend evidence is trusted here; chroma's
+    nondeterministic in-session ``_matches`` is never consulted.
+
+    The same task-local/unambiguous-basename rules as the original
+    ``_acoustid_hit_every_file`` confirmed branch (#821 2a): the basename
+    fallback may borrow only from a task-local evidence entry whose basename is
+    unique among both the task items and the evidence, so an unconfirmed sibling
+    on an asymmetric multi-disc folder can never borrow a confirming recording.
+    """
+    items = list(getattr(task, "items", None) or [])
+    out: Dict[Any, set] = {it: set() for it in items}
+    if not confirmed or not items:
+        return out
+
+    def _base(p):
+        return os.path.basename(os.fsdecode(p) if isinstance(p, bytes) else p)
+
+    by_key = {_fp_path_key(k): {str(r).lower() for r in (v or [])}
+              for k, v in confirmed.items()}
+    task_roots = [_fp_path_key(p) for p in (getattr(task, "paths", None) or [])]
+
+    def _task_local(key: str) -> bool:
+        if not task_roots:
+            return True
+        return any(key == r or key.startswith(r + os.sep) for r in task_roots)
+
+    local_conf = {k: v for k, v in confirmed.items() if _task_local(_fp_path_key(k))}
+    item_bases = [_base(it.path) for it in items]
+    conf_bases = [_base(k) for k in local_conf]
+    by_base = {_base(k): {str(r).lower() for r in (v or [])}
+               for k, v in local_conf.items()
+               if item_bases.count(_base(k)) == 1 and conf_bases.count(_base(k)) == 1}
+    for item in items:
+        hit = by_key.get(_fp_path_key(item.path))
+        if hit is None:
+            hit = by_base.get(_base(item.path))
+        out[item] = hit or set()
+    return out
+
+
 def _acoustid_hit_every_file(task, match, confirmed=None) -> bool:
     """True when, for every file in the task, AcoustID confirmed the recording
     id of the Release track Beets mapped that file to -- positive
@@ -723,46 +768,13 @@ def _acoustid_hit_every_file(task, match, confirmed=None) -> bool:
     if not items:
         return False
     if confirmed:
-        def _base(p):
-            return os.path.basename(os.fsdecode(p) if isinstance(p, bytes) else p)
-        by_key = {_fp_path_key(k): {str(r).lower() for r in (v or [])}
-                  for k, v in confirmed.items()}
-        # Basename fallback covers a source-vs-Beets path divergence (symlink/
-        # realpath), but ONLY for a basename that is unambiguous across the
-        # WHOLE task -- exactly one task item AND one evidence entry carry it.
-        # Counting over evidence alone would let an UNCONFIRMED sibling on an
-        # asymmetric multi-disc folder (disc1/01.flac confirmed, disc2/01.flac
-        # not) borrow its sibling's recording when the mapped ids coincide
-        # (N2 fail-open). Counting over all items keeps every file fail-closed.
-        #
-        # 2a (#821): the basename fallback may borrow ONLY from TASK-LOCAL
-        # evidence -- an entry whose file lies under one of this task's own
-        # import roots (``task.paths``). The evidence map can also carry entries
-        # for files NOT in this beets task (Beets splitting a pinned import into
-        # several tasks, or the existing-album library items when
-        # ``existing_album_id`` is set); those live outside ``task.paths`` and
-        # must never be borrowed by a same-basename task file. Exact path-key
-        # hits (``by_key``) are the same physical file and stay unaffected; only
-        # the heuristic basename map is narrowed.
-        task_roots = [_fp_path_key(p) for p in (getattr(task, "paths", None) or [])]
-
-        def _task_local(key: str) -> bool:
-            if not task_roots:
-                return True
-            return any(key == r or key.startswith(r + os.sep) for r in task_roots)
-
-        local_conf = {k: v for k, v in confirmed.items() if _task_local(_fp_path_key(k))}
-        item_bases = [_base(it.path) for it in items]
-        conf_bases = [_base(k) for k in local_conf]
-        by_base = {_base(k): {str(r).lower() for r in (v or [])}
-                   for k, v in local_conf.items()
-                   if item_bases.count(_base(k)) == 1 and conf_bases.count(_base(k)) == 1}
+        # Exact path-key, else an unambiguous task-local basename (#821 2a);
+        # see _confirmed_recordings_for_items. Every file must carry a confirmed
+        # recording that IS its mapped track (fail closed on any that does not).
+        by_item = _confirmed_recordings_for_items(task, confirmed)
         for item in items:
             track_id = getattr(mapping.get(item), "track_id", None)
-            hit = by_key.get(_fp_path_key(item.path))
-            if hit is None:
-                hit = by_base.get(_base(item.path))
-            if not track_id or not hit or str(track_id).lower() not in hit:
+            if not track_id or str(track_id).lower() not in (by_item.get(item) or set()):
                 return False
         return True
     chroma = sys.modules.get("beetsplug.chroma")  # imported only when Beets loaded it
@@ -838,24 +850,39 @@ def _forced_pin_tracklist_sane(task, match) -> bool:
     return files <= tracks
 
 
-def _has_any_fingerprint_signal(task, confirmed) -> bool:
-    """True when ANY fingerprint evidence was available to judge this task --
-    Web Manager's own per-file evidence (``confirmed``, non-empty) or a chroma
-    in-session AcoustID hit for one of the task's files. The forced pin fires
-    ONLY when there is no such signal at all: when a fingerprint signal exists
-    but does not confirm every file, that is a conflict/ambiguity, so the
-    pinned Release fails closed to the fingerprint rung (and on to review)
-    rather than being forced. This keeps the confirmed-only fingerprint
-    contract (#819/#821) untouched -- a human pin never overrides a fingerprint
-    that disagrees; it only fills the gap when no fingerprint evidence exists."""
-    if confirmed:
-        return True
-    chroma = sys.modules.get("beetsplug.chroma")  # imported only when Beets loaded it
-    matches = getattr(chroma, "_matches", None)
-    if not isinstance(matches, dict) or not matches:
+def _fingerprint_disagrees(task, match, confirmed) -> bool:
+    """True when Web Manager's reliable cached AcoustID evidence CONFIDENTLY
+    identifies some file as a recording OTHER than the pinned track Beets mapped
+    it to -- a genuine fingerprint disagreement that must fail closed to review,
+    never be forced (#827 tri-state: CONFIRM / DISAGREE / no-proof).
+
+    Only the backend ``confirmed`` evidence is trusted (the same MI-5
+    confirmed-only rule the accept path uses). Chroma's in-session ``_matches``
+    is NOT consulted: its lookup is a separate, best-effort live AcoustID call
+    over a shared, rate-limited public key that returns a recording hit for
+    almost ANY catalog file -- a hit that confirms nothing about the pinned
+    Release and whose mere presence is nondeterministic (network/rate-limit).
+    The previous gate (``_has_any_fingerprint_signal``) treated that presence as
+    a blocking "signal", so live -- where chroma IS loaded and fingerprints every
+    file at ``import_task_start`` -- the forced pin was blocked for exactly the
+    0-confirmed, text-divergent catalog releases it exists to import (#825 live
+    failure). CI passed only because its fixture loaded no chroma and blocked
+    sockets, so ``_matches`` was always empty.
+
+    A file with no confirmed recording is NOT a disagreement -- it is simply no
+    proof, the gap the human's explicit Release pick is allowed to fill. A file
+    is a disagreement only when the backend confirmed a recording for it and that
+    recording is not the one its mapped track carries."""
+    if not confirmed:
         return False
-    return any(matches.get(getattr(item, "path", None))
-               for item in (getattr(task, "items", None) or []))
+    mapping = getattr(match, "mapping", None) or {}
+    by_item = _confirmed_recordings_for_items(task, confirmed)
+    for item in (getattr(task, "items", None) or []):
+        hit = by_item.get(item) or set()
+        track_id = getattr(mapping.get(item), "track_id", None)
+        if hit and track_id and str(track_id).lower() not in hit:
+            return True
+    return False
 
 
 def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
@@ -905,15 +932,21 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     Finally, on the human-confirmed path only, a FORCED pin accepts the Release
     irrespective of Beets' text distance even WITHOUT any fingerprint evidence:
     the person's explicit Import-with-ID pick of a valid Release IS the identity
-    authorization (#813). It fires ONLY when there is no fingerprint signal at
-    all (``_has_any_fingerprint_signal`` is false): a fingerprint that is present
-    but does not confirm every file is a conflict, so the pinned Release fails
-    closed to the fingerprint rung (and on to review) rather than being forced --
-    a human pin fills the gap when no fingerprint evidence exists, it never
-    overrides a fingerprint that disagrees. The only remaining guard is then the
-    TRACKLIST-SANITY rail (``_forced_pin_tracklist_sane``): the source's file
-    count must line up with the Release's track count, so a gross mismatch (e.g.
-    15 files onto a 1-track Release) is still refused. Every structural guard above still holds (pinned
+    authorization (#813). It is blocked ONLY by a genuine fingerprint
+    DISAGREEMENT (``_fingerprint_disagrees``): Web Manager's reliable cached
+    AcoustID evidence confidently identified some file as a recording OTHER than
+    the pinned track it maps to, so the pinned Release fails closed to review
+    rather than being forced -- a human pin fills the gap where there is no proof,
+    it never overrides a fingerprint that disagrees. The gate deliberately does
+    NOT block on the mere PRESENCE of a fingerprint signal: chroma's in-session
+    ``_matches`` returns a hit for almost any catalog file, confirming nothing
+    about the pinned Release, and live -- where chroma IS loaded and fingerprints
+    every file -- that presence blocked exactly the 0-confirmed, text-divergent
+    catalog imports the forced pin exists for (#825 live failure; #827 tri-state).
+    The other remaining guard is the TRACKLIST-SANITY rail
+    (``_forced_pin_tracklist_sane``): the source's file count must line up with
+    the Release's track count, so a gross mismatch (e.g. 15 files onto a 1-track
+    Release) is still refused. Every structural guard above still holds (pinned
     Release is best candidate, no extra items, no penalty capped below strong).
     Fingerprint and artist-relaxed acceptance are tried first, so a forced pin
     is only the fall-through for a 0-fingerprint, text-divergent source; it is
@@ -974,21 +1007,23 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
                      [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
                      _source_artist(task))
             return match
-    # Explicit human confirm, FORCED pin (no fingerprint evidence): the person
-    # picked this exact valid Release via Import-with-ID, which IS the identity
-    # authorization (#813). The text ceiling is overridden; the TRACKLIST-SANITY
-    # rail is the only remaining guard (a gross file/track mismatch is refused).
-    # Tried last, so fingerprint/artist-relaxed acceptance (stronger evidence)
-    # win the flag first; never on the auto/recovery path (human_confirmed
-    # false). Beets' write-on import then rewrites the source's tags with this
-    # Release's MusicBrainz metadata.
-    if (human_confirmed and not _has_any_fingerprint_signal(task, fingerprint_confirmed)
+    # Explicit human confirm, FORCED pin (no fingerprint DISAGREEMENT): the
+    # person picked this exact valid Release via Import-with-ID, which IS the
+    # identity authorization (#813). Blocked only by a genuine fingerprint
+    # disagreement (_fingerprint_disagrees); the mere presence of chroma's
+    # in-session signal no longer blocks it (#825 live / #827). The text ceiling
+    # is overridden; the TRACKLIST-SANITY rail is the remaining guard (a gross
+    # file/track mismatch is refused). Tried last, so fingerprint/artist-relaxed
+    # acceptance (stronger evidence) win the flag first; never on the
+    # auto/recovery path (human_confirmed false). Beets' write-on import then
+    # rewrites the source's tags with this Release's MusicBrainz metadata.
+    if (human_confirmed and not _fingerprint_disagrees(task, match, fingerprint_confirmed)
             and _forced_pin_tracklist_sane(task, match)):
         ratio = (raw / max_distance) if max_distance > 0 else 0.0
         task.webmanager_confirmed_forced = True
         log.warning(
             "Pinned release %s FORCED for %s on the explicit human-confirmed path "
-            "WITHOUT fingerprint evidence (the human's Release pick is the identity "
+            "with no fingerprint disagreement (the human's Release pick is the identity "
             "authority, #813); tracklist counts line up and no source file is "
             "unmapped; text ceiling overridden (distance %.4f). Beets will tag the "
             "files as this release, correcting the source metadata.",

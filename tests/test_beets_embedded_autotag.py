@@ -6,6 +6,7 @@ real sockets are blocked, so nothing reaches the network.
 
 import json
 import os
+import shutil
 import site
 import subprocess
 import sys
@@ -24,6 +25,19 @@ def _beets_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def _chroma_available() -> bool:
+    # The *_chroma_* scenarios load the real chroma plugin, so acoustid must
+    # import and fpcalc must be on PATH (the embedded self-test flags its absence
+    # as an error once chroma is loaded). The published image ships both.
+    if not _beets_available():
+        return False
+    try:
+        import acoustid  # noqa: F401
+    except ImportError:
+        return False
+    return bool(shutil.which("fpcalc"))
 
 
 @unittest.skipUnless(_beets_available(), "needs beets==2.14.1 (requirements.txt)")
@@ -108,6 +122,54 @@ class EmbeddedAutotagTests(unittest.TestCase):
         self.assertEqual(out["import"]["forced_pin"], [])
         self.assertEqual([s["reason"] for s in out["import"]["skipped"]], ["no_strong_match"])
         self.assertEqual(out["import"]["confirmed_fingerprint_primary"], [])
+        self.assertEqual((out["albums"], out["items"]), ([], []))
+
+    # --- #825 LIVE regression: chroma IS loaded (as in production) and produces
+    # a non-confirming in-session _matches signal. The prior gate blocked the
+    # forced pin whenever ANY such signal existed, so these imports failed live
+    # while CI (no chroma, sockets blocked) passed. The CI fixtures above never
+    # exercised this; these three do.
+    @unittest.skipUnless(_chroma_available(), "needs the chroma plugin (acoustid + fpcalc)")
+    def test_forced_pin_fires_with_a_non_confirming_chroma_signal(self):
+        # The exact live condition: human-confirmed Import-with-ID, no Web
+        # Manager fingerprint evidence, text-divergent titles, AND chroma loaded
+        # with a _matches hit that does NOT confirm the pinned release. The
+        # forced pin must still fire -- the chroma signal confirms nothing about
+        # the pin and must not block it.
+        out = self._run("forced_chroma_noise")
+        self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["skipped"], [])
+        self.assertEqual(len(out["import"]["imported_album_ids"]), 1)
+        self.assertEqual(len(out["import"]["forced_pin"]), 1)
+        self.assertEqual(out["import"]["confirmed_fingerprint_primary"], [])
+        self.assertEqual(out["albums"], [{"album": "Jóga", "albumartist": "Björk",
+                                          "mb_albumid": REL, "mb_releasegroupid": RG}])
+        self.assertEqual(out["items"], ["Jóga (Introvert 4/4 mix)", "Jóga (Introvert Breaks mix)"])
+        self.assertEqual(out["stats_after"], {"albums": 1, "items": 2})
+
+    @unittest.skipUnless(_chroma_available(), "needs the chroma plugin (acoustid + fpcalc)")
+    def test_auto_path_with_a_chroma_signal_is_still_refused(self):
+        # Same chroma signal on the AUTOMATIC path (human_confirmed False): the
+        # force never fires without a human, so Beets' strong text bar refuses it.
+        out = self._run("auto_chroma_noise")
+        self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["imported_album_ids"], [])
+        self.assertEqual(out["import"]["forced_pin"], [])
+        self.assertEqual([s["reason"] for s in out["import"]["skipped"]], ["no_strong_match"])
+        self.assertEqual((out["albums"], out["items"]), ([], []))
+
+    @unittest.skipUnless(_chroma_available(), "needs the chroma plugin (acoustid + fpcalc)")
+    def test_forced_pin_fails_closed_on_a_confident_fingerprint_disagreement(self):
+        # A genuine disagreement: Web Manager's OWN reliable AcoustID lookup
+        # confirmed a recording for a file that is NOT the pinned track it maps
+        # to. Even on the human path, the forced pin must fail closed to review;
+        # a human pin fills the no-proof gap but never overrides a disagreement.
+        out = self._run("forced_chroma_disagree")
+        self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["imported_album_ids"], [])
+        self.assertEqual(out["import"]["forced_pin"], [])
+        self.assertEqual(out["import"]["confirmed_fingerprint_primary"], [])
+        self.assertEqual([s["reason"] for s in out["import"]["skipped"]], ["no_strong_match"])
         self.assertEqual((out["albums"], out["items"]), ([], []))
 
     def test_divergent_titles_import_with_web_manager_fingerprint_evidence(self):
