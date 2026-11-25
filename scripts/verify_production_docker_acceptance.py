@@ -391,6 +391,25 @@ def run_acceptance() -> None:
             return
         _ok("First-run admin credentials established successfully")
 
+        # #603: completing first-run setup writes a curated starter config.yaml
+        # into /config (write-only-when-absent). It must now exist, carry the
+        # resolved directory/library/plugins and the no-secret header, and still
+        # no beetsplug/ folder may be installed there.
+        starter = stack.beets_dir / "config.yaml"
+        if (stack.beets_dir / "beetsplug").exists():
+            _fail("Web Manager installed a beetsplug/ folder into /config (it must not)")
+        elif not starter.exists():
+            _fail("First-run setup did not write the starter config.yaml into /config (#603)")
+        else:
+            text = starter.read_text(encoding="utf-8")
+            needed = ("directory: /music", "library: /config/musiclibrary.blb", "- web", "- webmanager",
+                      "the AcoustID API key is managed by Web Manager, not stored here")
+            missing = [s for s in needed if s not in text]
+            if missing:
+                _fail(f"Starter config.yaml is missing expected content: {missing}")
+            else:
+                _ok("First-run setup wrote a curated starter config.yaml (directory/library/plugins, no-secret header), no beetsplug/")
+
         # 3a. Beets inside Web Manager is available to setup diagnostics.
         print("==> Step 7a: Verifying Beets diagnostics...")
         status, _, status_body = stack.request("GET", "/api/setup/status", headers=bearer_header, timeout=30.0)
