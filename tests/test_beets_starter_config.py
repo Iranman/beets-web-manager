@@ -49,11 +49,14 @@ elif scenario == "idempotent":
 
 elif scenario == "config_missing_clears":
     beets_embedded.write_starter_config_if_missing()
-    # Equivalent unit check: re-read beets' config and confirm the file is now
-    # present at exactly the path beets_embedded's `config_missing` check uses.
-    config.clear()
-    config.read(user=True, defaults=True)
-    out["config_present"] = os.path.isfile(os.fsdecode(config.user_config_path()))
+    # Drive the REAL engine self-test (not a file-existence proxy): after the
+    # write, the `config_missing` check must report ok. The live second-writer
+    # probes are stubbed so status() does no network/proc scan in the test box.
+    beets_embedded._separate_beets_address = lambda: ""
+    beets_embedded._beet_commands = lambda: []
+    beets_embedded.reset()
+    st = beets_embedded.status()
+    out["config_missing_checks"] = [c for c in st.get("checks", []) if c["code"] == "config_missing"]
 
 else:  # "fresh"
     out["result"] = beets_embedded.write_starter_config_if_missing()
@@ -119,8 +122,12 @@ class StarterConfigTests(unittest.TestCase):
         self.assertTrue(res["unchanged"])
 
     def test_config_missing_clears_after_write(self):
+        # The engine's own self-test must stop emitting the config_missing
+        # warning once the starter config exists (real check path, not a proxy).
         res = _run("config_missing_clears", self.beetsdir, self.music)
-        self.assertTrue(res["config_present"])
+        checks = res["config_missing_checks"]
+        self.assertEqual(len(checks), 1, f"expected one config_missing check, got {checks}")
+        self.assertTrue(checks[0]["ok"], f"config_missing still failing after write: {checks[0]}")
 
 
 if __name__ == "__main__":
