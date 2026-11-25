@@ -23,6 +23,7 @@ import secrets
 import shutil
 import socket
 import stat
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -117,8 +118,12 @@ def write_starter_config_if_missing() -> Optional[str]:
             library_line=yaml.safe_dump({"library": library}, allow_unicode=True).strip(),
         )
         os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-        tmp = f"{target}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        # mkstemp gives an unpredictable name created O_EXCL, so a symlink
+        # pre-planted at the temp path can't be followed to truncate the
+        # library or a media file. The never-overwrite guard on `target`
+        # (isfile -> return) above is unchanged.
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target) or ".", prefix=".config.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(body)
             f.flush()
             os.fsync(f.fileno())

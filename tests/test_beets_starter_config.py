@@ -58,6 +58,23 @@ elif scenario == "config_missing_clears":
     st = beets_embedded.status()
     out["config_missing_checks"] = [c for c in st.get("checks", []) if c["code"] == "config_missing"]
 
+elif scenario == "symlink_temp":
+    # Pre-plant a symlink at the *old predictable* temp path, pointing at a
+    # victim file. The hardened writer uses tempfile.mkstemp (unpredictable
+    # name, O_EXCL), so it never touches that path; a revert to the predictable
+    # `open(f"{target}.{pid}.tmp", "w")` would follow the symlink and truncate
+    # the victim.
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    victim = os.path.join(os.path.dirname(target), "victim.blb")
+    with open(victim, "w") as f:
+        f.write("VICTIM")
+    old_predictable = f"{target}.{os.getpid()}.tmp"
+    os.symlink(victim, old_predictable)
+    out["result"] = beets_embedded.write_starter_config_if_missing()
+    with open(victim) as f:
+        out["victim_content"] = f.read()
+    out["config_written"] = os.path.isfile(target)
+
 else:  # "fresh"
     out["result"] = beets_embedded.write_starter_config_if_missing()
     out["exists"] = os.path.isfile(target)
@@ -120,6 +137,14 @@ class StarterConfigTests(unittest.TestCase):
         self.assertEqual(res["first"], res["target"])
         self.assertIsNone(res["second"])
         self.assertTrue(res["unchanged"])
+
+    @unittest.skipUnless(os.name == "posix", "symlink pre-planting needs POSIX")
+    def test_temp_file_is_not_a_predictable_symlink_target(self):
+        # A symlink planted at the predictable old temp path must not be
+        # followed/truncated: mkstemp picks an unpredictable O_EXCL name.
+        res = _run("symlink_temp", self.beetsdir, self.music)
+        self.assertEqual(res["victim_content"], "VICTIM")  # not truncated/overwritten
+        self.assertTrue(res["config_written"])  # the real config still got written
 
     def test_config_missing_clears_after_write(self):
         # The engine's own self-test must stop emitting the config_missing
