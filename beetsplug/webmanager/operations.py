@@ -811,6 +811,53 @@ def _artist_relaxable(task, match, release_id: str, lib, existing_album_id: int,
     return bool(parts) and all(part in credits for part in parts)
 
 
+#: Tolerance for the human-confirmed forced-pin TRACKLIST-SANITY rail: a
+#: person forcing a legitimate Release has roughly as many files as it has
+#: tracks, so the source's file count must not exceed the Release's track
+#: count. The structural guard already refuses any extra_item (a source file
+#: mapped to no Release track), so a gross over-supply -- e.g. 15 files forced
+#: onto a 1-track Release -- never even reaches the forced rung; this is the
+#: explicit, mapping-independent re-check of that invariant.
+def _forced_pin_tracklist_sane(task, match) -> bool:
+    """TRACKLIST-SANITY rail for a human-confirmed forced pin without any
+    fingerprint evidence. True only when the source's file count lines up with
+    the pinned Release's track count: at least one file and one track, no
+    source file left unmapped (``extra_items``), and never more files than the
+    Release has tracks. This is what prevents a catastrophic mis-tag -- the one
+    guard that still stands once Beets' text-distance ceiling is overridden by
+    the human's explicit pick, so it fails closed on any count it cannot
+    vouch for."""
+    files = len(getattr(task, "items", None) or [])
+    mapping = getattr(match, "mapping", None) or {}
+    extra_tracks = getattr(match, "extra_tracks", None) or []
+    extra_items = getattr(match, "extra_items", None) or []
+    # Every Release track is either mapped to a file or missing (extra_tracks).
+    tracks = len(mapping) + len(extra_tracks)
+    if files <= 0 or tracks <= 0 or extra_items:
+        return False
+    return files <= tracks
+
+
+def _has_any_fingerprint_signal(task, confirmed) -> bool:
+    """True when ANY fingerprint evidence was available to judge this task --
+    Web Manager's own per-file evidence (``confirmed``, non-empty) or a chroma
+    in-session AcoustID hit for one of the task's files. The forced pin fires
+    ONLY when there is no such signal at all: when a fingerprint signal exists
+    but does not confirm every file, that is a conflict/ambiguity, so the
+    pinned Release fails closed to the fingerprint rung (and on to review)
+    rather than being forced. This keeps the confirmed-only fingerprint
+    contract (#819/#821) untouched -- a human pin never overrides a fingerprint
+    that disagrees; it only fills the gap when no fingerprint evidence exists."""
+    if confirmed:
+        return True
+    chroma = sys.modules.get("beetsplug.chroma")  # imported only when Beets loaded it
+    matches = getattr(chroma, "_matches", None)
+    if not isinstance(matches, dict) or not matches:
+        return False
+    return any(matches.get(getattr(item, "path", None))
+               for item in (getattr(task, "items", None) or []))
+
+
 def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
                           lib=None, existing_album_id: int = 0, human_confirmed: bool = False,
                           fingerprint_confirmed=None):
@@ -853,7 +900,28 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     file the strong bar is kept (fail closed). Flagged
     ``webmanager_confirmed_fingerprint_primary`` (and, when the text distance
     was also under ``match.medium_rec_thresh``, ``webmanager_confirmed_relaxed``
-    for #817 back-compat)."""
+    for #817 back-compat).
+
+    Finally, on the human-confirmed path only, a FORCED pin accepts the Release
+    irrespective of Beets' text distance even WITHOUT any fingerprint evidence:
+    the person's explicit Import-with-ID pick of a valid Release IS the identity
+    authorization (#813). It fires ONLY when there is no fingerprint signal at
+    all (``_has_any_fingerprint_signal`` is false): a fingerprint that is present
+    but does not confirm every file is a conflict, so the pinned Release fails
+    closed to the fingerprint rung (and on to review) rather than being forced --
+    a human pin fills the gap when no fingerprint evidence exists, it never
+    overrides a fingerprint that disagrees. The only remaining guard is then the
+    TRACKLIST-SANITY rail (``_forced_pin_tracklist_sane``): the source's file
+    count must line up with the Release's track count, so a gross mismatch (e.g.
+    15 files onto a 1-track Release) is still refused. Every structural guard above still holds (pinned
+    Release is best candidate, no extra items, no penalty capped below strong).
+    Fingerprint and artist-relaxed acceptance are tried first, so a forced pin
+    is only the fall-through for a 0-fingerprint, text-divergent source; it is
+    flagged ``webmanager_confirmed_forced`` and reported for the audit trail,
+    and never fires on the auto/recovery path (``human_confirmed`` is false
+    there). Beets imports with ``write`` on against the pinned Release, so the
+    source's messy tags are rewritten with the Release's MusicBrainz metadata as
+    a built-in side effect -- the "fix the tags" outcome."""
     candidates = list(getattr(task, "candidates", None) or [])
     if not release_id or not candidates:
         return None
@@ -906,6 +974,28 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
                      [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
                      _source_artist(task))
             return match
+    # Explicit human confirm, FORCED pin (no fingerprint evidence): the person
+    # picked this exact valid Release via Import-with-ID, which IS the identity
+    # authorization (#813). The text ceiling is overridden; the TRACKLIST-SANITY
+    # rail is the only remaining guard (a gross file/track mismatch is refused).
+    # Tried last, so fingerprint/artist-relaxed acceptance (stronger evidence)
+    # win the flag first; never on the auto/recovery path (human_confirmed
+    # false). Beets' write-on import then rewrites the source's tags with this
+    # Release's MusicBrainz metadata.
+    if (human_confirmed and not _has_any_fingerprint_signal(task, fingerprint_confirmed)
+            and _forced_pin_tracklist_sane(task, match)):
+        ratio = (raw / max_distance) if max_distance > 0 else 0.0
+        task.webmanager_confirmed_forced = True
+        log.warning(
+            "Pinned release %s FORCED for %s on the explicit human-confirmed path "
+            "WITHOUT fingerprint evidence (the human's Release pick is the identity "
+            "authority, #813); tracklist counts line up and no source file is "
+            "unmapped; text ceiling overridden (distance %.4f). Beets will tag the "
+            "files as this release, correcting the source metadata.",
+            release_id,
+            [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
+            ratio)
+        return match
     return None
 
 
@@ -1410,6 +1500,10 @@ def run_import():
                     "confirmed_fingerprint_primary": [
                         util.displayable_path(tp) for t in tasks
                         if getattr(t, "webmanager_confirmed_fingerprint_primary", False) and not getattr(t, "skip", False)
+                        for tp in getattr(t, "paths", None) or []],
+                    "forced_pin": [
+                        util.displayable_path(tp) for t in tasks
+                        if getattr(t, "webmanager_confirmed_forced", False) and not getattr(t, "skip", False)
                         for tp in getattr(t, "paths", None) or []],
                     "imported_album_ids": sorted(set(imported_ids)),
                 }
