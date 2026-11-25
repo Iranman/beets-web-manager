@@ -359,18 +359,34 @@ class EmbeddedBeetsScenarios(unittest.TestCase):
         listed = set(yaml.safe_load(text)["plugins"].split())
         self.assertTrue(listed <= set(out["status"]["loaded_plugins"]), listed - set(out["status"]["loaded_plugins"]))
 
-    def test_fresh_install_without_config_uses_the_stock_layout(self):
-        # No config.yaml: library beside it, MUSIC_ROOT as `directory:`, as
-        # the stock Beets container laid it out; nothing is written.
+    def test_fresh_install_without_config_writes_the_stock_layout(self):
+        # #603: with no config.yaml, the engine writes a curated starter
+        # config.yaml on first start -- the stock layout (library beside it,
+        # MUSIC_ROOT as `directory:`), so config_missing clears and the file
+        # now exists. An existing config is still never overwritten (see
+        # test_existing_config_is_never_rewritten paths elsewhere).
         out = self._run("no_config")
         failed = self._failed(out["status"])
-        self.assertEqual(failed.get("config_missing"), "warning")
+        self.assertNotIn("config_missing", failed)  # cleared: the starter config was written
         self.assertEqual(failed.get("library_created"), "warning")
-        self.assertTrue(out["status"]["ok"], out["status"])
+        # The starter config enables chroma, so fpcalc becomes required. The
+        # test image ships no fpcalc, so fpcalc_missing is the only error here;
+        # the published image includes fpcalc, so a real fresh install is ok
+        # (the production-docker-acceptance job, on the real image, proves it).
+        errors = {c for c, sev in failed.items() if sev == "error"}
+        self.assertLessEqual(errors, {"fpcalc_missing"}, out["status"])
         self.assertEqual(out["status"]["library_path"], self.dbpath)
         self.assertEqual(out["status"]["library_directory"], self.music)
-        self.assertFalse(os.path.exists(os.path.join(self.config, "config.yaml")))
-        self.assertNotEqual((out["mutate_error"] or [None, None])[1], "BEETS_EMBEDDED_DEGRADED")
+        cfg = os.path.join(self.config, "config.yaml")
+        self.assertTrue(os.path.exists(cfg))  # #603: starter config materialized
+        import yaml
+        doc = yaml.safe_load(open(cfg, encoding="utf-8"))
+        self.assertEqual(doc["library"], self.dbpath)
+        self.assertEqual(doc["directory"], self.music)
+        self.assertEqual(doc["plugins"][:2], ["web", "webmanager"])
+        # (The write/ok behavior under a missing fpcalc -- which the starter's
+        # chroma plugin now requires -- is covered by
+        # test_missing_fpcalc_is_an_error_when_chroma_is_configured.)
 
     def test_fresh_install_without_config_is_ready(self):
         # Regression (PR #466): a fresh config-less install must answer
