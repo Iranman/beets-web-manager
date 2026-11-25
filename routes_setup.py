@@ -4117,6 +4117,15 @@ def setup_first_run():
             }), 500
 
         _cleanup_initial_browser_password_if_replaced()
+        # #603: first run -> materialise a curated starter Beets config.yaml if
+        # the mounted /config has none yet. Write-only-when-absent and fail-safe
+        # (never raises, never overwrites an existing config), so it cannot block
+        # setup; config_missing clears on the next Beets engine start. Called
+        # from this request handler (not at import or on every engine start) so
+        # importing the app never pulls Beets in early and ordinary engine
+        # starts stay config-less.
+        from backend.beets_embedded import write_starter_config_if_missing
+        write_starter_config_if_missing()
         from app import _stamp_session_epoch
         session.clear()
         session.permanent = True
