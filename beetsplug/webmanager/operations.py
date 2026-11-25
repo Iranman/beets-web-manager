@@ -540,7 +540,9 @@ def get_operation_status(op_id: str):
 
 
 _QUIET_FALLBACKS = ("skip", "asis")
-_MB_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# 2c (#821): matched with re.fullmatch, so a trailing newline (``$`` also
+# matches just before a final "\n" under re.match) is rejected outright.
+_MB_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 #: An artist or album value that names nothing: placing it would build a
@@ -732,10 +734,28 @@ def _acoustid_hit_every_file(task, match, confirmed=None) -> bool:
         # asymmetric multi-disc folder (disc1/01.flac confirmed, disc2/01.flac
         # not) borrow its sibling's recording when the mapped ids coincide
         # (N2 fail-open). Counting over all items keeps every file fail-closed.
+        #
+        # 2a (#821): the basename fallback may borrow ONLY from TASK-LOCAL
+        # evidence -- an entry whose file lies under one of this task's own
+        # import roots (``task.paths``). The evidence map can also carry entries
+        # for files NOT in this beets task (Beets splitting a pinned import into
+        # several tasks, or the existing-album library items when
+        # ``existing_album_id`` is set); those live outside ``task.paths`` and
+        # must never be borrowed by a same-basename task file. Exact path-key
+        # hits (``by_key``) are the same physical file and stay unaffected; only
+        # the heuristic basename map is narrowed.
+        task_roots = [_fp_path_key(p) for p in (getattr(task, "paths", None) or [])]
+
+        def _task_local(key: str) -> bool:
+            if not task_roots:
+                return True
+            return any(key == r or key.startswith(r + os.sep) for r in task_roots)
+
+        local_conf = {k: v for k, v in confirmed.items() if _task_local(_fp_path_key(k))}
         item_bases = [_base(it.path) for it in items]
-        conf_bases = [_base(k) for k in confirmed]
+        conf_bases = [_base(k) for k in local_conf]
         by_base = {_base(k): {str(r).lower() for r in (v or [])}
-                   for k, v in confirmed.items()
+                   for k, v in local_conf.items()
                    if item_bases.count(_base(k)) == 1 and conf_bases.count(_base(k)) == 1}
         for item in items:
             track_id = getattr(mapping.get(item), "track_id", None)
@@ -1089,7 +1109,7 @@ def run_import():
     search_ids = data.get("search_ids") or []
     if (
         not isinstance(search_ids, list)
-        or not all(isinstance(x, str) and _MB_UUID.match(x) for x in search_ids)
+        or not all(isinstance(x, str) and _MB_UUID.fullmatch(x) for x in search_ids)
         or (search_ids and not autotag)
     ):
         return jsonify({
@@ -1136,9 +1156,18 @@ def run_import():
     if isinstance(raw_fp, dict):
         for k, v in raw_fp.items():
             if isinstance(k, str) and k and isinstance(v, list):
-                rids = [x.lower() for x in v if isinstance(x, str) and _MB_UUID.match(x.lower())]
+                rids = [x.lower() for x in v if isinstance(x, str) and _MB_UUID.fullmatch(x.lower())]
                 if rids:
                     fingerprint_confirmed[k] = rids
+
+    # 2b (#821) defense-in-depth: this fingerprint evidence relaxes Beets' text
+    # bar ONLY on the explicit human-confirmed path. The backend already sends
+    # it only then (test_fingerprint_confirmed_forwarded_only_on_the_human_path),
+    # so this is no behaviour change on the real auto/recovery path; it just
+    # ensures a crafted authenticated request can never reach _pinned_partial_match
+    # / _artist_relaxable with evidence while human_confirmed is false.
+    if not human_confirmed:
+        fingerprint_confirmed = {}
 
     # Policy 2: Validate duplicate_action strictly
     raw_dup = data.get("duplicate_action", "skip")

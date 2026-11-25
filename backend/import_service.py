@@ -2589,7 +2589,64 @@ def _target_preview_source_files(folder_path: str, existing_album_id: int = 0) -
     return files
 
 
-def _confirmed_recording_evidence(folder_path: str, existing_album_id: int = 0) -> Dict[str, List[str]]:
+def _pending_review_confirmed_recordings(folder_path: str) -> Dict[str, List[str]]:
+    """Reuse the AcoustID-confirmed per-file recording ids ALREADY computed when
+    this folder's Import Review item was built, so a human-confirmed
+    Import-with-ID does not fingerprint + look up every file a second time
+    (#821 perf; the duplicate lookups serialized under MusicBrainz' rate limit
+    dominated a divergent-title classical import).
+
+    Source: the stored review item's server-computed ``track_mapping``
+    (``suggestion.track_mapping`` == the ``comparison`` rows). A row with
+    ``status == 'acoustid_verified'`` means the server's OWN canonical
+    fingerprint check (``_album_track_fingerprint_check`` ->
+    ``_acoustid_confirmed_recording``) confirmed that physical file's recording
+    to be the row's ``mb_trackid`` -- the SAME canonical rule (MI-5) and the
+    SAME single value ``_acoustid_fingerprint_ids`` returns for that file, so a
+    reused entry is byte-for-byte what recomputation would produce for it.
+
+    Keyed by the absolute source path resolved through the SAME trusted resolver
+    the recompute path uses, so keys match exactly and no basename guessing is
+    needed. A row that is not acoustid_verified, carries no valid recording id,
+    or whose source path does not resolve into this folder is simply omitted, so
+    that file falls back to recomputation (fail closed, never a different
+    recording). Only the stored, server-side evidence is trusted here; the
+    client request payload is never consulted."""
+    key = _pending_review_path_key(folder_path)
+    if not key:
+        return {}
+    source_root, source_error = _resolve_import_review_source_path(
+        folder_path, allow_music=True, expected_type=None, require_exists=True)
+    if source_error or source_root is None:
+        return {}
+    try:
+        items = _load_pending_reviews(prune_resolved=False)
+    except Exception:
+        return {}
+    cached: Dict[str, List[str]] = {}
+    for item in items:
+        item = item if isinstance(item, dict) else {}
+        if _pending_review_path_key(_s(item.get("path"))) != key:
+            continue
+        suggestion = item.get("suggestion") if isinstance(item.get("suggestion"), dict) else {}
+        mapping = suggestion.get("track_mapping")
+        for row in (mapping if isinstance(mapping, list) else []):
+            row = row if isinstance(row, dict) else {}
+            if _s(row.get("status")).strip().lower() != "acoustid_verified":
+                continue
+            rid = _s(row.get("mb_trackid") or row.get("recording_id")).strip().lower()
+            raw_source = _review_path_text(row.get("source_path"))
+            if not rid or not _MB_UUID_RE.match(rid) or not raw_source:
+                continue
+            resolved = _resolve_import_review_selected_audio_file(raw_source, source_root)
+            if not resolved:
+                continue
+            cached[os.path.abspath(str(resolved))] = [rid]
+    return cached
+
+
+def _confirmed_recording_evidence(folder_path: str, existing_album_id: int = 0,
+                                  cached: Optional[Dict[str, List[str]]] = None) -> Dict[str, List[str]]:
     """Per-source-file AcoustID-confirmed recording ids for the human-confirmed
     fingerprint-primary import path (plugin 1.23.0 ``fingerprint_confirmed``).
 
@@ -2603,15 +2660,26 @@ def _confirmed_recording_evidence(folder_path: str, existing_album_id: int = 0) 
     recording). The plugin accepts the pinned Release irrespective of text
     distance only when every imported file's mapped recording is confirmed
     here; a file with no confirmed recording is simply absent, so the plugin
-    keeps Beets' strong text bar for it (fail closed)."""
+    keeps Beets' strong text bar for it (fail closed).
+
+    ``cached`` (#821) holds confirmed recording ids already computed when the
+    review item was built, keyed by the same absolute source path. When present
+    for a file it is used verbatim instead of fingerprinting + looking the file
+    up a second time; any file not covered falls back to recomputation, so the
+    returned map is identical to a full recompute while skipping the duplicate
+    external AcoustID work for the already-verified files."""
+    cached = cached or {}
     evidence: Dict[str, List[str]] = {}
     for path in _target_preview_source_files(folder_path, existing_album_id):
-        try:
-            rids = _acoustid_fingerprint_ids(str(path))
-        except Exception:
-            rids = []
+        abs_key = os.path.abspath(str(path))
+        rids = cached.get(abs_key)
+        if not rids:
+            try:
+                rids = _acoustid_fingerprint_ids(str(path))
+            except Exception:
+                rids = []
         if rids:
-            evidence[os.path.abspath(str(path))] = [_s(r).strip().lower() for r in rids if _s(r).strip()]
+            evidence[abs_key] = [_s(r).strip().lower() for r in rids if _s(r).strip()]
     return {k: v for k, v in evidence.items() if v}
 
 
@@ -4129,8 +4197,16 @@ def start_folder_import_with_id(payload_in: Dict[str, Any]) -> Tuple[Any, int]:
             # fingerprint-primary override, so a pinned --search-id import of a
             # divergent-title (e.g. classical) release actually engages live.
             # Only computed/sent on the human path; absent -> strong bar kept.
+            # #821: reuse the recording evidence the review item already carries
+            # (keyed by the ORIGINAL review folder, which equals import_folder_path
+            # for a full-album import; a staged subset simply misses and recomputes)
+            # so a human-confirmed Import-with-ID does not fingerprint + look up
+            # every file a second time. Only on the human path; byte-for-byte the
+            # same map a full recompute would produce.
             "fingerprint_confirmed": (
-                _confirmed_recording_evidence(import_folder_path, existing_album_id)
+                _confirmed_recording_evidence(
+                    import_folder_path, existing_album_id,
+                    cached=_pending_review_confirmed_recordings(folder_path) if review_item_id else None)
                 if human_confirmed_import else {}
             ),
             # A deliberate human-confirmed subset holds only some of the

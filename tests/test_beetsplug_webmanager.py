@@ -159,7 +159,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.get_json()
         self.assertEqual(data["protocol_version"], "1.0")
-        self.assertEqual(data["plugin_version"], "1.23.0")
+        self.assertEqual(data["plugin_version"], "1.24.0")
         self.assertIn("library_fields", data["capabilities"])
         self.assertTrue(data["plugin_mutations_enabled"])
         # 1.6.0: path diagnostics are exposed only behind the bearer token
@@ -173,7 +173,7 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         from beetsplug.webmanager.version import PLUGIN_VERSION, PROTOCOL_VERSION
 
         self.assertEqual(beetsplug.webmanager.__version__, PLUGIN_VERSION)
-        self.assertEqual(PLUGIN_VERSION, "1.23.0")
+        self.assertEqual(PLUGIN_VERSION, "1.24.0")
         self.assertEqual(PROTOCOL_VERSION, "1.0")
 
         res = self.client.get(
@@ -295,6 +295,51 @@ class BeetsplugWebManagerTests(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.get_json()["error_code"], "SOURCE_NOT_FOUND")
+
+    def test_search_id_with_trailing_newline_is_rejected(self):
+        """2c (#821): _MB_UUID is matched with fullmatch, so an id with a
+        trailing newline (which ``$`` + re.match would have accepted) is
+        rejected outright."""
+        auth = {"Authorization": f"Bearer {self.token}"}
+        sample_album = os.path.join(self.downloads_dir, "album1")
+        os.makedirs(sample_album, exist_ok=True)
+        ops_mod.set_import_roots([self.downloads_dir])
+        res = self.client.post(
+            "/webmanager/import",
+            headers=auth,
+            json={"paths": [sample_album], "autotag": True,
+                  "search_ids": ["a6a6e718-3d8e-4c3e-9eaa-7b54af639bb9\n"]},
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error_code"], "INVALID_SEARCH_IDS")
+
+    def test_fingerprint_evidence_dropped_when_not_human_confirmed(self):
+        """2b (#821) defense-in-depth: the plugin itself drops
+        ``fingerprint_confirmed`` when ``human_confirmed`` is false, even if a
+        populated, well-formed map is supplied, so the automatic/recovery path
+        can never reach _pinned_partial_match / _artist_relaxable with evidence."""
+        auth = {"Authorization": f"Bearer {self.token}"}
+        sample_album = os.path.join(self.downloads_dir, "album1")
+        os.makedirs(sample_album, exist_ok=True)
+        ops_mod.set_import_roots([self.downloads_dir])
+        sid = "a6a6e718-3d8e-4c3e-9eaa-7b54af639bb9"
+        evidence = {os.path.join(sample_album, "01.flac"): [sid]}
+
+        def _post(human_confirmed):
+            with patch.object(ops_mod, "_import_session_class") as factory:
+                factory.return_value.return_value.run.return_value = None
+                res = self.client.post(
+                    "/webmanager/import",
+                    headers=auth,
+                    json={"paths": [sample_album], "autotag": True, "search_ids": [sid],
+                          "human_confirmed": human_confirmed, "fingerprint_confirmed": evidence},
+                )
+                self.assertEqual(res.status_code, 200, res.get_json())
+                # 7th positional arg of the session factory is fingerprint_confirmed.
+                return factory.call_args.args[6]
+
+        self.assertEqual(_post(False), {})        # auto path: evidence dropped
+        self.assertEqual(_post(True), evidence)   # human path: evidence kept
 
     def test_importer_config_snapshot_restoration(self):
         """Verify beets config is snapshot and restored even when an error occurs."""
