@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from backend.app_runtime import _app_logger, AUDIO_EXT, EDITABLE_FIELDS, MUSIC_ROOT, _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD, _MB_UUID_RE, _extract_mb_uuid, _s
 from backend.ai_service import _ai_artist_mismatch_reason, _compact_track_ai_candidate, _run_ai_release_preflight
-from backend.import_service import IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD, _IMPORT_REVIEW_IMPORTABLE_STATUSES, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, evaluate_import_eligibility, start_folder_import_with_id
+from backend.import_service import IMPORT_REVIEW_AUTO_IMPORT_CONFIDENCE_THRESHOLD, _IMPORT_REVIEW_IMPORTABLE_STATUSES, _import_review_auto_lock, _import_review_auto_state, _import_review_auto_update, _source_stat_identity, evaluate_import_eligibility, start_folder_import_with_id
 from backend.library_service import _album_folder_for_album_id, _folder_import_track_count, _target_preview_year
 from backend.ai_evidence_service import _enrich_track_ai_candidate
 from backend.pending_review_store import _AI_PENDING_FILE, _ai_pending_lock, _load_pending_reviews, _save_pending_reviews, _trusted_stored_review_path
@@ -495,6 +495,11 @@ def _candidate_track_build_comparison(
             local_title = ""
             source_path = ""
             status = "missing"
+        # #821 R2: stamp the fingerprinted file's size+mtime_ns so a human-
+        # confirmed import can reuse this row's confirmed recording id ONLY
+        # while the file is byte-for-byte unchanged (see
+        # import_service._pending_review_confirmed_recordings).
+        src_size, src_mtime_ns = _source_stat_identity(source_path) if source_path else (None, None)
         comparison.append({
             "num": num,
             "local_title": local_title,
@@ -502,6 +507,8 @@ def _candidate_track_build_comparison(
             "mb_trackid": mb_track.get("mb_trackid", ""),
             "status": status,
             "source_path": source_path,
+            "source_size": src_size,
+            "source_mtime_ns": src_mtime_ns,
         })
 
     for j, cand in enumerate(work_candidates):

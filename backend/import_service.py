@@ -2589,6 +2589,21 @@ def _target_preview_source_files(folder_path: str, existing_album_id: int = 0) -
     return files
 
 
+def _source_stat_identity(path: Any) -> Tuple[Optional[int], Optional[int]]:
+    """``(size, mtime_ns)`` of a source file, or ``(None, None)`` if unreadable.
+
+    Mirrors the AcoustID file cache's freshness key
+    (``acoustid_service._audio_cache_file_identity``: resolved path + size +
+    ``st_mtime_ns``), so a file byte-identical to what was fingerprinted at
+    review-build compares equal and a file changed since does not -- the #821 R2
+    freshness proof for reusing a cached confirmed recording id."""
+    try:
+        st = os.stat(str(path))
+    except OSError:
+        return None, None
+    return int(st.st_size), int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+
+
 def _pending_review_confirmed_recordings(folder_path: str) -> Dict[str, List[str]]:
     """Reuse the AcoustID-confirmed per-file recording ids ALREADY computed when
     this folder's Import Review item was built, so a human-confirmed
@@ -2605,13 +2620,23 @@ def _pending_review_confirmed_recordings(folder_path: str) -> Dict[str, List[str
     SAME single value ``_acoustid_fingerprint_ids`` returns for that file, so a
     reused entry is byte-for-byte what recomputation would produce for it.
 
+    Freshness (#821 R2): a reused id is only valid while the file is byte-for-byte
+    what was fingerprinted. The recompute path this replaces re-derives from the
+    file (its AcoustID cache is keyed by path+size+mtime_ns), so reuse must NOT
+    forward a review-build id for a file whose audio changed since. Each row
+    carries the file's ``source_size``/``source_mtime_ns`` captured at
+    review-build; a row is reused ONLY when the file's CURRENT size+mtime_ns
+    still match. A missing stamp (an older review item) or any mismatch falls
+    back to recomputation for that file (fail closed -> fresh fingerprint of the
+    current content), so a changed file can never relax the text bar for a stale
+    recording.
+
     Keyed by the absolute source path resolved through the SAME trusted resolver
     the recompute path uses, so keys match exactly and no basename guessing is
     needed. A row that is not acoustid_verified, carries no valid recording id,
-    or whose source path does not resolve into this folder is simply omitted, so
-    that file falls back to recomputation (fail closed, never a different
-    recording). Only the stored, server-side evidence is trusted here; the
-    client request payload is never consulted."""
+    has no freshness stamp, is stale, or whose source path does not resolve into
+    this folder is simply omitted. Only the stored, server-side evidence is
+    trusted here; the client request payload is never consulted."""
     key = _pending_review_path_key(folder_path)
     if not key:
         return {}
@@ -2640,6 +2665,16 @@ def _pending_review_confirmed_recordings(folder_path: str) -> Dict[str, List[str
                 continue
             resolved = _resolve_import_review_selected_audio_file(raw_source, source_root)
             if not resolved:
+                continue
+            # #821 R2 freshness proof: reuse the review-build id only while the
+            # file is byte-for-byte what was fingerprinted. No stamp (older item)
+            # or any size/mtime change -> skip, so the file is recomputed fresh.
+            stamp_size = row.get("source_size")
+            stamp_mtime = row.get("source_mtime_ns")
+            if not isinstance(stamp_size, int) or not isinstance(stamp_mtime, int):
+                continue
+            cur_size, cur_mtime = _source_stat_identity(resolved)
+            if cur_size is None or cur_size != stamp_size or cur_mtime != stamp_mtime:
                 continue
             cached[os.path.abspath(str(resolved))] = [rid]
     return cached

@@ -703,24 +703,64 @@ class ReuseConfirmedEvidenceTests(unittest.TestCase):
             self.assertEqual(fp.call_count, 2)
             self.assertEqual(reused, self._expected())
 
-    def test_review_cache_reads_only_acoustid_verified_rows_with_valid_ids(self):
-        import backend.import_service as IS
-        folder = "/dl/Album"
-        item = {"path": folder, "suggestion": {"track_mapping": [
-            {"status": "acoustid_verified", "mb_trackid": self.ID1, "source_path": "/dl/Album/01.flac"},
-            # text-matched (not fingerprint-confirmed) -> must NOT be reused
-            {"status": "fuzzy", "mb_trackid": self.ID2, "source_path": "/dl/Album/02.flac"},
-            # verified but malformed recording id -> dropped (falls back to recompute)
-            {"status": "acoustid_verified", "mb_trackid": "not-a-uuid", "source_path": "/dl/Album/03.flac"},
-            {"status": "missing", "mb_trackid": "", "source_path": ""},
-        ]}}
+    def _review_cache(self, IS, folder, rows):
+        item = {"path": folder, "suggestion": {"track_mapping": rows}}
         with mock.patch.object(IS, "_load_pending_reviews", return_value=[item]), \
              mock.patch.object(IS, "_pending_review_path_key", side_effect=lambda p: str(p)), \
              mock.patch.object(IS, "_resolve_import_review_source_path", return_value=(Path(folder), "")), \
              mock.patch.object(IS, "_resolve_import_review_selected_audio_file",
                                side_effect=lambda raw, root: Path(raw)):
-            cached = IS._pending_review_confirmed_recordings(folder)
-        self.assertEqual(cached, {os.path.abspath("/dl/Album/01.flac"): [self.ID1]})
+            return IS._pending_review_confirmed_recordings(folder)
+
+    def test_review_cache_reuses_unchanged_verified_rows_only(self):
+        import backend.import_service as IS
+        with tempfile.TemporaryDirectory() as td:
+            f1 = Path(td) / "01.flac"; f1.write_bytes(b"a" * 1000)
+            f2 = Path(td) / "02.flac"; f2.write_bytes(b"b" * 2000)
+            f3 = Path(td) / "03.flac"; f3.write_bytes(b"c" * 1500)
+            s1, m1 = IS._source_stat_identity(f1)
+            s2, m2 = IS._source_stat_identity(f2)
+            rows = [
+                # acoustid-verified + fresh stamp -> reused
+                {"status": "acoustid_verified", "mb_trackid": self.ID1, "source_path": str(f1),
+                 "source_size": s1, "source_mtime_ns": m1},
+                {"status": "acoustid_verified", "mb_trackid": self.ID2, "source_path": str(f2),
+                 "source_size": s2, "source_mtime_ns": m2},
+                # text-matched (not fingerprint-confirmed) -> never reused
+                {"status": "fuzzy", "mb_trackid": self.ID1, "source_path": str(f3),
+                 "source_size": 1500, "source_mtime_ns": 1},
+                # verified but malformed recording id -> dropped
+                {"status": "acoustid_verified", "mb_trackid": "not-a-uuid", "source_path": str(f3),
+                 "source_size": 1500, "source_mtime_ns": 1},
+                # verified but NO freshness stamp (older review item) -> fail closed to recompute
+                {"status": "acoustid_verified", "mb_trackid": self.ID1, "source_path": str(f3)},
+            ]
+            cached = self._review_cache(IS, td, rows)
+            self.assertEqual(cached, {os.path.abspath(str(f1)): [self.ID1],
+                                      os.path.abspath(str(f2)): [self.ID2]})
+
+    def test_review_cache_skips_a_file_changed_since_review_build(self):
+        # #821 R2: the file's audio changed after the review item was built, so
+        # the stale confirmed id must NOT be reused -- it falls back to recompute
+        # (fail closed), so a changed file can never relax the bar for a stale id.
+        import backend.import_service as IS
+        with tempfile.TemporaryDirectory() as td:
+            f1 = Path(td) / "01.flac"; f1.write_bytes(b"a" * 1000)
+            f2 = Path(td) / "02.flac"; f2.write_bytes(b"b" * 2000)
+            s1, m1 = IS._source_stat_identity(f1)
+            s2, m2 = IS._source_stat_identity(f2)
+            rows = [
+                {"status": "acoustid_verified", "mb_trackid": self.ID1, "source_path": str(f1),
+                 "source_size": s1, "source_mtime_ns": m1},
+                {"status": "acoustid_verified", "mb_trackid": self.ID2, "source_path": str(f2),
+                 "source_size": s2, "source_mtime_ns": m2},
+            ]
+            # Replace f2's audio (size changes; mtime bumped to be robust).
+            f2.write_bytes(b"c" * 5000)
+            os.utime(f2, ns=(m2 + 10_000_000_000, m2 + 10_000_000_000))
+            cached = self._review_cache(IS, td, rows)
+            # f1 (unchanged) still reused; f2 (changed) dropped -> recompute.
+            self.assertEqual(cached, {os.path.abspath(str(f1)): [self.ID1]})
 
 
 if __name__ == "__main__":
