@@ -68,7 +68,7 @@ DIVERGENT = [("Violin Concerto no. 1 I. Prologue", 641),
              ("Serenade after Plato II. Aristophanes", 534)]
 if scenario == "mismatch":
     tracks = [("Something Else", 30), ("Another Song", 45)]
-elif scenario in ("fp_primary_divergent", "fp_primary_confirmed"):
+elif scenario in ("fp_primary_divergent", "fp_primary_confirmed", "auto_divergent"):
     tracks = DIVERGENT
 else:
     tracks = [("Jóga (Introvert Breaks mix)", 641), ("Jóga (Introvert 4/4 mix)", 534)]
@@ -87,11 +87,15 @@ beets_embedded._separate_beets_address = lambda: ""
 beets_embedded._beet_commands = lambda: []
 a = BeetsAdapter()
 out = {"status_ok": beets_embedded.status()["ok"]}
-# fp_primary_*: the explicit human-confirmed Import-with-ID path. Chroma is NOT
-# loaded (plugins: [musicbrainz]), mirroring a pinned --search-id run whose
+# fp_primary_* / auto_divergent: the divergent-title pinned release. Chroma is
+# NOT loaded (plugins: [musicbrainz]), mirroring a pinned --search-id run whose
 # in-session AcoustID lookup yields nothing, so the threaded per-file evidence
-# is the ONLY fingerprint signal. "confirmed" supplies the release recording
-# ids as Web Manager's own evidence; "divergent" supplies none (bug repro).
+# is the ONLY fingerprint signal. fp_primary_confirmed supplies the release
+# recording ids as Web Manager's own evidence (fingerprint-primary accept).
+# fp_primary_divergent supplies none on the HUMAN path: it imports via the
+# forced-pin rail (the human's pick is the authority; tracklist counts line up).
+# auto_divergent is the same folder on the AUTOMATIC path (human_confirmed
+# False): it must still be refused -- the force never fires without a human.
 human_confirmed = scenario in ("fp_primary_divergent", "fp_primary_confirmed")
 # One confirmed recording id per file (as production does -- at most one), each
 # the recording of the release track that file is length-matched to (641s/534s
@@ -104,7 +108,7 @@ try:
                        copy=True, move=False, write=False,
                        human_confirmed=human_confirmed, fingerprint_confirmed=fp_evidence)
     out["import"] = {k: res.get(k) for k in ("ok", "skipped", "imported_album_ids", "no_strong_match",
-                                             "confirmed_fingerprint_primary")}
+                                             "confirmed_fingerprint_primary", "forced_pin")}
 except BeetsAdapterError as ex:
     out["import_error"] = [type(ex).__name__, ex.status_code, ex.error_code, str(ex)]
 albums = a.get_albums()

@@ -310,17 +310,19 @@ class PinnedHumanConfirmedFingerprintPrimaryTests(unittest.TestCase):
         self.assertTrue(getattr(task, "webmanager_confirmed_relaxed", False))
 
     def test_b_without_fingerprint_hits_fails_closed_to_strong(self):
-        # chroma not loaded, a dropped file, and a wrong recording all refuse,
-        # even though the text distance (album 0.807) is under medium -- the
-        # text score cannot carry it without fingerprint proof.
-        for name, kw in (("no chroma", {"chroma": False}),
-                         ("one file lacks a hit", {"drop_hit": True}),
+        # A fingerprint signal that is PRESENT but does not confirm every file
+        # is a conflict: it refuses (no fingerprint-primary flag, and the forced
+        # pin does not fire -- a present-but-incomplete signal is not forced).
+        # (The zero-signal "no chroma" case is now force-accepted on the human
+        # path; see PinnedHumanConfirmedForcedTests.)
+        for name, kw in (("one file lacks a hit", {"drop_hit": True}),
                          ("one file mapped to another recording", {"wrong_hit": True})):
             with self.subTest(name):
                 got, _, task = self._case(human_confirmed=True, **kw)
                 self.assertIsNone(got)
                 self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
                 self.assertFalse(getattr(task, "webmanager_confirmed_relaxed", False))
+                self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
 
     def test_c_auto_path_still_refuses_the_text_distant_match(self):
         # The automatic gate is byte-for-byte unchanged: same distance, same
@@ -513,6 +515,138 @@ class PinnedConfirmedEvidenceBranchTests(unittest.TestCase):
             got = ops._pinned_partial_match(task, REL, False, None, 0, True, ev)
         self.assertIs(got, match)
         self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+
+class PinnedHumanConfirmedForcedTests(unittest.TestCase):
+    """webmanager plugin 1.25.0: on the explicit human Confirm/Import-with-ID
+    path only, a FORCED pin accepts the Release past Beets' text-distance gate
+    even with NO fingerprint evidence -- the person's explicit pick of a valid
+    Release IS the identity authorization (#813). The only remaining guard is
+    the TRACKLIST-SANITY rail: the source's file count must line up with the
+    Release's track count, so a gross mismatch is still refused. The automatic
+    path never forces."""
+
+    def _case(self, album=0.807, track_title=0.5, human_confirmed=True, ntracks=8,
+              extra_items=(), missing=0, allow_missing=False, album_id=REL, evidence=None):
+        items = [_Item(k) for k in range(1, ntracks + 1)]
+        dist = _album([_track(title=track_title, data_source=None) for _ in items],
+                      missing=missing, artist=0.0, album=album, data_source=None)
+        info = types.SimpleNamespace(album_id=album_id, va=False, artists=[], artists_credit=[], artist="")
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[object()] * missing, extra_items=list(extra_items),
+            mapping={it: types.SimpleNamespace(track_id=TRACK_IDS[k - 1]) for k, it in enumerate(items, 1)})
+        task = types.SimpleNamespace(candidates=[match], items=items, cur_artist="",
+                                     paths=[b"/downloads/Forced"])
+        # chroma deliberately absent: with no threaded evidence either, only the
+        # forced-pin rail can accept the folder.
+        with mock.patch.dict(sys.modules, {}):
+            sys.modules.pop("beetsplug.chroma", None)
+            got = ops._pinned_partial_match(task, REL, allow_missing, None, 0, human_confirmed, evidence)
+        return got, match, task
+
+    def test_forced_import_accepts_divergent_zero_fingerprint(self):
+        # DECISIVE positive (fail-before/pass-after): text distance over the
+        # strong bar, NO fingerprint evidence, human-confirmed -> the forced-pin
+        # rail accepts it. Pre-1.25.0 this returned None (the #825 live failure).
+        got, match, task = self._case(album=0.807, track_title=0.5, human_confirmed=True)
+        raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
+        self.assertGreaterEqual(raw / mx, THRESH)  # text alone would refuse it
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_forced", False))
+        # No fingerprint evidence, so the fingerprint-primary flag stays unset.
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+    def test_auto_path_never_forces(self):
+        # Cardinal rule: the same folder on the automatic path (human_confirmed
+        # False) is byte-for-byte unchanged -> still refused, no forced flag.
+        got, _, task = self._case(album=0.807, track_title=0.5, human_confirmed=False)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
+
+    def test_structural_guards_still_hold_under_force(self):
+        # The force overrides only the TEXT ceiling; the structural guards stand.
+        for name, kw in (("extra items", {"extra_items": [object()]}),
+                         ("not the pinned release", {"album_id": "b6a6e718-3d8e-4c3e-9eaa-7b54af639bb9"}),
+                         ("missing without allow", {"missing": 2, "allow_missing": False})):
+            with self.subTest(name):
+                got, _, task = self._case(human_confirmed=True, **kw)
+                self.assertIsNone(got)
+                self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
+
+    def test_gross_tracklist_mismatch_is_refused(self):
+        # 15 files forced onto a 1-track release: 14 files map to no track
+        # (extra_items), so both the structural guard and the tracklist-sanity
+        # rail refuse it -- the catastrophic mis-tag the rail exists to prevent.
+        items = [_Item(k) for k in range(1, 16)]
+        dist = _album([_track(title=0.5, data_source=None)], missing=0, artist=0.0,
+                      album=0.807, data_source=None)
+        info = types.SimpleNamespace(album_id=REL, va=False, artists=[], artists_credit=[], artist="")
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[], extra_items=[object()] * 14,
+            mapping={items[0]: types.SimpleNamespace(track_id=TRACK_IDS[0])})
+        task = types.SimpleNamespace(candidates=[match], items=items, cur_artist="",
+                                     paths=[b"/downloads/Forced"])
+        self.assertFalse(ops._forced_pin_tracklist_sane(task, match))
+        with mock.patch.dict(sys.modules, {}):
+            sys.modules.pop("beetsplug.chroma", None)
+            self.assertIsNone(ops._pinned_partial_match(task, REL, False, None, 0, True, None))
+
+    def test_forced_pin_tracklist_sane_unit(self):
+        def _match(nfiles, nmapped, nmissing, nextra):
+            items = [_Item(k) for k in range(1, nfiles + 1)]
+            mapping = {items[i]: object() for i in range(nmapped)}
+            m = types.SimpleNamespace(mapping=mapping, extra_tracks=[object()] * nmissing,
+                                      extra_items=[object()] * nextra)
+            return types.SimpleNamespace(items=items), m
+        # Complete album, exact alignment: sane.
+        self.assertTrue(ops._forced_pin_tracklist_sane(*_match(8, 8, 0, 0)))
+        # Deliberate subset (fewer files than tracks): sane.
+        self.assertTrue(ops._forced_pin_tracklist_sane(*_match(3, 3, 5, 0)))
+        # Any unmapped source file: refused.
+        self.assertFalse(ops._forced_pin_tracklist_sane(*_match(9, 8, 0, 1)))
+        # No files or no tracks: refused.
+        self.assertFalse(ops._forced_pin_tracklist_sane(*_match(0, 0, 0, 0)))
+
+    def test_present_but_conflicting_fingerprint_is_not_forced(self):
+        # A fingerprint signal that is present but wrong (a file mapped to a
+        # recording the evidence does not confirm) is a CONFLICT: the pinned
+        # Release fails closed to review, it is NOT force-accepted. The human
+        # pin only fills the gap when no fingerprint evidence exists at all.
+        items = [_Item(k) for k in range(1, 9)]
+        wrong = {it.path: ["99999999-0000-4000-8000-000000000099"] for it in items}
+        got, _, task = self._case(human_confirmed=True, evidence=wrong)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
+    def test_fingerprint_evidence_takes_precedence_over_force(self):
+        # When fingerprint evidence confirms every file, the stronger
+        # fingerprint-primary acceptance wins the flag; the forced flag is NOT
+        # set, so the audit trail records the strongest evidence tier used.
+        evidence = {_Item(k).path: [TRACK_IDS[k - 1]] for k in range(1, 9)}
+        got, match, task = self._case(human_confirmed=True, evidence=evidence)
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+        self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
+
+    def test_forced_subset_needs_allow_missing(self):
+        # A deliberate 6-of-8 subset forces only with allow_missing (step 3).
+        got, match, task = self._case(missing=2, allow_missing=True, human_confirmed=True)
+        self.assertIs(got, match)
+        self.assertTrue(getattr(task, "webmanager_confirmed_forced", False))
+        got2, _, _ = self._case(missing=2, allow_missing=False, human_confirmed=True)
+        self.assertIsNone(got2)
+
+    def test_strong_match_is_unchanged_and_unflagged(self):
+        # A genuinely strong pinned match still imports via the strong gate with
+        # no forced flag, whether or not human_confirmed.
+        for human in (True, False):
+            with self.subTest(human_confirmed=human):
+                got, match, task = self._case(album=0.3, track_title=0.0, human_confirmed=human)
+                raw, mx = ops._distance_without(match.distance, ops._PINNED_ALBUM_EXEMPT)
+                self.assertLess(raw / mx, THRESH)
+                self.assertIs(got, match)
+                self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
 
 
 if __name__ == "__main__":

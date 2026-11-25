@@ -75,13 +75,37 @@ class EmbeddedAutotagTests(unittest.TestCase):
     # verified, divergent-title pinned release must import through a REAL
     # `beet import --search-id` session -- exercising choose_match /
     # _pinned_partial_match, not a direct call with _matches pre-injected.
-    def test_divergent_titles_without_fingerprint_evidence_are_refused(self):
-        # Chroma absent and no Web Manager evidence: the fingerprint-primary
-        # override cannot fire, so Beets' strong text bar refuses the
-        # divergent-title release (this is the pre-fix live behaviour).
+    def test_divergent_titles_force_import_on_human_confirmed_path(self):
+        # The #825 live failure: NO fingerprint evidence, text-divergent titles,
+        # human-confirmed Import-with-ID. Pre-fix this was refused ("no confident
+        # match"); now the human's explicit pin forces it past Beets' text bar.
+        # The source file count (2) lines up with the release track count (2),
+        # so the tracklist-sanity rail passes. The import writes the release's
+        # MusicBrainz metadata over the divergent source tags -- the items come
+        # back with the release's titles, not the classical-style source titles.
         out = self._run("fp_primary_divergent")
         self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["skipped"], [])
+        self.assertEqual(len(out["import"]["imported_album_ids"]), 1)
+        self.assertEqual(len(out["import"]["forced_pin"]), 1)
+        # No fingerprint evidence, so the fingerprint-primary flag stays empty:
+        # the forced-pin rail, not fingerprint identity, accepted this.
+        self.assertEqual(out["import"]["confirmed_fingerprint_primary"], [])
+        self.assertEqual(out["albums"], [{"album": "Jóga", "albumartist": "Björk",
+                                          "mb_albumid": REL, "mb_releasegroupid": RG}])
+        # Tag correction: the divergent source titles are gone, replaced by the
+        # pinned release's MusicBrainz track titles.
+        self.assertEqual(out["items"], ["Jóga (Introvert 4/4 mix)", "Jóga (Introvert Breaks mix)"])
+        self.assertEqual(out["stats_after"], {"albums": 1, "items": 2})
+
+    def test_divergent_titles_on_the_auto_path_are_still_refused(self):
+        # Cardinal rule (#820/#822): the AUTOMATIC path never forces. Same
+        # divergent-title folder, no fingerprint evidence, but human_confirmed
+        # False -> Beets' strong text bar still refuses it, no album, no flag.
+        out = self._run("auto_divergent")
+        self.assertNotIn("import_error", out)
         self.assertEqual(out["import"]["imported_album_ids"], [])
+        self.assertEqual(out["import"]["forced_pin"], [])
         self.assertEqual([s["reason"] for s in out["import"]["skipped"]], ["no_strong_match"])
         self.assertEqual(out["import"]["confirmed_fingerprint_primary"], [])
         self.assertEqual((out["albums"], out["items"]), ([], []))

@@ -5392,10 +5392,17 @@ def apply_confirmed_import(
             relaxed = imported.get("partial_artist_relaxed") if isinstance(imported, dict) else None
             confirmed_relaxed = imported.get("confirmed_relaxed") if isinstance(imported, dict) else None
             confirmed_fp_primary = imported.get("confirmed_fingerprint_primary") if isinstance(imported, dict) else None
+            confirmed_forced = imported.get("forced_pin") if isinstance(imported, dict) else None
             relax_logs = []
             if relaxed:
                 relax_logs.append(f"Beets matched {relaxed} to the pinned release with the artist penalty set aside "
                                   "(AcoustID matched every file; the source artist is part of the release credit)")
+            if confirmed_forced:
+                relax_logs.append(f"Beets FORCED {confirmed_forced} on the explicit human-confirmed path WITHOUT "
+                                  "fingerprint evidence (the human's Release pick is the identity authority, #813; "
+                                  "the source file count lines up with the release track count; the text-distance "
+                                  "ceiling was overridden; the automatic gate is unchanged). Beets' write-on import "
+                                  "rewrote the source's tags with this release's MusicBrainz metadata.")
             if confirmed_fp_primary:
                 relax_logs.append(f"Beets accepted {confirmed_fp_primary} on the explicit human-confirmed path by complete "
                                   "recording-level fingerprint identity (AcoustID matched every file to its mapped recording; "
@@ -5412,7 +5419,8 @@ def apply_confirmed_import(
                                                       "write_tags": True,
                                                       "partial_artist_relaxed": bool(relaxed),
                                                       "confirmed_relaxed": bool(confirmed_relaxed),
-                                                      "confirmed_fingerprint_primary": bool(confirmed_fp_primary)}})
+                                                      "confirmed_fingerprint_primary": bool(confirmed_fp_primary),
+                                                      "forced_pin": bool(confirmed_forced)}})
     except ResourceLockConflictError as exc:
         return _fail("Running", "resource_busy", _lock_busy(operation_id, exc)["error"], mutated=True,
                      album_ids=[album_id],
