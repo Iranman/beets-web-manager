@@ -158,9 +158,9 @@ class ConfirmedImportTests(unittest.TestCase):
             self._run(ad, **meta)
             self.assertIsNone(ad.run_import.call_args.kwargs["fingerprint_confirmed"])
         # import_service only COMPUTES evidence on the human path (else {}).
+        # (#821 made the reuse source an optional arg; the human-path gate stays.)
         src = (Path(__file__).resolve().parents[1] / "backend" / "import_service.py").read_text(encoding="utf-8")
-        self.assertIn("_confirmed_recording_evidence(import_folder_path, existing_album_id)\n"
-                      "                if human_confirmed_import else {}", src)
+        self.assertIn("if human_confirmed_import else {}", src)
 
     def test_move_and_in_place_modes(self):
         ad = _adapter({"id": 9, "mb_albumid": REL})
@@ -645,6 +645,122 @@ class AiImportReleaseTests(unittest.TestCase):
         self.assertEqual((track.read_bytes(), os.stat(track).st_nlink), (b"x", 2))
         self.assertTrue(any("left in place" in line for line in log), log)
         plan.assert_not_called()
+
+
+class ReuseConfirmedEvidenceTests(unittest.TestCase):
+    """#821: a human-confirmed Import-with-ID reuses the AcoustID-confirmed
+    recording evidence the review item already carries, instead of
+    fingerprinting + looking every file up a second time. The reused
+    ``fingerprint_confirmed`` map must be byte-for-byte what a full recompute
+    would produce; anything not covered falls back to recomputation."""
+
+    FILES = [Path("/dl/Album/01.flac"), Path("/dl/Album/02.flac")]
+    ID1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    ID2 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+    def _ids_by_path(self):
+        return {str(self.FILES[0]): [self.ID1], str(self.FILES[1]): [self.ID2]}
+
+    def _fp(self):
+        table = self._ids_by_path()
+        return mock.MagicMock(side_effect=lambda p: list(table.get(str(p), [])))
+
+    def _expected(self):
+        return {os.path.abspath(str(p)): list(self._ids_by_path()[str(p)]) for p in self.FILES}
+
+    def test_reused_map_equals_recompute_and_skips_the_second_lookup(self):
+        import backend.import_service as IS
+        with mock.patch.object(IS, "_target_preview_source_files", return_value=list(self.FILES)):
+            fp = self._fp()
+            with mock.patch.object(IS, "_acoustid_fingerprint_ids", fp):
+                recompute = IS._confirmed_recording_evidence("/dl/Album", 0)
+            self.assertEqual(fp.call_count, 2)  # recompute fingerprints every file
+            # Cached values are exactly what the review item carried.
+            cached = {os.path.abspath(str(p)): list(self._ids_by_path()[str(p)]) for p in self.FILES}
+            fp2 = self._fp()
+            with mock.patch.object(IS, "_acoustid_fingerprint_ids", fp2):
+                reused = IS._confirmed_recording_evidence("/dl/Album", 0, cached=cached)
+            self.assertEqual(fp2.call_count, 0)   # no second AcoustID lookup for covered files
+            self.assertEqual(reused, recompute)   # byte-for-byte equal to recompute
+
+    def test_fallback_recomputes_only_the_uncovered_files(self):
+        import backend.import_service as IS
+        with mock.patch.object(IS, "_target_preview_source_files", return_value=list(self.FILES)):
+            cached = {os.path.abspath(str(self.FILES[0])): [self.ID1]}  # only file 1 covered
+            fp = self._fp()
+            with mock.patch.object(IS, "_acoustid_fingerprint_ids", fp):
+                reused = IS._confirmed_recording_evidence("/dl/Album", 0, cached=cached)
+            fp.assert_called_once_with(str(self.FILES[1]))  # only the uncovered file
+            self.assertEqual(reused, self._expected())
+
+    def test_no_cached_evidence_recomputes_everything(self):
+        # Direct folder import (no review item) -> cached None -> full recompute, unchanged.
+        import backend.import_service as IS
+        with mock.patch.object(IS, "_target_preview_source_files", return_value=list(self.FILES)):
+            fp = self._fp()
+            with mock.patch.object(IS, "_acoustid_fingerprint_ids", fp):
+                reused = IS._confirmed_recording_evidence("/dl/Album", 0, cached=None)
+            self.assertEqual(fp.call_count, 2)
+            self.assertEqual(reused, self._expected())
+
+    def _review_cache(self, IS, folder, rows):
+        item = {"path": folder, "suggestion": {"track_mapping": rows}}
+        with mock.patch.object(IS, "_load_pending_reviews", return_value=[item]), \
+             mock.patch.object(IS, "_pending_review_path_key", side_effect=lambda p: str(p)), \
+             mock.patch.object(IS, "_resolve_import_review_source_path", return_value=(Path(folder), "")), \
+             mock.patch.object(IS, "_resolve_import_review_selected_audio_file",
+                               side_effect=lambda raw, root: Path(raw)):
+            return IS._pending_review_confirmed_recordings(folder)
+
+    def test_review_cache_reuses_unchanged_verified_rows_only(self):
+        import backend.import_service as IS
+        with tempfile.TemporaryDirectory() as td:
+            f1 = Path(td) / "01.flac"; f1.write_bytes(b"a" * 1000)
+            f2 = Path(td) / "02.flac"; f2.write_bytes(b"b" * 2000)
+            f3 = Path(td) / "03.flac"; f3.write_bytes(b"c" * 1500)
+            s1, m1 = IS._source_stat_identity(f1)
+            s2, m2 = IS._source_stat_identity(f2)
+            rows = [
+                # acoustid-verified + fresh stamp -> reused
+                {"status": "acoustid_verified", "mb_trackid": self.ID1, "source_path": str(f1),
+                 "source_size": s1, "source_mtime_ns": m1},
+                {"status": "acoustid_verified", "mb_trackid": self.ID2, "source_path": str(f2),
+                 "source_size": s2, "source_mtime_ns": m2},
+                # text-matched (not fingerprint-confirmed) -> never reused
+                {"status": "fuzzy", "mb_trackid": self.ID1, "source_path": str(f3),
+                 "source_size": 1500, "source_mtime_ns": 1},
+                # verified but malformed recording id -> dropped
+                {"status": "acoustid_verified", "mb_trackid": "not-a-uuid", "source_path": str(f3),
+                 "source_size": 1500, "source_mtime_ns": 1},
+                # verified but NO freshness stamp (older review item) -> fail closed to recompute
+                {"status": "acoustid_verified", "mb_trackid": self.ID1, "source_path": str(f3)},
+            ]
+            cached = self._review_cache(IS, td, rows)
+            self.assertEqual(cached, {os.path.abspath(str(f1)): [self.ID1],
+                                      os.path.abspath(str(f2)): [self.ID2]})
+
+    def test_review_cache_skips_a_file_changed_since_review_build(self):
+        # #821 R2: the file's audio changed after the review item was built, so
+        # the stale confirmed id must NOT be reused -- it falls back to recompute
+        # (fail closed), so a changed file can never relax the bar for a stale id.
+        import backend.import_service as IS
+        with tempfile.TemporaryDirectory() as td:
+            f1 = Path(td) / "01.flac"; f1.write_bytes(b"a" * 1000)
+            f2 = Path(td) / "02.flac"; f2.write_bytes(b"b" * 2000)
+            s1, m1 = IS._source_stat_identity(f1)
+            s2, m2 = IS._source_stat_identity(f2)
+            rows = [
+                {"status": "acoustid_verified", "mb_trackid": self.ID1, "source_path": str(f1),
+                 "source_size": s1, "source_mtime_ns": m1},
+                {"status": "acoustid_verified", "mb_trackid": self.ID2, "source_path": str(f2),
+                 "source_size": s2, "source_mtime_ns": m2},
+            ]
+            # Replace f2's audio (size changes; mtime bumped to be robust).
+            f2.write_bytes(b"c" * 5000)
+            os.utime(f2, ns=(m2 + 10_000_000_000, m2 + 10_000_000_000))
+            cached = self._review_cache(IS, td, rows)
+            # f1 (unchanged) still reused; f2 (changed) dropped -> recompute.
+            self.assertEqual(cached, {os.path.abspath(str(f1)): [self.ID1]})
 
 
 if __name__ == "__main__":

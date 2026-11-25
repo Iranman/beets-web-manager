@@ -463,6 +463,30 @@ class PinnedConfirmedEvidenceBranchTests(unittest.TestCase):
         self.assertIsNone(got)
         self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
 
+    def test_2a_evidence_for_a_non_task_file_cannot_be_borrowed(self):
+        # #821 2a: a task file whose ONLY same-basename evidence entry belongs
+        # to a file OUTSIDE this task's import root (task.paths) -- an
+        # existing-album library item, or another split task's file. The
+        # basename fallback is now scoped to task-local evidence, so that entry
+        # cannot be borrowed -> fail closed (before the fix this false-accepted).
+        item = _PathItem(b"/dl/Album/01.flac")
+        dist = _album([_track(title=0.5, data_source=None)],
+                      missing=0, artist=0.0, album=0.807, data_source=None)
+        info = types.SimpleNamespace(album_id=REL, va=False, artists=[], artists_credit=[], artist="")
+        match = types.SimpleNamespace(
+            info=info, distance=dist, extra_tracks=[], extra_items=[],
+            mapping={item: types.SimpleNamespace(track_id=TRACK_IDS[0])})
+        task = types.SimpleNamespace(candidates=[match], items=[item], cur_artist="",
+                                     paths=[b"/dl/Album"])
+        # Only a NON-task file is confirmed, same basename + same recording id,
+        # but it lives under /library, not under the task root /dl/Album.
+        evidence = {b"/library/Old/01.flac": [TRACK_IDS[0]]}
+        with mock.patch.dict(sys.modules, {}):
+            sys.modules.pop("beetsplug.chroma", None)
+            got = ops._pinned_partial_match(task, REL, False, None, 0, True, evidence)
+        self.assertIsNone(got)
+        self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+
     def test_auto_path_ignores_evidence(self):
         # human_confirmed False: even complete, correct evidence does not relax
         # the text bar (the automatic gate is unchanged).

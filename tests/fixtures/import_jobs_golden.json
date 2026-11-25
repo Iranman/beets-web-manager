@@ -28045,6 +28045,18 @@
    ],
    [
     "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
+   ],
+   [
+    "call",
     "cw.plan_confirmed_import",
     [
      {
@@ -44649,6 +44661,18 @@
      "<TMP>/staged"
     ],
     {}
+   ],
+   [
+    "call",
+    "_resolve_import_review_source_path",
+    [
+     "<TMP>/downloads/Artist/Album (2001)"
+    ],
+    {
+     "allow_music": true,
+     "expected_type": null,
+     "require_exists": true
+    }
    ],
    [
     "call",
