@@ -976,7 +976,10 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
         return None
 
     if not release_id:
-        return _reject("no pinned MusicBrainz release id was provided")
+        # Not a pinned import (no search id): normal non-pinned matching runs in
+        # super().choose_match. There is no pinned match to reject, so record
+        # nothing -- a detail here would mislabel every ordinary autotag skip.
+        return None
     if not candidates:
         return _reject("Beets found no candidate for the pinned release "
                        "(the MusicBrainz lookup returned nothing)")

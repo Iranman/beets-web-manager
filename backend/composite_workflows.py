@@ -5344,10 +5344,11 @@ def apply_confirmed_import(
         reasons = {_s(r.get("reason")) if isinstance(r, dict) else "" for r in skipped_rows}
         res["skip_reason"] = reasons.pop() if len(reasons) == 1 else ""
         # #829: the specific guard that refused the pinned match (plugin
-        # ``skipped[].reason_detail``), surfaced only when every skipped path
-        # agrees; mixed or missing details stay "". Observability only.
-        details = {_s(r.get("reason_detail")) for r in skipped_rows
-                   if isinstance(r, dict) and _s(r.get("reason_detail")).strip()}
+        # ``skipped[].reason_detail``). Same unanimity rule as skip_reason --
+        # the set is built over EVERY skipped row (a missing detail contributes
+        # ""), so a mix of details, or some paths with a detail and some
+        # without, collapses to "". Observability only.
+        details = {_s(r.get("reason_detail")) if isinstance(r, dict) else "" for r in skipped_rows}
         res["skip_detail"] = details.pop() if len(details) == 1 else ""
         return res
     if len(new) > 1:
