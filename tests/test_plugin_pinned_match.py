@@ -367,14 +367,22 @@ class PinnedHumanConfirmedFingerprintPrimaryTests(unittest.TestCase):
                 self.assertIsNone(got)
                 self.assertFalse(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
 
-    def test_g_human_confirmed_subset_needs_allow_missing(self):
-        # A deliberate 8-of-10 subset: missing tracks are allowed only with
-        # allow_missing (step 3); only then is the folder fingerprint-accepted.
-        got, match, task = self._case(missing=2, allow_missing=True, human_confirmed=True)
-        self.assertIs(got, match)
-        self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
-        # Without allow_missing the missing tracks refuse it before acceptance.
-        got2, _, _ = self._case(missing=2, allow_missing=False, human_confirmed=True)
+    def test_g_human_confirmed_subset_imports_without_allow_missing(self):
+        # Partial-album fix: a human-confirmed subset (8 of 10 tracks) with every
+        # present file fingerprint-confirmed is accepted by fingerprint identity
+        # WHETHER OR NOT allow_missing was set. A full-folder Import-with-ID of an
+        # incomplete album no longer has to be flagged a staged subset to import:
+        # the structural missing-tracks guard no longer rejects it on the human
+        # path before the acceptance rungs run.
+        for allow in (True, False):
+            with self.subTest(allow_missing=allow):
+                got, match, task = self._case(missing=2, allow_missing=allow, human_confirmed=True)
+                self.assertIs(got, match)
+                self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
+        # The AUTOMATIC path is unchanged: a missing-tracks folder without
+        # allow_missing is still refused before any acceptance rung (no human,
+        # no force), even with the same complete fingerprint hits.
+        got2, _, _ = self._case(missing=2, allow_missing=False, human_confirmed=False)
         self.assertIsNone(got2)
 
 
@@ -611,10 +619,14 @@ class PinnedHumanConfirmedForcedTests(unittest.TestCase):
         self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
 
     def test_structural_guards_still_hold_under_force(self):
-        # The force overrides only the TEXT ceiling; the structural guards stand.
+        # The force overrides only the TEXT ceiling and (on the human path) the
+        # missing-tracks guard; the remaining structural guards stand -- an
+        # unmapped source file (extra_items) and a best candidate that is not the
+        # pinned release are still refused. (Missing tracks are intentionally no
+        # longer a guard here: a human-confirmed partial album is allowed to
+        # import -- see test_forced_subset_imports_without_allow_missing.)
         for name, kw in (("extra items", {"extra_items": [object()]}),
-                         ("not the pinned release", {"album_id": "b6a6e718-3d8e-4c3e-9eaa-7b54af639bb9"}),
-                         ("missing without allow", {"missing": 2, "allow_missing": False})):
+                         ("not the pinned release", {"album_id": "b6a6e718-3d8e-4c3e-9eaa-7b54af639bb9"})):
             with self.subTest(name):
                 got, _, task = self._case(human_confirmed=True, **kw)
                 self.assertIsNone(got)
@@ -676,13 +688,23 @@ class PinnedHumanConfirmedForcedTests(unittest.TestCase):
         self.assertTrue(getattr(task, "webmanager_confirmed_fingerprint_primary", False))
         self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
 
-    def test_forced_subset_needs_allow_missing(self):
-        # A deliberate 6-of-8 subset forces only with allow_missing (step 3).
-        got, match, task = self._case(missing=2, allow_missing=True, human_confirmed=True)
-        self.assertIs(got, match)
-        self.assertTrue(getattr(task, "webmanager_confirmed_forced", False))
-        got2, _, _ = self._case(missing=2, allow_missing=False, human_confirmed=True)
+    def test_forced_subset_imports_without_allow_missing(self):
+        # Partial-album fix: a deliberate 6-of-8 subset with NO fingerprint
+        # evidence forces on the human path WHETHER OR NOT allow_missing was set
+        # -- the owner's "a partial album can't import" defect. The tracklist is
+        # sane (6 files <= 8 tracks, no extra_items), so the forced-pin rail
+        # accepts it. Pre-fix, allow_missing=False was rejected by the structural
+        # missing-tracks guard before the forced rung ever ran.
+        for allow in (True, False):
+            with self.subTest(allow_missing=allow):
+                got, match, task = self._case(missing=2, allow_missing=allow, human_confirmed=True)
+                self.assertIs(got, match)
+                self.assertTrue(getattr(task, "webmanager_confirmed_forced", False))
+        # The AUTOMATIC path never forces a partial: same subset, human_confirmed
+        # False -> still refused (byte-for-byte unchanged).
+        got2, _, task2 = self._case(missing=2, allow_missing=False, human_confirmed=False)
         self.assertIsNone(got2)
+        self.assertFalse(getattr(task2, "webmanager_confirmed_forced", False))
 
     def test_strong_match_is_unchanged_and_unflagged(self):
         # A genuinely strong pinned match still imports via the strong gate with
@@ -705,12 +727,14 @@ class PinnedRejectDetailTests(unittest.TestCase):
     behaviour is unchanged (still ``None``)."""
 
     def test_tracklist_mismatch_records_missing_and_extra_counts(self):
-        # The diagnosed live case: a full-album human pin whose folder is
-        # missing release tracks is rejected at the structural guard
-        # (allow_missing False), BEFORE the forced-pin rung.
+        # The AUTOMATIC path with a missing-tracks folder (allow_missing False)
+        # is rejected at the structural guard and records the missing/extra
+        # counts. (On the human-confirmed path a missing-tracks subset is now
+        # allowed past this guard -- see test_g / test_forced_subset_imports_*;
+        # the structural detail therefore fires for auto imports here.)
         task, _ = _task(_album([_track()], missing=2), missing=2)
         self.assertIsNone(
-            ops._pinned_partial_match(task, REL, allow_missing=False, human_confirmed=True))
+            ops._pinned_partial_match(task, REL, allow_missing=False, human_confirmed=False))
         detail = getattr(task, "webmanager_pinned_reject_detail", None)
         self.assertIsNotNone(detail)
         self.assertIn("missing release track", detail)

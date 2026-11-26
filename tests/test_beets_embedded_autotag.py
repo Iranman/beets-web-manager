@@ -42,7 +42,7 @@ def _chroma_available() -> bool:
 
 @unittest.skipUnless(_beets_available(), "needs beets==2.14.1 (requirements.txt)")
 class EmbeddedAutotagTests(unittest.TestCase):
-    def _run(self, scenario: str) -> dict:
+    def _run(self, scenario: str, source_left=("01.wav", "02.wav")) -> dict:
         env = {k: v for k, v in os.environ.items() if not k.startswith(("BEETS_", "BEETSDIR"))}
         env.update({"BWM_ROOT": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1",
                     "PYTHONUSERBASE": os.environ.get("PYTHONUSERBASE") or site.getuserbase()})
@@ -56,7 +56,7 @@ class EmbeddedAutotagTests(unittest.TestCase):
         self.assertEqual(out["requests"], [f"https://musicbrainz.org/ws/2/release/{REL}"])
         self.assertTrue(out["status_ok"])
         self.assertTrue(out["status_ok_after"])
-        self.assertEqual(out["source_left"], ["01.wav", "02.wav"], "a copy import never touches the source")
+        self.assertEqual(out["source_left"], list(source_left), "a copy import never touches the source")
         return out
 
     def _assert_nothing_imported(self, out: dict, reason: str) -> None:
@@ -169,6 +169,51 @@ class EmbeddedAutotagTests(unittest.TestCase):
         self.assertEqual(out["import"]["imported_album_ids"], [])
         self.assertEqual(out["import"]["forced_pin"], [])
         self.assertEqual(out["import"]["confirmed_fingerprint_primary"], [])
+        self.assertEqual([s["reason"] for s in out["import"]["skipped"]], ["no_strong_match"])
+        self.assertEqual((out["albums"], out["items"]), ([], []))
+
+    # --- Partial / incomplete album (the owner's "I need import all to just
+    # work"): a human-confirmed Import-with-ID of a folder that holds only a
+    # SUBSET of the pinned Release's tracks must IMPORT the present track(s),
+    # tagged to that Release, instead of being refused and left in Review. The
+    # live Chasing Summer case: 1 audio file of a 14-track album. Pre-fix the
+    # structural missing-tracks guard in _pinned_partial_match returned None
+    # before any acceptance rung ran (allow_missing False for a full-folder,
+    # non-staged-subset import), so Beets skipped the folder -> nothing imported.
+    def test_partial_subset_imports_on_the_human_confirmed_path(self):
+        # 1 of the Release's 2 tracks, cleanly tagged, human-confirmed, NO
+        # fingerprint evidence (the live condition). The present track imports,
+        # tagged to the pinned Release (right album, albumartist, Release Group).
+        out = self._run("partial_human", source_left=("01.wav",))
+        self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["skipped"], [])
+        self.assertEqual(len(out["import"]["imported_album_ids"]), 1)
+        self.assertEqual(out["albums"], [{"album": "Jóga", "albumartist": "Björk",
+                                          "mb_albumid": REL, "mb_releasegroupid": RG}])
+        # Exactly the one present track, carrying the Release's MusicBrainz title.
+        self.assertEqual(out["items"], ["Jóga (Introvert Breaks mix)"])
+        self.assertEqual(out["stats_after"], {"albums": 1, "items": 1})
+
+    def test_partial_subset_on_the_auto_path_is_still_refused(self):
+        # Cardinal rule: the AUTOMATIC path never imports a partial album
+        # wholesale. Same 1-of-2 subset, human_confirmed False -> Beets' own
+        # missing-track cap refuses it, nothing imported (byte-for-byte unchanged).
+        out = self._run("partial_auto", source_left=("01.wav",))
+        self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["imported_album_ids"], [])
+        self.assertEqual(out["import"]["forced_pin"], [])
+        self.assertEqual((out["albums"], out["items"]), ([], []))
+        self.assertEqual(out["stats_after"], {"albums": 0, "items": 0})
+
+    def test_partial_with_an_unmatched_extra_file_is_still_refused(self):
+        # The hard safety boundary: a local file that maps to NO Release track
+        # (extra_items > 0) is a wrong-edition / junk-padded folder. Even on the
+        # human path it must be refused to Review -- forcing it would orphan or
+        # mis-tag that file. Both Release tracks plus one unmatched extra file.
+        out = self._run("partial_extra_item", source_left=("01.wav", "02.wav", "03.wav"))
+        self.assertNotIn("import_error", out)
+        self.assertEqual(out["import"]["imported_album_ids"], [])
+        self.assertEqual(out["import"]["forced_pin"], [])
         self.assertEqual([s["reason"] for s in out["import"]["skipped"]], ["no_strong_match"])
         self.assertEqual((out["albums"], out["items"]), ([], []))
 
