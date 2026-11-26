@@ -2931,6 +2931,11 @@ export function ReviewCard({
   const staleStoredReason = selectedMatchActive && /preflight failed|failed tracklist preflight|rejected selected musicbrainz release/i.test(item.reason || '');
   const visibleReason = blockedActive || staleStoredReason || decisionBannerShown ? '' : item.reason;
   const decisionBannerReason = decisionBannerShown ? (item.reason || '') : '';
+  // Folder completeness from the top candidate's stored per-track alignment
+  // (backend _alt_completeness). Drives the prominent "Incomplete — N of M
+  // tracks present" banner so the owner instantly sees a partial download
+  // instead of only the generic no-match reason.
+  const completeness = item.alt_candidates?.completeness;
   const visibleMatchNote = (selectedMatchActive && !audioMismatchActive) || decisionBannerShown ? '' : matchNote;
   const visibleBlockReason = applyBlockedReason || storedBlockedReason(item);
   const visibleBlockHint = applyBlockedReason
@@ -3110,6 +3115,29 @@ export function ReviewCard({
                   </div>
                 ) : null}
               </dl>
+            ) : null}
+            {completeness?.incomplete ? (
+              // Incomplete-download banner: the single most common reason a
+              // folder sits stuck in Review is that only a fraction of the
+              // album's tracks were downloaded, which beets correctly refuses
+              // to tag. State that plainly and up front (text, not colour
+              // alone) so the generic "no confident match" reason below is not
+              // the only explanation the user sees.
+              <div
+                data-testid="review-incomplete-banner"
+                className="mt-2 rounded border border-amber-500/40 bg-amber-950/40 px-3 py-2 text-sm font-semibold text-amber-200"
+              >
+                {completeness.summary
+                  || `Incomplete download — ${completeness.tracks_present} of ${completeness.tracks_total} tracks present`}
+              </div>
+            ) : completeness?.summary ? (
+              // No missing tracks but a tracklist mismatch (extra local files).
+              <div
+                data-testid="review-mismatch-banner"
+                className="mt-2 rounded border border-amber-500/30 bg-amber-950/30 px-3 py-2 text-sm text-amber-200"
+              >
+                {completeness.summary}
+              </div>
             ) : null}
             {decisionBannerShown ? (
               <div className="mt-2 rounded border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">

@@ -329,6 +329,41 @@ def _alt_candidate_per_track(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows[:_ALT_PER_TRACK_CAP]
 
 
+def _alt_completeness(per_track: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Concise "is this folder complete?" projection from the best candidate's
+    stored per-track alignment. Pure count of already-serialized rows -- no
+    network, no re-ranking, no mutation. ``missing`` == release tracks with no
+    local file; ``extra`` == local files that matched no release track (the same
+    missing/extra semantics the #830 pinned-reject reason reports). The common
+    owner complaint is an incomplete download (e.g. 1 of 14 tracks present), so
+    the Review card can state that plainly instead of the generic no-match text.
+    """
+    rows = per_track if isinstance(per_track, list) else []
+    missing = sum(1 for r in rows if isinstance(r, dict) and r.get("status") == "missing")
+    extra = sum(1 for r in rows if isinstance(r, dict) and r.get("status") == "unmatched_local")
+    present = max(0, len(rows) - missing - extra)
+    total = present + missing
+    incomplete = bool(total) and missing > 0
+    extra_phrase = f"{extra} extra local file{'' if extra == 1 else 's'}"
+    if incomplete:
+        summary = f"Incomplete download — {present} of {total} tracks present"
+        if extra:
+            summary += f" ({extra_phrase} not on this release)"
+    elif extra and total:
+        # No missing release tracks, but local files that are not on this
+        # release -- a tracklist mismatch worth stating, though not "incomplete".
+        summary = f"{extra_phrase} not on this release"
+    else:
+        summary = ""
+    return {
+        "tracks_present": present,
+        "tracks_total": total,
+        "extra_files": extra,
+        "incomplete": incomplete,
+        "summary": summary,
+    }
+
+
 def serialize_review_alt_candidates(evidence: Optional[Dict[str, Any]],
                                     *, include_per_track: bool = False) -> Dict[str, Any]:
     """Project evidence.deterministic_decision into the ranked alt-candidate
@@ -347,9 +382,12 @@ def serialize_review_alt_candidates(evidence: Optional[Dict[str, Any]],
 
     out: List[Dict[str, Any]] = []
     best_rgid = ""
+    first_cand: Optional[Dict[str, Any]] = None
     for cand in raw[:_ALT_CANDIDATE_CAP]:
         if not isinstance(cand, dict):
             continue
+        if first_cand is None:
+            first_cand = cand
         ev = cand.get("evidence") if isinstance(cand.get("evidence"), dict) else {}
         rgid = _s(cand.get("release_group_id"))
         rep = _s(cand.get("representative_release_id"))
@@ -379,12 +417,16 @@ def serialize_review_alt_candidates(evidence: Optional[Dict[str, Any]],
         out.append(row)
     for row in out:
         row["is_best_verified"] = bool(best_rgid and row["release_group_id"] == best_rgid)
+    # Folder completeness from the top candidate's stored alignment (same pure
+    # projection, computed even when per_track is not inlined into the rows).
+    completeness = _alt_completeness(_alt_candidate_per_track(first_cand) if first_cand else [])
     return {
         "best_verified_release_group_id": best_rgid,
         "auto_import": {
             "eligible": auto.get("eligible") if "eligible" in auto else None,
             "reasons": [str(r) for r in (auto.get("reasons") if isinstance(auto.get("reasons"), list) else [])],
         },
+        "completeness": completeness,
         "candidates": out,
     }
 
