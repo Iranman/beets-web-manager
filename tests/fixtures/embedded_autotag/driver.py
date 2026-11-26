@@ -4,7 +4,8 @@
 # for it, with the CC BY-NC-SA supplementary keys tags/genres/rating removed).
 # argv[1] is the scenario: match | mismatch | provider_down | not_found |
 # fp_primary_* | auto_divergent | forced_chroma_noise | auto_chroma_noise |
-# forced_chroma_disagree (the *_chroma_* scenarios load the real chroma plugin).
+# forced_chroma_disagree (the *_chroma_* scenarios load the real chroma plugin) |
+# partial_human | partial_auto | partial_extra_item (partial-album subset cases).
 import json, os, socket, struct, sys, tempfile, wave
 ROOT = os.environ["BWM_ROOT"]; sys.path.insert(0, ROOT); os.chdir(ROOT)
 import mutagen.id3, mutagen.wave
@@ -75,12 +76,27 @@ DIVERGENT = [("Violin Concerto no. 1 I. Prologue", 641),
 # nothing). The chroma network/fpcalc lookup is replaced by a stub that injects
 # recordings NOT on the pinned release, exactly as live catalog music does.
 CHROMA_SCENARIOS = ("forced_chroma_noise", "auto_chroma_noise", "forced_chroma_disagree")
+# The pinned Release's two tracks, cleanly tagged (what the `match` scenario uses).
+CLEAN = [("Jóga (Introvert Breaks mix)", 641), ("Jóga (Introvert 4/4 mix)", 534)]
+# partial_*: the live "incomplete album" condition. A human-confirmed
+# Import-with-ID of a folder holding only a SUBSET of the pinned Release's tracks
+# (partial_human: 1 of 2) must import the present track tagged to the Release --
+# pre-fix it was rejected by the structural missing-tracks guard before any
+# acceptance rung ran (operations._pinned_partial_match), the owner's "a partial
+# album can't import" defect. partial_auto is the same subset on the AUTOMATIC
+# path (must still refuse). partial_extra_item adds a local file that maps to NO
+# Release track (extra_items=1): a wrong-edition/junk-padded folder, refused even
+# on the human path (forcing it would orphan/mis-tag that file).
 if scenario == "mismatch":
     tracks = [("Something Else", 30), ("Another Song", 45)]
 elif scenario in ("fp_primary_divergent", "fp_primary_confirmed", "auto_divergent") + CHROMA_SCENARIOS:
     tracks = DIVERGENT
+elif scenario in ("partial_human", "partial_auto"):
+    tracks = CLEAN[:1]
+elif scenario == "partial_extra_item":
+    tracks = CLEAN + [("Totally Unrelated Bonus", 200)]
 else:
-    tracks = [("Jóga (Introvert Breaks mix)", 641), ("Jóga (Introvert 4/4 mix)", 534)]
+    tracks = CLEAN
 for n, (title, secs) in enumerate(tracks, 1):
     wav(os.path.join(src, f"0{n}.wav"), title, secs, n)
 plugin_line = "plugins: [musicbrainz, chroma]" if scenario in CHROMA_SCENARIOS else "plugins: [musicbrainz]"
@@ -118,7 +134,8 @@ if scenario in CHROMA_SCENARIOS:
 # auto_divergent is the same folder on the AUTOMATIC path (human_confirmed
 # False): it must still be refused -- the force never fires without a human.
 human_confirmed = scenario in ("fp_primary_divergent", "fp_primary_confirmed",
-                               "forced_chroma_noise", "forced_chroma_disagree")
+                               "forced_chroma_noise", "forced_chroma_disagree",
+                               "partial_human", "partial_extra_item")
 # One confirmed recording id per file (as production does -- at most one), each
 # the recording of the release track that file is length-matched to (641s/534s
 # -> track 1/2): 01.wav -> Breaks mix, 02.wav -> 4/4 mix.

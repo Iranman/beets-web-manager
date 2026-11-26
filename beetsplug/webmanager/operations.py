@@ -916,7 +916,12 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
 
     ``human_confirmed`` is the explicit human Confirm/Import-with-ID path (a
     person picked this exact Release after Web Manager verified it); it is
-    never set for auto-import or unattended recovery. On that path only, and
+    never set for auto-import or unattended recovery. On that path only, a
+    legitimate PARTIAL folder (a subset of the pinned Release's tracks) is let
+    past the structural missing-tracks guard even when ``allow_missing`` is
+    false, so a full-folder Import-with-ID of, say, 1 of 14 tracks reaches the
+    acceptance rungs instead of being rejected outright; ``extra_items`` is
+    still always refused. On that path only, and
     only when AcoustID matched every file to the recording of its mapped track
     (``_acoustid_hit_every_file``), complete recording-level fingerprint
     identity accepts the pinned Release irrespective of Beets' text distance:
@@ -990,11 +995,28 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
                        f"not the pinned release")
     missing = len(getattr(match, "extra_tracks", None) or [])
     extra_items = len(getattr(match, "extra_items", None) or [])
-    if (missing and not allow_missing) or extra_items:
+    # ``extra_items`` (a source file mapped to NO Release track) is ALWAYS
+    # refused here: forcing it would orphan/mis-tag that file, so a wrong-edition
+    # or junk-padded folder stays in review. Missing Release tracks are refused
+    # on the automatic path unless a missing-track repair explicitly asked for
+    # them (``allow_missing``). On the explicit human-confirmed path a legitimate
+    # PARTIAL folder -- a subset of the pinned Release (e.g. 1 of 14 tracks) --
+    # is let past this structural guard and the decision deferred to the
+    # acceptance rungs below: the base strong rung when the present track(s) match
+    # cleanly (``missing_tracks`` is distance-exempt via ``_PINNED_ALBUM_EXEMPT``),
+    # else the forced-pin rung, whose ``_forced_pin_tracklist_sane`` rail already
+    # encodes the correct partial-album safety rule (files <= tracks AND no
+    # ``extra_items``). Without this, a full-folder human Import-with-ID of a
+    # subset (``allow_missing`` False, since it is not a staged subset) was
+    # rejected outright before the forced rung ever ran -- the owner's "a partial
+    # album can't import" defect. The automatic/recovery path (``human_confirmed``
+    # false) is byte-for-byte unchanged: the condition still reads
+    # ``missing and not allow_missing``.
+    if (missing and not allow_missing and not human_confirmed) or extra_items:
         return _reject(
             f"the pinned release tracklist does not line up with the folder: "
             f"{missing} missing release track(s), {extra_items} extra local file(s) "
-            f"(allow_missing={allow_missing})")
+            f"(allow_missing={allow_missing}, human_confirmed={human_confirmed})")
     dist = match.distance
     keys = set(dist.keys())
     for track_dist in (getattr(dist, "tracks", None) or {}).values():
