@@ -696,5 +696,45 @@ class PinnedHumanConfirmedForcedTests(unittest.TestCase):
                 self.assertFalse(getattr(task, "webmanager_confirmed_forced", False))
 
 
+class PinnedRejectDetailTests(unittest.TestCase):
+    """#829 observability: when ``_pinned_partial_match`` rejects a pinned
+    match it records WHY on ``task.webmanager_pinned_reject_detail`` (and logs
+    it), without changing the ``None`` it returns. Fail-before: the attribute
+    did not exist, so the skip surfaced only the generic 'no confident match'.
+    These assert the specific guard detail is captured; the acceptance
+    behaviour is unchanged (still ``None``)."""
+
+    def test_tracklist_mismatch_records_missing_and_extra_counts(self):
+        # The diagnosed live case: a full-album human pin whose folder is
+        # missing release tracks is rejected at the structural guard
+        # (allow_missing False), BEFORE the forced-pin rung.
+        task, _ = _task(_album([_track()], missing=2), missing=2)
+        self.assertIsNone(
+            ops._pinned_partial_match(task, REL, allow_missing=False, human_confirmed=True))
+        detail = getattr(task, "webmanager_pinned_reject_detail", None)
+        self.assertIsNotNone(detail)
+        self.assertIn("missing release track", detail)
+        self.assertIn("2 missing release track(s)", detail)
+        self.assertIn("allow_missing=False", detail)
+
+    def test_extra_local_files_records_detail(self):
+        task, _ = _task(_album([_track()], missing=0), missing=0, extra_items=(object(),))
+        self.assertIsNone(ops._pinned_partial_match(task, REL, human_confirmed=True))
+        self.assertIn("extra local file",
+                      getattr(task, "webmanager_pinned_reject_detail", ""))
+
+    def test_best_candidate_is_not_the_pinned_release_records_detail(self):
+        task, _ = _task(_album([_track()], missing=0), missing=0, album_id="other-release")
+        self.assertIsNone(ops._pinned_partial_match(task, REL))
+        self.assertIn("not the pinned release",
+                      getattr(task, "webmanager_pinned_reject_detail", ""))
+
+    def test_no_candidate_records_detail(self):
+        task = types.SimpleNamespace(candidates=[])
+        self.assertIsNone(ops._pinned_partial_match(task, REL))
+        self.assertIn("no candidate",
+                      getattr(task, "webmanager_pinned_reject_detail", "").lower())
+
+
 if __name__ == "__main__":
     unittest.main()

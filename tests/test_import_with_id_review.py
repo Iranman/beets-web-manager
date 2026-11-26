@@ -312,6 +312,26 @@ class AlreadyInLibraryMessageTests(unittest.TestCase):
         self.assertIn("could not confidently match", reason)
         self.assertNotIn("already in your library", reason)
 
+    def test_not_imported_surfaces_skip_detail_in_reason_and_job_log(self):
+        # #829 observability: the specific guard that refused the pinned match
+        # (apply_res["skip_detail"]) is appended to the review reason AND written
+        # to the job log, so the operator sees which guard tripped instead of
+        # only the generic message. Fail-before: skip_detail was ignored.
+        ctx = self._ctx()
+        detail = ("the pinned release tracklist does not line up with the folder: "
+                  "2 missing release track(s), 0 extra local file(s) (allow_missing=False)")
+        apply_res = {"ok": False, "code": "not_imported", "skip_reason": "no_strong_match",
+                     "skip_detail": detail,
+                     "error": "Beets did not import this folder as the selected release."}
+        with mock.patch.object(isvc_mod, "_queue_folder_for_manual_review") as q:
+            with self.assertRaises(RuntimeError):
+                isvc_mod._folder_import_refuse_failed_apply(ctx, apply_res, REL, RG)
+        reason = q.call_args.args[2]
+        self.assertIn("could not confidently match", reason)
+        self.assertIn(detail, reason)
+        self.assertTrue(any(detail in str(line) for line in ctx.log),
+                        "the guard detail must be written to the job log")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3787,10 +3787,17 @@ def _folder_import_refuse_failed_apply(ctx: _FolderImportContext, apply_res: Dic
                 ctx, mb_albumid, selected_releasegroupid,
                 f"This release is already in your library; nothing was imported. "
                 f"(MusicBrainz release {mb_albumid}, release group {selected_releasegroupid}.)")
+        # #829: the specific guard that refused the pinned match (plugin
+        # ``skip_detail``), so the job log says exactly why rather than only the
+        # generic "no confident match". Observability only -- outcome unchanged.
+        skip_detail = _s(apply_res.get("skip_detail")).strip()
+        detail_suffix = f" Detail: {skip_detail}." if skip_detail else ""
+        if skip_detail:
+            log.append(f"[import] Pinned match was not accepted: {skip_detail}")
         _folder_import_review_and_raise(
             ctx, mb_albumid, selected_releasegroupid,
             f"Beets could not confidently match this source to MusicBrainz release "
-            f"{mb_albumid} (release group {selected_releasegroupid}): {reason}")
+            f"{mb_albumid} (release group {selected_releasegroupid}): {reason}{detail_suffix}")
     raise RuntimeError(reason)
 
 
