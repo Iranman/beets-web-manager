@@ -407,9 +407,24 @@ export interface ReviewAltCandidate {
 /** PR3/Lane C: the ranked alt-candidate contract on a pending_ai review row
  * (routes_import serialize_review_alt_candidates). `auto_import` is the folder's
  * authoritative deterministic verdict (the "why"); candidates are ordered. */
+/** Folder completeness projected from the top candidate's stored per-track
+ * alignment (backend `_alt_completeness`). `incomplete` means release tracks are
+ * missing locally (an incomplete download); `summary` is the ready human phrase,
+ * e.g. "Incomplete download — 1 of 14 tracks present". */
+export interface ReviewAltCompleteness {
+  tracks_present: number;
+  tracks_total: number;
+  extra_files: number;
+  incomplete: boolean;
+  summary: string;
+}
+
 export interface ReviewAltCandidates {
   best_verified_release_group_id: string;
   auto_import: { eligible: boolean | null; reasons: string[] };
+  /** Present on rows served by GET /api/import/review-queue; older cached rows
+   * may omit it, so treat it as optional. */
+  completeness?: ReviewAltCompleteness;
   candidates: ReviewAltCandidate[];
 }
 

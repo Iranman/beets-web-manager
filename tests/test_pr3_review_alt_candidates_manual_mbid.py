@@ -112,6 +112,45 @@ class AltCandidateSerializerTests(unittest.TestCase):
         # Compact row omitted unless explicitly requested.
         self.assertNotIn("per_track", serialize_review_alt_candidates(self._evidence())["candidates"][0])
 
+    def test_completeness_flags_an_incomplete_download(self):
+        # candidate[0] alignment: 1 matched + 1 missing release track + 1 extra
+        # local file -> 1 of 2 present, incomplete, 1 extra.
+        out = serialize_review_alt_candidates(self._evidence())
+        c = out["completeness"]
+        self.assertEqual(c["tracks_present"], 1)
+        self.assertEqual(c["tracks_total"], 2)
+        self.assertEqual(c["extra_files"], 1)
+        self.assertTrue(c["incomplete"])
+        self.assertIn("1 of 2 tracks present", c["summary"])
+        # Does not depend on include_per_track being inlined into the rows.
+        self.assertEqual(
+            serialize_review_alt_candidates(self._evidence(), include_per_track=True)["completeness"], c)
+
+    def test_completeness_not_incomplete_when_all_release_tracks_present(self):
+        cand = _candidate(RG1, REL1, 1, 0.9, action_allowed=True, verified=2, total=2,
+                          with_alignment=False)
+        cand["matching_decision"]["evidence"]["canonical_match"]["track_alignment"] = {
+            "assignments": [
+                {"target_index": 0, "local_title": "A", "target_title": "A",
+                 "target_recording_id": REC1, "status": "matched"},
+                {"target_index": 1, "local_title": "B", "target_title": "B",
+                 "target_recording_id": REC2, "status": "matched"},
+            ],
+            "unmatched_local": [],
+            "missing_tracks": [],
+        }
+        ev = {"deterministic_decision": {"auto_import": {"eligible": True, "reasons": []},
+                                         "candidates": [cand]}}
+        c = serialize_review_alt_candidates(ev)["completeness"]
+        self.assertEqual((c["tracks_present"], c["tracks_total"], c["extra_files"]), (2, 2, 0))
+        self.assertFalse(c["incomplete"])
+        self.assertEqual(c["summary"], "")
+
+    def test_completeness_empty_when_no_candidates(self):
+        c = serialize_review_alt_candidates({})["completeness"]
+        self.assertEqual(c, {"tracks_present": 0, "tracks_total": 0, "extra_files": 0,
+                             "incomplete": False, "summary": ""})
+
     def test_absent_or_malformed_evidence_is_empty(self):
         for ev in (None, {}, {"deterministic_decision": {}}, {"deterministic_decision": {"candidates": "x"}}):
             out = serialize_review_alt_candidates(ev)
