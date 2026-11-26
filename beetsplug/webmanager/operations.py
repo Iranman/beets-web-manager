@@ -956,14 +956,45 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     source's messy tags are rewritten with the Release's MusicBrainz metadata as
     a built-in side effect -- the "fix the tags" outcome."""
     candidates = list(getattr(task, "candidates", None) or [])
-    if not release_id or not candidates:
+
+    def _reject(detail: str):
+        # Pure observability (#829, instrument-first): record WHY the pinned
+        # match was not accepted so the skip surfaces a specific reason in the
+        # operator's job log instead of the generic "no confident match". This
+        # only annotates the task and logs; it never changes the return value
+        # or any acceptance decision -- every caller still sees None.
+        try:
+            task.webmanager_pinned_reject_detail = detail
+        except Exception:
+            pass
+        log.info(
+            "Pinned release %s not accepted for %s: %s "
+            "(candidates=%d, allow_missing=%s, human_confirmed=%s)",
+            release_id or "<none>",
+            [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
+            detail, len(candidates), allow_missing, human_confirmed)
         return None
+
+    if not release_id:
+        # Not a pinned import (no search id): normal non-pinned matching runs in
+        # super().choose_match. There is no pinned match to reject, so record
+        # nothing -- a detail here would mislabel every ordinary autotag skip.
+        return None
+    if not candidates:
+        return _reject("Beets found no candidate for the pinned release "
+                       "(the MusicBrainz lookup returned nothing)")
     match = candidates[0]
-    if getattr(getattr(match, "info", None), "album_id", None) != release_id:
-        return None
+    best_id = getattr(getattr(match, "info", None), "album_id", None)
+    if best_id != release_id:
+        return _reject(f"Beets' best candidate was release {best_id or '<unknown>'}, "
+                       f"not the pinned release")
     missing = len(getattr(match, "extra_tracks", None) or [])
-    if (missing and not allow_missing) or getattr(match, "extra_items", None):
-        return None
+    extra_items = len(getattr(match, "extra_items", None) or [])
+    if (missing and not allow_missing) or extra_items:
+        return _reject(
+            f"the pinned release tracklist does not line up with the folder: "
+            f"{missing} missing release track(s), {extra_items} extra local file(s) "
+            f"(allow_missing={allow_missing})")
     dist = match.distance
     keys = set(dist.keys())
     for track_dist in (getattr(dist, "tracks", None) or {}).values():
@@ -971,7 +1002,9 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
     max_rec = beets_config["match"]["max_rec"]
     for key in keys - {"missing_tracks"}:  # an explicit data_source cap still holds
         if key in max_rec.keys() and max_rec[key].as_str() != "strong":
-            return None
+            return _reject(f"Beets capped the '{key}' penalty at "
+                           f"'{max_rec[key].as_str()}' (below 'strong'), so the pinned "
+                           f"match cannot be accepted")
     thresh = beets_config["match"]["strong_rec_thresh"].as_number()
     raw, max_distance = _distance_without(dist, _PINNED_ALBUM_EXEMPT)
     if max_distance > 0 and raw / max_distance < thresh:
@@ -1031,7 +1064,22 @@ def _pinned_partial_match(task, release_id: str, allow_missing: bool = True,
             [util.displayable_path(p) for p in getattr(task, "paths", None) or []],
             ratio)
         return match
-    return None
+    # Fell through every acceptance rung. Name which guard refused so the skip
+    # is diagnosable; the helpers below are read-only, so this changes nothing.
+    if not human_confirmed:
+        return _reject("text distance is over the strong threshold and there is no "
+                       "fingerprint confirmation; the automatic path keeps the strong bar")
+    if _fingerprint_disagrees(task, match, fingerprint_confirmed):
+        return _reject("human-confirmed forced pin refused: backend AcoustID evidence "
+                       "identifies a file as a recording other than its pinned track")
+    if not _forced_pin_tracklist_sane(task, match):
+        files_n = len(getattr(task, "items", None) or [])
+        tracks_n = len(getattr(match, "mapping", None) or {}) + len(getattr(match, "extra_tracks", None) or [])
+        extra_n = len(getattr(match, "extra_items", None) or [])
+        return _reject(
+            "human-confirmed forced pin refused by tracklist sanity: "
+            f"files={files_n}, mapped+missing tracks={tracks_n}, extra_items={extra_n}")
+    return _reject("pinned match not accepted (no acceptance rung applied)")
 
 
 _EVIDENCE_MAX_IDS = 200
@@ -1511,6 +1559,12 @@ def run_import():
                                 row = {"path": shown, "reason": reason}
                                 if reason == "duplicate":
                                     row["duplicate_evidence"] = getattr(task, "webmanager_duplicate_evidence", None)
+                                # #829: the specific guard that refused a pinned
+                                # match (set by _pinned_partial_match), surfaced so
+                                # the operator's job log says which one tripped.
+                                detail = getattr(task, "webmanager_pinned_reject_detail", None)
+                                if detail:
+                                    row["reason_detail"] = str(detail)
                                 skipped_reasons.append(row)
                 result = {
                     "success": True,

@@ -153,6 +153,28 @@ class UnsuccessfulMatchTouchesNothingTests(unittest.TestCase):
         self.assertEqual(res["album_ids"], [])
         self.assertEqual(self.store.get(op)["status"], "Failed")
 
+    def test_not_imported_surfaces_the_pinned_reject_detail(self):
+        # #829 observability: the plugin reports WHY the pinned match was
+        # refused in ``skipped[].reason_detail``; apply_confirmed_import lifts a
+        # single unanimous detail to ``skip_detail`` so the operator job log can
+        # show the specific guard, not only the generic message. Fail-before:
+        # there was no ``skip_detail`` key.
+        detail = ("the pinned release tracklist does not line up with the folder: "
+                  "2 missing release track(s), 0 extra local file(s) (allow_missing=False)")
+        ad = base._adapter(None, existing=[{"id": 4, "mb_albumid": REL}])
+        ad.run_import.return_value = {
+            "success": True,
+            "skipped": [{"path": "/downloads/A", "reason": "no_strong_match",
+                         "reason_detail": detail}],
+        }
+        op = cw.plan_confirmed_import(
+            {"source_folder": "/downloads/A", "mb_albumid": REL, "mb_releasegroupid": RG},
+            store=self.store)["operation_id"]
+        res = cw.apply_confirmed_import(op, adapter=ad, store=self.store, timeout=60.0)
+        self.assertEqual(res["code"], "not_imported")
+        self.assertEqual(res.get("skip_reason"), "no_strong_match")
+        self.assertEqual(res.get("skip_detail"), detail)
+
 
 class ManualRgidSeamTests(unittest.TestCase):
     """The PR3 shared resolver and the controlled pipeline compose end to end."""

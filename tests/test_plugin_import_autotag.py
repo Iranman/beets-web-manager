@@ -45,6 +45,14 @@ def _album(folder, artist, album, n=2):
         mw.save()
 
 
+def _skipped_shape(rows):
+    """#829: skipped[] rows with the additive diagnostic ``reason_detail`` field
+    dropped, so a row-shape assertion checks ``path``/``reason`` (and any other
+    stable keys) without pinning the free-text guard detail. The detail itself is
+    covered by ``tests/test_plugin_pinned_match.py::PinnedRejectDetailTests``."""
+    return [{k: v for k, v in r.items() if k != "reason_detail"} for r in rows]
+
+
 class PluginImportAutotagTests(unittest.TestCase):
     def setUp(self):
         # Hermetic isolation (#466): this module documents "with no
@@ -117,7 +125,7 @@ class PluginImportAutotagTests(unittest.TestCase):
         self.assertTrue(data["autotag"])
         self.assertEqual((data["quiet_fallback"], data["search_ids"]), ("skip", [REL]))
         self.assertEqual(data["skipped_paths"], [src])
-        self.assertEqual(data["skipped"], [{"path": src, "reason": "no_candidates"}])
+        self.assertEqual(_skipped_shape(data["skipped"]), [{"path": src, "reason": "no_candidates"}])
         self.assertEqual(len(self.lib.albums()), 0)
         self.assertEqual(sorted(os.listdir(src)), ["01.wav", "02.wav"])
         self.assertEqual(before, {k: beets_config["import"][k].get() for k in before})
@@ -166,7 +174,7 @@ class PluginImportAutotagTests(unittest.TestCase):
         titles, lengths and artist, is still skipped by Beets' quiet importer
         (match.max_rec.missing_tracks caps it at medium)."""
         src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2", "Track 3"]))
-        self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}])
+        self.assertEqual(_skipped_shape(data["skipped"]), [{"path": src, "reason": "no_strong_match"}])
         self.assertEqual(len(self.lib.albums()), 0)
 
     def test_allow_missing_tracks_imports_the_pinned_release(self):
@@ -209,7 +217,7 @@ class PluginImportAutotagTests(unittest.TestCase):
         ):
             with self.subTest(name):
                 src, data = self._import_pinned(info, allow_missing_tracks=True)
-                self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}])
+                self.assertEqual(_skipped_shape(data["skipped"]), [{"path": src, "reason": "no_strong_match"}])
                 self.assertEqual(len(self.lib.albums()), 0)
                 shutil.rmtree(src)
 
@@ -334,7 +342,7 @@ class PluginImportAutotagTests(unittest.TestCase):
                 src, data = self._import_pinned(self._pinned_release(["Track 1", "Track 2"]))
         finally:
             beets_config["match"]["max_rec"]["data_source"] = "strong"  # confuse cannot delete; strong = no cap
-        self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}])
+        self.assertEqual(_skipped_shape(data["skipped"]), [{"path": src, "reason": "no_strong_match"}])
         self.assertEqual(len(self.lib.albums()), 0)
 
     def test_artist_relaxation_end_to_end_refusals(self):
@@ -347,7 +355,7 @@ class PluginImportAutotagTests(unittest.TestCase):
         ):
             with self.subTest(name):
                 src, data, _ = self._relaxation_case(rec, release, aid)
-                self.assertEqual(data["skipped"], [{"path": src, "reason": "no_strong_match"}], data)
+                self.assertEqual(_skipped_shape(data["skipped"]), [{"path": src, "reason": "no_strong_match"}], data)
                 self.assertEqual(data["partial_artist_relaxed"], [])
                 self.assertEqual(data["imported_album_ids"], [])
                 shutil.rmtree(src)
