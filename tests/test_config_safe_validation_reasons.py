@@ -55,17 +55,23 @@ class ValidationClassificationTests(unittest.TestCase):
                 self.assertEqual(exc.safe_reason, reason)
                 self.assertIn(reason, SAFE_CONFIG_REASONS)
 
-    def test_raw_parser_detail_is_not_surfaced_but_kept_for_the_log(self):
+    def test_raw_parser_detail_is_not_surfaced_to_the_client(self):
         exc = self._raise(SECRET_SYNTAX)
         self.assertIsNone(exc.safe_reason)   # nothing curated reaches the client
-        self.assertIn(SECRET, str(exc))      # full detail retained server-side
+        # The raw parser message lives only on the in-memory exception object;
+        # it is never returned to the client and never written to a log.
+        self.assertIn(SECRET, str(exc))
 
-    def test_validate_logs_raw_detail_server_side_only(self):
+    def test_validate_logs_only_a_secret_free_summary(self):
         with self.assertLogs("beets.config_manager", "WARNING") as logs:
             ok, msg = validate_config_yaml(SECRET_SYNTAX)
         self.assertFalse(ok)
         self.assertNotIn(msg, SAFE_CONFIG_REASONS)
-        self.assertIn(SECRET, "\n".join(logs.output))
+        joined = "\n".join(logs.output)
+        # A warning IS emitted (error type + line/column), but the secret-bearing
+        # source snippet must NEVER reach the log (CLAUDE.md: never log secrets).
+        self.assertNotIn(SECRET, joined)
+        self.assertIn("Config YAML parse error", joined)
 
     def test_safe_reason_only_ever_holds_an_allowlisted_string(self):
         # Even a caller that passes raw text as safe_reason cannot leak it.

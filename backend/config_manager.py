@@ -365,10 +365,15 @@ def validate_config_yaml(content: str) -> Tuple[bool, str]:
     except (ValueError, OverflowError):
         return False, "Invalid YAML: a value could not be read (for example an impossible date)"
     except yaml.YAMLError as exc:
-        # #463 NB2: the parser message quotes the offending line and may carry
-        # secret values, so keep the full detail in the server log only; the
-        # client receives the generic message (safe_reason stays unset).
-        log.warning("Config YAML parse error (detail kept server-side only): %s", exc)
+        # #463 NB2: the parser message (str(exc) / get_snippet()) quotes the
+        # offending source line, which may hold a secret config value, so it is
+        # NEVER logged or returned. Log only a secret-free summary -- the error
+        # type and the mark's line/column -- and give the client the generic
+        # message (safe_reason stays unset because this string is not in the
+        # SAFE_CONFIG_REASONS allowlist).
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        log.warning("Config YAML parse error (%s%s); detail withheld to avoid logging secret config values", type(exc).__name__, where)
         return False, f"Invalid YAML syntax: {exc}"
 
 
