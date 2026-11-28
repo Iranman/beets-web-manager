@@ -51,8 +51,10 @@ class ConfigConflictError(ConfigError):
 # #463 NB2: the fixed, curated validation reasons that are safe to surface to
 # the browser. They describe only shape/size, never config values. Every other
 # ConfigValidationError message (notably "Invalid YAML syntax: <exc>", which
-# quotes the offending line and can contain secret values) keeps its detail in
-# the server log only, and the client sees the generic message instead.
+# quotes the offending line and can contain secret values) is NEVER logged or
+# returned -- it lives only on the in-memory exception object -- and the client
+# sees the generic message instead. (The YAMLError branch logs only the error
+# type + line/column, never the parser snippet.)
 SAFE_CONFIG_REASONS = frozenset({
     "Config content cannot be empty",
     "Config is larger than 1 MiB",
@@ -71,7 +73,8 @@ class ConfigValidationError(ConfigError):
     ``safe_reason`` is the curated, secret-free reason surfaced to the client;
     it defaults to ``message`` but is kept only if it is one of the fixed
     ``SAFE_CONFIG_REASONS`` (so a raw parser excerpt can never leak). The full
-    ``message`` is retained for the server-side log."""
+    ``message`` is retained only on this in-memory exception object -- it is
+    never written to a log or returned to the client."""
 
     def __init__(self, message: str, safe_reason: Optional[str] = None):
         super().__init__(message, error_code="CONFIG_INVALID_YAML", status_code=400)
