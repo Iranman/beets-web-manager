@@ -79,6 +79,7 @@ else:  # "fresh"
     out["result"] = beets_embedded.write_starter_config_if_missing()
     out["exists"] = os.path.isfile(target)
     out["text"] = open(target, "r", encoding="utf-8").read()
+    out["mode"] = oct(os.stat(target).st_mode & 0o777)
 
 print(json.dumps(out, default=str))
 '''
@@ -137,6 +138,13 @@ class StarterConfigTests(unittest.TestCase):
         self.assertEqual(res["first"], res["target"])
         self.assertIsNone(res["second"])
         self.assertTrue(res["unchanged"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file-mode semantics")
+    def test_written_config_has_0644_mode(self):
+        # #826: the mode is set via os.fchmod on the open fd (before close),
+        # not os.chmod on the pathname -- the result is still 0644.
+        res = _run("fresh", self.beetsdir, self.music)
+        self.assertEqual(res["mode"], oct(0o644))
 
     @unittest.skipUnless(os.name == "posix", "symlink pre-planting needs POSIX")
     def test_temp_file_is_not_a_predictable_symlink_target(self):
