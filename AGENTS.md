@@ -90,7 +90,7 @@ The project uses Semantic Versioning. While the version is `0.x`, the MINOR numb
 - **MINOR (`0.Y.0`)** when any of these is true:
   - the CHANGELOG entry has an **Upgrade Notes** section that asks the operator to do something, or something that used to work is now refused (security tightening included);
   - a migration rewrites persisted state or user files (`/web-manager-data`, Beets `config.yaml`, `beetsplug/`);
-  - the webmanager plugin's `PLUGIN_VERSION` minor/major or its `PROTOCOL_VERSION` changes (Beets must be restarted);
+  - the webmanager plugin's `PLUGIN_VERSION` minor/major or its `PROTOCOL_VERSION` changes (the operations load in-process, so recreating the `beets-web-manager` container reloads the embedded plugin — see step 4 under Release and deploy);
   - a Compose, environment-variable or mount contract is renamed or removed;
   - a new user-facing feature or endpoint family is added.
 - **PATCH (`0.y.Z`)** for bug fixes and dependency or security bumps that need no operator action and no state migration, including plugin patch versions.
