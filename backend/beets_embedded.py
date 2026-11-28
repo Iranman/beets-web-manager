@@ -100,12 +100,16 @@ def write_starter_config_if_missing() -> Optional[str]:
     already present or the write failed (fail-safe: never raises, never
     overwrites). This is the one place the app writes the user's config; every
     other path treats it as read-only (docs/adr/0006-embedded-beets.md)."""
-    import yaml
-    from beets import config
-
-    from backend.config_layers import music_root
     tmp = None
     try:
+        # Imports live inside the try so an (essentially impossible) import
+        # failure fails safe like any other error here -- the docstring
+        # promises this never raises -- rather than 500-ing first-run setup.
+        import yaml
+        from beets import config
+
+        from backend.config_layers import music_root
+
         target = os.fsdecode(config.user_config_path())
         if os.path.isfile(target):
             log.debug("Beets config already exists at %s; leaving it untouched", target)
@@ -123,14 +127,24 @@ def write_starter_config_if_missing() -> Optional[str]:
         # library or a media file. The never-overwrite guard on `target`
         # (isfile -> return) above is unchanged.
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target) or ".", prefix=".config.", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except Exception:
+            # fdopen did not take ownership of the raw fd, so close it here to
+            # avoid leaking it; mkstemp already created the file.
+            os.close(fd)
+            raise
+        with handle as f:
+            # fchmod the open fd (not the pathname) before close: no post-close
+            # window, and no chance of chmod-ing a name swapped underneath us.
+            # AttributeError covers platforms without os.fchmod (best-effort).
+            try:
+                os.fchmod(f.fileno(), 0o644)
+            except (OSError, AttributeError):
+                pass
             f.write(body)
             f.flush()
             os.fsync(f.fileno())
-        try:
-            os.chmod(tmp, 0o644)
-        except OSError:
-            pass
         os.replace(tmp, target)  # atomic; never clobbers via a partial write
         log.info("Wrote a starter Beets config at %s (first setup); edit it freely", target)
         return target

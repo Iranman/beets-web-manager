@@ -39,8 +39,19 @@ _SAME_ORIGIN_CSRF_HEADERS = {"X-Beets-CSRF": "1", "Origin": "http://localhost"}
 
 class FirstRunBrowserBootstrapTests(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors: with a per-test BEETSDIR (below) the real
+        # first-run path lets beets open musiclibrary.blb inside this temp dir.
+        # On Windows an open DB file can't be unlinked, so teardown would raise
+        # PermissionError (WinError 32) after the test itself passed; on POSIX
+        # this flag is a no-op. The assertions, not cleanup, are the contract.
+        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.data_dir = Path(self.tmpdir.name)
+        # A per-test BEETSDIR so that the real, unmocked first-run completions
+        # (which invoke write_starter_config_if_missing) can only ever write a
+        # starter config.yaml inside this temp dir -- never into the dev
+        # machine's real Beets config dir. config.user_config_path() reads
+        # BEETSDIR dynamically, so this redirects the writer in-process.
+        self.beets_dir = self.data_dir / "beets"
 
         self.initial_pwd_file = self.data_dir / ".initial_admin_password"
         self.persisted_pwd_file = self.data_dir / ".browser_password"
@@ -56,6 +67,7 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
                 "BEETS_WEB_USERNAME": "",
                 "BEETS_WEB_AUTH_TOKEN": "valid_test_bearer_token_32_chars_minimum!",
                 "BEETS_WEB_AUTH_DISABLED": "0",
+                "BEETSDIR": str(self.beets_dir),
             },
             clear=False,
         )
@@ -134,6 +146,27 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
             )
         self.assertEqual(resp.status_code, 200)
         writer.assert_called_once_with()
+
+    def test_first_run_real_writer_stays_inside_temp_beetsdir(self):
+        """#826: the unmocked first-run completion must only ever write the
+        starter config inside the per-test BEETSDIR, never the host's real
+        Beets config dir. Runs the REAL writer (no mock) and asserts the file
+        landed under self.beets_dir."""
+        app_module._migrate_or_initialize_setup_state()
+        resp = self.client.post(
+            "/api/setup/first-run",
+            json={"username": "freshadmin", "password": _VALID_TEST_PASSWORD},
+            headers=_SAME_ORIGIN_CSRF_HEADERS,
+        )
+        self.assertEqual(resp.status_code, 200)
+        written = self.beets_dir / "config.yaml"
+        self.assertTrue(
+            written.is_file(),
+            "the real writer must materialise config.yaml inside the per-test "
+            "BEETSDIR; a miss means setUp failed to isolate BEETSDIR",
+        )
+        # And nothing escaped the temp tree.
+        self.assertTrue(str(written.resolve()).startswith(str(self.data_dir.resolve())))
 
     def test_v018_upgrade_migration_security(self):
         """Scenario: upgrade from v0.1.8 generated-password installation.
