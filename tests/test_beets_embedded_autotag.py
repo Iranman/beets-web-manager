@@ -138,6 +138,18 @@ class EmbeddedAutotagTests(unittest.TestCase):
         # the pin and must not block it.
         out = self._run("forced_chroma_noise")
         self.assertNotIn("import_error", out)
+        # NB2 (#828): make this test non-vacuous. The forced pin ALSO fires when
+        # NO fingerprint signal is present, so success alone would still pass if
+        # chroma silently failed to populate _matches at the gate (a future
+        # registration/event-ordering regression), re-opening the live-vs-CI gap.
+        # Prove, from inside the scenario, that chroma's non-confirming _matches
+        # was genuinely present (and carried the injected noise recording) AT
+        # choose_match -- i.e. the gate accepted the pin WHILE ignoring a real
+        # signal, not merely because none existed.
+        self.assertTrue(out["chroma_matches_present"],
+                        "chroma _matches was empty at the choose_match gate -- the "
+                        "forced-pin assertion below would be vacuous (#828 NB2)")
+        self.assertTrue(out["chroma_matches_noise"])
         self.assertEqual(out["import"]["skipped"], [])
         self.assertEqual(len(out["import"]["imported_album_ids"]), 1)
         self.assertEqual(len(out["import"]["forced_pin"]), 1)
@@ -153,6 +165,7 @@ class EmbeddedAutotagTests(unittest.TestCase):
         # force never fires without a human, so Beets' strong text bar refuses it.
         out = self._run("auto_chroma_noise")
         self.assertNotIn("import_error", out)
+        self.assertTrue(out["chroma_matches_present"])  # refused WITH a signal present (#828 NB2)
         self.assertEqual(out["import"]["imported_album_ids"], [])
         self.assertEqual(out["import"]["forced_pin"], [])
         self.assertEqual([s["reason"] for s in out["import"]["skipped"]], ["no_strong_match"])
@@ -166,6 +179,7 @@ class EmbeddedAutotagTests(unittest.TestCase):
         # a human pin fills the no-proof gap but never overrides a disagreement.
         out = self._run("forced_chroma_disagree")
         self.assertNotIn("import_error", out)
+        self.assertTrue(out["chroma_matches_present"])  # failed closed WITH a signal present (#828 NB2)
         self.assertEqual(out["import"]["imported_album_ids"], [])
         self.assertEqual(out["import"]["forced_pin"], [])
         self.assertEqual(out["import"]["confirmed_fingerprint_primary"], [])

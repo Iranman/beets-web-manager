@@ -119,11 +119,28 @@ out = {"status_ok": beets_embedded.status()["ok"]}
 # result for real catalog music. This populates _matches AFTER Web Manager's
 # import_task_created drop (same ordering as live), so choose_match sees a
 # non-confirming in-session signal. Pre-fix this blocked the forced pin.
+gate_matches = {}  # NB2 (#828): snapshot of chroma's _matches AT the choose_match gate
 if scenario in CHROMA_SCENARIOS:
     import beetsplug.chroma as _chroma
     NOISE = (["00000000-0000-4000-8000-000000000001"],  # a recording not on the release
              ["00000000-0000-4000-8000-0000000000a1"])  # a release that is not the pinned one
     _chroma.acoustid_match = lambda log, path, _c=_chroma, _n=NOISE: _c._matches.__setitem__(path, _n)
+    # NB2 (#828): prove the chroma signal was actually PRESENT at the gate, not
+    # silently empty. Without this, the forced-pin test passes even if _matches
+    # were empty at choose_match (a future registration/event-ordering regression
+    # where chroma never populates), re-opening the live-vs-CI gap #828 guards.
+    # choose_match resolves `_pinned_partial_match` by module-global name at call
+    # time, so wrapping the module attribute snapshots _matches at the real gate.
+    from beetsplug.webmanager import operations as _ops
+    _orig_ppm = _ops._pinned_partial_match
+    def _ppm_spy(task, *a, _o=_orig_ppm, _n=NOISE[0][0], **k):
+        m = getattr(sys.modules.get("beetsplug.chroma"), "_matches", None)
+        if isinstance(m, dict):
+            gate_matches["present"] = gate_matches.get("present", False) or bool(m)
+            gate_matches["noise"] = gate_matches.get("noise", False) or any(
+                hit and _n in (hit[0] or []) for hit in m.values())
+        return _o(task, *a, **k)
+    _ops._pinned_partial_match = _ppm_spy
 # fp_primary_* / auto_divergent: the divergent-title pinned release. Chroma is
 # NOT loaded (plugins: [musicbrainz]), mirroring a pinned --search-id run whose
 # in-session AcoustID lookup yields nothing, so the threaded per-file evidence
@@ -164,4 +181,9 @@ out["source_left"] = sorted(os.listdir(src)) if os.path.isdir(src) else None
 out["status_ok_after"] = beets_embedded.status()["ok"]
 out["stats_after"] = a.get_stats()
 out["requests"] = sorted(set(requests_seen))
+if scenario in CHROMA_SCENARIOS:
+    # NB2 (#828): what chroma's _matches held at the choose_match gate, so the
+    # test can prove the forced-pin decision was made WITH a signal present.
+    out["chroma_matches_present"] = gate_matches.get("present", False)
+    out["chroma_matches_noise"] = gate_matches.get("noise", False)
 print(json.dumps(out, ensure_ascii=False, default=str))
