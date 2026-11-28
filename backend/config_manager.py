@@ -48,11 +48,38 @@ class ConfigConflictError(ConfigError):
         super().__init__(message, error_code="CONFIG_REVISION_MISMATCH", status_code=409)
 
 
-class ConfigValidationError(ConfigError):
-    """Raised when configuration content fails YAML syntax validation."""
+# #463 NB2: the fixed, curated validation reasons that are safe to surface to
+# the browser. They describe only shape/size, never config values. Every other
+# ConfigValidationError message (notably "Invalid YAML syntax: <exc>", which
+# quotes the offending line and can contain secret values) is NEVER logged or
+# returned -- it lives only on the in-memory exception object -- and the client
+# sees the generic message instead. (The YAMLError branch logs only the error
+# type + line/column, never the parser snippet.)
+SAFE_CONFIG_REASONS = frozenset({
+    "Config content cannot be empty",
+    "Config is larger than 1 MiB",
+    "YAML aliases (*name) are not supported; write the value out in full",
+    "Config keys must be text",
+    "Configuration root must be a YAML mapping/dictionary",
+    "Invalid YAML: nested too deeply",
+    "Invalid YAML: a value could not be read (for example an impossible date)",
+    "Invalid YAML after restoring redacted secrets",
+})
 
-    def __init__(self, message: str):
+
+class ConfigValidationError(ConfigError):
+    """Raised when configuration content fails YAML syntax validation.
+
+    ``safe_reason`` is the curated, secret-free reason surfaced to the client;
+    it defaults to ``message`` but is kept only if it is one of the fixed
+    ``SAFE_CONFIG_REASONS`` (so a raw parser excerpt can never leak). The full
+    ``message`` is retained only on this in-memory exception object -- it is
+    never written to a log or returned to the client."""
+
+    def __init__(self, message: str, safe_reason: Optional[str] = None):
         super().__init__(message, error_code="CONFIG_INVALID_YAML", status_code=400)
+        candidate = message if safe_reason is None else safe_reason
+        self.safe_reason = candidate if candidate in SAFE_CONFIG_REASONS else None
 
 
 class ConfigCodeExecutionEditRefused(ConfigError):
@@ -341,6 +368,15 @@ def validate_config_yaml(content: str) -> Tuple[bool, str]:
     except (ValueError, OverflowError):
         return False, "Invalid YAML: a value could not be read (for example an impossible date)"
     except yaml.YAMLError as exc:
+        # #463 NB2: the parser message (str(exc) / get_snippet()) quotes the
+        # offending source line, which may hold a secret config value, so it is
+        # NEVER logged or returned. Log only a secret-free summary -- the error
+        # type and the mark's line/column -- and give the client the generic
+        # message (safe_reason stays unset because this string is not in the
+        # SAFE_CONFIG_REASONS allowlist).
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        log.warning("Config YAML parse error (%s%s); detail withheld to avoid logging secret config values", type(exc).__name__, where)
         return False, f"Invalid YAML syntax: {exc}"
 
 
@@ -499,7 +535,9 @@ def revert_config(
 
         valid, err_msg = validate_config_yaml(backup_content)
         if not valid:
-            raise ConfigValidationError(f"Backup configuration is invalid: {err_msg}")
+            # Surface only the curated base reason (if any); the composed
+            # message is for the server log, not the client.
+            raise ConfigValidationError(f"Backup configuration is invalid: {err_msg}", safe_reason=err_msg)
         refuse_code_execution_edits(current_data["content"], backup_content)
 
         try:

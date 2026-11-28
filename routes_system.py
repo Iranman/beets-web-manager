@@ -203,7 +203,10 @@ def save_config():
     except ConfigConflictError:
         return jsonify({"ok": False, "error": "Config was changed by another writer; reload before saving.", "code": "config_revision_conflict"}), 409
     except ConfigValidationError as exc:
-        return jsonify({"ok": False, "error": "Invalid Beets configuration YAML.", "code": "config_invalid_yaml"}), 400
+        # #463 NB2: surface only the curated, secret-free reason; a raw parser
+        # excerpt (which may quote secret values) never leaves the server.
+        reason = getattr(exc, "safe_reason", None)
+        return jsonify({"ok": False, "error": reason or "Invalid Beets configuration YAML.", "code": "config_invalid_yaml"}), 400
     except ConfigError as exc:
         return jsonify({"ok": False, "error": str(exc), "code": getattr(exc, "error_code", "config_write_failed")}), getattr(exc, "status_code", 502)
     return jsonify({"ok": True, "backed_up": bool(result.get("backed_up")), "revision": result.get("revision")})
@@ -228,7 +231,10 @@ def revert_config():
     except ConfigConflictError:
         return jsonify({"ok": False, "error": "Config was changed by another writer; reload before saving.", "code": "config_revision_conflict"}), 409
     except ConfigValidationError as exc:
-        return jsonify({"ok": False, "error": "Invalid Beets configuration YAML.", "code": "config_invalid_yaml"}), 400
+        # #463 NB2: surface only the curated, secret-free reason; a raw parser
+        # excerpt (which may quote secret values) never leaves the server.
+        reason = getattr(exc, "safe_reason", None)
+        return jsonify({"ok": False, "error": reason or "Invalid Beets configuration YAML.", "code": "config_invalid_yaml"}), 400
     except ConfigError as exc:
         return jsonify({"ok": False, "error": str(exc), "code": getattr(exc, "error_code", "config_revert_failed")}), getattr(exc, "status_code", 502)
     return jsonify({"ok": True, "revision": result.get("revision")})
